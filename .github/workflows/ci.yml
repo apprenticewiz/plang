@@ -24,14 +24,17 @@ jobs:
     name: ${{ matrix.compiler }} / ${{ matrix.build_type }}
     runs-on: ubuntu-latest
     strategy:
-      # One combination failing should not hide the state of the others.
+      # One combination failing should not hide the state of the others, which
+      # is what makes this matrix able to answer where the GCC floor actually
+      # is: gcc-14 rejects the deducing-this lambdas in Sema and CodeGen, and
+      # whether gcc-15 does too is the open question.
       fail-fast: false
       matrix:
-        compiler: [gcc, clang]
+        compiler: [gcc-14, gcc-15, clang]
         build_type: [Debug, Release]
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install LLVM and lld
         run: |
@@ -59,17 +62,30 @@ jobs:
         run: sudo apt-get install -y ninja-build libgtest-dev
 
       - name: Select the compiler
-        # C++23 is required: GCC 14 or Clang 18 at the oldest.  The clang the
-        # LLVM install already brought in is new enough on its own.
+        # C++23 is required.  The clang the LLVM install already brought in is
+        # new enough on its own; the GCCs come from the toolchain PPA, since a
+        # runner image only carries one or two of them.
         run: |
-          if [ "${{ matrix.compiler }}" = "gcc" ]; then
-            sudo apt-get install -y gcc-14 g++-14
-            echo "CC=gcc-14"   >> "$GITHUB_ENV"
-            echo "CXX=g++-14"  >> "$GITHUB_ENV"
-          else
-            echo "CC=clang-$LLVM_VERSION"    >> "$GITHUB_ENV"
-            echo "CXX=clang++-$LLVM_VERSION" >> "$GITHUB_ENV"
-          fi
+          case "${{ matrix.compiler }}" in
+            gcc-*)
+              ver="${{ matrix.compiler }}"
+              ver="${ver#gcc-}"
+              sudo add-apt-repository -y ppa:ubuntu-toolchain-r/test
+              sudo apt-get update
+              sudo apt-get install -y "gcc-$ver" "g++-$ver"
+              echo "CC=gcc-$ver"   >> "$GITHUB_ENV"
+              echo "CXX=g++-$ver"  >> "$GITHUB_ENV"
+              ;;
+            clang)
+              echo "CC=clang-$LLVM_VERSION"    >> "$GITHUB_ENV"
+              echo "CXX=clang++-$LLVM_VERSION" >> "$GITHUB_ENV"
+              ;;
+          esac
+
+      - name: Show the compiler version
+        # Printed so the log says exactly which build of the compiler gave the
+        # result, which is the whole point of the gcc-14 against gcc-15 run.
+        run: $CXX --version
 
       - name: Check the C runtime startup files are where the driver looks
         # detectGCC() wants /usr/lib/gcc/<triple>/<ver>/crtbeginS.o and a libc
@@ -112,7 +128,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install LLVM and lld
         run: |
