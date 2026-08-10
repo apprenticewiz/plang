@@ -1,0 +1,8 @@
+find_package(GTest REQUIRED)
+
+add_subdirectory(Lex)
+add_subdirectory(Parse)
+add_subdirectory(Sema)
+add_subdirectory(Driver)
+add_subdirectory(Conformance)
+add_subdirectory(Acceptance)

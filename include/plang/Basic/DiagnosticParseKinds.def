@@ -1,0 +1,26 @@
+// DiagnosticParseKinds.def — Parser diagnostics.
+// Included by DiagnosticMessages.def.
+
+// Dialect gating.  Raised by the parser and by the analyser alike, wherever a
+// construct belongs to Extended Pascal (ISO 10206) and the source is being
+// read as standard Pascal (ISO 7185).
+DIAG(err_ep_extension, Error,
+     "%0 is an Extended Pascal extension and is not available under "
+     "-std=iso7185")
+
+// ISO 7185 §6.6.3.7.1: the packed form of a conformant array schema takes one
+// index-type-specification; the unpacked form is the one that may have several.
+DIAG(err_packed_conformant_shape, Error,
+     "a packed conformant array parameter has one dimension")
+
+DIAG(err_expected_type_expr, Error, "expected type expression, got %0")
+DIAG(err_expected_label, Error, "expected label (integer or identifier), got %0")
+DIAG(err_expected_goto_label, Error, "expected label after 'goto', got %0")
+DIAG(err_unexpected_int_literal, Error, "unexpected integer literal in statement position")
+DIAG(err_expected_assign_after_var, Error, "expected ':=' after variable reference")
+DIAG(err_expected_to_or_downto, Error, "expected 'to' or 'downto' in for statement, got %0")
+DIAG(err_int_literal_out_of_range, Error, "integer literal '%0' is out of range")
+DIAG(err_real_literal_out_of_range, Error, "real literal '%0' is out of range")
+DIAG(err_expected_expr, Error, "expected expression, got %0")
+DIAG(err_expected_token, Error, "expected %0, got %1")
+DIAG(err_expected_token_got_lexeme, Error, "expected %0, got %1 '%2'")

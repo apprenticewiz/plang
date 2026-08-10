@@ -1,0 +1,368 @@
+.TH PLANG 1 "2026-08-07" "plang 0.1.0" "User Commands"
+.SH NAME
+plang \- LLVM-based Pascal compiler
+.SH SYNOPSIS
+.B plang
+[\fIoptions\fR] \fIfile\fR
+.SH DESCRIPTION
+.B plang
+is a Pascal compiler built on the LLVM compiler infrastructure.
+It accepts a Pascal source file and compiles it to a native executable,
+object file, assembly, or LLVM IR depending on the options given.
+.P
+The compiler follows the clang/flang driver model: the
+.B plang
+binary acts as a driver that orchestrates the Pascal front end
+.RB ( plang\ \-pc1 ),
+the LLVM code generator
+.RB ( llc ),
+and the linker
+.RB ( ld.lld ).
+.SH OPTIONS
+.SS "Output modes"
+.TP
+.B \-S
+Emit native assembly instead of an executable.
+The default output file is \fI<source>.s\fR.
+.TP
+.B \-c
+Compile to an object file; do not link.
+The default output file is \fI<source>.o\fR.
+.TP
+.B \-emit\-llvm
+Emit LLVM IR text instead of running the back end.
+The default output file is \fI<source>.ll\fR.
+.TP
+.BI \-o " file"
+Write the primary output to \fIfile\fR instead of the default name.
+.SS "Optimisation"
+.TP
+.BR \-O0 " / " \-O1 " / " \-O2 " / " \-O3
+Set the optimisation level passed to
+.BR llc .
+The default is
+.BR \-O0 .
+.SS "Language"
+.TP
+.BI \-std= dialect
+Select the Pascal language dialect.
+.RS
+.TP
+.B iso7185
+ISO 7185 Standard Pascal at level 1 (default, fully implemented).  Level 1 is
+level 0 together with conformant array parameters, in both the
+.B array
+and the
+.B "packed array"
+form, so a procedure may take an array of any length:
+.RS
+.PP
+.EX
+procedure show(s: packed array [lo..hi: integer] of char);
+.EE
+.RE
+.IP
+The extensions Extended Pascal adds \(em
+.BR string( n ),
+.BR ** ,
+.BR substr ,
+.BR card ,
+.BR halt ,
+.BR >< ,
+.BR "for ... in" ,
+an
+.B otherwise
+part of a case-statement, and the rest \(em are rejected under this dialect.
+.TP
+.B iso10206
+ISO 10206 Extended Pascal (implemented).
+.TP
+.B turbo
+Turbo Pascal extensions (planned; not yet implemented).
+.TP
+.B delphi
+Delphi / Object Pascal (planned; not yet implemented).
+.TP
+.B fpc
+Free Pascal extensions (planned; not yet implemented).
+.RE
+.PP
+.B \-std
+is enforced strictly: a construct outside the selected standard is an error and
+not a warning, so there is no separate switch for insisting on it.
+.SS "Warnings"
+Every warning is enabled by default.  A warning reports something the standard
+permits a processor to pass over — an error clause 5.1 f) 1) allows to go
+unreported, or a construct that is well formed and cannot have been meant — so
+none of them rejects a program unless
+.B \-Werror
+is given.
+.TP
+.BI \-ferror\-limit= n
+Report at most
+.I n
+errors and pass over the rest, which spares the cascade a single mistake early
+in a file can set off.  The compilation still fails.  Zero, the default, means
+no limit.  Warnings are not counted against it.
+.TP
+.B \-w
+Suppress all warnings.
+.TP
+.B \-Werror
+Treat all warnings as errors.
+.TP
+.B \-Wall
+Enable every warning.  They are on already; the flag is accepted so that a
+command line written for another compiler need not be edited.
+.TP
+.BI \-W name
+Enable the named warning, undoing an earlier
+.BI \-Wno- name \fR.
+.TP
+.BI \-Wno- name
+Disable the named warning.
+.TP
+.B \-fcolor\-diagnostics
+Colourise diagnostics even when standard error is not a terminal, which is what
+a build log read back through a pager wants.
+.TP
+.B \-fno\-color\-diagnostics
+Do not colourise diagnostics.  Neither option is needed in the ordinary case:
+colour is used when standard error is a terminal and not otherwise.  The driver
+and the front end are separate processes and both print diagnostics, and the
+option settles it for both.
+.TP
+.B \-\-help\-warnings
+List the warning names.
+.PP
+The warnings, by the name each answers to:
+.TP
+.B var\-uninitialized
+A variable is read on a path that has not given it a value (§6.5.1).
+.TP
+.B for\-var\-after\-loop
+The control variable of a for-statement is read after the statement has
+finished, which §6.8.3.9 leaves undefined.
+.TP
+.B result\-not\-always\-set
+A function has a path through it that does not assign its result (§6.6.2).
+That it is assigned somewhere is a separate requirement, and an error.
+.TP
+.B const\-div\-zero
+The divisor of
+.BR / ,
+.B div
+or
+.B mod
+is a constant zero, which §6.7.2.2 makes an error wherever it is reached.
+.TP
+.B const\-out\-of\-range
+A constant assigned to a variable of a subrange type lies outside it, which the
+run-time check is certain to catch wherever it is reached.
+.TP
+.B unreachable\-code
+No path reaches a statement.
+.TP
+.B compare\-always
+One operand's type settles a comparison on its own, so the other is not being
+consulted.  Only a range the program wrote down — a subrange or an enumeration
+— counts, since every char lies within
+.BR chr(0)..chr(255) .
+.TP
+.B case\-not\-exhaustive
+A case-statement has no
+.B otherwise
+part and does not cover its selector's type, and §6.8.3.5 makes reaching it
+with an unmatched value an error.  Checked only for a selector whose type
+states its range: a subrange, an enumeration, or boolean.
+.TP
+.B unused\-variable
+A variable is declared and never mentioned again.
+.TP
+.B unused\-parameter
+A parameter is never named in the body.  A procedure passed as a procedural
+parameter (§6.6.3.1) takes the signature its formal demands whether it wants
+every parameter or not, so some correct programs will want this one off.
+.TP
+.B label\-unreachable
+A label is defined but no
+.B goto
+names it.
+.TP
+.B unrecognised\-argument
+An argument beginning with
+.B \-
+matches no option.  It is passed over rather than rejected, since a build
+system handing plang a flag meant for another compiler is a common enough
+thing, but
+.B \-Werror
+makes it fatal.  This is the one warning about the command line rather than
+about the program, and the only one that can be reported before a source file
+has been opened.
+.PP
+The three that depend on following the flow through a block —
+.BR var\-uninitialized ,
+.B for\-var\-after\-loop
+and
+.B result\-not\-always\-set
+— report only where no path reaching the statement gives the variable a value.
+They say nothing at all about a block that declares a label, since a
+.B goto
+may land anywhere the label is in scope, nor about a variable a nested
+procedure can reach, nor about a program that has already failed to compile.
+Reading a variable that has no value stays an error this processor does not
+report in general; see
+.BR docs/conformance.md .
+.SS "Debugging"
+.TP
+.B \-g
+Generate source-level debug information (reserved for future use).
+.SS "Linker control"
+.TP
+.BI \-\-target= triple
+Generate code for the specified target triple (e.g.\&
+.IR aarch64-linux-gnu ).
+The host triple is used when this option is omitted.
+.TP
+.BI \-L dir
+Add \fIdir\fR to the linker library search path.
+.TP
+.BI \-l lib
+Link with the library \fIlib\fR.
+.TP
+.BI \-Wl, args
+Pass the comma-separated list \fIargs\fR directly to the linker.
+.TP
+.BI \-Xlinker " arg"
+Pass \fIarg\fR as a single argument to the linker.
+.SS "Diagnostic / informational"
+.PP
+A diagnostic names the file, the line and the column, then quotes the line and
+puts a caret under the column:
+.PP
+.RS 4
+.nf
+prog.pas:4:13: error: undefined identifier 'coutn'
+    writeln(coutn)
+            ^
+.fi
+.RE
+.PP
+The line is reproduced as it was written, tabs included, so the caret lands
+under the right character whatever the indentation.
+.PP
+A diagnostic with no place in the source is printed under the program name
+instead of a file, a line and a column.  These are the ones about the command
+line or about the toolchain, and they are the driver's:
+.PP
+.RS 4
+.nf
+plang: error: no input files
+.fi
+.RE
+.PP
+They pass through the same machinery as the rest, so
+.BR \-w ,
+.BR \-Werror ,
+.BI \-Wno- name
+and
+.BI \-ferror\-limit= n
+all apply to them.
+.TP
+.B \-v
+Show the sub-commands that
+.B plang
+would run and use verbose output from each tool.
+.TP
+.B \-###
+Print the sub-commands that would be run without actually executing them.
+.TP
+.B \-save\-temps
+Keep intermediate
+.I .ll
+and
+.I .o
+files rather than deleting them after compilation.
+.TP
+.B \-dumpversion
+Print the compiler version number and exit.
+.TP
+.B \-dumpmachine
+Print the compiler's default target triple and exit.
+.TP
+.BR \-h " / " \-\-help
+Print a usage summary and exit.
+.TP
+.B \-\-version
+Print the compiler version, target, and thread model, then exit.
+.SH "ENVIRONMENT"
+.TP
+.B PLANG_GCC_DIR
+Override the GCC installation directory used to locate CRT objects for linking.
+.TP
+.B PLANG_LIB_DIR
+Override the system C library directory used to locate
+.I Scrt1.o
+and related CRT files.
+.SH EXAMPLES
+Compile and link a Pascal program:
+.PP
+.RS
+.EX
+plang hello.pas \-o hello
+.EE
+.RE
+.PP
+Compile to an object file only:
+.PP
+.RS
+.EX
+plang \-c hello.pas \-o hello.o
+.EE
+.RE
+.PP
+Emit LLVM IR for inspection:
+.PP
+.RS
+.EX
+plang \-emit\-llvm hello.pas \-o hello.ll
+.EE
+.RE
+.PP
+Optimise and compile:
+.PP
+.RS
+.EX
+plang \-O2 program.pas \-o program
+.EE
+.RE
+.PP
+See what commands would be run without running them:
+.PP
+.RS
+.EX
+plang \-### program.pas \-o program
+.EE
+.RE
+.SH CONFORMANCE
+plang complies with the requirements of level 1 of ISO/IEC 7185.
+.PP
+Clause 5.1 of that standard asks a processor to be accompanied by documents
+defining its implementation-defined features and describing its extensions.
+.I docs/conformance.md
+in the distribution is those documents: it defines
+.BR maxint ,
+the character set and its ordering, the accuracy of real arithmetic, the
+default field widths and the representation a real is written in, and the
+binding of a file program-parameter; it says what happens at each point the
+standard leaves implementation-dependent, such as the order operands are
+evaluated in; and it lists which of the standard's
+.I errors
+are reported and which are not.
+.SH "SEE ALSO"
+.BR llc (1),
+.BR ld.lld (1)
+.SH BUGS
+Report bugs at \fIhttps://github.com/apprenticewiz/plang/issues\fR.
+.SH AUTHORS
+The plang developers.

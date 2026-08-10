@@ -1,0 +1,117 @@
+//===- Options.def - The one list of plang's command-line options -*- C++ -*-===//
+//
+// The driver and the front end both read this file.  Between them they used to
+// keep four lists of the options — the driver's parser, the driver's help text,
+// the front end's parser, and the front end's help text — and they had drifted:
+// the front end accepted -Wno-<name>, -Wall and -I without mentioning them, and
+// the driver called any option it had not been taught about "unrecognised" and
+// dropped it rather than passing it on.
+//
+//   OPTION(Spelling, Display, Kind, Consumer, Help)
+//
+//     Spelling  What to match on the command line.  For a Joined option this
+//               is the prefix, so "-std=" matches "-std=iso7185".
+//     Display   How the help text writes it.
+//     Kind      How the value, if any, is attached:
+//                 Flag              no value            -g
+//                 Joined            glued on            -std=iso7185
+//                 Separate          the next argument   -o out.s
+//                 JoinedOrSeparate  either              -Idir  or  -I dir
+//     Consumer  Who acts on it:
+//                 Driver    the driver alone
+//                 Frontend  passed through to -pc1
+//                 Both      both act on it, and the driver passes it through
+//     Help      One line, or several if it needs them; empty hides the option.
+//
+// Adding an option here is enough for the driver to recognise it, to hand it to
+// the front end if that is where it belongs, and for both help texts to
+// mention it.  What the option then *does* is still written where it acts.
+//
+//===----------------------------------------------------------------------===//
+
+#ifndef OPTION
+#define OPTION(Spelling, Display, Kind, Consumer, Help)
+#endif
+
+//===----------------------------------------------------------------------===//
+// Output selection
+//===----------------------------------------------------------------------===//
+
+OPTION("-o",         "-o <file>",         JoinedOrSeparate, Both,     "Write output to <file>")
+OPTION("-S",         "-S",                Flag,             Driver,   "Emit native assembly (default: <source>.s)")
+OPTION("-c",         "-c",                Flag,             Driver,   "Compile to object file (default: <source>.o)")
+OPTION("-emit-llvm", "-emit-llvm",        Flag,             Driver,   "Emit LLVM IR text (default: <source>.ll)")
+OPTION("-dump-ast",  "-dump-ast",         Flag,             Both,     "Print the typed AST and stop (default: stdout)")
+
+//===----------------------------------------------------------------------===//
+// Code generation
+//===----------------------------------------------------------------------===//
+
+OPTION("-O0", "-O0/-O1/-O2/-O3", Flag, Both, "Optimization level (default: -O0)")
+OPTION("-O1", "",                Flag, Both, "")
+OPTION("-O2", "",                Flag, Both, "")
+OPTION("-O3", "",                Flag, Both, "")
+OPTION("-g",  "-g",              Flag, Both, "Generate source-level debug information")
+OPTION("-frange-checks",    "-frange-checks",    Flag, Both,
+       "Emit array-index and subrange bounds checks (the default)")
+OPTION("-fno-range-checks", "-fno-range-checks", Flag, Both,
+       "Omit array-index and subrange bounds checks")
+
+//===----------------------------------------------------------------------===//
+// Language
+//===----------------------------------------------------------------------===//
+
+OPTION("-std=", "-std=<dialect>", Joined, Both,
+       "Pascal language standard\n"
+       "                       iso7185   ISO 7185 Standard Pascal (default)\n"
+       "                       iso10206  ISO 10206 Extended Pascal\n"
+       "                       turbo     Turbo Pascal extensions    [not yet implemented]\n"
+       "                       delphi    Delphi/Object Pascal       [not yet implemented]\n"
+       "                       fpc       Free Pascal extensions     [not yet implemented]")
+OPTION("-I", "-I<dir>", JoinedOrSeparate, Both,
+       "Add <dir> to the module (.pmi) search path")
+
+//===----------------------------------------------------------------------===//
+// Diagnostics
+//
+// -Wl, is matched before -W by the driver, since it is a linker option wearing
+// a warning option's clothes.
+//===----------------------------------------------------------------------===//
+
+OPTION("-w",       "-w",              Flag,   Both, "Suppress all warnings")
+OPTION("-Werror",  "-Werror",         Flag,   Both, "Treat warnings as errors")
+OPTION("-Wall",    "-Wall",           Flag,   Both, "Enable every warning (they are on by default)")
+OPTION("-Wno-",    "-Wno-<warning>",  Joined, Both, "Disable a named warning")
+OPTION("-W",       "-W<warning>",     Joined, Both, "Enable a named warning")
+OPTION("-ferror-limit=", "-ferror-limit=<n>", Joined, Both,
+       "Stop after <n> errors; 0 means no limit (default: 0)")
+OPTION("-fcolor-diagnostics",    "-fcolor-diagnostics",    Flag, Both,
+       "Colourise diagnostics even when stderr is not a terminal")
+OPTION("-fno-color-diagnostics", "-fno-color-diagnostics", Flag, Both,
+       "Do not colourise diagnostics (default: colour when stderr is a terminal)")
+OPTION("--help-warnings", "--help-warnings", Flag, Both, "List the named warnings")
+
+//===----------------------------------------------------------------------===//
+// Linking, and the driver's own business
+//===----------------------------------------------------------------------===//
+
+OPTION("-L",        "-L<dir>",          Joined,   Driver, "Add <dir> to the linker search path")
+OPTION("-l",        "-l<lib>",          Joined,   Driver, "Link with library <lib>")
+OPTION("-Wl,",      "-Wl,<args>",       Joined,   Driver, "Pass comma-separated <args> to the linker")
+OPTION("-Xlinker",  "-Xlinker <arg>",   Separate, Driver, "Pass <arg> to the linker")
+OPTION("-###",      "-###",             Flag,     Driver, "Print (but do not run) the compilation commands")
+OPTION("-save-temps", "-save-temps",    Flag,     Driver, "Keep intermediate .ll and .o files")
+OPTION("--target=", "--target=<triple>", Joined,  Driver, "Generate code for the given target")
+OPTION("-v",        "-v",               Flag,     Driver, "Show commands to run and use verbose output")
+
+//===----------------------------------------------------------------------===//
+// Information
+//===----------------------------------------------------------------------===//
+
+OPTION("-dumpversion", "-dumpversion", Flag, Driver, "Display the compiler version")
+OPTION("-dumpmachine", "-dumpmachine", Flag, Driver, "Display the compiler's target processor")
+OPTION("-h",           "-h/--help",    Flag, Both,   "Show this message")
+OPTION("--help",       "",             Flag, Both,   "")
+OPTION("--version",    "--version",    Flag, Both,   "Print version information")
+
+#undef OPTION

@@ -1,0 +1,152 @@
+//===- TokenKinds.def - The one list of Pascal token kinds ------*- C++ -*-===//
+//
+// Everything that has to know a token kind is generated from this file: the
+// TokenKind enumeration, the enumerator names, the source spellings, the
+// scanner's keyword table, and which words only Extended Pascal reserves.
+// Adding a token means adding one line here.
+//
+// A consumer defines the macros it cares about and includes this file; the
+// ones it leaves alone expand to nothing.
+//
+//   TOK(Id, Description)      A token with no fixed spelling.  Description is
+//                             what a diagnostic calls it ("identifier").
+//   PUNCT(Id, Spelling)       Punctuation, or an operator written in symbols.
+//   KEYWORD(Id, Spelling)     A word reserved in every dialect plang accepts.
+//   EPKEYWORD(Id, Spelling)   A word reserved only by ISO 10206 Extended
+//                             Pascal.  Under -std=iso7185 the scanner hands
+//                             these back as identifiers, which is what ISO
+//                             7185 requires of a program that uses one as a
+//                             name.
+//
+// The KEYWORD and EPKEYWORD entries are in ascending order of spelling and
+// must stay that way: the scanner binary-searches the table it builds from
+// them, and Scanner.cpp static_asserts that they are sorted.
+//
+//===----------------------------------------------------------------------===//
+
+#ifndef TOK
+#define TOK(Id, Description)
+#endif
+
+#ifndef PUNCT
+#define PUNCT(Id, Spelling) TOK(Id, Spelling)
+#endif
+
+#ifndef KEYWORD
+#define KEYWORD(Id, Spelling) TOK(Id, Spelling)
+#endif
+
+// An Extended Pascal keyword is a keyword; a consumer that does not care about
+// the distinction gets the same treatment for both.
+#ifndef EPKEYWORD
+#define EPKEYWORD(Id, Spelling) KEYWORD(Id, Spelling)
+#endif
+
+//===----------------------------------------------------------------------===//
+// Tokens whose spelling varies from one occurrence to the next
+//===----------------------------------------------------------------------===//
+
+TOK(IntLit,     "integer literal")
+TOK(RealLit,    "real literal")
+TOK(StringLit,  "string literal")
+TOK(Identifier, "identifier")
+TOK(Eof,        "end of file")
+
+// Produced by the Scanner for a character it cannot tokenise; the lexeme holds
+// the offending character.  The Parser skips these so that scanning continues.
+TOK(Error,      "invalid character")
+
+//===----------------------------------------------------------------------===//
+// Keywords, in ascending order of spelling
+//===----------------------------------------------------------------------===//
+
+KEYWORD  (And,        "and")
+EPKEYWORD(AndThen,    "and_then")     // EP §6.8.3.3
+KEYWORD  (Array,      "array")
+KEYWORD  (Begin,      "begin")
+EPKEYWORD(Bindable,   "bindable")     // EP §6.10
+KEYWORD  (Boolean,    "boolean")
+KEYWORD  (Case,       "case")
+KEYWORD  (Char,       "char")
+KEYWORD  (Const,      "const")
+KEYWORD  (Div,        "div")
+KEYWORD  (Do,         "do")
+KEYWORD  (Downto,     "downto")
+KEYWORD  (Else,       "else")
+KEYWORD  (End,        "end")
+EPKEYWORD(Export,     "export")       // EP §6.12
+KEYWORD  (False,      "false")
+KEYWORD  (File,       "file")
+KEYWORD  (For,        "for")
+KEYWORD  (Forward,    "forward")
+KEYWORD  (Function,   "function")
+KEYWORD  (Goto,       "goto")
+KEYWORD  (If,         "if")
+EPKEYWORD(Import,     "import")       // EP §6.12
+KEYWORD  (In,         "in")
+KEYWORD  (Integer,    "integer")
+EPKEYWORD(Interface,  "interface")    // EP §6.11
+KEYWORD  (Label,      "label")
+KEYWORD  (Mod,        "mod")
+EPKEYWORD(Module,     "module")       // EP §6.12
+KEYWORD  (Nil,        "nil")
+KEYWORD  (Not,        "not")
+KEYWORD  (Of,         "of")
+EPKEYWORD(Only,       "only")         // EP §6.12
+KEYWORD  (Or,         "or")
+EPKEYWORD(OrElse,     "or_else")      // EP §6.8.3.3
+EPKEYWORD(Otherwise,  "otherwise")    // EP §6.9.3.5
+KEYWORD  (Packed,     "packed")
+EPKEYWORD(Pow,        "pow")          // EP §6.8.3.2
+KEYWORD  (Procedure,  "procedure")
+KEYWORD  (Program,    "program")
+EPKEYWORD(Protected,  "protected")    // EP §6.6.3.7
+EPKEYWORD(Qualified,  "qualified")    // EP §6.12
+KEYWORD  (Real,       "real")
+KEYWORD  (Record,     "record")
+KEYWORD  (Repeat,     "repeat")
+EPKEYWORD(Restricted, "restricted")   // EP §6.4.1
+KEYWORD  (Set,        "set")
+KEYWORD  (String,     "string")
+KEYWORD  (Then,       "then")
+KEYWORD  (To,         "to")
+KEYWORD  (True,       "true")
+KEYWORD  (Type,       "type")
+KEYWORD  (Until,      "until")
+EPKEYWORD(Value,      "value")        // EP §6.6
+KEYWORD  (Var,        "var")
+KEYWORD  (While,      "while")
+KEYWORD  (With,       "with")
+
+//===----------------------------------------------------------------------===//
+// Operators and delimiters written in symbols
+//===----------------------------------------------------------------------===//
+
+PUNCT(Assign,             ":=")
+PUNCT(Caret,              "^")
+PUNCT(Colon,              ":")
+PUNCT(Comma,              ",")
+PUNCT(Divide,             "/")
+PUNCT(Dot,                ".")
+PUNCT(DotDot,             "..")
+PUNCT(Equal,              "=")
+PUNCT(GreaterThan,        ">")
+PUNCT(GreaterThanOrEqual, ">=")
+PUNCT(LeftBracket,        "[")
+PUNCT(LeftParen,          "(")
+PUNCT(LessThan,           "<")
+PUNCT(LessThanOrEqual,    "<=")
+PUNCT(Minus,              "-")
+PUNCT(NotEqual,           "<>")
+PUNCT(Plus,               "+")
+PUNCT(RightBracket,       "]")
+PUNCT(RightParen,         ")")
+PUNCT(Semicolon,          ";")
+PUNCT(StarStar,           "**")       // EP §6.8.3.2, exponentiation
+PUNCT(SymDiff,            "><")       // EP §6.8.3.4, symmetric set difference
+PUNCT(Times,              "*")
+
+#undef EPKEYWORD
+#undef KEYWORD
+#undef PUNCT
+#undef TOK

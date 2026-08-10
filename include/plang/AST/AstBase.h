@@ -1,0 +1,174 @@
+#pragma once
+
+#include "plang/Basic/Token.h"
+
+#include <memory>
+#include <string>
+#include <vector>
+
+namespace plang {
+
+struct Type; // forward declaration — complete definition in plang/Sema/Type.h
+
+// ---------------------------------------------------------------------------
+// NodeKind — discriminator for LLVM-style RTTI
+//
+/// Every concrete Node subclass carries one of these values so that
+/// llvm::isa<> / llvm::dyn_cast<> work without C++ RTTI (-fno-rtti).
+/// Abstract base classes (ExprNode, StmtNode, TypeNode) are identified by
+/// a contiguous range [XxxFirst, XxxLast] checked in their classof().
+// ---------------------------------------------------------------------------
+enum class NodeKind {
+    // -- Expressions --
+    ExprFirst,
+    IntLitExpr    = ExprFirst,
+    RealLitExpr,
+    StringLitExpr,
+    BoolLitExpr,
+    NilExpr,
+    IdentExpr,
+    IndexExpr,
+    FieldExpr,
+    DerefExpr,
+    BinaryExpr,
+    UnaryExpr,
+    CallExpr,
+    SetRangeExpr,
+    SetLiteralExpr,
+    SubstringExpr,        // EP §6.5.6: s[i..j] substring variable
+    StructuredValueExpr,  // EP §6.8.7: typed value constructor (array/record/set)
+    ExprLast      = StructuredValueExpr,
+
+    // write/writeln argument wrapper: appears only in write/writeln arg lists.
+    // Stored as ExprNode* via C++ inheritance but excluded from ExprFirst..ExprLast
+    // so generic expression traversals don't treat it as a first-class expression.
+    WriteParam,
+
+    // -- Statements --
+    StmtFirst,
+    AssignStmt    = StmtFirst,
+    CompoundStmt,
+    IfStmt,
+    WhileStmt,
+    ForStmt,
+    ForInStmt,  // EP §6.9.3.9.3: for v in set-expr do
+    RepeatStmt,
+    CallStmt,
+    WithStmt,
+    GotoStmt,
+    LabeledStmt,
+    CaseStmt,
+    StmtLast      = CaseStmt,
+
+    // -- Type expressions --
+    TypeFirst,
+    NamedTypeNode    = TypeFirst,
+    ArrayTypeNode,
+    SubrangeTypeNode,
+    EnumTypeNode,
+    RecordTypeNode,
+    SetTypeNode,
+    FileTypeNode,
+    PackedTypeNode,
+    PointerTypeNode,
+    StringTypeNode,          // EP §6.4.3.3: string(N) variable-length string
+    TypeOfNode,              // EP §6.4.9: type of x — static type inquiry
+    ConformantArrayTypeNode, // EP §6.7.3.7: conformant array parameter type
+    SchemaTypeNode,          // EP §6.4.8: discriminated schema instantiation
+    ProcedureTypeNode,       // ISO §6.6.3.1: procedural/functional parameter
+    TypeLast      = ProcedureTypeNode,
+
+    // -- Top-level declaration / program nodes --
+    ProcDeclKind,
+    BlockNodeKind,
+    ProgramNodeKind,
+    ModuleNodeKind,   // EP §6.11: module definition (heading or body)
+};
+
+/// How many kinds each category holds.
+///
+/// Several places walk the tree — Sema, codegen, the AST dump, the interface
+/// writer — and each does it with its own dispatch.  A switch over NodeKind
+/// cannot report a kind one of them forgot: the enum spans all three
+/// categories at once, so every walk needs a default for the two categories
+/// that are not its own, and a default is exactly what makes a missing kind
+/// quiet.  Three type denoters and a statement went unprinted for as long as
+/// they had existed for that reason.
+///
+/// So a walk states the count it was written against instead.  Adding a kind
+/// moves one of these and stops the build at every walk that named it, each
+/// with a message saying what to go and teach.
+inline constexpr int NumExprKinds =
+    static_cast<int>(NodeKind::ExprLast) - static_cast<int>(NodeKind::ExprFirst) + 1;
+inline constexpr int NumStmtKinds =
+    static_cast<int>(NodeKind::StmtLast) - static_cast<int>(NodeKind::StmtFirst) + 1;
+inline constexpr int NumTypeKinds =
+    static_cast<int>(NodeKind::TypeLast) - static_cast<int>(NodeKind::TypeFirst) + 1;
+
+// ---------------------------------------------------------------------------
+// Base nodes
+// ---------------------------------------------------------------------------
+
+/// Base class for all AST nodes.  Carries an LLVM-style RTTI discriminator
+/// and the source location of the construct.
+struct Node {
+    /// LLVM-style RTTI discriminator; set once at construction.
+    NodeKind    Kind;
+    /// Where this construct is.  Four bytes; ask a SourceManager to turn it
+    /// into a filename, a line and a column.
+    SourceLocation Loc;
+    virtual ~Node() = default;
+
+    /// Every concrete subclass provides classof(); the base accepts all nodes.
+    static bool classof(const Node*) { return true; }
+
+protected:
+    explicit Node(NodeKind k) : Kind(k) {}
+};
+
+/// Abstract base for all expression nodes.
+struct ExprNode : Node {
+    static bool classof(const Node* n) {
+        return n->Kind >= NodeKind::ExprFirst && n->Kind <= NodeKind::ExprLast;
+    }
+    /// Semantic type assigned by Sema::checkExpr(). Null before Sema runs.
+    /// Mutable so Sema can annotate nodes reached through const references.
+    mutable std::shared_ptr<Type> ResolvedType;
+protected:
+    using Node::Node;
+};
+
+/// Abstract base for all statement nodes.
+struct StmtNode : Node {
+    static bool classof(const Node* n) {
+        return n->Kind >= NodeKind::StmtFirst && n->Kind <= NodeKind::StmtLast;
+    }
+protected:
+    using Node::Node;
+};
+
+/// Abstract base for all type-expression nodes.
+struct TypeNode : Node {
+    static bool classof(const Node* n) {
+        return n->Kind >= NodeKind::TypeFirst && n->Kind <= NodeKind::TypeLast;
+    }
+    /// Semantic type assigned by Sema::resolveType(). Null before Sema runs.
+    /// Codegen falls back to this for type denoters it cannot lower from the
+    /// syntax alone, such as EP `type of x`.
+    /// Mutable so Sema can annotate nodes reached through const references.
+    mutable std::shared_ptr<Type> ResolvedType;
+    /// EP §6.4.1: the denoter was written with the 'bindable' prefix, so a
+    /// variable of it may be bound to an external entity.  It is a property of
+    /// the declaration rather than of the type — `bindable text` and `text`
+    /// describe the same values — so it is recorded here and not on Type.
+    bool Bindable{false};
+    /// EP §6.6: the 'value' clause of the denoter, which says what state a
+    /// variable of the type starts in.  Like Bindable it belongs to the
+    /// denoter and not to the type, since `integer value 0` and `integer`
+    /// describe the same values.  Null when none was written.
+    std::unique_ptr<ExprNode> InitialState;
+protected:
+    using Node::Node;
+};
+
+} // namespace plang

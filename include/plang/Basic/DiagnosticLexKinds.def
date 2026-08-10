@@ -1,0 +1,11 @@
+// DiagnosticLexKinds.def — Scanner / lexer diagnostics.
+// Included by DiagnosticMessages.def.
+
+DIAG(err_file_not_found, Error, "no such file or directory: '%0'")
+DIAG(err_comment_delim_mismatch, Error, "comment delimiter mismatch: %0")
+DIAG(err_unterminated_comment, Error, "unterminated comment")
+DIAG(err_nondecimal_base_range, Error, "nondecimal literal base must be 2–36")
+DIAG(err_nondecimal_no_digits, Error, "nondecimal literal has no digits")
+DIAG(err_nondecimal_bad_digit, Error, "digit '%0' is out of range for base %1")
+DIAG(err_unterminated_string, Error, "unterminated string literal")
+DIAG(err_unexpected_char, Error, "unexpected character: '%0'")

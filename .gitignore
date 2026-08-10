@@ -1,0 +1,59 @@
+# Build directories
+build/
+build-*/
+_build/
+out/
+
+# CMake generated files
+CMakeCache.txt
+CMakeFiles/
+CMakeScripts/
+cmake_install.cmake
+install_manifest.txt
+CTestTestfile.cmake
+Testing/
+
+# Compiled output
+*.o
+*.d
+*.a
+*.so
+*.so.*
+*.dylib
+
+# Executables (catch stray a.out, test binaries, etc.)
+a.out
+*.out
+
+# Intermediate compiler output
+*.ll
+*.s
+*.bc
+
+# clangd / LSP
+.cache/
+compile_commands.json
+.clangd/
+
+# Editor and IDE artifacts
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+*.orig
+\#*\#
+.#*
+
+# CLion
+cmake-build-*/
+
+# macOS
+.DS_Store
+
+# Installation trees inside the repo (e.g. local prefix for testing)
+usr/
+local/
+
+# One-off scripts not intended for publication
+tools/gen_conformance_tests.py

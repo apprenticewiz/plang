@@ -1,0 +1,53 @@
+---
+# plang .clang-format — based on LLVM style with project-specific overrides.
+# Run:  find include lib tools runtime -name '*.h' -o -name '*.cpp' | xargs clang-format -i
+BasedOnStyle: LLVM
+
+# Indentation
+IndentWidth:            4
+ContinuationIndentWidth: 4
+TabWidth:               4
+UseTab:                 Never
+
+# Braces
+BreakBeforeBraces: Attach
+
+# Column limit
+ColumnLimit: 100
+
+# Includes
+SortIncludes:        true
+IncludeBlocks:       Regroup
+IncludeCategories:
+  # 1. Matching source header (e.g. Sema.cpp → Sema.h)
+  - Regex:    '^"plang/'
+    Priority: 1
+  # 2. LLVM headers
+  - Regex:    '^"llvm/'
+    Priority: 2
+  # 3. Standard library
+  - Regex:    '^<'
+    Priority: 3
+
+# Pointer alignment: int* p  (type-side, matching LLVM style)
+PointerAlignment: Left
+
+# Namespace indentation
+NamespaceIndentation: None
+CompactNamespaces:    false
+
+# Function / constructor
+AllowShortFunctionsOnASingleLine:  Inline
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine:       false
+
+# Trailing commas / comments
+SpaceBeforeTrailingComments: 2
+AlignTrailingComments:       true
+
+# Alignment
+AlignConsecutiveAssignments:  false
+AlignConsecutiveDeclarations: false
+
+# C++
+Standard: c++23

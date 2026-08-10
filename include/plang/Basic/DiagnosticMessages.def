@@ -1,0 +1,15 @@
+// DiagnosticMessages.def — master dispatcher for all plang diagnostics.
+//
+// Include this file with DIAG(id, Level, "msg") defined.
+// To iterate only one subsystem, include its *Kinds.def directly.
+//
+// To add a diagnostic: edit the appropriate *Kinds.def, not this file.
+
+#ifndef DIAG
+#  error "Define DIAG(id, Level, msg) before including DiagnosticMessages.def"
+#endif
+
+#include "plang/Basic/DiagnosticDriverKinds.def"
+#include "plang/Basic/DiagnosticLexKinds.def"
+#include "plang/Basic/DiagnosticParseKinds.def"
+#include "plang/Basic/DiagnosticSemaKinds.def"

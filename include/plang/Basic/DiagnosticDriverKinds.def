@@ -1,0 +1,35 @@
+// DiagnosticDriverKinds.def — Driver diagnostics.
+// Included by DiagnosticMessages.def.
+//
+// These are the only diagnostics with nothing to point at: the driver is
+// reporting on the command line or on the toolchain, not on a place in a
+// Pascal source file.  DiagnosticPrinter writes them under the program name
+// instead of a file, line and column — "plang: error: no input files".
+//
+// A missing input file is not here.  The scanner already catalogues that as
+// err_file_not_found, with the wording the driver was using anyway, and one
+// message for one condition is the point of a shared catalog.
+
+DIAG(err_no_input_files, Error, "no input files")
+DIAG(err_arg_requires_value, Error, "%0 requires an argument")
+DIAG(err_unknown_dialect, Error,
+     "unknown Pascal dialect '%0'; valid dialects: %1")
+DIAG(err_dialect_not_implemented, Error,
+     "dialect '%0' is not yet implemented; implemented dialects: %1")
+
+// Toolchain: plang drives llc and ld.lld, and links against the C runtime that
+// the host GCC installation provides the startup files for.
+DIAG(err_no_gcc_installation, Error,
+     "could not detect GCC installation; set PLANG_GCC_DIR to override")
+DIAG(err_no_c_library_dir, Error,
+     "could not find system C library directory; set PLANG_LIB_DIR to override")
+DIAG(err_cannot_find_program, Error, "cannot find '%0': %1")
+DIAG(err_program_exec_failed, Error, "failed to execute '%0': %1")
+DIAG(err_cannot_create_temp_file, Error, "cannot create temporary file: %0")
+
+// An argument beginning with '-' that no option in Options.def matches.  A
+// warning rather than an error because it costs nothing to carry on without
+// it, and because a build system passing a flag plang does not know is a
+// common enough thing that failing on it would be unkind.  -Werror still
+// makes it fatal, which is the point of it having a name.
+DIAG(warn_unrecognised_argument, Warning, "unrecognised argument '%0'")
