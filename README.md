@@ -40,6 +40,10 @@ happen to find an issue, please report it on the issues page for this
 project.  I am also very open to pull requests for quality fixes and
 enhancements.
 
+**IMPORTANT NOTE**: plang is not an official component of the LLVM project.
+I am following many of their design choices and development practices, as
+they represent sound engineering principles.
+
 ## Status
 
 plang should be considered **alpha** quality at this time.  I am actively
