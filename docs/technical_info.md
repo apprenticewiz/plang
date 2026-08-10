@@ -30,7 +30,7 @@ The phases are the conventional ones, each in its own directory under `lib/`:
 | `Sema/`     | Name resolution, type checking, control-flow warnings       |
 | `CodeGen/`  | LLVM IR generation                                          |
 | `Driver/`   | Command line, job scheduling, the assembler and linker      |
-| `Frontend/` | The `-cc1` entry point the driver invokes                   |
+| `Frontend/` | The `-pc1` entry point the driver invokes                   |
 
 ### Following clang
 
@@ -88,15 +88,24 @@ prog.pas:5:14: warning: 42 is outside the range 1..10; this is an error whenever
 ```
 
 The line is reproduced as it was written, tabs included, so the caret lands
-under the right character whatever the indentation.  A diagnostic with no place
-in the source — a file that could not be opened, say — is printed without one.
+under the right character whatever the indentation.
 
-Every diagnostic passes through a single `DiagnosticsEngine`, which is the one
-place the policy below is applied, whichever phase raised it.
+A diagnostic with no place in the source is printed under the program name:
+
+```
+plang: error: no input files
+```
+
+These are the driver's, and they are about the command line or the toolchain
+rather than about a program.  They are catalogued in
+`Basic/DiagnosticDriverKinds.def` alongside the rest and pass through the same
+`DiagnosticsEngine`, which is the one place the policy below is applied,
+whichever phase raised it.  A driver diagnostic went straight to stderr before,
+with its own idea of when to use colour, which put it outside all of it.
 
 ### Warnings
 
-Eleven, all enabled by default, each with a name it can be turned off by.
+Twelve, all enabled by default, each with a name it can be turned off by.
 `--help-warnings` lists them; `-Wno-<name>` disables one, `-w` disables all of
 them, and `-Werror` turns those that remain into errors.
 
@@ -118,6 +127,10 @@ rejects a program unless `-Werror` is given.
 | `unused-variable`       | A variable declared and never mentioned again             |
 | `unused-parameter`      | A parameter never named in the body                       |
 | `label-unreachable`     | A label no `goto` names                                   |
+| `unrecognised-argument` | An argument beginning with `-` that matches no option     |
+
+The last is the only one about the command line rather than about the program,
+and the only one that can be reported before a source file has been opened.
 
 The first three follow the flow through a block, and report only where *no*
 path reaching the statement gives the variable a value.  They say nothing at
@@ -133,16 +146,24 @@ spares the cascade that a single mistake early in a file can set off.  The
 compilation still fails.  Zero, the default, means no limit, and warnings are
 not counted against it.
 
+### Colour
+
+Colour is used when standard error is a terminal, and
+`-f{,no-}color-diagnostics` says otherwise.  The driver and the front end are
+separate processes and both print diagnostics, so both have to answer this;
+the option is `Both` in the table, so the driver acts on it and hands it on,
+and the two cannot disagree.
+
 ## The test suite
 
-1499 tests, in six binaries:
+1511 tests, in six binaries:
 
 | Binary                              | Tests | What it covers                        |
 |-------------------------------------|-------|---------------------------------------|
 | `test/Lex/scanner_test`             | 139   | Tokens, literals, keywords, EP gating |
 | `test/Parse/parser_test`            | 130   | Declarations, statements, expressions |
 | `test/Sema/sema_test`               | 148   | Name resolution and type checking     |
-| `test/Driver/driver_test`           | 704   | Compile, link, run, compare output    |
+| `test/Driver/driver_test`           | 716   | Compile, link, run, compare output    |
 | `test/Conformance/conformance_test` | 377   | The Pascal-P5 ISO 7185 suite          |
 | `test/Acceptance/acceptance_test`   | 1     | The Pascal Acceptance Test            |
 
