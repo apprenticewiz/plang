@@ -6,6 +6,34 @@ version numbers follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 
 ---
 
+## [Unreleased]
+
+### Fixed
+
+- **plang builds against libc++.**  It had only ever been built against
+  libstdc++, and leaned on two things libc++ does not provide, so the build
+  failed on macOS, where clang uses libc++ by default.  `AstPrinter` was
+  written in terms of `std::views::enumerate`, which is C++23 and which libc++
+  has not implemented, in ten loops; and `SemaFlow` used `std::inserter`
+  without including `<iterator>`, which libstdc++ happens to supply through
+  another header and libc++ does not.  The second was a plain missing include
+  and always a bug.
+
+  The ten loops all wanted an index for one purpose, to write a space before
+  every item but the first, so they say that instead and no longer need an
+  index at all.  `std::views::zip` and `std::print`, the other C++23 library
+  features in the source, are both in libc++ and are left alone.
+
+  A `libc++ (compile only)` job now builds every translation unit that way.  It
+  stops short of linking because the `libLLVM` from apt.llvm.org is built
+  against libstdc++ and the two disagree about `std::string`; Homebrew's LLVM
+  is built against libc++ and links, and compiling is where these failures
+  happen in any case.
+
+  Note that this makes plang **build** on macOS, not target it: the driver
+  links through `ld.lld` with ELF startup files and an ELF emulation, so
+  producing an executable is still Linux-only.
+
 ## [0.1.1] - 2026-08-10
 
 A build fix.  Nothing about the language plang accepts, or the code it

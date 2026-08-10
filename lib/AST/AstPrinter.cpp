@@ -1,5 +1,4 @@
 #include <ostream>
-#include <ranges>
 #include <string>
 #include <string_view>
 
@@ -22,6 +21,30 @@ static std::string ind(int depth) {
 
 // Returns the operator symbol used in S-expression output.
 static std::string_view opSym(TokenKind k) { return spelling(k); }
+
+// Writes its separator before every item but the first, for the
+// space-separated lists this file is made of:
+//
+//     Sep sp;
+//     for (const auto& name : Names) os << sp << name;
+//
+// The loops used to enumerate the list and test the index for zero, which was
+// the only thing any of them wanted an index for.  std::views::enumerate is
+// also absent from libc++, so plang did not build against it.
+class Sep {
+public:
+    explicit Sep(std::string_view S = " ") : S_(S) {}
+
+    friend std::ostream& operator<<(std::ostream& OS, Sep& Sp) {
+        if (!Sp.First_) OS << Sp.S_;
+        Sp.First_ = false;
+        return OS;
+    }
+
+private:
+    std::string_view S_;
+    bool             First_ = true;
+};
 
 // Forward declarations.
 static void printExpr(const ExprNode& node, std::ostream& os);
@@ -87,10 +110,8 @@ static void printType(const TypeNode& node, std::ostream& os) {
         os << (n->Packed ? "(packed-record" : "(record");
         for (const auto& fd : n->Fields) {
             os << " (";
-            for (auto [i, name] : std::views::enumerate(fd.Names)) {
-                if (i > 0) os << ' ';
-                os << name;
-            }
+            Sep sp;
+            for (const auto& name : fd.Names) os << sp << name;
             os << " ";
             printType(*fd.Type, os);
             os << ")";
@@ -103,17 +124,16 @@ static void printType(const TypeNode& node, std::ostream& os) {
             printType(*vp.TagType, os);
             for (const auto& vc : vp.Cases) {
                 os << " (";
-                for (auto [i, lbl] : std::views::enumerate(vc.Labels)) {
-                    if (i > 0) os << ' ';
+                Sep lsp;
+                for (const auto& lbl : vc.Labels) {
+                    os << lsp;
                     printExpr(*lbl, os);
                 }
                 os << " :";
                 for (const auto& fd : vc.Fields) {
                     os << " (";
-                    for (auto [i, name] : std::views::enumerate(fd.Names)) {
-                        if (i > 0) os << ' ';
-                        os << name;
-                    }
+                    Sep nsp;
+                    for (const auto& name : fd.Names) os << nsp << name;
                     os << " ";
                     printType(*fd.Type, os);
                     os << ")";
@@ -313,8 +333,9 @@ static void printExpr(const ExprNode& node, std::ostream& os) {
     case NodeKind::SetLiteralExpr: {
         const auto* n = llvm::cast<SetLiteralExpr>(&node);
         os << "[";
-        for (auto [i, elem] : std::views::enumerate(n->Elements)) {
-            if (i > 0) os << ' ';
+        Sep sp;
+        for (const auto& elem : n->Elements) {
+            os << sp;
             printExpr(*elem, os);
         }
         os << "]";
@@ -342,8 +363,9 @@ static void printExpr(const ExprNode& node, std::ostream& os) {
             if (arm.IsOtherwise) {
                 os << "otherwise";
             } else {
-                for (auto [i, lbl] : std::views::enumerate(arm.Labels)) {
-                    if (i > 0) os << ' ';
+                Sep sp;
+                for (const auto& lbl : arm.Labels) {
+                    os << sp;
                     printExpr(*lbl, os);
                 }
             }
@@ -481,8 +503,9 @@ static void printStmt(const StmtNode* node, std::ostream& os, int depth) {
     case NodeKind::WithStmt: {
         const auto* n = llvm::cast<WithStmt>(node);
         os << "(with (";
-        for (auto [i, rec] : std::views::enumerate(n->Records)) {
-            if (i > 0) os << ' ';
+        Sep sp;
+        for (const auto& rec : n->Records) {
+            os << sp;
             printExpr(*rec, os);
         }
         os << ")\n" << ind(depth + 1);
@@ -506,8 +529,9 @@ static void printStmt(const StmtNode* node, std::ostream& os, int depth) {
         printExpr(*n->Selector, os);
         for (const auto& arm : n->Arms) {
             os << "\n" << ind(depth + 1) << "(arm (";
-            for (auto [i, lbl] : std::views::enumerate(arm.Labels)) {
-                if (i > 0) os << ' ';
+            Sep sp;
+            for (const auto& lbl : arm.Labels) {
+                os << sp;
                 printExpr(*lbl.Low, os);
                 if (lbl.High) {
                     os << "..";
@@ -539,14 +563,12 @@ static void printStmt(const StmtNode* node, std::ostream& os, int depth) {
 // Prints param groups inline: ((a b integer) (c real)) or () for empty.
 static void printParams(const std::vector<ParamGroup>& params, std::ostream& os) {
     os << "(";
-    for (auto [i, pg] : std::views::enumerate(params)) {
-        if (i > 0) os << ' ';
-        os << "(";
+    Sep psp;
+    for (const auto& pg : params) {
+        os << psp << "(";
         if (pg.IsVar) os << "var ";
-        for (auto [j, name] : std::views::enumerate(pg.Names)) {
-            if (j > 0) os << ' ';
-            os << name;
-        }
+        Sep nsp;
+        for (const auto& name : pg.Names) os << nsp << name;
         os << " ";
         printType(*pg.Type, os);
         os << ")";
@@ -575,10 +597,8 @@ static void printBlock(const BlockNode& node, std::ostream& os, int depth) {
 
     for (const auto& vg : node.Vars) {
         os << ind(depth) << "(var (";
-        for (auto [i, name] : std::views::enumerate(vg.Names)) {
-            if (i > 0) os << ' ';
-            os << name;
-        }
+        Sep sp;
+        for (const auto& name : vg.Names) os << sp << name;
         os << ") ";
         printType(*vg.Type, os);
         os << ")\n";

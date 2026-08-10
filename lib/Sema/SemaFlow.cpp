@@ -35,6 +35,9 @@
 #include "llvm/Support/Casting.h"
 
 #include <algorithm>
+#include <iterator>
+#include <set>
+#include <string>
 
 using namespace plang;
 

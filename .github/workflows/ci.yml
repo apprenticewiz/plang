@@ -124,6 +124,59 @@ jobs:
           plang hello.pas -o hello
           test "$(./hello)" = "ok"
 
+  libcxx:
+    name: libc++ (compile only)
+    # Every other job builds against libstdc++, which left plang relying on
+    # things libc++ does not give it: std::views::enumerate, which libc++ has
+    # not implemented, and std::inserter, which libstdc++ happens to drag in
+    # through another header and libc++ does not.  Neither showed up until
+    # somebody built on macOS, where clang uses libc++.  This job is that
+    # build, minus the parts of it that are specific to macOS.
+    #
+    # Compile only, because it cannot link: the libLLVM from apt.llvm.org is
+    # built against libstdc++, so its symbols and ours disagree about which
+    # std::string is meant.  Homebrew's LLVM is built against libc++ and links
+    # perfectly well, and compiling is where these failures happen anyway.
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install LLVM, lld and libc++
+        run: |
+          sudo apt-get update
+          wget -qO llvm.sh https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh "$LLVM_VERSION"
+          sudo apt-get install -y \
+            "llvm-$LLVM_VERSION" \
+            "llvm-$LLVM_VERSION-dev" \
+            "lld-$LLVM_VERSION" \
+            "libc++-$LLVM_VERSION-dev" \
+            "libc++abi-$LLVM_VERSION-dev"
+
+      - name: Install build dependencies
+        run: sudo apt-get install -y ninja-build
+
+      - name: Configure against libc++
+        run: |
+          cmake -S . -B build-libcxx -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_FLAGS="-stdlib=libc++" \
+            -DLLVM_DIR="/usr/lib/llvm-$LLVM_VERSION/lib/cmake/llvm"
+        env:
+          CC: clang-22
+          CXX: clang++-22
+
+      - name: Compile every translation unit
+        # The object libraries between them hold every source file the compiler
+        # is built from, so this misses nothing that a full build would catch
+        # short of the link.
+        run: |
+          cmake --build build-libcxx -j"$(nproc)" --target \
+            PlangAST PlangBasic PlangCodeGen PlangDriver PlangFrontend \
+            PlangLex PlangLocale PlangParse PlangSema
+
   sanitizers:
     name: asan + ubsan
     runs-on: ubuntu-latest
