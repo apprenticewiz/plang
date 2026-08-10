@@ -16,8 +16,19 @@ binary acts as a driver that orchestrates the Pascal front end
 .RB ( plang\ \-pc1 ),
 the LLVM code generator
 .RB ( llc ),
-and the linker
-.RB ( ld.lld ).
+and the linker.
+.P
+Which linker depends on the target.  On ELF targets it is
+.BR ld.lld ,
+which must be on
+.BR PATH ,
+and the link uses the startup files of the host GCC installation.  On macOS it
+is the system
+.BR ld ,
+found through
+.BR xcrun (1),
+and the link uses the macOS SDK; nothing need be installed beyond the Xcode
+command line tools.
 .SH OPTIONS
 .SS "Output modes"
 .TP
@@ -221,7 +232,9 @@ Generate source-level debug information (reserved for future use).
 .TP
 .BI \-\-target= triple
 Generate code for the specified target triple (e.g.\&
-.IR aarch64-linux-gnu ).
+.I aarch64-linux-gnu
+or
+.IR arm64-apple-macosx15.0 ).
 The host triple is used when this option is omitted.
 .TP
 .BI \-L dir
@@ -296,6 +309,8 @@ Print a usage summary and exit.
 .B \-\-version
 Print the compiler version, target, and thread model, then exit.
 .SH "ENVIRONMENT"
+The first two apply when linking for an ELF target, the rest when linking for
+macOS.
 .TP
 .B PLANG_GCC_DIR
 Override the GCC installation directory used to locate CRT objects for linking.
@@ -304,6 +319,26 @@ Override the GCC installation directory used to locate CRT objects for linking.
 Override the system C library directory used to locate
 .I Scrt1.o
 and related CRT files.
+.TP
+.B SDKROOT
+Override the macOS SDK to link against.  When it is not set the SDK is the one
+.BR xcrun (1)
+reports.
+.TP
+.B MACOSX_DEPLOYMENT_TARGET
+The earliest macOS the executable is to run on, for example
+.IR 15.0 .
+This is recorded in both the object file and the executable.  When it is not
+set the deployment target is taken from the target triple.
+.TP
+.B PLANG_BUILTINS_LIB
+Override the path to the compiler builtins archive
+.RI ( libclang_rt.osx.a ).
+It supplies the helper routines the compiler emits calls to rather than code
+for, which for Pascal means the complex multiply and divide; on ELF targets
+these come from
+.IR libgcc .
+When it is not set the archive is looked for beside the linker.
 .SH EXAMPLES
 Compile and link a Pascal program:
 .PP
@@ -361,7 +396,9 @@ evaluated in; and it lists which of the standard's
 are reported and which are not.
 .SH "SEE ALSO"
 .BR llc (1),
-.BR ld.lld (1)
+.BR ld.lld (1),
+.BR ld (1),
+.BR xcrun (1)
 .SH BUGS
 Report bugs at \fIhttps://github.com/apprenticewiz/plang/issues\fR.
 .SH AUTHORS

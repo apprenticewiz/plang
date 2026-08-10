@@ -7,7 +7,7 @@ add_subdirectory(CodeGen)
 add_subdirectory(Frontend)
 add_subdirectory(Driver)
 
-# ---- libplang-frontend.so ------------------------------------------------
+# ---- libplang-frontend ----------------------------------------------------
 # Shared library that bundles all subsystems for the driver and for embedders.
 # Each subsystem is compiled as an OBJECT library so their translation units
 # are linked directly into the shared library without intermediate archives.

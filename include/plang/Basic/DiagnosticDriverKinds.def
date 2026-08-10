@@ -17,12 +17,16 @@ DIAG(err_unknown_dialect, Error,
 DIAG(err_dialect_not_implemented, Error,
      "dialect '%0' is not yet implemented; implemented dialects: %1")
 
-// Toolchain: plang drives llc and ld.lld, and links against the C runtime that
-// the host GCC installation provides the startup files for.
+// Toolchain: plang drives llc and a linker.  On ELF targets that is ld.lld,
+// linking against the C runtime that the host GCC installation provides the
+// startup files for; on macOS it is the system ld, linking against the SDK.
 DIAG(err_no_gcc_installation, Error,
      "could not detect GCC installation; set PLANG_GCC_DIR to override")
 DIAG(err_no_c_library_dir, Error,
      "could not find system C library directory; set PLANG_LIB_DIR to override")
+DIAG(err_no_macos_sdk, Error,
+     "could not find the macOS SDK; install the Xcode command line tools "
+     "with 'xcode-select --install', or set SDKROOT to override")
 DIAG(err_cannot_find_program, Error, "cannot find '%0': %1")
 DIAG(err_program_exec_failed, Error, "failed to execute '%0': %1")
 DIAG(err_cannot_create_temp_file, Error, "cannot create temporary file: %0")

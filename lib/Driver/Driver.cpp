@@ -1,9 +1,11 @@
 /// plang driver — orchestrates the compilation pipeline.
 ///
 /// Invokes the plang front end (by re-invoking itself with \c -pc1), llc for
-/// code generation, and ld.lld for linking.  The front-end code lives in
-/// libplang-frontend.so; the driver links against it so \c -pc1 mode can be
-/// handled in-process without spawning a subprocess for trivial uses.
+/// code generation, and the platform linker for linking: ld.lld against the
+/// GCC startup files on ELF targets, and the macOS system ld against the SDK
+/// on Darwin.  The front-end code lives in the shared plang-frontend library;
+/// the driver links against it so \c -pc1 mode can be handled in-process
+/// without spawning a subprocess for trivial uses.
 
 #include "plang/Driver/Driver.h"
 #include "plang/Driver/Options.h"
@@ -21,9 +23,12 @@
 #include <vector>
 
 #include "llvm/Support/FileSystem.h"
+#include "llvm/Support/JSON.h"
+#include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/Path.h"
 #include "llvm/Support/Process.h"
 #include "llvm/Support/Program.h"
+#include "llvm/Support/VersionTuple.h"
 #include "llvm/TargetParser/Host.h"
 #include "llvm/TargetParser/Triple.h"
 
@@ -35,6 +40,14 @@ using namespace plang;
 
 static std::string hostTriple() {
     return llvm::sys::getDefaultTargetTriple();
+}
+
+/// The triple plang is generating code for: --target= if it was given, and the
+/// host otherwise.
+static llvm::Triple targetTriple(const Options &Opts) {
+    return llvm::Triple(Opts.target.empty()
+                            ? hostTriple()
+                            : llvm::Triple::normalize(Opts.target));
 }
 
 static std::string_view threadModel() {
@@ -52,6 +65,44 @@ static bool isRegFile(const llvm::Twine &Path) {
 
 static bool isDir(const llvm::Twine &Path) {
     return llvm::sys::fs::is_directory(Path);
+}
+
+/// Runs Prog and returns what it wrote to its standard output, with trailing
+/// whitespace removed; "" if it could not be run or did not succeed.
+///
+/// This is for asking the toolchain about itself — where the SDK is, where the
+/// linker is — rather than for running a stage of the compilation, which goes
+/// through Driver::runTool so that it is reported by -v and -### and so that a
+/// failure to run it is a diagnostic.  Here a failure is not an error: every
+/// caller has somewhere else to look.
+static std::string captureOutput(const std::string &Prog,
+                                 llvm::ArrayRef<llvm::StringRef> Args) {
+    auto ResolvedOrErr = llvm::sys::findProgramByName(Prog);
+    if (!ResolvedOrErr) return "";
+
+    llvm::SmallString<128> OutPath;
+    int Fd;
+    if (llvm::sys::fs::createTemporaryFile("plang-probe", "txt", Fd, OutPath))
+        return "";
+    close(Fd);
+
+    llvm::SmallVector<llvm::StringRef, 8> Argv;
+    Argv.push_back(*ResolvedOrErr);
+    Argv.append(Args.begin(), Args.end());
+
+    // An empty path is /dev/null, so the probe's own standard input and error
+    // stay out of plang's.
+    std::optional<llvm::StringRef> Redirects[3] = {
+        llvm::StringRef(""), llvm::StringRef(OutPath), llvm::StringRef("")};
+
+    std::string Out;
+    if (llvm::sys::ExecuteAndWait(*ResolvedOrErr, Argv, /*Env=*/std::nullopt,
+                                  Redirects) == 0) {
+        if (auto Buf = llvm::MemoryBuffer::getFile(OutPath))
+            Out = (*Buf)->getBuffer().rtrim().str();
+    }
+    llvm::sys::fs::remove(OutPath);
+    return Out;
 }
 
 // ---------------------------------------------------------------------------
@@ -236,6 +287,133 @@ static std::string dynamicLinker(const llvm::Triple &T) {
     case llvm::Triple::ppc64le: return "/lib64/ld64.so.2";
     default:                    return "";
     }
+}
+
+// ---------------------------------------------------------------------------
+// Darwin toolchain detection (SDK, linker and compiler builtins)
+// ---------------------------------------------------------------------------
+
+/// Where the parts of the macOS toolchain a link needs are.
+struct DarwinToolchain {
+    std::string Linker;      ///< the ld to run
+    std::string SDKPath;     ///< -syslibroot; libSystem and the rest live here
+    std::string SDKVersion;  ///< as recorded in the SDK, for -platform_version
+    std::string BuiltinsLib; ///< libclang_rt.osx.a, "" if it was not found
+};
+
+/// The name ld knows an architecture by, which is not always the name the
+/// triple does: an AArch64 triple may be spelled either "arm64" or "aarch64",
+/// and ld only answers to the first.
+static std::string machOArchName(const llvm::Triple &T) {
+    switch (T.getArch()) {
+    case llvm::Triple::aarch64:    return T.isArm64e() ? "arm64e" : "arm64";
+    case llvm::Triple::aarch64_32: return "arm64_32";
+    case llvm::Triple::x86_64:     return "x86_64";
+    case llvm::Triple::x86:        return "i386";
+    default:                       return "";
+    }
+}
+
+/// The macOS an executable is being built for.
+///
+/// This ends up in the object file, put there by llc from the triple, and in
+/// the executable, put there by ld from -platform_version.  ld warns when the
+/// two disagree, so both come from here.
+static std::string darwinDeploymentTarget(const llvm::Triple &T) {
+    // The variable every other macOS toolchain reads, and it wins: someone who
+    // has set it has said which macOS they mean.
+    if (const char *E = getenv("MACOSX_DEPLOYMENT_TARGET"); E && *E) return E;
+
+    llvm::VersionTuple V;
+    // Both asks are guarded by isMacOSX because getMacOSXVersion is only
+    // answerable for macOS and asserts rather than declining for anything
+    // else — the host when plang is cross-compiling from Linux, the target
+    // when it names one of the other Darwin platforms.
+    //
+    // A triple with no version on it — a bare "arm64-apple-darwin" — is read
+    // as the oldest macOS LLVM knows, which is not what anyone writing it
+    // meant.  Only a triple that names a version answers for itself.
+    if (T.isMacOSX() && !T.getOSVersion().empty() && T.getMacOSXVersion(V))
+        return V.getAsString();
+    if (const llvm::Triple Host(hostTriple());
+        Host.isMacOSX() && Host.getMacOSXVersion(V))
+        return V.getAsString();
+    return "";
+}
+
+/// The version the SDK says it is, from the SDKSettings.json beside it.
+static std::string sdkVersion(const std::string &SDKPath) {
+    if (SDKPath.empty()) return "";
+    auto Buf = llvm::MemoryBuffer::getFile(SDKPath + "/SDKSettings.json");
+    if (!Buf) return "";
+    auto Parsed = llvm::json::parse((*Buf)->getBuffer());
+    if (!Parsed) { llvm::consumeError(Parsed.takeError()); return ""; }
+    if (const llvm::json::Object *Root = Parsed->getAsObject())
+        if (auto V = Root->getString("Version")) return V->str();
+    return "";
+}
+
+/// <Root>/lib/clang/<version>/lib/darwin/libclang_rt.osx.a, newest version
+/// first, where Root is the usr directory of a toolchain.
+static std::string builtinsUnder(llvm::StringRef Root) {
+    const std::string ClangDir = Root.str() + "/lib/clang";
+    if (!isDir(ClangDir)) return "";
+    const std::vector<std::string> Versions = subdirs(ClangDir);
+    for (auto It = Versions.rbegin(), End = Versions.rend(); It != End; ++It) {
+        const std::string Candidate =
+            ClangDir + "/" + *It + "/lib/darwin/libclang_rt.osx.a";
+        if (isRegFile(Candidate)) return Candidate;
+    }
+    return "";
+}
+
+static DarwinToolchain detectDarwinToolchain() {
+    DarwinToolchain TC;
+
+    // xcrun answers for whichever toolchain xcode-select points at, which is
+    // the one the SDK belongs to; everything after it here is for a machine
+    // where xcrun cannot be run.  Asking it for ld rather than taking the
+    // first one on PATH also keeps a GNU ld installed alongside — Homebrew's
+    // binutils puts one there — from being handed a Mach-O link.
+    TC.Linker = captureOutput("xcrun", {"-f", "ld"});
+    if (TC.Linker.empty() || !isRegFile(TC.Linker)) TC.Linker = "ld";
+
+    if (const char *E = getenv("SDKROOT"); E && *E && isDir(E))
+        TC.SDKPath = E;
+    else
+        TC.SDKPath = captureOutput("xcrun", {"--sdk", "macosx", "--show-sdk-path"});
+    if (!isDir(TC.SDKPath)) {
+        TC.SDKPath.clear();
+        static const char *Fallbacks[] = {
+            "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk",
+            "/Applications/Xcode.app/Contents/Developer/Platforms"
+            "/MacOSX.platform/Developer/SDKs/MacOSX.sdk",
+        };
+        for (const char *F : Fallbacks)
+            if (isDir(F)) { TC.SDKPath = F; break; }
+    }
+    TC.SDKVersion = sdkVersion(TC.SDKPath);
+
+    if (const char *E = getenv("PLANG_BUILTINS_LIB"); E && *E) {
+        TC.BuiltinsLib = E;
+    } else {
+        // The builtins sit beside the linker: both an Xcode toolchain and the
+        // Command Line Tools keep ld in <root>/usr/bin and the archive in
+        // <root>/usr/lib/clang/<version>/lib/darwin.
+        if (TC.Linker != "ld")
+            TC.BuiltinsLib = builtinsUnder(llvm::sys::path::parent_path(
+                llvm::sys::path::parent_path(TC.Linker)));
+        static const char *Roots[] = {
+            "/Library/Developer/CommandLineTools/usr",
+            "/Applications/Xcode.app/Contents/Developer/Toolchains"
+            "/XcodeDefault.xctoolchain/usr",
+        };
+        for (const char *R : Roots) {
+            if (!TC.BuiltinsLib.empty()) break;
+            TC.BuiltinsLib = builtinsUnder(R);
+        }
+    }
+    return TC;
 }
 
 // ---------------------------------------------------------------------------
@@ -448,6 +626,26 @@ Options Driver::parseArgs(int Argc, char *Argv[]) {
 // Compilation pipeline
 // ---------------------------------------------------------------------------
 
+/// The triple to hand llc, or "" to leave it the one the IR names.
+///
+/// On macOS this is where the deployment target is settled.  The front end
+/// puts the host triple in the IR, which carries the Darwin kernel version
+/// rather than the macOS one and says nothing about which macOS the program is
+/// meant to run on; naming the deployment target here puts it in the object
+/// file, where it has to match what -platform_version tells ld or ld warns
+/// about every object it reads.
+static std::string llcTriple(const Options &Opts) {
+    const llvm::Triple T = targetTriple(Opts);
+    if (T.isMacOSX()) {
+        if (const std::string MinOS = darwinDeploymentTarget(T); !MinOS.empty()) {
+            llvm::Triple Versioned(T);
+            Versioned.setOSName("macosx" + MinOS);
+            return Versioned.str();
+        }
+    }
+    return Opts.target;
+}
+
 /// Build the argv for a -pc1 front-end invocation.
 static std::vector<std::string> makeFEArgs(const Options &Opts,
                                             const std::string &Out,
@@ -473,10 +671,10 @@ static std::vector<std::string> makeFEArgs(const Options &Opts,
 ///
 /// Takes the Driver so that it can report through the same engine everything
 /// else does, and run ld.lld through the same runTool.
-static int linkWithLLD(Driver &D, const Options &Opts, const std::string &ObjFile,
-                       const std::string &OutFile,
-                       const std::string &RuntimeLib,
-                       bool Verbose, bool DryRun) {
+static int linkELF(Driver &D, const Options &Opts, const std::string &ObjFile,
+                   const std::string &OutFile,
+                   const std::string &RuntimeLib,
+                   bool Verbose, bool DryRun) {
     GCCInstall GCC = detectGCC();
 
     if (const char *E = getenv("PLANG_GCC_DIR"))  GCC.Dir    = E;
@@ -491,13 +689,11 @@ static int linkWithLLD(Driver &D, const Options &Opts, const std::string &ObjFil
         return 1;
     }
 
-    llvm::Triple T(Opts.target.empty() ? hostTriple()
-                                       : llvm::Triple::normalize(Opts.target));
+    const llvm::Triple T = targetTriple(Opts);
     std::string Emul = linkerEmulation(T);
     std::string DynL = dynamicLinker(T);
     std::string Arch = T.getArchName().str();
 
-    std::string OOpt = "-O" + std::to_string(Opts.optLevel);
     std::vector<std::string> Args;
     Args.push_back("--hash-style=gnu");
     Args.push_back("--build-id");
@@ -529,6 +725,64 @@ static int linkWithLLD(Driver &D, const Options &Opts, const std::string &ObjFil
     Args.push_back(GCC.LibDir + "/crtn.o");
 
     return D.runTool("ld.lld", Args, Verbose, DryRun);
+}
+
+/// Link ObjFile into OutFile using the macOS system linker.
+///
+/// Much shorter than the ELF link because macOS has no startup files to find:
+/// libSystem carries the entry point, and is libc, libm and libpthread in one,
+/// so the whole system side of the link is -lSystem inside the SDK.  What is
+/// left is telling ld where the SDK is, which macOS the executable is for, and
+/// where the compiler builtins are — the runtime's complex arithmetic calls
+/// __muldc3 and __divdc3, which the compiler emits calls to rather than code
+/// for, and which on Linux arrive with -lgcc.
+static int linkDarwin(Driver &D, const Options &Opts, const std::string &ObjFile,
+                      const std::string &OutFile,
+                      const std::string &RuntimeLib,
+                      bool Verbose, bool DryRun) {
+    const llvm::Triple T  = targetTriple(Opts);
+    const DarwinToolchain TC = detectDarwinToolchain();
+
+    if (TC.SDKPath.empty()) {
+        D.diag(diag::err_no_macos_sdk);
+        return 1;
+    }
+
+    const std::string MinOS = darwinDeploymentTarget(T);
+
+    std::vector<std::string> Args;
+    if (std::string Arch = machOArchName(T); !Arch.empty()) {
+        Args.push_back("-arch"); Args.push_back(Arch);
+    }
+    Args.push_back("-syslibroot"); Args.push_back(TC.SDKPath);
+    if (!MinOS.empty()) {
+        Args.push_back("-platform_version");
+        Args.push_back("macos");
+        Args.push_back(MinOS);
+        // An SDK that does not say which version it is is reported as the
+        // deployment target, which ld accepts and which says no more than it
+        // can tell.
+        Args.push_back(TC.SDKVersion.empty() ? MinOS : TC.SDKVersion);
+    }
+    Args.push_back("-o"); Args.push_back(OutFile);
+    Args.push_back(ObjFile);
+    if (!RuntimeLib.empty()) Args.push_back(RuntimeLib);
+    for (const auto &A : Opts.linkerArgs) Args.push_back(A);
+    Args.push_back("-lSystem");
+    // Left out rather than reported when it is missing: it is only wanted by
+    // programs that do complex arithmetic, and everything else links without.
+    if (!TC.BuiltinsLib.empty()) Args.push_back(TC.BuiltinsLib);
+
+    return D.runTool(TC.Linker, Args, Verbose, DryRun);
+}
+
+/// Link ObjFile into OutFile with whichever linker the target calls for.
+static int link(Driver &D, const Options &Opts, const std::string &ObjFile,
+                const std::string &OutFile, const std::string &RuntimeLib,
+                bool Verbose, bool DryRun) {
+    if (targetTriple(Opts).isOSDarwin())
+        return linkDarwin(D, Opts, ObjFile, OutFile, RuntimeLib, Verbose, DryRun);
+    return linkELF(D, Opts, ObjFile, OutFile, RuntimeLib, Verbose, DryRun);
 }
 
 int Driver::compile(const Options &Opts) {
@@ -615,11 +869,13 @@ int Driver::compile(const Options &Opts) {
         return Rc;
     }
 
+    const std::string LLCTriple = llcTriple(Opts);
+
     // Assembly mode: IR → .s.
     if (Opts.mode == OutputMode::Assembly) {
         std::vector<std::string> LLCArgs = {OOpt};
         if (Opts.debug)              LLCArgs.push_back("-g");
-        if (!Opts.target.empty())  { LLCArgs.push_back("--mtriple"); LLCArgs.push_back(Opts.target); }
+        if (!LLCTriple.empty())    { LLCArgs.push_back("--mtriple"); LLCArgs.push_back(LLCTriple); }
         LLCArgs.push_back("-o"); LLCArgs.push_back(OutFile);
         LLCArgs.push_back(IrFile);
         Rc = runTool("llc", LLCArgs, V, DR);
@@ -650,8 +906,8 @@ int Driver::compile(const Options &Opts) {
 
     {
         std::vector<std::string> LLCArgs = {"-filetype=obj", "-relocation-model=pic", OOpt};
-        if (Opts.debug)             LLCArgs.push_back("-g");
-        if (!Opts.target.empty()) { LLCArgs.push_back("--mtriple"); LLCArgs.push_back(Opts.target); }
+        if (Opts.debug)            LLCArgs.push_back("-g");
+        if (!LLCTriple.empty())  { LLCArgs.push_back("--mtriple"); LLCArgs.push_back(LLCTriple); }
         LLCArgs.push_back("-o"); LLCArgs.push_back(ObjFile);
         LLCArgs.push_back(IrFile);
         Rc = runTool("llc", LLCArgs, V, DR);
@@ -661,10 +917,10 @@ int Driver::compile(const Options &Opts) {
 
     if (Opts.mode == OutputMode::Object) return 0;
 
-    // Link with ld.lld, appending any extra object files from multi-file builds.
+    // Link, appending any extra object files from multi-file builds.
     Options LinkOpts = Opts;
     for (const auto &EO : ExtraObjs) LinkOpts.linkerArgs.push_back(EO);
-    Rc = linkWithLLD(*this, LinkOpts, ObjFile, OutFile, findRuntimeLib(ExePath_), V, DR);
+    Rc = link(*this, LinkOpts, ObjFile, OutFile, findRuntimeLib(ExePath_), V, DR);
     if (OwnObj) llvm::sys::fs::remove(ObjFile);
     return Rc;
 }

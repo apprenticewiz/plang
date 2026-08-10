@@ -171,7 +171,14 @@ void Codegen::Impl::emitGoto(const GotoStmt& s) {
     const VarEntry* ve = findVar(owner->bufName);
     if (!ve) { codegenICE("jump buffer for label " + s.Label + " is out of reach"); return; }
 
-    auto* jump = getExternFnN("longjmp", llvm::Type::getVoidTy(ctx),
+    // _longjmp, not longjmp, to match the _setjmp the landing pad was entered
+    // with.  The two forms differ in whether they carry the signal mask, and
+    // they have to agree: on macOS longjmp restores a mask from the buffer
+    // whatever put it there, so paired with _setjmp, which does not save one,
+    // it sets the mask from whatever the buffer happened to hold.  The
+    // program-level buffer is zeroed, which unblocks every signal the program
+    // had blocked; a procedure's buffer is a stack slot, so it is worse.
+    auto* jump = getExternFnN("_longjmp", llvm::Type::getVoidTy(ctx),
                               {ptrTy, i32Ty});
     if (auto* f = llvm::dyn_cast<llvm::Function>(jump))
         f->addFnAttr(llvm::Attribute::NoReturn);

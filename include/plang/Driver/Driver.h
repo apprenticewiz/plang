@@ -13,7 +13,7 @@ namespace plang {
 /// Controls how far the compilation pipeline runs.
 enum class OutputMode {
     Executable, ///< (default) link to a native binary
-    Object,     ///< -c        compile to ELF object file
+    Object,     ///< -c        compile to a native object file
     Assembly,   ///< -S        compile to native assembly
     LLVMIr,     ///< -emit-llvm   emit textual LLVM IR
     DumpAst,    ///< -dump-ast    print the typed AST and stop
@@ -24,7 +24,7 @@ struct Options {
     std::string  inputFile;
     std::string  outputFile;               ///< empty = derive from inputFile / mode
     OutputMode   mode{OutputMode::Executable};
-    int          optLevel{0};              ///< 0–3, forwarded to llc / ld.lld
+    int          optLevel{0};              ///< 0–3, forwarded to the front end and llc
     bool         verbose{false};           ///< -v: echo each tool invocation
     bool         dryRun{false};            ///< -###: print commands, don't run
     bool         saveTemps{false};         ///< -save-temps: keep .ll and .o files
@@ -40,8 +40,9 @@ struct Options {
     std::vector<std::string> extraInputFiles; ///< additional .pas files for multi-file builds
 };
 
-/// Compiler driver.  Parses arguments and orchestrates the compilation pipeline:
-/// plang -pc1 (Pascal front end), llc (code generation), ld.lld (linking).
+/// Compiler driver.  Parses arguments and orchestrates the compilation
+/// pipeline: plang -pc1 (Pascal front end), llc (code generation), and the
+/// platform linker — ld.lld on ELF targets, the system ld on macOS.
 class Driver {
 public:
     /// Construct with \p Argv0 (argv[0] from main) so that the driver can

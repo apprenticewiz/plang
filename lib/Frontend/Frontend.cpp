@@ -1,6 +1,7 @@
 /// plang -pc1 — Pascal compiler front end
 ///
-/// Implements plang::frontendPC1Main(), compiled into libplang-frontend.so.
+/// Implements plang::frontendPC1Main(), compiled into the shared library
+/// libplang-frontend.
 /// The plang driver re-invokes itself as "plang -pc1 ..." to run the front
 /// end as a subprocess; embedders can also call frontendPC1Main() directly.
 ///

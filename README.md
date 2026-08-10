@@ -1,9 +1,14 @@
 # plang — Pascal LLVM Compiler
 
-plang is a Pascal compiler built on LLVM.  It implements ISO 7185 Standard
-Pascal at level 1 — conformant array parameters included — and ISO 10206
-Extended Pascal, with future support planned for other Pascal dialects and
-extensions, including Turbo Pascal, Delphi (Object Pascal), and Free Pascal.
+plang is a Pascal compiler built on LLVM, currently targeting both Linux
+and macOS platforms using either x86_64 or aarch64 CPUs.  It implements
+ISO 7185 Standard Pascal at level 1 (conformant array parameters
+included) and ISO 10206 Extended Pascal, with future support planned for
+other Pascal dialects and extensions, including Turbo Pascal,
+Delphi/Object Pascal, and Free Pascal.
+
+Native Windows support is not available, although it may be considered
+for a future update.  For now, Windows users can run plang using WSL.
 
 ## Background
 
@@ -85,16 +90,22 @@ encountered.
 ## Prerequisites
 
 - CMake ≥ 3.16
-- LLVM (any recent release; tested with 22.x)
+- LLVM (any recent release; tested with 22.x) — `llc` must be on `PATH`
 - GCC ≥ 14 or Clang ≥ 18 (C++23 required)
-- lld (`ld.lld` must be on `PATH` for linking)
 - Google Test — only to build the test suite, which is off by default
+
+Linking prerequisites vary by platform:
+
+| Platform | Requirement |
+|----------|-------------|
+| Linux | lld (`ld.lld` on `PATH`), and a GCC installation, whose startup files and `libgcc` the link uses |
+| macOS | The Xcode command line tools (`xcode-select --install`), which supply the linker and the SDK |
 
 ## Building and Installing
 
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j$(nproc)
+cmake --build build -j$(getconf _NPROCESSORS_ONLN)
 cmake --install build
 ```
 

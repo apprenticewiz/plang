@@ -1,3 +1,15 @@
+# The runtime is linked into every program plang compiles, and those may be
+# built for an older macOS than plang itself was — MACOSX_DEPLOYMENT_TARGET
+# says which.  ld warns about each object in the archive that was built for a
+# newer macOS than the link is for, so a runtime built for the host would put
+# a page of warnings in front of anyone targeting anything but it.  Building it
+# for the oldest macOS that runs on either architecture makes it usable by all
+# of them; nothing in here needs a recent one.  An explicit setting is left
+# alone, since someone who gave one has said what they want.
+if(APPLE AND NOT CMAKE_OSX_DEPLOYMENT_TARGET)
+    set(CMAKE_OSX_DEPLOYMENT_TARGET "11.0")
+endif()
+
 set(PLANG_RUNTIME_SOURCES
     plang_io.cpp
     plang_real.cpp
@@ -20,10 +32,10 @@ foreach(rt_target plang_runtime plang_runtime_shared)
         PRIVATE ${CMAKE_SOURCE_DIR}/include)
 endforeach()
 
-# The runtime is linked into the Pascal programs that plang compiles, and those
-# links are performed by ld.lld without any sanitizer runtime.  Instrumenting
-# the runtime would leave every compiled program with undefined __asan_*
-# symbols, so opt these targets out of the project-wide sanitizer flags.
+# The runtime is linked into the Pascal programs that plang compiles, and the
+# driver performs those links without any sanitizer runtime.  Instrumenting the
+# runtime would leave every compiled program with undefined __asan_* symbols,
+# so opt these targets out of the project-wide sanitizer flags.
 if(PLANG_SANITIZE)
     foreach(rt_target plang_runtime plang_runtime_shared)
         target_compile_options(${rt_target} PRIVATE -fno-sanitize=all)

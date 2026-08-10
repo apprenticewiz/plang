@@ -10545,9 +10545,20 @@ static std::string runWithStdinHeldOpen(const std::string& Bin) {
     // Holding the fifo open read-write on a spare descriptor means it has a
     // writer for as long as the shell lives, so the reader never sees EOF —
     // and opening it does not block, which it would with no writer at all.
+    //
+    // A program that does wait has to be killed for the test to report rather
+    // than hang, and the watchdog is written out here rather than left to
+    // timeout(1), which is GNU coreutils and is not on a Mac.  A killed
+    // program reports 137 — 128 and SIGKILL — where timeout reported 124.
+    // The watchdog gets its own standard output rather than inheriting this
+    // one, because the caller reads until end of file and an inherited
+    // descriptor would hold that open for the whole five seconds even once the
+    // program under test had finished.
     const std::string Out = runCmd(
-        "exec 9<>" + Fifo + "; timeout 5 " + Bin + " <" + Fifo
-        + " 2>/dev/null; echo \"exit:$?\"; exec 9>&-");
+        "exec 9<>" + Fifo + "; " + Bin + " <" + Fifo + " 2>/dev/null & "
+        "pid=$!; (sleep 5; kill -9 $pid 2>/dev/null) >/dev/null 2>&1 & "
+        "guard=$!; wait $pid; rc=$?; kill $guard 2>/dev/null; "
+        "echo \"exit:$rc\"; exec 9>&-");
     removeTempDir(Dir);
     return Out;
 }
@@ -10585,8 +10596,8 @@ TEST(ProgramParameters, DeclaringInputDoesNotWaitForItBeforeWriting) {
     removeTempDir(Dir);
 
     EXPECT_NE(Out.find("exit:0"), std::string::npos)
-        << "did not finish with the standard input still open; 124 is the "
-           "timeout, meaning it is waiting for input it never asked for:\n"
+        << "did not finish with the standard input still open; 137 is the "
+           "watchdog, meaning it is waiting for input it never asked for:\n"
         << Out;
     EXPECT_NE(Out.find("1\n2\n3\n"), std::string::npos) << Out;
 }

@@ -203,8 +203,8 @@ with.
 
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DPLANG_ENABLE_TESTS=ON
-cmake --build build -j$(nproc)
-ctest --test-dir build -j$(nproc)
+cmake --build build -j$(getconf _NPROCESSORS_ONLN)
+ctest --test-dir build -j$(getconf _NPROCESSORS_ONLN)
 ```
 
 `ctest` works in a build configured without the tests as well, and reports that
