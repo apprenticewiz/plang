@@ -6,7 +6,7 @@ version numbers follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 
 ---
 
-## 0.1.0 - 2026-08-10
+## [0.1.0] - 2026-08-10
 
 Initial release.  Full support for ISO 7185 Standard Pascal at Level 1 and
 ISO 10206 Extended Pascal.  Support for other Pascal dialects and extensions
