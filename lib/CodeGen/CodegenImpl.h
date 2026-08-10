@@ -422,6 +422,12 @@ struct Codegen::Impl {
     /// The labels \p block declares that a goto inside a procedure declared in
     /// it names.  These are the ones that need somewhere to land.
     static std::set<std::string> nonLocalTargets(const BlockNode& block);
+    /// Recursive half of nonLocalTargets: scans the procedures declared in
+    /// \p inner for gotos naming a label \p block declares, collecting into
+    /// \p found.
+    static void scanNonLocalTargets(const BlockNode& inner,
+                                    const BlockNode& block,
+                                    std::set<std::string>& found);
 
     /// The value a longjmp passes for \p label.  Offset by one because zero is
     /// what setjmp returns when it is first called, and longjmp turns a
@@ -952,6 +958,8 @@ struct Codegen::Impl {
     void emitFunctionDef(const ProcDecl& proc, bool declareOnly = false);
     /// Introduce the constants of any enumeration written inside \p tn.
     void registerEnumValues(const TypeNode* tn);
+    /// The same for a variant part and the variants nested in it.
+    void registerVariantEnumValues(const VariantPart& vp);
     void emitBlockDecls(const BlockNode& block);
     /// The value a named constant stands for; null when it can only be
     /// computed inside a basic block.

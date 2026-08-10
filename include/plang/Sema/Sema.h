@@ -206,6 +206,14 @@ private:
     // proc-body sub-checks so inner blocks don't clobber the outer block's info.
     std::unordered_map<std::string, const StmtNode*> LabelEnclosingStmt;
 
+    // Fills LabelEnclosingStmt for the statement S, with NestStack carrying the
+    // structured statements enclosing it.  Recursion by an ordinary member
+    // function rather than a lambda: written as one taking an explicit object
+    // parameter, GCC rejects the reference to LabelEnclosingStmt outright
+    // through 14 and crashes on it in 15.
+    void scanLabelNesting(const StmtNode* S,
+                          std::vector<const StmtNode*>& NestStack);
+
     // The labels the block being checked declares.  A goto naming one of these
     // stays inside the block; anything else it names belongs to an enclosing
     // block and leaves.  The symbol table cannot answer this on its own: a
@@ -245,6 +253,9 @@ private:
     [[nodiscard]] std::shared_ptr<Type> resolveType(const TypeNode& Node);
     /// Body of resolveType; call resolveType so the node gets annotated.
     [[nodiscard]] std::shared_ptr<Type> resolveTypeImpl(const TypeNode& Node);
+    /// Adds the fields of a variant part, and of the variants nested in it, to
+    /// the record type T, so that field access can find them (§6.4.3.3).
+    void walkVariantFields(const VariantPart& Vp, Type& T);
     [[nodiscard]] std::shared_ptr<Type> resolveNamed(const NamedTypeNode& N);
     /// EP §6.6: checks a denoter's 'value' clause against the type it denotes.
     void checkInitialState(const TypeNode& Node, const Type& T);

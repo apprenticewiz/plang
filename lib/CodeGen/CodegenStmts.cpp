@@ -41,23 +41,26 @@ bool Codegen::Impl::declaresLabel(const BlockNode& block,
     return std::ranges::find(block.Labels, label) != block.Labels.end();
 }
 
+void Codegen::Impl::scanNonLocalTargets(const BlockNode& inner,
+                                        const BlockNode& block,
+                                        std::set<std::string>& found) {
+    for (const auto& proc : inner.Procs) {
+        if (!proc->Body) continue;
+        // A procedure declaring the label itself means its own, and every goto
+        // below it names that one rather than the outer block's.
+        walkStmts(proc->Body->Body.get(), [&](const StmtNode* s) {
+            if (auto* g = llvm::dyn_cast<GotoStmt>(s))
+                if (declaresLabel(block, g->Label)
+                        && !declaresLabel(*proc->Body, g->Label))
+                    found.insert(g->Label);
+        });
+        scanNonLocalTargets(*proc->Body, block, found);
+    }
+}
+
 std::set<std::string> Codegen::Impl::nonLocalTargets(const BlockNode& block) {
     std::set<std::string> found;
-    auto scan = [&](this auto& self, const BlockNode& inner) -> void {
-        for (const auto& proc : inner.Procs) {
-            if (!proc->Body) continue;
-            // A procedure declaring the label itself means its own, and every
-            // goto below it names that one rather than the outer block's.
-            walkStmts(proc->Body->Body.get(), [&](const StmtNode* s) {
-                if (auto* g = llvm::dyn_cast<GotoStmt>(s))
-                    if (declaresLabel(block, g->Label)
-                            && !declaresLabel(*proc->Body, g->Label))
-                        found.insert(g->Label);
-            });
-            self(*proc->Body);
-        }
-    };
-    scan(block);
+    scanNonLocalTargets(block, block, found);
     return found;
 }
 

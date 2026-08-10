@@ -120,6 +120,44 @@ void Sema::checkInitialState(const TypeNode& Node, const Type& T) {
     adoptSetType(*Node.InitialState, Node.ResolvedType);
 }
 
+void Sema::walkVariantFields(const VariantPart& Vp, Type& T) {
+    // Tag field (the discriminator variable, e.g. 'b' in 'case b: boolean of')
+    // Resolved once: an enumeration written out here declares its values, and
+    // resolving the denoter a second time would declare them again.
+    std::shared_ptr<Type> TagTy;
+    if (!Vp.TagField.empty() && Vp.TagType) {
+        TagTy = resolveType(*Vp.TagType);
+        if (!std::ranges::any_of(T.RecordFields,
+                [&](const Type::Field& F) { return eqCI(F.Name, Vp.TagField); }))
+            T.RecordFields.push_back({ .Name = Vp.TagField, .Ty = TagTy, .IsTagField = true });
+    }
+    // §6.4.3.3: the case-constants of a variant part shall be distinct, for the
+    // reason they must be in a case-statement — the tag value has to name one
+    // variant and not two.
+    std::set<int64_t> SeenTags;
+    for (const auto& Vc : Vp.Cases)
+        for (const auto& Lbl : Vc.Labels)
+            if (Lbl)
+                if (auto V = constBound(*Lbl); V && !SeenTags.insert(*V).second)
+                    error(Lbl->Loc, diag::err_variant_label_duplicate,
+                          {TagTy ? spellOrdinal(*TagTy, *V)
+                                 : std::to_string(*V)});
+
+    // All fixed fields from every variant case, plus recursion into nested
+    // variants.
+    for (const auto& Vc : Vp.Cases) {
+        for (const auto& Fd : Vc.Fields) {
+            auto Ft = resolveType(*Fd.Type);
+            for (const auto& Nm : Fd.Names) {
+                if (!std::ranges::any_of(T.RecordFields,
+                        [&](const Type::Field& F) { return eqCI(F.Name, Nm); }))
+                    T.RecordFields.push_back({ .Name = Nm, .Ty = Ft });
+            }
+        }
+        if (Vc.NestedVariant) walkVariantFields(*Vc.NestedVariant, T);
+    }
+}
+
 std::shared_ptr<Type> Sema::resolveTypeImpl(const TypeNode& Node) {
     if (auto* N = llvm::dyn_cast<NamedTypeNode>(&Node)) {
         return resolveNamed(*N);
@@ -202,44 +240,7 @@ std::shared_ptr<Type> Sema::resolveTypeImpl(const TypeNode& Node) {
         }
         // Walk the variant part (and nested variants) adding all variant fields to
         // RecordFields so that field-access checking can find them (ISO §6.4.3.3).
-        auto WalkVariant = [&](this auto& Self, const VariantPart& Vp) -> void {
-            // Tag field (the discriminator variable, e.g. 'b' in 'case b: boolean of')
-            // Resolved once: an enumeration written out here declares its
-            // values, and resolving the denoter a second time would declare
-            // them again.
-            std::shared_ptr<Type> TagTy;
-            if (!Vp.TagField.empty() && Vp.TagType) {
-                TagTy = resolveType(*Vp.TagType);
-                if (!std::ranges::any_of(T->RecordFields,
-                        [&](const Type::Field& F) { return eqCI(F.Name, Vp.TagField); }))
-                    T->RecordFields.push_back({ .Name = Vp.TagField, .Ty = TagTy, .IsTagField = true });
-            }
-            // §6.4.3.3: the case-constants of a variant part shall be distinct,
-            // for the reason they must be in a case-statement — the tag value
-            // has to name one variant and not two.
-            std::set<int64_t> SeenTags;
-            for (const auto& Vc : Vp.Cases)
-                for (const auto& Lbl : Vc.Labels)
-                    if (Lbl)
-                        if (auto V = constBound(*Lbl); V && !SeenTags.insert(*V).second)
-                            error(Lbl->Loc, diag::err_variant_label_duplicate,
-                                  {TagTy ? spellOrdinal(*TagTy, *V)
-                                         : std::to_string(*V)});
-
-            // All fixed fields from every variant case, plus recursion into nested variants.
-            for (const auto& Vc : Vp.Cases) {
-                for (const auto& Fd : Vc.Fields) {
-                    auto Ft = resolveType(*Fd.Type);
-                    for (const auto& Nm : Fd.Names) {
-                        if (!std::ranges::any_of(T->RecordFields,
-                                [&](const Type::Field& F) { return eqCI(F.Name, Nm); }))
-                            T->RecordFields.push_back({ .Name = Nm, .Ty = Ft });
-                    }
-                }
-                if (Vc.NestedVariant) Self(*Vc.NestedVariant);
-            }
-        };
-        if (N->Variant) WalkVariant(*N->Variant);
+        if (N->Variant) walkVariantFields(*N->Variant, *T);
         // Named after its fields so two inline records read differently in a
         // diagnostic; nameNominalType replaces this if a declaration names it.
         std::vector<std::string> FieldNames;

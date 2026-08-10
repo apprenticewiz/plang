@@ -719,6 +719,17 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
 /// ISO §6.4.2.3: the identifiers of an enumerated type denote constants of it.
 /// The type need not have been given a name to do that, so a `var e: (x, y)`
 /// introduces x and y just as a named type declaration would.
+/// Registers the enumerations a variant part introduces, as its tag type or as
+/// the type of a field in one of its alternatives, and does the same for the
+/// variants nested inside it.
+void Codegen::Impl::registerVariantEnumValues(const VariantPart& vp) {
+    registerEnumValues(vp.TagType.get());
+    for (const auto& vc : vp.Cases) {
+        for (const auto& f : vc.Fields) registerEnumValues(f.Type.get());
+        if (vc.NestedVariant) registerVariantEnumValues(*vc.NestedVariant);
+    }
+}
+
 void Codegen::Impl::registerEnumValues(const TypeNode* tn) {
     if (!tn) return;
     if (auto* etn = llvm::dyn_cast<EnumTypeNode>(tn)) {
@@ -738,14 +749,7 @@ void Codegen::Impl::registerEnumValues(const TypeNode* tn) {
         for (const auto& f : rtn->Fields) registerEnumValues(f.Type.get());
         // A variant part can introduce an enumeration too, as its tag type or
         // as the type of a field in one of the alternatives.
-        auto walk = [&](this auto& self, const VariantPart& vp) -> void {
-            registerEnumValues(vp.TagType.get());
-            for (const auto& vc : vp.Cases) {
-                for (const auto& f : vc.Fields) registerEnumValues(f.Type.get());
-                if (vc.NestedVariant) self(*vc.NestedVariant);
-            }
-        };
-        if (rtn->Variant) walk(*rtn->Variant);
+        if (rtn->Variant) registerVariantEnumValues(*rtn->Variant);
     }
 }
 

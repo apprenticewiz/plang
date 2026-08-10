@@ -680,6 +680,48 @@ void Sema::checkBindingCall(const std::string& LowerName, SourceLocation Loc,
     }
 }
 
+void Sema::scanLabelNesting(const StmtNode* S,
+                            std::vector<const StmtNode*>& NestStack) {
+    if (!S) return;
+    if (auto* Ls = llvm::dyn_cast<LabeledStmt>(S)) {
+        if (!NestStack.empty()) {
+            LabelEnclosingStmt[Ls->Label] = NestStack.back();
+            // Recorded on the symbol as well, because a goto in a procedure
+            // declared here is checked with that procedure's own nesting in
+            // LabelEnclosingStmt, not this block's.
+            if (Symbol* Sym = Symtab.lookup(Ls->Label);
+                Sym && Sym->Kind == SymbolKind::Label)
+                Sym->LabelNested = true;
+        }
+        scanLabelNesting(Ls->Stmt.get(), NestStack);
+        return;
+    }
+    if (auto* Cs = llvm::dyn_cast<CompoundStmt>(S)) {
+        for (const auto& St : Cs->Stmts) scanLabelNesting(St.get(), NestStack);
+        return;
+    }
+
+    // Everything below is a structured statement, so it goes on the stack for
+    // the labels beneath it to name as their enclosing one.
+    NestStack.push_back(S);
+    if (auto* Is = llvm::dyn_cast<IfStmt>(S)) {
+        scanLabelNesting(Is->Then.get(), NestStack);
+        scanLabelNesting(Is->Else.get(), NestStack);
+    } else if (auto* Fs = llvm::dyn_cast<ForStmt>(S)) {
+        scanLabelNesting(Fs->Body.get(), NestStack);
+    } else if (auto* Ws = llvm::dyn_cast<WhileStmt>(S)) {
+        scanLabelNesting(Ws->Body.get(), NestStack);
+    } else if (auto* Rs = llvm::dyn_cast<RepeatStmt>(S)) {
+        for (const auto& St : Rs->Stmts) scanLabelNesting(St.get(), NestStack);
+    } else if (auto* Cas = llvm::dyn_cast<CaseStmt>(S)) {
+        for (const auto& Arm : Cas->Arms) scanLabelNesting(Arm.Body.get(), NestStack);
+        scanLabelNesting(Cas->Else.get(), NestStack);
+    } else if (auto* Wts = llvm::dyn_cast<WithStmt>(S)) {
+        scanLabelNesting(Wts->Body.get(), NestStack);
+    }
+    NestStack.pop_back();
+}
+
 void Sema::checkBlock(const BlockNode& Block,
                       llvm::function_ref<void()> BeforePop) {
     Symtab.pushScope();
@@ -892,52 +934,7 @@ void Sema::checkBlock(const BlockNode& Block,
     {
         LabelEnclosingStmt.clear();
         std::vector<const StmtNode*> NestStack;
-        auto ScanNest = [&](this auto& Self, const StmtNode* S) -> void {
-            if (!S) return;
-            if (auto* Ls = llvm::dyn_cast<LabeledStmt>(S)) {
-                if (!NestStack.empty()) {
-                    LabelEnclosingStmt[Ls->Label] = NestStack.back();
-                    // Recorded on the symbol as well, because a goto in a
-                    // procedure declared here is checked with that procedure's
-                    // own nesting in LabelEnclosingStmt, not this block's.
-                    if (Symbol* Sym = Symtab.lookup(Ls->Label);
-                        Sym && Sym->Kind == SymbolKind::Label)
-                        Sym->LabelNested = true;
-                }
-                Self(Ls->Stmt.get());
-                return;
-            }
-            if (auto* Cs = llvm::dyn_cast<CompoundStmt>(S)) {
-                for (const auto& St : Cs->Stmts) Self(St.get());
-            } else if (auto* Is = llvm::dyn_cast<IfStmt>(S)) {
-                NestStack.push_back(S);
-                Self(Is->Then.get());
-                Self(Is->Else.get());
-                NestStack.pop_back();
-            } else if (auto* Fs = llvm::dyn_cast<ForStmt>(S)) {
-                NestStack.push_back(S);
-                Self(Fs->Body.get());
-                NestStack.pop_back();
-            } else if (auto* Ws = llvm::dyn_cast<WhileStmt>(S)) {
-                NestStack.push_back(S);
-                Self(Ws->Body.get());
-                NestStack.pop_back();
-            } else if (auto* Rs = llvm::dyn_cast<RepeatStmt>(S)) {
-                NestStack.push_back(S);
-                for (const auto& St : Rs->Stmts) Self(St.get());
-                NestStack.pop_back();
-            } else if (auto* Cas = llvm::dyn_cast<CaseStmt>(S)) {
-                NestStack.push_back(S);
-                for (const auto& Arm : Cas->Arms) Self(Arm.Body.get());
-                Self(Cas->Else.get());
-                NestStack.pop_back();
-            } else if (auto* Wts = llvm::dyn_cast<WithStmt>(S)) {
-                NestStack.push_back(S);
-                Self(Wts->Body.get());
-                NestStack.pop_back();
-            }
-        };
-        ScanNest(Block.Body.get());
+        scanLabelNesting(Block.Body.get(), NestStack);
     }
     // Save a snapshot before Phase 5b overwrites LabelEnclosingStmt via inner checkBlock calls.
     auto SavedLabelEnclosing = LabelEnclosingStmt;

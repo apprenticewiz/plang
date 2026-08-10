@@ -24,10 +24,11 @@ jobs:
     name: ${{ matrix.compiler }} / ${{ matrix.build_type }}
     runs-on: ubuntu-latest
     strategy:
-      # One combination failing should not hide the state of the others, which
-      # is what makes this matrix able to answer where the GCC floor actually
-      # is: gcc-14 rejects the deducing-this lambdas in Sema and CodeGen, and
-      # whether gcc-15 does too is the open question.
+      # gcc-14 and gcc-15 are both here to hold the README to "GCC >= 14".
+      # They are the versions that reject, and then crash on, lambdas taking an
+      # explicit object parameter that name a member of the enclosing class;
+      # this builds without one, and these two runs are what keeps it that way.
+      # One combination failing should not hide the state of the others.
       fail-fast: false
       matrix:
         compiler: [gcc-14, gcc-15, clang]
