@@ -565,6 +565,10 @@ Options Driver::parseArgs(int Argc, char *Argv[]) {
             Opts.rangeChecks = true;
         } else if (Arg == "-fno-range-checks") {
             Opts.rangeChecks = false;
+        } else if (Arg == "-fnil-checks") {
+            Opts.nilChecks = true;
+        } else if (Arg == "-fno-nil-checks") {
+            Opts.nilChecks = false;
         } else if (Arg.starts_with("-W") && Arg.size() > 2) {
             if (Arg.size() <= 3 || Arg[2] != 'l' || Arg[3] != ',')
                 Opts.frontendArgs.push_back(Arg);
@@ -658,6 +662,7 @@ static std::vector<std::string> makeFEArgs(const Options &Opts,
     if (Opts.suppressWarnings)   Args.push_back("-w");
     if (Opts.warningsAsErrors)   Args.push_back("-Werror");
     if (!Opts.rangeChecks)       Args.push_back("-fno-range-checks");
+    if (!Opts.nilChecks)         Args.push_back("-fno-nil-checks");
     // The front end runs the LLVM pipeline; llc gets the same level separately
     // for instruction selection.
     Args.push_back("-O" + std::to_string(Opts.optLevel));

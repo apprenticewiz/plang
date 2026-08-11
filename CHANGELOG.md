@@ -6,6 +6,102 @@ version numbers follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 
 ---
 
+## [Unreleased]
+
+### Fixed
+
+- **A program may declare its own `abs`.**  ISO §6.2.2.10 lets a program
+  redeclare a required identifier, and the declaration then denotes what the
+  program said and not the required procedure or function.  Codegen decided
+  which was meant by lowercasing the name and running an if-chain over the
+  required ones, before anything had asked which declaration was in scope where
+  the call was written — so wherever the two were spelled alike, the required
+  one won.  A program declaring `function abs(x: integer): integer` and calling
+  `abs(-3)` printed 3: its own body was compiled, and nothing ever called it.
+
+  Where the redeclaration took different arguments this was worse than a wrong
+  answer.  A declared `procedure close(x: integer)` reached the required
+  `close`, which takes a file, and was emitted as a call to it with no arguments
+  at all — caught, if it was caught, by the LLVM verifier reporting a null
+  operand, and reported as an internal error rather than as anything to do with
+  the program.
+
+  Which declaration a name denotes is a question about the scope the name was
+  written in, and Sema is the only phase that knows.  It now records what it
+  resolved, on `CallExpr` and `CallStmt`, and codegen consults that before
+  reaching for the name: a call Sema did not resolve to a required routine is
+  not one, whatever it is spelled.  Nothing about the required routines
+  themselves has changed.
+
+  This also settles a functional parameter named after a required function.
+  `emitCallExpr` checked for one only after the whole required chain, the
+  reverse of what `emitCallStmt` did, so a parameter called `abs` was never
+  reached; the check that resolves this comes first for both now.
+
+- **A program may declare its own `close`.**  Everything the source names was
+  mangled into `plang_*`, and so are the runtime's own ~150 entry points, so the
+  two halves of every link shared one namespace.  Thirty-three names collided,
+  twenty-four of them required identifiers ISO §6.2.2.10 entitles a program to
+  redeclare: `close`, `reset`, `rewrite`, `page`, `halt`, `round`, `trunc`,
+  `sqrt`, `sin`, `ln` and the rest.  A program that declared one asked the
+  linker for a symbol the runtime had already defined.
+
+  What made it hard to see is that it did not always fail.  The runtime is a
+  static archive, so the twin only reaches the link when the translation unit
+  holding it is pulled in for some other reason — which is why a procedure
+  called `time` linked and one called `close` did not, and why which programs
+  broke depended on what else they happened to use.
+
+  Procedures and functions are `pas_` now, and variables `pasg_`; nothing in the
+  runtime begins with either, so no declaration can collide with it whatever it
+  is called.  The mangling is otherwise unchanged, and the prefixes are named
+  constants in one place rather than a literal at each of the nine sites that
+  built one.
+
+  This changes the object file ABI: a `.o` from an earlier plang does not link
+  against one from this version.  Recompile, rather than relink, anything
+  compiled with `-c` before.  `.pmi` files are unaffected — they are Pascal
+  source, and name nothing mangled.
+
+- **An underscore in a name is not a scope separator.**  An enclosing scope — a
+  module, or the procedure a procedure is nested in — was joined to what it
+  declares with `__`, which Extended Pascal §6.1.3 allows inside an identifier,
+  so a mangled name did not separate into its parts one way.  A module `a`
+  exporting `b` and a top-level `a__b` were both `pas_a__b`: LLVM renamed the
+  second definition, every call reached the first, and nothing was reported.  A
+  program with both printed the same answer twice.
+
+  They are joined with `$` now, which is not in the Pascal alphabet, so no
+  identifier can be mistaken for a scope boundary and none can forge one.  It
+  is accepted unquoted in an LLVM identifier and in an ELF and a Mach-O symbol;
+  `-S` output still assembles with the system assembler.
+
+- **`-fno-range-checks` no longer removes the nil-dereference check.**  ISO
+  §6.5.4 makes dereferencing `nil` an error, and plang reports it rather than
+  leaving it to the hardware, which would answer with a signal and no
+  indication of which line.  That check had been grouped with the array-index
+  and subrange checks and so was turned off with them.  The two are not the
+  same request: asking for indexing not to be checked is a statement about what
+  a bounds test costs inside a loop, and says nothing about wanting a nil
+  dereference to become a segmentation fault.  It has its own flag now,
+  `-f{,no-}nil-checks`, on by default.
+
+- **The file record is declared once.**  A Pascal file variable is a
+  `PascalFile`, and the runtime and codegen each said what that was: the C++
+  struct in `plang_file.cpp`, and the equivalent LLVM `StructType` in
+  `fileStructType()`.  Holding them together was a `sizeof` assert on the
+  runtime side, which could not see the codegen encoding at all — so a field
+  added, widened or reordered on one side alone gave generated code a field at
+  an offset nothing had written it to, with nothing reported anywhere, since
+  the sizes still agreed.  The struct moves to
+  `include/plang/Basic/PascalFileLayout.h`, which both sides read, and codegen
+  now checks the type it builds against that struct field by field and as a
+  whole.  This follows `plang/Basic/Arith.h`, which the runtime and the
+  constant folders already share for the same reason.
+
+  Nothing about the layout itself has changed.  The stale comment calling it
+  16 bytes is gone.
+
 ## [0.1.2] -- 2026-08-10
 
 ### Added

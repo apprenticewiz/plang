@@ -251,9 +251,12 @@ void Codegen::Impl::emitModDivisorCheck(llvm::Value* divisor) {
 void Codegen::Impl::emitNilCheck(llvm::Value* ptr) {
     // ISO §6.5.4: dereferencing nil is an error.  Left to the hardware it is a
     // segmentation fault with no indication of which line, which is the least
-    // useful thing a Pascal implementation can say.  Grouped with the other
-    // range checks so -fno-range-checks turns it off for release builds.
-    if (!rangeChecks || !ptr) return;
+    // useful thing a Pascal implementation can say.  It has its own flag:
+    // this was grouped with the range checks until 0.1.2, so -fno-range-checks
+    // silently removed it, and a program compiled that way answered a nil
+    // dereference with a signal rather than a diagnostic.  A single compare
+    // against null is also not what anyone turns range checking off to avoid.
+    if (!nilChecks || !ptr) return;
     auto* isNil = builder.CreateICmpEQ(
         ptr, llvm::ConstantPointerNull::get(ptrTy), "isnil");
     emitGuard(isNil, "nilderef", [&] {

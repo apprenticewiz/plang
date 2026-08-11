@@ -582,6 +582,18 @@ void Codegen::Impl::emitCallStmt(const CallStmt& s) {
         return;
     }
 
+    // ISO §6.2.2.10: a required procedure identifier may be redeclared, and
+    // then it denotes what the program declared and not the required one.  The
+    // chain below dispatches on spelling alone, so without this a program that
+    // declares its own `close` reaches a required procedure that takes
+    // different arguments — which it then emitted a call to with none of them.
+    // Sema resolved the name in the scope it was written in and is the only
+    // thing that knows which won.
+    if (!s.ResolvedBuiltin) {
+        emitUserProcCall(s);
+        return;
+    }
+
     if (lo == "write" || lo == "writeln") {
         emitBuiltinWrite(s.Args, lo == "writeln");
         return;
@@ -757,6 +769,10 @@ void Codegen::Impl::emitCallStmt(const CallStmt& s) {
         return;
     }
 
+    emitUserProcCall(s);
+}
+
+void Codegen::Impl::emitUserProcCall(const CallStmt& s) {
     // User-defined procedure — walk the nesting hierarchy to find the right
     // LLVM mangled name (plang_outer__inner, not just plang_inner).
     std::string mangledName = findMangledProc(s.Name);

@@ -27,6 +27,13 @@ struct LangOptions {
     /// (-fno-range-checks turns them off).  Division by zero and unmatched
     /// case labels are always checked; those cost nothing measurable.
     bool     RangeChecks  = true;
+    /// If true, emit the ISO §6.5.4 check that a pointer being dereferenced is
+    /// not nil (-fno-nil-checks turns it off).  Separate from RangeChecks:
+    /// asking for indexing not to be checked is a statement about the cost of
+    /// a bounds test in a loop, and says nothing about wanting a nil
+    /// dereference to become a bare segmentation fault.  The two were one flag
+    /// until 0.1.2, which meant -fno-range-checks quietly took this with it.
+    bool     NilChecks    = true;
     /// -O0..-O3.  Selects the LLVM optimization pipeline run over the module
     /// before it is written out; 0 runs none.
     unsigned OptLevel     = 0;

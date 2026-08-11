@@ -84,6 +84,14 @@ struct CallExpr : ExprNode {
     CallExpr() : ExprNode(NodeKind::CallExpr) {}
     std::string                            Name;  /// function name
     std::vector<std::unique_ptr<ExprNode>> Args;  /// actual arguments, in order
+
+    /// True where Sema resolved this call to a required function rather than
+    /// to one the program declared.  ISO §6.2.2.10 lets a program declare its
+    /// own `abs` or `round`, and the name alone cannot say which was meant —
+    /// only the scope the call was written in can, and Sema is what knows it.
+    /// Mutable so that Sema can annotate through a const reference, as it does
+    /// for TypeNode::ResolvedType.
+    mutable bool ResolvedBuiltin{false};
 };
 
 struct SetRangeExpr : ExprNode {

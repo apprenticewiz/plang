@@ -53,6 +53,31 @@ Set the optimisation level passed to
 .BR llc .
 The default is
 .BR \-O0 .
+.SS "Run-time checks"
+.TP
+.BR \-frange\-checks " / " \-fno\-range\-checks
+Emit, or omit, the checks that an array index lies within its index type
+(ISO 7185 §6.5.3.2) and that a value assigned to a subrange lies within it
+(§6.6.3.2, §6.8.2.2).  On by default.  A program compiled with
+.B \-fno\-range\-checks
+is not one whose errors are reported, and the flag is a statement by whoever
+compiles it that the program is known not to commit them.
+.TP
+.BR \-fnil\-checks " / " \-fno\-nil\-checks
+Emit, or omit, the check that a pointer being dereferenced is not
+.BR nil
+(§6.5.4).  On by default.  Without it the dereference reaches the hardware and
+the program is stopped by a signal, with nothing said about where.  This is
+separate from
+.BR \-fno\-range\-checks ,
+which took it too until 0.1.2: a bounds test inside a loop and a single compare
+against null are not the same cost, and asking to be rid of the one says
+nothing about the other.
+.PP
+Division by zero and a
+.B case
+statement matching no label are always checked; neither costs anything
+measurable.
 .SS "Language"
 .TP
 .BI \-std= dialect

@@ -34,6 +34,7 @@ struct Options {
     bool         suppressWarnings{false};  ///< -w
     bool         warningsAsErrors{false};  ///< -Werror
     bool         rangeChecks{true};        ///< -fno-range-checks disables
+    bool         nilChecks{true};          ///< -fno-nil-checks disables
     std::vector<std::string> frontendArgs; ///< options passed straight to -pc1
     std::vector<std::string> linkerArgs;   ///< -Wl,… / -Xlinker / -L / -l extras
     std::vector<std::string> modulePaths;  ///< -I<dir> module search paths

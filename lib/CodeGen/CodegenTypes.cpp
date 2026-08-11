@@ -80,8 +80,8 @@ void Codegen::Impl::init(const std::string& progName) {
     curRetAlloca = nullptr;
     curRetType = nullptr;
     curFuncName.clear();
-    namePrefix   = "plang_";
-    globalPrefix = "g_";
+    namePrefix   = PlangProcPrefix;
+    globalPrefix = PlangGlobalPrefix;
     currentUnit_.clear();
     moduleGlobals_.clear();
 }

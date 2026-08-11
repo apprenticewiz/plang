@@ -14,7 +14,7 @@ void Codegen::Impl::emitFileParams(const std::vector<std::string>& names) {
         auto* zero = llvm::Constant::getNullValue(ty);
         auto* gv   = new llvm::GlobalVariable(*mod, ty, /*isConst=*/false,
                                                llvm::GlobalValue::ExternalLinkage,
-                                               zero, "g_" + nm);
+                                               zero, PlangGlobalPrefix + nm);
         defVar(nm, gv, ty, /*typeNode=*/nullptr);
     }
 }
@@ -143,7 +143,7 @@ void Codegen::Impl::registerInterfaceTypes(const BlockNode& iface,
         if (!vg.Type) continue;
         llvm::Type* ty = llvmTypeOf(vg.Type.get(), nullptr);
         for (const auto& nm : vg.Names) {
-            const std::string gname = "g_" + unit + "__" + nm;
+            const std::string gname = PlangGlobalPrefix + unit + PlangScopeSep + nm;
             auto* gv = mod->getGlobalVariable(gname);
             if (!gv)
                 gv = new llvm::GlobalVariable(*mod, ty, /*isConst=*/false,
@@ -242,7 +242,7 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
     labelBlocks.clear();
 
     std::string mangledName = namePrefix + proc.Name;
-    namePrefix = mangledName + "__";
+    namePrefix = mangledName + PlangScopeSep;
     curFuncName = proc.Name;
 
     // ISO §6.6.1: where the parameters and result type were written.  For the
@@ -1128,7 +1128,7 @@ void Codegen::Impl::emitMain(const BlockNode& block,
     auto  savedIP        = builder.saveIP();
 
     curFuncName  = "main";
-    namePrefix   = "plang_";
+    namePrefix   = PlangProcPrefix;
     curRetType   = nullptr;
     curRetAlloca = nullptr;
 

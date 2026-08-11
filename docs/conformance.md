@@ -226,10 +226,12 @@ exit status of 70:
 - a `case` statement whose selector matches no case-constant and which has no
   `otherwise` part (§6.8.3.5)
 - division by zero, whether by `/`, `div` or `mod` (§6.7.2.2)
+- dereferencing a pointer whose value is `nil` (§6.5.4)
 
-The index and subrange checks are the ones `-fno-range-checks` turns off. A
-program compiled with that flag is not one whose errors are reported, and the
-flag is a statement by whoever compiles it that the program is known not to
+The index and subrange checks are the ones `-fno-range-checks` turns off, and
+the nil check is what `-fno-nil-checks` turns off; the two were one flag until
+0.1.2. A program compiled with either is not one whose errors are reported, and
+the flag is a statement by whoever compiles it that the program is known not to
 commit them.
 
 **Not reported.** Clause 5.1 f) 1) requires these be listed:
