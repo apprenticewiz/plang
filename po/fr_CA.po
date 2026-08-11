@@ -1,0 +1,38 @@
+# plang diagnostic messages -- French (Canada).
+#
+# A delta on fr.po, not a translation in its own right: it names only what
+# differs regionally, and everything else falls through to fr.po and then
+# to the compiled-in English, one message at a time.
+#
+# DRAFTED, NOT REVIEWED -- see fr.po.
+#
+# Quebec usage writes "identificateur" where France writes "identifiant".
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: plang\n"
+"Language: fr_CA\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"X-Plang-Catalog-ABI: 1\n"
+
+#, fuzzy
+msgctxt "token/Identifier"
+msgid "identifier"
+msgstr "identificateur"
+
+#, fuzzy
+msgctxt "diag/err_ep_underscore_in_identifier"
+msgid "an underscore in an identifier is an Extended Pascal extension and is not available under -std=iso7185"
+msgstr "le tiret bas dans un identificateur est une extension Extended Pascal et n'est pas disponible avec -std=iso7185"
+
+#, fuzzy
+msgctxt "diag/err_expected_label"
+msgid "expected label (integer or identifier), got %0"
+msgstr "étiquette attendue (entier ou identificateur), %0 obtenu"
+
+#, fuzzy
+msgctxt "diag/err_undefined_identifier"
+msgid "undefined identifier '%0'"
+msgstr "identificateur non défini « %0 »"

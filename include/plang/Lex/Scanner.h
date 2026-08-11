@@ -12,12 +12,12 @@
 
 namespace plang {
 
-/// Lexical analyser for Pascal source files.
+/// Lexical analyzer for Pascal source files.
 /// Reads the entire file into memory on construction, then yields one token at
 /// a time via next().  Repeated calls after Eof safely return Eof again.
 ///
 /// All lexical errors are appended to the shared diagnostics vector passed at
-/// construction; the Scanner never throws.  On an unrecognised character it
+/// construction; the Scanner never throws.  On an unrecognized character it
 /// emits a diagnostic and returns TokenKind::Error (the Parser skips these).
 /// On an unterminated comment or string it emits a diagnostic and resumes
 /// scanning from the nearest sensible point.
@@ -78,7 +78,7 @@ private:
 
     // Scans a one- or two-character operator / delimiter.
     // Returns TokenKind::Error (with the bad character as the lexeme) for any
-    // character not recognised as a valid Pascal symbol.
+    // character not recognized as a valid Pascal symbol.
     Token scanSymbol(size_t TokenStart);
 
     void emitError(SourceLocation Loc, std::string Msg);

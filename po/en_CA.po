@@ -1,0 +1,18 @@
+# plang diagnostic messages -- English (Canada).
+#
+# A delta, as en_GB.po is, and a much smaller one: Canadian usage takes the
+# -ize ending, which is what the source already uses, and differs from it only
+# in the doubled consonant of "labelled".
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: plang\n"
+"Language: en_CA\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"X-Plang-Catalog-ABI: 1\n"
+
+msgctxt "diag/err_label_never_placed"
+msgid "label '%0' declared but never defined as a labeled statement"
+msgstr "label '%0' declared but never defined as a labelled statement"

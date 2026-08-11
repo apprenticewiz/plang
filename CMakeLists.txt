@@ -90,6 +90,68 @@ add_subdirectory(lib)
 add_subdirectory(runtime)
 add_subdirectory(tools)
 
+# ---- Message catalogs ------------------------------------------------------
+#
+# The English a translator works from is generated from the same .def files the
+# compiler compiles in, so the two cannot drift.  qps_ploc is not a language:
+# every message is the English wrapped in [! !], which is the only way a test
+# can tell a build that loaded a catalog from one that fell back to English --
+# and falling back is silent by design, so without it a broken install passes.
+set(PLANG_LOCALE_BUILD_DIR ${CMAKE_BINARY_DIR}/share/plang/locale)
+set(PLANG_DEF_FILES
+    ${CMAKE_SOURCE_DIR}/include/plang/Basic/DiagnosticDriverKinds.def
+    ${CMAKE_SOURCE_DIR}/include/plang/Basic/DiagnosticLexKinds.def
+    ${CMAKE_SOURCE_DIR}/include/plang/Basic/DiagnosticParseKinds.def
+    ${CMAKE_SOURCE_DIR}/include/plang/Basic/DiagnosticSemaKinds.def
+)
+set(PLANG_DEF_ARGS)
+foreach(d ${PLANG_DEF_FILES})
+    list(APPEND PLANG_DEF_ARGS --def ${d})
+endforeach()
+
+add_custom_command(
+    OUTPUT  ${PLANG_LOCALE_BUILD_DIR}/en_US.po
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${PLANG_LOCALE_BUILD_DIR}
+    COMMAND plang-po --output ${PLANG_LOCALE_BUILD_DIR}/en_US.po
+                     --language en_US ${PLANG_DEF_ARGS}
+    DEPENDS plang-po ${PLANG_DEF_FILES}
+    COMMENT "Generating en_US.po"
+    VERBATIM
+)
+add_custom_command(
+    OUTPUT  ${PLANG_LOCALE_BUILD_DIR}/qps_ploc.po
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${PLANG_LOCALE_BUILD_DIR}
+    COMMAND plang-po --output ${PLANG_LOCALE_BUILD_DIR}/qps_ploc.po
+                     --language qps_ploc --pseudo ${PLANG_DEF_ARGS}
+    DEPENDS plang-po ${PLANG_DEF_FILES}
+    COMMENT "Generating qps_ploc.po"
+    VERBATIM
+)
+# The hand-written catalogs.  Unlike en_US.po these are source: a translator
+# edits them, so they live in po/ and are copied into the build tree beside the
+# generated ones, which is where an uninstalled plang and the test suite look.
+file(GLOB PLANG_PO_FILES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/po/*.po)
+set(PLANG_STAGED_PO)
+foreach(po ${PLANG_PO_FILES})
+    get_filename_component(po_name ${po} NAME)
+    add_custom_command(
+        OUTPUT  ${PLANG_LOCALE_BUILD_DIR}/${po_name}
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${PLANG_LOCALE_BUILD_DIR}
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                ${po} ${PLANG_LOCALE_BUILD_DIR}/${po_name}
+        DEPENDS ${po}
+        COMMENT "Staging ${po_name}"
+        VERBATIM
+    )
+    list(APPEND PLANG_STAGED_PO ${PLANG_LOCALE_BUILD_DIR}/${po_name})
+endforeach()
+
+add_custom_target(plang_catalogs ALL
+    DEPENDS ${PLANG_LOCALE_BUILD_DIR}/en_US.po
+            ${PLANG_LOCALE_BUILD_DIR}/qps_ploc.po
+            ${PLANG_STAGED_PO}
+)
+
 # ---- Installation ----
 include(GNUInstallDirs)
 
@@ -117,6 +179,13 @@ install(FILES ${CMAKE_BINARY_DIR}/include/plang/Basic/Version.h
 # Man page, generated so that its header cannot disagree with the compiler
 install(FILES ${CMAKE_BINARY_DIR}/docs/plang.1
     DESTINATION ${CMAKE_INSTALL_MANDIR}/man1
+)
+# Message catalogs.  The compiler finds these relative to its own binary, the
+# way it already finds its runtime library, so bin/ and share/ have to stay in
+# the relation the prefix put them in.
+install(DIRECTORY ${PLANG_LOCALE_BUILD_DIR}/
+    DESTINATION ${CMAKE_INSTALL_DATADIR}/plang/locale
+    FILES_MATCHING PATTERN "*.po"
 )
 
 # ---- Tests ----

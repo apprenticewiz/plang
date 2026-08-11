@@ -339,7 +339,7 @@ void Sema::flowStmt(const StmtNode* S, FlowState& St) {
         return;
     }
 
-    // A labelled statement or a goto means flowIsFollowable said no and the
+    // A labeled statement or a goto means flowIsFollowable said no and the
     // walk was never started.  Anything else has no expressions and no body.
 }
 

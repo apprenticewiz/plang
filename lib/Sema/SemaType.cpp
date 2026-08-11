@@ -69,11 +69,11 @@ std::string describeBound(const Type& T, int64_t V) {
 /// not fold, reached by a different route.
 std::optional<std::pair<int64_t, int64_t>>
 Sema::foldBounds(const ExprNode& Low, const ExprNode& High,
-                 const Type& Base, DiagID ID) {
+                 const Type& Base, DiagID LowID, DiagID HighID) {
     const auto Lo = constBound(Low);
     const auto Hi = constBound(High);
-    if (!Lo) error(Low.Loc,  ID, {"lower"});
-    if (!Hi) error(High.Loc, ID, {"upper"});
+    if (!Lo) error(Low.Loc,  LowID);
+    if (!Hi) error(High.Loc, HighID);
     if (!Lo || !Hi) return std::nullopt;
     if (*Lo > *Hi) {
         error(Low.Loc, diag::err_bound_range_inverted,
@@ -185,7 +185,8 @@ std::shared_ptr<Type> Sema::resolveTypeImpl(const TypeNode& Node) {
         auto Hi = checkExpr(*N->High);
         auto BaseOrd = (Lo->isOrdinal() ? Lo : (Hi->isOrdinal() ? Hi : TyInt));
         auto Bounds = foldBounds(*N->Low, *N->High, *BaseOrd,
-                                 diag::err_array_bound_not_const);
+                                 diag::err_array_lower_bound_not_const,
+                                 diag::err_array_upper_bound_not_const);
         if (!Bounds) return TyErr;
         // Route index subrange through TypeContext for canonical identity.
         // Include the actual bounds so array[1..3] ≠ array[1..100].
@@ -198,7 +199,8 @@ std::shared_ptr<Type> Sema::resolveTypeImpl(const TypeNode& Node) {
         auto Hi = checkExpr(*N->High);
         auto Base = (Lo->isOrdinal() ? Lo : (Hi->isOrdinal() ? Hi : TyInt));
         auto Bounds = foldBounds(*N->Low, *N->High, *Base,
-                                 diag::err_subrange_bound_not_const);
+                                 diag::err_subrange_lower_bound_not_const,
+                                 diag::err_subrange_upper_bound_not_const);
         if (!Bounds) return TyErr;
         return Ctx_.getSubrange(Base, Bounds->first, Bounds->second);
     }
@@ -269,8 +271,8 @@ std::shared_ptr<Type> Sema::resolveTypeImpl(const TypeNode& Node) {
             // EP §6.4.3.6: nor may it be a restricted type — reading one back
             // would be a way of making a value the restriction does not allow.
             else if (Elem->isRestricted())
-                error(N->Loc, diag::err_restricted_component_type,
-                      {Elem->Name, "component type of a file"});
+                error(N->Loc, diag::err_restricted_file_component,
+                      {Elem->Name});
             else {
                 // Check for records that contain a file field
                 for (const auto& F : Elem->RecordFields) {
@@ -313,7 +315,7 @@ std::shared_ptr<Type> Sema::resolveTypeImpl(const TypeNode& Node) {
         // Standard Pascal has no string type; its strings are values of
         // 'packed array [1..n] of char' (ISO §6.4.3.2).
         if (!Opts.extendedPascal()) {
-            error(N->Loc, diag::err_ep_extension, {"the type 'string(n)'"});
+            error(N->Loc, diag::err_ep_type, {"string(n)"});
             return TyErr;
         }
         auto CapTy = checkExpr(*N->Capacity);
@@ -436,7 +438,7 @@ std::shared_ptr<Type> Sema::resolveTypeImpl(const TypeNode& Node) {
         N->ResolvedBody = T;
         return T;
     }
-    error(Node.Loc, diag::err_unrecognised_type);
+    error(Node.Loc, diag::err_unrecognized_type);
     return TyErr;
 }
 
@@ -468,14 +470,13 @@ std::shared_ptr<Type> Sema::resolveNamedUnrestricted(const NamedTypeNode& N) {
     if (Lo == "real")    return TyReal;
     if (Lo == "boolean") return TyBool;
     if (Lo == "char")    return TyChar;
-    // Both are Extended Pascal's (EP §6.4.2.2, §6.4.3.3).  They are recognised
+    // Both are Extended Pascal's (EP §6.4.2.2, §6.4.3.3).  They are recognized
     // under either standard so that naming one while reading standard Pascal
     // says which type it is and where it comes from, rather than reporting an
     // undeclared name for a type plang does in fact know.
     if (Lo == "complex" || Lo == "string") {
         if (!Opts.extendedPascal()) {
-            const auto What = "the type '" + Lo + "'";
-            error(N.Loc, diag::err_ep_extension, {What});
+            error(N.Loc, diag::err_ep_type, {Lo});
             return TyErr;
         }
         return (Lo == "complex") ? TyComplex : TyStr;
@@ -535,7 +536,7 @@ std::shared_ptr<Type> Sema::resolveUndiscriminatedSchema(Symbol& Sym,
     if (!Body || Body->isError()) return TyErr;
 
     // A discriminant-dependent size is only representable for an array body,
-    // where each access recomputes the bounds — the schema analogue of a
+    // where each access recomputes the bounds — the schema analog of a
     // conformant array.  A record with a discriminant-sized field would need
     // run-time field offsets.
     if (LayoutVaries && Body->Kind != TypeKind::Array) {

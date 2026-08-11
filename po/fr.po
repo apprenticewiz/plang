@@ -1,0 +1,1093 @@
+# plang diagnostic messages -- French.
+#
+# DRAFTED, NOT REVIEWED.  Every entry is marked "#, fuzzy", which means plang
+# ignores it and prints the English instead.  That is deliberate: a
+# mistranslated diagnostic sends someone looking for the wrong mistake, which
+# is worse than reading English.  Clear the fuzzy flag on an entry once a
+# native speaker has checked it, and that entry starts being used.
+#
+# To read the draft as it stands, compile with -fdiagnostics-show-fuzzy.
+#
+# %0..%9 are values plang substitutes.  Reorder them as the language needs, but
+# use the same set: an entry that drops or invents one is refused and the
+# English is used for it.  Text inside the %N is not translated -- it is a
+# Pascal identifier, type name or operator.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: plang\n"
+"Language: fr\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"X-Plang-Catalog-ABI: 1\n"
+
+#, fuzzy
+msgctxt "token/IntLit"
+msgid "integer literal"
+msgstr "littéral entier"
+
+#, fuzzy
+msgctxt "token/RealLit"
+msgid "real literal"
+msgstr "littéral réel"
+
+#, fuzzy
+msgctxt "token/StringLit"
+msgid "string literal"
+msgstr "littéral chaîne"
+
+#, fuzzy
+msgctxt "token/Identifier"
+msgid "identifier"
+msgstr "identifiant"
+
+#, fuzzy
+msgctxt "token/Eof"
+msgid "end of file"
+msgstr "fin de fichier"
+
+#, fuzzy
+msgctxt "token/Error"
+msgid "invalid character"
+msgstr "caractère invalide"
+
+#, fuzzy
+msgctxt "label/error"
+msgid "error"
+msgstr "erreur"
+
+#, fuzzy
+msgctxt "label/warning"
+msgid "warning"
+msgstr "avertissement"
+
+#, fuzzy
+msgctxt "label/note"
+msgid "note"
+msgstr "note"
+
+#, fuzzy
+msgctxt "diag/err_no_input_files"
+msgid "no input files"
+msgstr "aucun fichier d'entrée"
+
+#, fuzzy
+msgctxt "diag/err_arg_requires_value"
+msgid "%0 requires an argument"
+msgstr "%0 exige un argument"
+
+#, fuzzy
+msgctxt "diag/err_unknown_dialect"
+msgid "unknown Pascal dialect '%0'; valid dialects: %1"
+msgstr "dialecte Pascal inconnu « %0 » ; dialectes valides : %1"
+
+#, fuzzy
+msgctxt "diag/err_dialect_not_implemented"
+msgid "dialect '%0' is not yet implemented; implemented dialects: %1"
+msgstr "le dialecte « %0 » n'est pas encore implémenté ; dialectes implémentés : %1"
+
+#, fuzzy
+msgctxt "diag/err_no_gcc_installation"
+msgid "could not detect GCC installation; set PLANG_GCC_DIR to override"
+msgstr "installation de GCC introuvable ; définissez PLANG_GCC_DIR pour la préciser"
+
+#, fuzzy
+msgctxt "diag/err_no_c_library_dir"
+msgid "could not find system C library directory; set PLANG_LIB_DIR to override"
+msgstr "répertoire de la bibliothèque C système introuvable ; définissez PLANG_LIB_DIR pour le préciser"
+
+#, fuzzy
+msgctxt "diag/err_no_macos_sdk"
+msgid "could not find the macOS SDK; install the Xcode command line tools with 'xcode-select --install', or set SDKROOT to override"
+msgstr "SDK macOS introuvable ; installez les outils en ligne de commande Xcode avec « xcode-select --install », ou définissez SDKROOT"
+
+#, fuzzy
+msgctxt "diag/err_cannot_find_program"
+msgid "cannot find '%0': %1"
+msgstr "« %0 » introuvable : %1"
+
+#, fuzzy
+msgctxt "diag/err_program_exec_failed"
+msgid "failed to execute '%0': %1"
+msgstr "échec de l'exécution de « %0 » : %1"
+
+#, fuzzy
+msgctxt "diag/err_cannot_create_temp_file"
+msgid "cannot create temporary file: %0"
+msgstr "impossible de créer un fichier temporaire : %0"
+
+#, fuzzy
+msgctxt "diag/warn_unrecognized_argument"
+msgid "unrecognized argument '%0'"
+msgstr "argument non reconnu « %0 »"
+
+#, fuzzy
+msgctxt "diag/err_file_not_found"
+msgid "no such file or directory: '%0'"
+msgstr "fichier ou répertoire inexistant : « %0 »"
+
+#, fuzzy
+msgctxt "diag/err_comment_delim_mismatch"
+msgid "comment delimiter mismatch: %0"
+msgstr "délimiteurs de commentaire discordants : %0"
+
+#, fuzzy
+msgctxt "diag/err_unterminated_comment"
+msgid "unterminated comment"
+msgstr "commentaire non terminé"
+
+#, fuzzy
+msgctxt "diag/err_nondecimal_base_range"
+msgid "nondecimal literal base must be 2–36"
+msgstr "la base d'un littéral non décimal doit être comprise entre 2 et 36"
+
+#, fuzzy
+msgctxt "diag/err_nondecimal_no_digits"
+msgid "nondecimal literal has no digits"
+msgstr "littéral non décimal sans chiffre"
+
+#, fuzzy
+msgctxt "diag/err_nondecimal_bad_digit"
+msgid "digit '%0' is out of range for base %1"
+msgstr "le chiffre « %0 » est hors limites pour la base %1"
+
+#, fuzzy
+msgctxt "diag/err_unterminated_string"
+msgid "unterminated string literal"
+msgstr "littéral chaîne non terminé"
+
+#, fuzzy
+msgctxt "diag/err_unexpected_char"
+msgid "unexpected character: '%0'"
+msgstr "caractère inattendu : « %0 »"
+
+#, fuzzy
+msgctxt "diag/err_ep_underscore_in_identifier"
+msgid "an underscore in an identifier is an Extended Pascal extension and is not available under -std=iso7185"
+msgstr "le tiret bas dans un identifiant est une extension Extended Pascal et n'est pas disponible avec -std=iso7185"
+
+#, fuzzy
+msgctxt "diag/err_ep_operator"
+msgid "the operator '%0' is an Extended Pascal extension and is not available under -std=iso7185"
+msgstr "l'opérateur « %0 » est une extension Extended Pascal et n'est pas disponible avec -std=iso7185"
+
+#, fuzzy
+msgctxt "diag/err_ep_for_in"
+msgid "the 'for ... in' statement is an Extended Pascal extension and is not available under -std=iso7185"
+msgstr "l'instruction « for ... in » est une extension Extended Pascal et n'est pas disponible avec -std=iso7185"
+
+#, fuzzy
+msgctxt "diag/err_ep_case_otherwise"
+msgid "an 'otherwise' part of a case-statement is an Extended Pascal extension and is not available under -std=iso7185"
+msgstr "la partie « otherwise » d'une instruction case est une extension Extended Pascal et n'est pas disponible avec -std=iso7185"
+
+#, fuzzy
+msgctxt "diag/err_ep_case_range"
+msgid "a range as a case-constant is an Extended Pascal extension and is not available under -std=iso7185"
+msgstr "un intervalle comme constante de case est une extension Extended Pascal et n'est pas disponible avec -std=iso7185"
+
+#, fuzzy
+msgctxt "diag/err_ep_type"
+msgid "the type '%0' is an Extended Pascal extension and is not available under -std=iso7185"
+msgstr "le type « %0 » est une extension Extended Pascal et n'est pas disponible avec -std=iso7185"
+
+#, fuzzy
+msgctxt "diag/err_ep_required_name"
+msgid "'%0' is an Extended Pascal extension and is not available under -std=iso7185"
+msgstr "« %0 » est une extension Extended Pascal et n'est pas disponible avec -std=iso7185"
+
+#, fuzzy
+msgctxt "diag/err_ep_two_arg_form"
+msgid "the two-argument form of '%0' is an Extended Pascal extension and is not available under -std=iso7185"
+msgstr "la forme à deux arguments de « %0 » est une extension Extended Pascal et n'est pas disponible avec -std=iso7185"
+
+#, fuzzy
+msgctxt "diag/err_packed_conformant_shape"
+msgid "a packed conformant array parameter has one dimension"
+msgstr "un paramètre tableau conformant packed a une seule dimension"
+
+#, fuzzy
+msgctxt "diag/err_expected_type_expr"
+msgid "expected type expression, got %0"
+msgstr "expression de type attendue, %0 obtenu"
+
+#, fuzzy
+msgctxt "diag/err_expected_label"
+msgid "expected label (integer or identifier), got %0"
+msgstr "étiquette attendue (entier ou identifiant), %0 obtenu"
+
+#, fuzzy
+msgctxt "diag/err_expected_goto_label"
+msgid "expected label after 'goto', got %0"
+msgstr "étiquette attendue après « goto », %0 obtenu"
+
+#, fuzzy
+msgctxt "diag/err_unexpected_int_literal"
+msgid "unexpected integer literal in statement position"
+msgstr "littéral entier inattendu en position d'instruction"
+
+#, fuzzy
+msgctxt "diag/err_expected_assign_after_var"
+msgid "expected ':=' after variable reference"
+msgstr "« := » attendu après une référence de variable"
+
+#, fuzzy
+msgctxt "diag/err_expected_to_or_downto"
+msgid "expected 'to' or 'downto' in for statement, got %0"
+msgstr "« to » ou « downto » attendu dans l'instruction for, %0 obtenu"
+
+#, fuzzy
+msgctxt "diag/err_int_literal_out_of_range"
+msgid "integer literal '%0' is out of range"
+msgstr "le littéral entier « %0 » est hors limites"
+
+#, fuzzy
+msgctxt "diag/err_real_literal_out_of_range"
+msgid "real literal '%0' is out of range"
+msgstr "le littéral réel « %0 » est hors limites"
+
+#, fuzzy
+msgctxt "diag/err_expected_expr"
+msgid "expected expression, got %0"
+msgstr "expression attendue, %0 obtenu"
+
+#, fuzzy
+msgctxt "diag/err_expected_token"
+msgid "expected %0, got %1"
+msgstr "%0 attendu, %1 obtenu"
+
+#, fuzzy
+msgctxt "diag/err_expected_token_got_lexeme"
+msgid "expected %0, got %1 '%2'"
+msgstr "%0 attendu, %1 « %2 » obtenu"
+
+#, fuzzy
+msgctxt "diag/err_restricted_needs_type_name"
+msgid "'restricted' must be followed by the name of a type"
+msgstr "« restricted » doit être suivi du nom d'un type"
+
+#, fuzzy
+msgctxt "diag/err_module_to_needs_begin_or_end"
+msgid "'to' in module body must be followed by 'begin' or 'end'"
+msgstr "« to » dans le corps d'un module doit être suivi de « begin » ou « end »"
+
+#, fuzzy
+msgctxt "diag/err_label_must_be_integer"
+msgid "label '%0' must be an unsigned integer"
+msgstr "l'étiquette « %0 » doit être un entier non signé"
+
+#, fuzzy
+msgctxt "diag/err_label_out_of_range"
+msgid "label '%0' is outside the range 0 to 9999"
+msgstr "l'étiquette « %0 » est hors de l'intervalle 0 à 9999"
+
+#, fuzzy
+msgctxt "diag/err_duplicate_label"
+msgid "duplicate label '%0'"
+msgstr "étiquette « %0 » en double"
+
+#, fuzzy
+msgctxt "diag/err_duplicate_declaration"
+msgid "duplicate declaration of '%0'"
+msgstr "déclaration en double de « %0 »"
+
+#, fuzzy
+msgctxt "diag/err_duplicate_type_decl"
+msgid "duplicate type declaration '%0'"
+msgstr "déclaration de type « %0 » en double"
+
+#, fuzzy
+msgctxt "diag/err_duplicate_param"
+msgid "duplicate parameter name '%0'"
+msgstr "nom de paramètre « %0 » en double"
+
+#, fuzzy
+msgctxt "diag/warn_label_unreachable"
+msgid "label '%0' defined but never reached by goto"
+msgstr "l'étiquette « %0 » est définie mais aucun goto ne l'atteint"
+
+#, fuzzy
+msgctxt "diag/err_label_never_placed"
+msgid "label '%0' declared but never defined as a labeled statement"
+msgstr "l'étiquette « %0 » est déclarée mais n'est jamais définie sur une instruction"
+
+#, fuzzy
+msgctxt "diag/err_function_no_result"
+msgid "function '%0' does not assign to its result variable"
+msgstr "la fonction « %0 » n'affecte pas sa variable résultat"
+
+#, fuzzy
+msgctxt "diag/err_empty_string_const"
+msgid "string constant must contain at least one character"
+msgstr "une constante chaîne doit contenir au moins un caractère"
+
+#, fuzzy
+msgctxt "diag/err_substring_non_varstring"
+msgid "substring operator '[i..j]' requires a string(N) operand"
+msgstr "l'opérateur de sous-chaîne « [i..j] » exige un opérande de type string(N)"
+
+#, fuzzy
+msgctxt "diag/err_unrecognized_expr"
+msgid "unrecognized expression node"
+msgstr "nœud d'expression non reconnu"
+
+#, fuzzy
+msgctxt "diag/err_restricted_assigned"
+msgid "'%0' is a restricted type, so nothing can be assigned to a variable of it"
+msgstr "« %0 » est un type restricted ; rien ne peut être affecté à une variable de ce type"
+
+#, fuzzy
+msgctxt "diag/err_restricted_used"
+msgid "a value of the restricted type '%0' can only be passed as a parameter or returned from a function"
+msgstr "une valeur du type restricted « %0 » ne peut qu'être passée en paramètre ou renvoyée par une fonction"
+
+#, fuzzy
+msgctxt "diag/err_restricted_component"
+msgid "'%0' is a restricted type, so its components are not accessible"
+msgstr "« %0 » est un type restricted ; ses composants ne sont donc pas accessibles"
+
+#, fuzzy
+msgctxt "diag/err_restricted_file_component"
+msgid "'%0' is a restricted type and cannot be the component type of a file"
+msgstr "« %0 » est un type restricted et ne peut pas être le type composant d'un fichier"
+
+#, fuzzy
+msgctxt "diag/err_undefined_identifier"
+msgid "undefined identifier '%0'"
+msgstr "identifiant non défini « %0 »"
+
+#, fuzzy
+msgctxt "diag/err_function_requires_args"
+msgid "function '%0' requires an argument list"
+msgstr "la fonction « %0 » exige une liste d'arguments"
+
+#, fuzzy
+msgctxt "diag/err_proc_as_value"
+msgid "procedure '%0' cannot be used as a value"
+msgstr "la procédure « %0 » ne peut pas être utilisée comme valeur"
+
+#, fuzzy
+msgctxt "diag/err_builtin_proc_as_value"
+msgid "built-in procedure '%0' cannot be used as a value"
+msgstr "la procédure prédéfinie « %0 » ne peut pas être utilisée comme valeur"
+
+#, fuzzy
+msgctxt "diag/err_type_name_as_value"
+msgid "type name '%0' cannot be used as a value"
+msgstr "le nom de type « %0 » ne peut pas être utilisé comme valeur"
+
+#, fuzzy
+msgctxt "diag/err_label_as_value"
+msgid "label '%0' cannot be used as a value"
+msgstr "l'étiquette « %0 » ne peut pas être utilisée comme valeur"
+
+#, fuzzy
+msgctxt "diag/err_subscript_non_array"
+msgid "subscript operator applied to non-array type '%0'"
+msgstr "opérateur d'indexation appliqué au type non tableau « %0 »"
+
+#, fuzzy
+msgctxt "diag/err_index_not_ordinal"
+msgid "array index must be ordinal, got '%0'"
+msgstr "un indice de tableau doit être ordinal, « %0 » obtenu"
+
+#, fuzzy
+msgctxt "diag/err_index_type_mismatch"
+msgid "array index type mismatch: index type is '%0' but array expects '%1'"
+msgstr "type d'indice incompatible : l'indice est de type « %0 » mais le tableau attend « %1 »"
+
+#, fuzzy
+msgctxt "diag/err_field_on_non_record"
+msgid "field access '.%0' on non-record type '%1'"
+msgstr "accès au champ « .%0 » sur le type non enregistrement « %1 »"
+
+#, fuzzy
+msgctxt "diag/err_no_such_field"
+msgid "record type '%0' has no field '%1'"
+msgstr "le type enregistrement « %0 » n'a pas de champ « %1 »"
+
+#, fuzzy
+msgctxt "diag/err_deref_non_pointer"
+msgid "dereference operator '^' applied to non-pointer type '%0'"
+msgstr "opérateur de déréférencement « ^ » appliqué au type non pointeur « %0 »"
+
+#, fuzzy
+msgctxt "diag/err_op_numeric"
+msgid "operator '%0' requires numeric operands, got '%1' and '%2'"
+msgstr "l'opérateur « %0 » exige des opérandes numériques, « %1 » et « %2 » obtenus"
+
+#, fuzzy
+msgctxt "diag/err_op_divide_numeric"
+msgid "operator '/' requires numeric operands, got '%0' and '%1'"
+msgstr "l'opérateur « / » exige des opérandes numériques, « %0 » et « %1 » obtenus"
+
+#, fuzzy
+msgctxt "diag/err_op_integer"
+msgid "operator '%0' requires integer operands, got '%1' and '%2'"
+msgstr "l'opérateur « %0 » exige des opérandes entiers, « %1 » et « %2 » obtenus"
+
+#, fuzzy
+msgctxt "diag/err_op_boolean"
+msgid "operator '%0' requires boolean operands, got '%1' and '%2'"
+msgstr "l'opérateur « %0 » exige des opérandes booléens, « %1 » et « %2 » obtenus"
+
+#, fuzzy
+msgctxt "diag/err_op_symdiff_set"
+msgid "operator '><' requires set operands, got '%0' and '%1'"
+msgstr "l'opérateur « >< » exige des opérandes de type ensemble, « %0 » et « %1 » obtenus"
+
+#, fuzzy
+msgctxt "diag/err_op_set_mixed"
+msgid "operator '%0' cannot mix set and non-set operands, got '%1' and '%2'"
+msgstr "l'opérateur « %0 » ne peut pas mélanger des opérandes ensemble et non ensemble, « %1 » et « %2 » obtenus"
+
+#, fuzzy
+msgctxt "diag/err_op_set_base"
+msgid "operator '%0' requires sets with compatible base types, got set of '%1' and set of '%2'"
+msgstr "l'opérateur « %0 » exige des ensembles de types de base compatibles, ensemble de « %1 » et ensemble de « %2 » obtenus"
+
+#, fuzzy
+msgctxt "diag/err_op_set_ordering"
+msgid "operator '%0' is not defined for sets; use '<=' or '>=' for set inclusion"
+msgstr "l'opérateur « %0 » n'est pas défini pour les ensembles ; utilisez « <= » ou « >= » pour l'inclusion"
+
+#, fuzzy
+msgctxt "diag/err_op_pointer_ordering"
+msgid "operator '%0' is not defined for pointers; only '=' and '<>' are"
+msgstr "l'opérateur « %0 » n'est pas défini pour les pointeurs ; seuls « = » et « <> » le sont"
+
+#, fuzzy
+msgctxt "diag/err_cannot_compare"
+msgid "cannot compare '%0' with '%1'"
+msgstr "impossible de comparer « %0 » et « %1 »"
+
+#, fuzzy
+msgctxt "diag/err_in_lhs_not_ordinal"
+msgid "left operand of 'in' must be ordinal, got '%0'"
+msgstr "l'opérande gauche de « in » doit être ordinal, « %0 » obtenu"
+
+#, fuzzy
+msgctxt "diag/err_in_rhs_not_set"
+msgid "right operand of 'in' must be a set type, got '%0'"
+msgstr "l'opérande droit de « in » doit être de type ensemble, « %0 » obtenu"
+
+#, fuzzy
+msgctxt "diag/err_in_incompatible"
+msgid "type '%0' is not compatible with set of '%1'"
+msgstr "le type « %0 » n'est pas compatible avec un ensemble de « %1 »"
+
+#, fuzzy
+msgctxt "diag/err_unknown_binop"
+msgid "unknown binary operator"
+msgstr "opérateur binaire inconnu"
+
+#, fuzzy
+msgctxt "diag/err_unary_numeric"
+msgid "unary '%0' requires a numeric operand, got '%1'"
+msgstr "l'opérateur unaire « %0 » exige un opérande numérique, « %1 » obtenu"
+
+#, fuzzy
+msgctxt "diag/err_not_requires_boolean"
+msgid "'not' requires a boolean operand, got '%0'"
+msgstr "« not » exige un opérande booléen, « %0 » obtenu"
+
+#, fuzzy
+msgctxt "diag/err_unknown_unop"
+msgid "unknown unary operator"
+msgstr "opérateur unaire inconnu"
+
+#, fuzzy
+msgctxt "diag/err_undefined_function"
+msgid "undefined function '%0'"
+msgstr "fonction non définie « %0 »"
+
+#, fuzzy
+msgctxt "diag/err_ordinal_argument"
+msgid "'%0' requires an ordinal argument, got '%1'"
+msgstr "« %0 » exige un argument ordinal, « %1 » obtenu"
+
+#, fuzzy
+msgctxt "diag/err_write_param_type"
+msgid "'%0' cannot be written; a write-parameter is an integer, real, boolean, char or string value"
+msgstr "« %0 » ne peut pas être écrit ; un paramètre de write est une valeur entière, réelle, booléenne, caractère ou chaîne"
+
+#, fuzzy
+msgctxt "diag/err_string_too_long"
+msgid "string of length %0 does not fit a string(%1)"
+msgstr "une chaîne de longueur %0 n'entre pas dans un string(%1)"
+
+#, fuzzy
+msgctxt "diag/err_string_length_mismatch"
+msgid "string of length %0 does not fit a packed array[1..%1] of char; a string-type takes a value of exactly its own length"
+msgstr "une chaîne de longueur %0 n'entre pas dans un packed array[1..%1] of char ; un type chaîne prend une valeur d'exactement sa propre longueur"
+
+#, fuzzy
+msgctxt "diag/err_set_elem_not_ordinal"
+msgid "set elements must be ordinal, got '%0'"
+msgstr "les éléments d'un ensemble doivent être ordinaux, « %0 » obtenu"
+
+#, fuzzy
+msgctxt "diag/err_not_callable"
+msgid "'%0' is not callable"
+msgstr "« %0 » n'est pas appelable"
+
+#, fuzzy
+msgctxt "diag/err_proc_cannot_return_value"
+msgid "'%0' is a procedure and cannot return a value"
+msgstr "« %0 » est une procédure et ne peut pas renvoyer de valeur"
+
+#, fuzzy
+msgctxt "diag/err_func_as_statement"
+msgid "'%0' is a function; use it in an expression, not as a statement"
+msgstr "« %0 » est une fonction ; utilisez-la dans une expression, non comme instruction"
+
+#, fuzzy
+msgctxt "diag/err_wrong_arg_count"
+msgid "'%0' expects %1 argument(s), got %2"
+msgstr "« %0 » attend %1 argument(s), %2 obtenu(s)"
+
+#, fuzzy
+msgctxt "diag/err_var_param_needs_lvalue"
+msgid "argument %0 of '%1' is a 'var' parameter and requires a variable"
+msgstr "l'argument %0 de « %1 » correspond à un paramètre « var » et exige une variable"
+
+#, fuzzy
+msgctxt "diag/err_var_param_type_mismatch"
+msgid "type mismatch for 'var' parameter '%0': expected '%1', got '%2'"
+msgstr "type incompatible pour le paramètre « var » « %0 » : « %1 » attendu, « %2 » obtenu"
+
+#, fuzzy
+msgctxt "diag/err_var_param_distinct_anon_type"
+msgid "'var' parameter '%0' requires the argument to have the same type, but '%1' is written out separately in each place, which declares two distinct types; give the type a name and use that name in both"
+msgstr "le paramètre « var » « %0 » exige que l'argument ait le même type, mais « %1 » est écrit séparément à chaque endroit, ce qui déclare deux types distincts ; nommez le type et utilisez ce nom aux deux endroits"
+
+#, fuzzy
+msgctxt "diag/err_tag_field_var_param"
+msgid "tag field '%0' cannot be passed as a var parameter"
+msgstr "le champ de discrimination « %0 » ne peut pas être passé comme paramètre var"
+
+#, fuzzy
+msgctxt "diag/err_packed_struct_var_param"
+msgid "component of packed structure cannot be passed as a var parameter"
+msgstr "un composant d'une structure packed ne peut pas être passé comme paramètre var"
+
+#, fuzzy
+msgctxt "diag/err_packed_array_var_param"
+msgid "element of packed array cannot be passed as a var parameter"
+msgstr "un élément d'un tableau packed ne peut pas être passé comme paramètre var"
+
+#, fuzzy
+msgctxt "diag/err_param_type_mismatch"
+msgid "type mismatch for parameter '%0': expected '%1', got '%2'"
+msgstr "type incompatible pour le paramètre « %0 » : « %1 » attendu, « %2 » obtenu"
+
+#, fuzzy
+msgctxt "diag/err_file_value_param"
+msgid "value parameter '%0' has a type containing a file component, which is not permitted"
+msgstr "le paramètre par valeur « %0 » a un type contenant un composant fichier, ce qui n'est pas permis"
+
+#, fuzzy
+msgctxt "diag/err_lhs_not_lvalue"
+msgid "left-hand side of assignment is not an assignable variable"
+msgstr "le membre gauche de l'affectation n'est pas une variable assignable"
+
+#, fuzzy
+msgctxt "diag/err_assign_mismatch"
+msgid "cannot assign '%0' to variable of type '%1'"
+msgstr "impossible d'affecter « %0 » à une variable de type « %1 »"
+
+#, fuzzy
+msgctxt "diag/err_if_not_boolean"
+msgid "condition of 'if' must be boolean, got '%0'"
+msgstr "la condition de « if » doit être booléenne, « %0 » obtenu"
+
+#, fuzzy
+msgctxt "diag/err_while_not_boolean"
+msgid "condition of 'while' must be boolean, got '%0'"
+msgstr "la condition de « while » doit être booléenne, « %0 » obtenu"
+
+#, fuzzy
+msgctxt "diag/err_for_var_undefined"
+msgid "undefined variable '%0' in for statement"
+msgstr "variable non définie « %0 » dans l'instruction for"
+
+#, fuzzy
+msgctxt "diag/err_for_var_not_ordinal"
+msgid "for-loop variable '%0' must be an ordinal type; got '%1'"
+msgstr "la variable de boucle for « %0 » doit être d'un type ordinal ; « %1 » obtenu"
+
+#, fuzzy
+msgctxt "diag/err_for_var_not_local"
+msgid "for-loop control variable '%0' must be declared in the immediately enclosing block"
+msgstr "la variable de contrôle de boucle for « %0 » doit être déclarée dans le bloc englobant immédiat"
+
+#, fuzzy
+msgctxt "diag/err_for_bounds_incompatible"
+msgid "for-loop bounds have incompatible types ('%0' and '%1')"
+msgstr "les bornes de la boucle for ont des types incompatibles (« %0 » et « %1 »)"
+
+#, fuzzy
+msgctxt "diag/err_for_body_assigns"
+msgid "for-loop control variable '%0' must not be assigned within the loop body"
+msgstr "la variable de contrôle de boucle for « %0 » ne doit pas être affectée dans le corps de la boucle"
+
+#, fuzzy
+msgctxt "diag/err_for_body_reuses"
+msgid "for-loop control variable '%0' is reused as inner for-loop control variable"
+msgstr "la variable de contrôle de boucle for « %0 » est réutilisée comme variable de contrôle d'une boucle interne"
+
+#, fuzzy
+msgctxt "diag/err_for_body_reads"
+msgid "for-loop control variable '%0' must not be read into within the loop body"
+msgstr "la variable de contrôle de boucle for « %0 » ne doit pas être lue par read dans le corps de la boucle"
+
+#, fuzzy
+msgctxt "diag/err_for_body_var_param"
+msgid "for-loop control variable '%0' must not be passed as a 'var' parameter within the loop body"
+msgstr "la variable de contrôle de boucle for « %0 » ne doit pas être passée comme paramètre « var » dans le corps de la boucle"
+
+#, fuzzy
+msgctxt "diag/err_for_inter_assigns"
+msgid "procedure accessible from for-loop assigns to control variable '%0'"
+msgstr "une procédure accessible depuis la boucle for affecte la variable de contrôle « %0 »"
+
+#, fuzzy
+msgctxt "diag/err_for_inter_reads"
+msgid "procedure accessible from for-loop reads into control variable '%0'"
+msgstr "une procédure accessible depuis la boucle for lit par read la variable de contrôle « %0 »"
+
+#, fuzzy
+msgctxt "diag/err_for_inter_var_param"
+msgid "procedure accessible from for-loop passes control variable '%0' as var parameter"
+msgstr "une procédure accessible depuis la boucle for passe la variable de contrôle « %0 » comme paramètre var"
+
+#, fuzzy
+msgctxt "diag/err_repeat_not_boolean"
+msgid "condition of 'repeat..until' must be boolean, got '%0'"
+msgstr "la condition de « repeat..until » doit être booléenne, « %0 » obtenu"
+
+#, fuzzy
+msgctxt "diag/err_undefined_procedure"
+msgid "undefined procedure '%0'"
+msgstr "procédure non définie « %0 »"
+
+#, fuzzy
+msgctxt "diag/err_write_requires_args"
+msgid "write requires at least one argument"
+msgstr "write exige au moins un argument"
+
+#, fuzzy
+msgctxt "diag/err_readln_not_text"
+msgid "readln is only valid for text files, got 'file of %0'"
+msgstr "readln n'est valide que pour les fichiers texte, « file of %0 » obtenu"
+
+#, fuzzy
+msgctxt "diag/err_read_type_mismatch"
+msgid "type mismatch in read: file element type is '%0', but variable has type '%1'"
+msgstr "type incompatible dans read : le type élément du fichier est « %0 », mais la variable est de type « %1 »"
+
+#, fuzzy
+msgctxt "diag/err_write_type_mismatch"
+msgid "type mismatch in write: file element type is '%0', but value has type '%1'"
+msgstr "type incompatible dans write : le type élément du fichier est « %0 », mais la valeur est de type « %1 »"
+
+#, fuzzy
+msgctxt "diag/err_pack_index_mismatch"
+msgid "pack: start index type '%0' is not compatible with array index type '%1'"
+msgstr "pack : le type de l'indice de départ « %0 » n'est pas compatible avec le type d'indice du tableau « %1 »"
+
+#, fuzzy
+msgctxt "diag/err_unpack_index_mismatch"
+msgid "unpack: start index type '%0' is not compatible with array index type '%1'"
+msgstr "unpack : le type de l'indice de départ « %0 » n'est pas compatible avec le type d'indice du tableau « %1 »"
+
+#, fuzzy
+msgctxt "diag/err_pack_operand_not_array_unpacked"
+msgid "%0 expects an array as its unpacked argument, got '%1'"
+msgstr "%0 attend un tableau comme argument non packed, « %1 » obtenu"
+
+#, fuzzy
+msgctxt "diag/err_pack_operand_not_array_packed"
+msgid "%0 expects an array as its packed argument, got '%1'"
+msgstr "%0 attend un tableau comme argument packed, « %1 » obtenu"
+
+#, fuzzy
+msgctxt "diag/err_with_non_record"
+msgid "'with' expects a record variable, got '%0'"
+msgstr "« with » attend une variable de type enregistrement, « %0 » obtenu"
+
+#, fuzzy
+msgctxt "diag/err_goto_undefined"
+msgid "undefined label '%0'"
+msgstr "étiquette non définie « %0 »"
+
+#, fuzzy
+msgctxt "diag/err_goto_outer_block"
+msgid "goto '%0' leaves this block for a label that is not at the outermost level of the block declaring it"
+msgstr "le goto « %0 » quitte ce bloc pour une étiquette qui n'est pas au niveau le plus externe du bloc qui la déclare"
+
+#, fuzzy
+msgctxt "diag/err_goto_into_structured"
+msgid "goto '%0' jumps into a structured statement"
+msgstr "le goto « %0 » saute à l'intérieur d'une instruction structurée"
+
+#, fuzzy
+msgctxt "diag/err_label_not_declared"
+msgid "label '%0' used as a statement but not declared in label section"
+msgstr "l'étiquette « %0 » est utilisée sur une instruction mais n'est pas déclarée dans la section label"
+
+#, fuzzy
+msgctxt "diag/err_case_selector_not_ordinal"
+msgid "case selector must be an ordinal type, got '%0'"
+msgstr "le sélecteur de case doit être d'un type ordinal, « %0 » obtenu"
+
+#, fuzzy
+msgctxt "diag/err_case_label_mismatch"
+msgid "case label type '%0' is not compatible with selector type '%1'"
+msgstr "le type de l'étiquette de case « %0 » n'est pas compatible avec le type du sélecteur « %1 »"
+
+#, fuzzy
+msgctxt "diag/err_case_label_duplicate"
+msgid "case label %0 is used by more than one arm"
+msgstr "l'étiquette de case %0 est utilisée par plus d'une branche"
+
+#, fuzzy
+msgctxt "diag/err_variant_label_duplicate"
+msgid "case label %0 is used by more than one variant"
+msgstr "l'étiquette de case %0 est utilisée par plus d'une variante"
+
+#, fuzzy
+msgctxt "diag/err_line_proc_not_text"
+msgid "'%0' applies to a text file only, not to 'file of %1'"
+msgstr "« %0 » ne s'applique qu'à un fichier texte, non à « file of %1 »"
+
+#, fuzzy
+msgctxt "diag/err_assign_file"
+msgid "a variable of a file type, or with a file component, cannot be assigned"
+msgstr "une variable d'un type fichier, ou comportant un composant fichier, ne peut pas être affectée"
+
+#, fuzzy
+msgctxt "diag/err_function_result_type"
+msgid "a function result must be a simple or pointer type, not '%0'"
+msgstr "le résultat d'une fonction doit être d'un type simple ou pointeur, non « %0 »"
+
+#, fuzzy
+msgctxt "diag/err_duplicate_enum_value"
+msgid "duplicate enumeration value '%0'"
+msgstr "valeur d'énumération « %0 » en double"
+
+#, fuzzy
+msgctxt "diag/err_duplicate_field"
+msgid "duplicate field name '%0' in record"
+msgstr "nom de champ « %0 » en double dans l'enregistrement"
+
+#, fuzzy
+msgctxt "diag/err_set_base_not_ordinal"
+msgid "set base type must be ordinal; got '%0'"
+msgstr "le type de base d'un ensemble doit être ordinal ; « %0 » obtenu"
+
+#, fuzzy
+msgctxt "diag/err_set_base_too_wide"
+msgid "set base type '%0' exceeds the %1-element limit on sets"
+msgstr "le type de base d'ensemble « %0 » dépasse la limite de %1 éléments"
+
+#, fuzzy
+msgctxt "diag/err_file_component_is_file"
+msgid "file component type must not itself be a file type"
+msgstr "le type composant d'un fichier ne doit pas être lui-même un type fichier"
+
+#, fuzzy
+msgctxt "diag/err_file_field_has_file"
+msgid "file component type must not contain a file field (field '%0' is a file type)"
+msgstr "le type composant d'un fichier ne doit pas contenir de champ fichier (le champ « %0 » est d'un type fichier)"
+
+#, fuzzy
+msgctxt "diag/err_string_cap_not_int"
+msgid "string capacity must be an integer constant expression"
+msgstr "la capacité d'une chaîne doit être une expression constante entière"
+
+#, fuzzy
+msgctxt "diag/err_string_cap_not_positive"
+msgid "string capacity must be positive; got %0"
+msgstr "la capacité d'une chaîne doit être positive ; %0 obtenu"
+
+#, fuzzy
+msgctxt "diag/err_array_lower_bound_not_const"
+msgid "lower bound of array index type is not a constant expression; for a run-time length use a schema type, 'type t(n: integer) = array[1..n]'"
+msgstr "la borne inférieure du type d'indice du tableau n'est pas une expression constante ; pour une longueur déterminée à l'exécution, utilisez un type schéma, « type t(n: integer) = array[1..n] »"
+
+#, fuzzy
+msgctxt "diag/err_array_upper_bound_not_const"
+msgid "upper bound of array index type is not a constant expression; for a run-time length use a schema type, 'type t(n: integer) = array[1..n]'"
+msgstr "la borne supérieure du type d'indice du tableau n'est pas une expression constante ; pour une longueur déterminée à l'exécution, utilisez un type schéma, « type t(n: integer) = array[1..n] »"
+
+#, fuzzy
+msgctxt "diag/err_subrange_lower_bound_not_const"
+msgid "lower bound of subrange is not a constant expression"
+msgstr "la borne inférieure de l'intervalle n'est pas une expression constante"
+
+#, fuzzy
+msgctxt "diag/err_subrange_upper_bound_not_const"
+msgid "upper bound of subrange is not a constant expression"
+msgstr "la borne supérieure de l'intervalle n'est pas une expression constante"
+
+#, fuzzy
+msgctxt "diag/err_array_index_not_ordinal"
+msgid "'%0' cannot be an array index type; an index type is an ordinal type with a bounded range"
+msgstr "« %0 » ne peut pas être un type d'indice de tableau ; un type d'indice est un type ordinal à intervalle borné"
+
+#, fuzzy
+msgctxt "diag/err_bound_range_inverted"
+msgid "lower bound %0 exceeds upper bound %1, so the type has no values"
+msgstr "la borne inférieure %0 dépasse la borne supérieure %1, le type n'a donc aucune valeur"
+
+#, fuzzy
+msgctxt "diag/err_proc_param_needs_proc_name"
+msgid "parameter '%0' is a procedural parameter, so the argument must be the name of a procedure or function"
+msgstr "le paramètre « %0 » est un paramètre procédural, l'argument doit donc être le nom d'une procédure ou d'une fonction"
+
+#, fuzzy
+msgctxt "diag/err_proc_param_is_required"
+msgid "'%0' is a required procedure or function and cannot be passed as a parameter"
+msgstr "« %0 » est une procédure ou fonction prédéfinie et ne peut pas être passée en paramètre"
+
+#, fuzzy
+msgctxt "diag/err_proc_param_not_congruous"
+msgid "'%0' has signature '%1', which is not congruous with parameter '%2' of type '%3'"
+msgstr "« %0 » a la signature « %1 », qui n'est pas congruente avec le paramètre « %2 » de type « %3 »"
+
+#, fuzzy
+msgctxt "diag/err_proc_param_not_assignable"
+msgid "'%0' is a procedural parameter and cannot be assigned to"
+msgstr "« %0 » est un paramètre procédural et ne peut pas recevoir d'affectation"
+
+#, fuzzy
+msgctxt "diag/err_unrecognized_type"
+msgid "unrecognized type expression"
+msgstr "expression de type non reconnue"
+
+#, fuzzy
+msgctxt "diag/err_undefined_type"
+msgid "undefined type '%0'"
+msgstr "type non défini « %0 »"
+
+#, fuzzy
+msgctxt "diag/err_not_a_type"
+msgid "'%0' is not a type"
+msgstr "« %0 » n'est pas un type"
+
+#, fuzzy
+msgctxt "diag/err_forward_param_count"
+msgid "implementation of '%0' has %1 parameter(s) but forward declaration had %2"
+msgstr "l'implémentation de « %0 » a %1 paramètre(s) alors que la déclaration forward en avait %2"
+
+#, fuzzy
+msgctxt "diag/err_forward_param_type"
+msgid "parameter '%0' of '%1': type '%2' does not match forward declaration type '%3'"
+msgstr "paramètre « %0 » de « %1 » : le type « %2 » ne correspond pas au type « %3 » de la déclaration forward"
+
+#, fuzzy
+msgctxt "diag/err_forward_return_type"
+msgid "return type of '%0' does not match forward declaration"
+msgstr "le type de retour de « %0 » ne correspond pas à la déclaration forward"
+
+#, fuzzy
+msgctxt "diag/err_function_no_result_type"
+msgid "function '%0' has no result type; only the defining occurrence of a function declared 'forward' may leave it out"
+msgstr "la fonction « %0 » n'a pas de type résultat ; seule l'occurrence définissante d'une fonction déclarée « forward » peut l'omettre"
+
+#, fuzzy
+msgctxt "diag/err_protected_param_assigned"
+msgid "assignment to protected parameter '%0' (EP §6.7.3.1)"
+msgstr "affectation au paramètre protected « %0 » (EP §6.7.3.1)"
+
+#, fuzzy
+msgctxt "diag/err_type_of_undefined"
+msgid "'type of %0': '%0' is not defined"
+msgstr "« type of %0 » : « %0 » n'est pas défini"
+
+#, fuzzy
+msgctxt "diag/err_for_in_not_set"
+msgid "'for ... in' requires a set-type expression, got '%0'"
+msgstr "« for ... in » exige une expression de type ensemble, « %0 » obtenu"
+
+#, fuzzy
+msgctxt "diag/err_for_in_var_scope"
+msgid "loop variable '%0' in 'for ... in' must be a new name in this scope"
+msgstr "la variable de boucle « %0 » de « for ... in » doit être un nom nouveau dans cette portée"
+
+#, fuzzy
+msgctxt "diag/err_conformant_actual_not_array"
+msgid "conformant array parameter '%0' requires an array argument, got '%1'"
+msgstr "le paramètre tableau conformant « %0 » exige un argument de type tableau, « %1 » obtenu"
+
+#, fuzzy
+msgctxt "diag/err_conformant_elem_mismatch"
+msgid "element type mismatch for conformant array parameter '%0': expected '%1', got '%2'"
+msgstr "type d'élément incompatible pour le paramètre tableau conformant « %0 » : « %1 » attendu, « %2 » obtenu"
+
+#, fuzzy
+msgctxt "diag/err_schema_not_defined"
+msgid "'%0' is not a schema type"
+msgstr "« %0 » n'est pas un type schéma"
+
+#, fuzzy
+msgctxt "diag/err_schema_wrong_arg_count"
+msgid "schema '%0' expects %1 discriminant(s), got %2"
+msgstr "le schéma « %0 » attend %1 discriminant(s), %2 obtenu(s)"
+
+#, fuzzy
+msgctxt "diag/err_schema_disc_not_const"
+msgid "schema discriminant '%0' must be a constant expression"
+msgstr "le discriminant de schéma « %0 » doit être une expression constante"
+
+#, fuzzy
+msgctxt "diag/err_schema_disc_type_mismatch"
+msgid "schema discriminant '%0' has wrong type"
+msgstr "le discriminant de schéma « %0 » est d'un type incorrect"
+
+#, fuzzy
+msgctxt "diag/err_schema_undiscriminated"
+msgid "schema '%0' needs its discriminants here, as in '%0(...)'; a schema name stands alone only as a parameter type or as the domain of a pointer"
+msgstr "le schéma « %0 » exige ses discriminants ici, comme dans « %0(...) » ; un nom de schéma n'est employé seul que comme type de paramètre ou comme domaine d'un pointeur"
+
+#, fuzzy
+msgctxt "diag/err_schema_body_not_representable"
+msgid "schema '%0' cannot be used without discriminants: its size varies with them and its body is not an array"
+msgstr "le schéma « %0 » ne peut pas être utilisé sans discriminants : sa taille varie avec eux et son corps n'est pas un tableau"
+
+#, fuzzy
+msgctxt "diag/err_schema_new_needs_discs"
+msgid "'new' for a pointer to schema '%0' needs %1 discriminant(s), got %2"
+msgstr "« new » pour un pointeur vers le schéma « %0 » exige %1 discriminant(s), %2 obtenu(s)"
+
+#, fuzzy
+msgctxt "diag/err_schema_new_disc_type"
+msgid "discriminant '%0' of schema '%1' needs an ordinal value"
+msgstr "le discriminant « %0 » du schéma « %1 » exige une valeur ordinale"
+
+#, fuzzy
+msgctxt "diag/err_schema_not_a_discriminant"
+msgid "schema '%0' has no discriminant '%1'"
+msgstr "le schéma « %0 » n'a pas de discriminant « %1 »"
+
+#, fuzzy
+msgctxt "diag/err_schema_arg_not_schematic"
+msgid "argument for parameter '%0' must be a '%1', got '%2'"
+msgstr "l'argument du paramètre « %0 » doit être un « %1 », « %2 » obtenu"
+
+#, fuzzy
+msgctxt "diag/err_constructor_type_not_found"
+msgid "type '%0' not found for value constructor"
+msgstr "type « %0 » introuvable pour le constructeur de valeur"
+
+#, fuzzy
+msgctxt "diag/err_constructor_not_aggregate"
+msgid "value constructor type must be array, record, or set, got '%0'"
+msgstr "le type d'un constructeur de valeur doit être tableau, enregistrement ou ensemble, « %0 » obtenu"
+
+#, fuzzy
+msgctxt "diag/err_record_constructor_unknown_field"
+msgid "field '%0' not found in record type '%1'"
+msgstr "champ « %0 » introuvable dans le type enregistrement « %1 »"
+
+#, fuzzy
+msgctxt "diag/err_value_init_type_mismatch"
+msgid "'value' initializer type '%0' is not compatible with variable type '%1'"
+msgstr "le type « %0 » de l'initialiseur « value » n'est pas compatible avec le type « %1 » de la variable"
+
+#, fuzzy
+msgctxt "diag/err_bind_needs_variable"
+msgid "the first argument of '%0' must be a variable"
+msgstr "le premier argument de « %0 » doit être une variable"
+
+#, fuzzy
+msgctxt "diag/err_bind_not_bindable"
+msgid "'%0' was not declared bindable, so it cannot be passed to '%1' (EP §6.4.1)"
+msgstr "« %0 » n'a pas été déclaré bindable et ne peut donc pas être passé à « %1 » (EP §6.4.1)"
+
+#, fuzzy
+msgctxt "diag/err_bind_nonfile_unsupported"
+msgid "'%0' is of type '%1'; plang can bind only a file variable"
+msgstr "« %0 » est de type « %1 » ; plang ne peut lier qu'une variable fichier"
+
+#, fuzzy
+msgctxt "diag/err_bind_needs_binding_type"
+msgid "the second argument of 'bind' must be of type 'BindingType', not '%0'"
+msgstr "le second argument de « bind » doit être de type « BindingType », non « %0 »"
+
+#, fuzzy
+msgctxt "diag/err_import_name_clash"
+msgid "'%0' is imported from both '%1' and '%2'"
+msgstr "« %0 » est importé à la fois de « %1 » et de « %2 »"
+
+#, fuzzy
+msgctxt "diag/err_unknown_module"
+msgid "no module named '%0' was found; it must be defined in this file or have an interface file on the module search path"
+msgstr "aucun module nommé « %0 » n'a été trouvé ; il doit être défini dans ce fichier ou avoir un fichier d'interface sur le chemin de recherche des modules"
+
+#, fuzzy
+msgctxt "diag/err_import_name_not_exported"
+msgid "'%0' is not exported by module '%1'"
+msgstr "« %0 » n'est pas exporté par le module « %1 »"
+
+#, fuzzy
+msgctxt "diag/err_export_range_not_constants"
+msgid "'%0..%1' is not a range of constants of one enumerated type"
+msgstr "« %0..%1 » n'est pas un intervalle de constantes d'un même type énuméré"
+
+#, fuzzy
+msgctxt "diag/err_protected_import_assigned"
+msgid "'%0' is exported protected and cannot be assigned to here"
+msgstr "« %0 » est exporté protected et ne peut pas recevoir d'affectation ici"
+
+#, fuzzy
+msgctxt "diag/warn_const_div_zero"
+msgid "'%0' by a constant zero; this is an error whenever it is reached"
+msgstr "« %0 » par une constante nulle ; c'est une erreur chaque fois que ce point est atteint"
+
+#, fuzzy
+msgctxt "diag/warn_const_out_of_range"
+msgid "%0 is outside the range %1..%2; this is an error whenever it is reached"
+msgstr "%0 est hors de l'intervalle %1..%2 ; c'est une erreur chaque fois que ce point est atteint"
+
+#, fuzzy
+msgctxt "diag/warn_for_var_after_loop"
+msgid "'%0' is undefined here: a for-statement leaves its control variable undefined when it finishes"
+msgstr "« %0 » n'est pas défini ici : une instruction for laisse sa variable de contrôle indéfinie lorsqu'elle se termine"
+
+#, fuzzy
+msgctxt "diag/warn_var_uninitialized"
+msgid "'%0' is read here before it has been given a value"
+msgstr "« %0 » est lu ici avant d'avoir reçu une valeur"
+
+#, fuzzy
+msgctxt "diag/warn_result_not_always_set"
+msgid "'%0' does not assign to its result on every path through it"
+msgstr "« %0 » n'affecte pas son résultat sur tous les chemins qui la traversent"
+
+#, fuzzy
+msgctxt "diag/warn_unreachable_code"
+msgid "this statement cannot be reached"
+msgstr "cette instruction ne peut pas être atteinte"
+
+#, fuzzy
+msgctxt "diag/warn_compare_always"
+msgid "comparison is always %0: '%1' is of type '%2', whose range is %3..%4"
+msgstr "la comparaison vaut toujours %0 : « %1 » est de type « %2 », dont l'intervalle est %3..%4"
+
+#, fuzzy
+msgctxt "diag/warn_case_not_exhaustive"
+msgid "case does not cover %0 of type '%1', and has no 'otherwise' part; reaching it with such a value is an error"
+msgstr "le case ne couvre pas %0 du type « %1 » et n'a pas de partie « otherwise » ; l'atteindre avec une telle valeur est une erreur"
+
+#, fuzzy
+msgctxt "diag/warn_unused_variable"
+msgid "'%0' is declared but never used"
+msgstr "« %0 » est déclaré mais jamais utilisé"
+
+#, fuzzy
+msgctxt "diag/warn_unused_parameter"
+msgid "parameter '%0' is never used"
+msgstr "le paramètre « %0 » n'est jamais utilisé"

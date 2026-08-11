@@ -16,7 +16,7 @@ namespace {
 /// and from the small codes a program is likely to pass to halt itself.
 constexpr int PlangRuntimeErrorStatus = 70;
 
-/// Module finalisers, in the order the modules were initialised.  A plain
+/// Module finalisers, in the order the modules were initialized.  A plain
 /// array rather than a std::vector: the runtime is linked into generated
 /// programs without the C++ standard library, and a function-local static
 /// would want a guard variable from it as well.
@@ -35,7 +35,7 @@ void plang_halt(int64_t Status) {
     std::exit(static_cast<int>(Status));
 }
 
-/// Allocate \p Bytes zero-initialised bytes.  Aborts on out-of-memory so
+/// Allocate \p Bytes zero-initialized bytes.  Aborts on out-of-memory so
 /// generated code never needs to check the result.
 void *plang_new(int64_t Bytes) {
     void *P = std::calloc(1, static_cast<std::size_t>(Bytes));
@@ -51,17 +51,17 @@ void plang_dispose(void *P) {
     std::free(P);
 }
 
-// ---- EP §6.11.2: module finalisation order ----
+// ---- EP §6.11.2: module finalization order ----
 //
 // A module's 'to end do' runs after that of every module it imports, which is
-// the reverse of the order they were initialised in.  A module initialiser
+// the reverse of the order they were initialized in.  A module initialiser
 // registers its finaliser here once it has run, so the order falls out of what
 // actually happened rather than having to be worked out ahead of time — which
 // the program could not do anyway, since it cannot see what a separately
 // compiled module imports.
 
-/// Register \p Fn to run at finalisation.  Called at the end of a module
-/// initialiser, so registration order is initialisation order.
+/// Register \p Fn to run at finalization.  Called at the end of a module
+/// initialiser, so registration order is initialization order.
 void plang_module_final_push(void (*Fn)(void)) {
     if (ModuleFinaliserCount == ModuleFinaliserCap) {
         std::size_t NewCap = ModuleFinaliserCap ? ModuleFinaliserCap * 2 : 8;
@@ -77,7 +77,7 @@ void plang_module_final_push(void (*Fn)(void)) {
     ModuleFinalisers[ModuleFinaliserCount++] = Fn;
 }
 
-/// Run every registered finaliser, most recently initialised module first.
+/// Run every registered finaliser, most recently initialized module first.
 void plang_module_finals_run(void) {
     // Each is taken off before it is called, so a finaliser that reaches this
     // again — through halt, say — cannot run anything a second time.

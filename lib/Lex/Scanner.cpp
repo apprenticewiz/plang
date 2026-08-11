@@ -142,8 +142,7 @@ Token Scanner::scanIdentifierOrKeyword(size_t TokenStart) {
     // asks that a use of an extension be reportable, and -std=iso7185 is where
     // that reporting happens, so this cannot pass silently there.
     if (Underscore && !Opts.extendedPascal())
-        emitError(locAt(TokenStart), diag::err_ep_extension,
-                  {"an underscore in an identifier"});
+        emitError(locAt(TokenStart), diag::err_ep_underscore_in_identifier);
     std::string Lower = toLower(Word);
     auto It = std::ranges::lower_bound(keywords, Lower, {}, &KW::first);
     TokenKind Kind = (It != keywords.end() && It->first == Lower) ? It->second
@@ -211,7 +210,7 @@ Token Scanner::scanNumber(size_t TokenStart) {
     // ISO §6.1.5 scale-factor: 'e' [sign] digits, with or without a fractional
     // part before it, so both 1e3 and 1.5e-2 are real literals.  The exponent
     // is only taken when a digit really follows: otherwise the 'e' belongs to
-    // whatever comes next, and swallowing it would turn a neighbouring word
+    // whatever comes next, and swallowing it would turn a neighboring word
     // into a malformed number rather than leaving it to be scanned.
     if (Pos < Text.size() && (Text[Pos] == 'e' || Text[Pos] == 'E')) {
         size_t Look = Pos + 1;

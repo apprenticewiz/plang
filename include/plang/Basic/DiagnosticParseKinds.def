@@ -1,12 +1,44 @@
 // DiagnosticParseKinds.def — Parser diagnostics.
 // Included by DiagnosticMessages.def.
 
-// Dialect gating.  Raised by the parser and by the analyser alike, wherever a
+// Dialect gating.  Raised by the parser and by the analyzer alike, wherever a
 // construct belongs to Extended Pascal (ISO 10206) and the source is being
 // read as standard Pascal (ISO 7185).
-DIAG(err_ep_extension, Error,
-     "%0 is an Extended Pascal extension and is not available under "
+//
+// These were one diagnostic, "%0 is an Extended Pascal extension and is not
+// available under -std=iso7185", with the subject passed in as an English noun
+// phrase from each of ten call sites.  That cannot be translated: a language
+// with grammatical gender or case needs the frame and the subject to agree,
+// and English already needs a different article at each site.  So each
+// construct says the whole sentence itself.
+//
+// Where the inserted text is not prose -- an operator, a type name, an
+// identifier -- it stays an argument, because those are Pascal syntax and are
+// not translated in any language.
+DIAG(err_ep_underscore_in_identifier, Error,
+     "an underscore in an identifier is an Extended Pascal extension and is "
+     "not available under -std=iso7185")
+DIAG(err_ep_operator, Error,
+     "the operator '%0' is an Extended Pascal extension and is not available "
+     "under -std=iso7185")
+DIAG(err_ep_for_in, Error,
+     "the 'for ... in' statement is an Extended Pascal extension and is not "
+     "available under -std=iso7185")
+DIAG(err_ep_case_otherwise, Error,
+     "an 'otherwise' part of a case-statement is an Extended Pascal extension "
+     "and is not available under -std=iso7185")
+DIAG(err_ep_case_range, Error,
+     "a range as a case-constant is an Extended Pascal extension and is not "
+     "available under -std=iso7185")
+DIAG(err_ep_type, Error,
+     "the type '%0' is an Extended Pascal extension and is not available "
+     "under -std=iso7185")
+DIAG(err_ep_required_name, Error,
+     "'%0' is an Extended Pascal extension and is not available under "
      "-std=iso7185")
+DIAG(err_ep_two_arg_form, Error,
+     "the two-argument form of '%0' is an Extended Pascal extension and is "
+     "not available under -std=iso7185")
 
 // ISO 7185 §6.6.3.7.1: the packed form of a conformant array schema takes one
 // index-type-specification; the unpacked form is the one that may have several.
@@ -24,3 +56,11 @@ DIAG(err_real_literal_out_of_range, Error, "real literal '%0' is out of range")
 DIAG(err_expected_expr, Error, "expected expression, got %0")
 DIAG(err_expected_token, Error, "expected %0, got %1")
 DIAG(err_expected_token_got_lexeme, Error, "expected %0, got %1 '%2'")
+
+// The last two diagnostics that were raw strings passed straight to the
+// engine.  They had no identifier, so they could not be translated, could not
+// be given a -W name, and did not appear in the catalog a translator reads.
+DIAG(err_restricted_needs_type_name, Error,
+     "'restricted' must be followed by the name of a type")
+DIAG(err_module_to_needs_begin_or_end, Error,
+     "'to' in module body must be followed by 'begin' or 'end'")

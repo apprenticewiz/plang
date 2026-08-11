@@ -1,32 +1,31 @@
-# Locale-specific diagnostic message strings.
+# Diagnostic message text.
 #
-# Each locale is a single .cpp file that implements getDiagFormat(DiagID).
-# Only one locale is compiled into the binary at a time; choose it with:
+# en_US.cpp is the compiled-in English, expanded from the DiagnosticKinds .def
+# catalogs; MessageCatalog.cpp reads a translation of it from a .po file at
+# run time and falls back here whenever it has nothing to say.  Which language
+# plang speaks is therefore a question answered when it runs, not when it is
+# built, and adding one no longer needs a rebuild.
 #
-#   cmake -DPLANG_LOCALE=en_US ...   (default)
-#   cmake -DPLANG_LOCALE=fr_FR ...   (when a French translation exists)
+# The target keeps the name PlangLocale because lib/CMakeLists.txt links it by
+# that name; it is no longer "the selected locale", it is the message layer.
 #
-# To add a new translation:
-#   1. Copy lib/Basic/en_US.cpp to lib/Basic/<locale>.cpp
-#   2. Translate every string returned by getDiagFormat()
-#   3. Rebuild with -DPLANG_LOCALE=<locale>
-#
-# The DiagID enum values in include/plang/Basic/DiagnosticIDs.h are the stable
-# keys; they must never be renumbered without updating all locale files.
+# The DiagID enum values are the stable keys, and DiagnosticMessages.def fixes
+# the order the four catalogs are concatenated in.  A .po file keys on the
+# identifier rather than on that number, so reordering the catalogs cannot
+# silently repoint a translation at the wrong message.
 
-set(PLANG_LOCALE "en_US" CACHE STRING
-    "Diagnostic message locale to compile in (e.g. en_US, fr_FR)")
-
-if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${PLANG_LOCALE}.cpp")
-    message(FATAL_ERROR
-        "No diagnostic message file for locale '${PLANG_LOCALE}' "
-        "(looked for lib/Basic/${PLANG_LOCALE}.cpp). "
-        "Available: en_US")
-endif()
-
-add_library(PlangLocale OBJECT ${PLANG_LOCALE}.cpp)
+add_library(PlangLocale OBJECT
+    en_US.cpp           # compiled-in English: the fallback, and the base text
+    MessageCatalog.cpp  # the .po reader, and getDiagFormat itself
+)
 target_compile_options(PlangLocale PRIVATE -fno-rtti -fno-exceptions -fPIC)
 target_link_libraries(PlangLocale PRIVATE plang_warnings)
+# Where the catalogs are in the build tree.  An installed plang finds them
+# relative to its own binary; an uninstalled one -- and every test binary,
+# which is its own main executable and so has no such relation -- finds them
+# here.  Same two-step the driver uses for its runtime library.
+target_compile_definitions(PlangLocale PRIVATE
+    PLANG_CATALOG_DIR="${CMAKE_BINARY_DIR}/share/plang/locale")
 
 # Language-independent support: source buffers and positions.
 add_library(PlangBasic OBJECT SourceManager.cpp)

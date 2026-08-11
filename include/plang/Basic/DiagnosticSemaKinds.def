@@ -1,4 +1,4 @@
-// DiagnosticSemaKinds.def — Semantic analyser diagnostics.
+// DiagnosticSemaKinds.def — Semantic analyzer diagnostics.
 // Included by DiagnosticMessages.def.
 
 // ISO 7185 §6.1.6: a label is a digit-sequence in the closed interval 0 to 9999,
@@ -18,13 +18,14 @@ DIAG(err_function_no_result, Error, "function '%0' does not assign to its result
 // ISO 7185 §6.1.7: A character-string must contain at least one character.
 DIAG(err_empty_string_const, Error, "string constant must contain at least one character")
 DIAG(err_substring_non_varstring, Error, "substring operator '[i..j]' requires a string(N) operand")
-DIAG(err_unrecognised_expr, Error, "unrecognised expression node")
+DIAG(err_unrecognized_expr, Error, "unrecognized expression node")
 // EP §6.4.2.5: the only thing that may be done with a value of a restricted
 // type is to pass it as a parameter or return it from a function.
 DIAG(err_restricted_assigned, Error, "'%0' is a restricted type, so nothing can be assigned to a variable of it")
 DIAG(err_restricted_used, Error, "a value of the restricted type '%0' can only be passed as a parameter or returned from a function")
 DIAG(err_restricted_component, Error, "'%0' is a restricted type, so its components are not accessible")
-DIAG(err_restricted_component_type, Error, "'%0' is a restricted type and cannot be the %1")
+DIAG(err_restricted_file_component, Error,
+     "'%0' is a restricted type and cannot be the component type of a file")
 DIAG(err_undefined_identifier, Error, "undefined identifier '%0'")
 DIAG(err_function_requires_args, Error, "function '%0' requires an argument list")
 DIAG(err_proc_as_value, Error, "procedure '%0' cannot be used as a value")
@@ -67,6 +68,9 @@ DIAG(err_set_elem_not_ordinal, Error, "set elements must be ordinal, got '%0'")
 DIAG(err_not_callable, Error, "'%0' is not callable")
 DIAG(err_proc_cannot_return_value, Error, "'%0' is a procedure and cannot return a value")
 DIAG(err_func_as_statement, Error, "'%0' is a function; use it in an expression, not as a statement")
+// TRANSLATORS: %1 is a count, but may read "2 or more" or "1 or 2", built
+// in English at the call site.  "argument(s)" is an English plural dodge;
+// use whatever your language does for a count that may be one or many.
 DIAG(err_wrong_arg_count, Error, "'%0' expects %1 argument(s), got %2")
 DIAG(err_var_param_needs_lvalue, Error, "argument %0 of '%1' is a 'var' parameter and requires a variable")
 DIAG(err_var_param_type_mismatch, Error, "type mismatch for 'var' parameter '%0': expected '%1', got '%2'")
@@ -123,7 +127,13 @@ DIAG(err_write_type_mismatch, Error, "type mismatch in write: file element type 
 DIAG(err_pack_index_mismatch, Error, "pack: start index type '%0' is not compatible with array index type '%1'")
 DIAG(err_unpack_index_mismatch, Error, "unpack: start index type '%0' is not compatible with array index type '%1'")
 // ISO 7185 §6.6.5.4: both operands are arrays of one dimension.
-DIAG(err_pack_operand_not_array, Error, "%0 expects an array as its %1 argument, got '%2'")
+// Two, rather than "%0 expects ... its %1 argument" with "packed" or
+// "unpacked" supplied as a word.  %0 stays an argument: it is the Pascal
+// identifier 'pack' or 'unpack', which no language translates.
+DIAG(err_pack_operand_not_array_unpacked, Error,
+     "%0 expects an array as its unpacked argument, got '%1'")
+DIAG(err_pack_operand_not_array_packed, Error,
+     "%0 expects an array as its packed argument, got '%1'")
 DIAG(err_with_non_record, Error, "'with' expects a record variable, got '%0'")
 DIAG(err_goto_undefined, Error, "undefined label '%0'")
 // ISO 7185 §6.8.1: A goto may not leave the immediately enclosing block
@@ -153,11 +163,19 @@ DIAG(err_string_cap_not_int, Error, "string capacity must be an integer constant
 DIAG(err_string_cap_not_positive, Error, "string capacity must be positive; got %0")
 // ISO §6.4.3.2, §6.4.2.4: an index type and a subrange are written with
 // constants, so the extent of the type is known wherever the type is.
-DIAG(err_array_bound_not_const, Error,
-     "%0 bound of array index type is not a constant expression; "
+// One diagnostic per bound rather than "%0 bound" with "lower" or "upper"
+// passed in: the adjective was an English word traveling into a frame chosen
+// by the caller, which is two things a translator cannot see at once.
+DIAG(err_array_lower_bound_not_const, Error,
+     "lower bound of array index type is not a constant expression; "
      "for a run-time length use a schema type, 'type t(n: integer) = array[1..n]'")
-DIAG(err_subrange_bound_not_const, Error,
-     "%0 bound of subrange is not a constant expression")
+DIAG(err_array_upper_bound_not_const, Error,
+     "upper bound of array index type is not a constant expression; "
+     "for a run-time length use a schema type, 'type t(n: integer) = array[1..n]'")
+DIAG(err_subrange_lower_bound_not_const, Error,
+     "lower bound of subrange is not a constant expression")
+DIAG(err_subrange_upper_bound_not_const, Error,
+     "upper bound of subrange is not a constant expression")
 // ISO §6.4.3.2: an index type is an ordinal type of known extent.  'integer'
 // is ordinal but names no bounded range, so it is turned away here too.
 DIAG(err_array_index_not_ordinal, Error,
@@ -177,11 +195,13 @@ DIAG(err_proc_param_not_congruous, Error,
      "type '%3'")
 DIAG(err_proc_param_not_assignable, Error,
      "'%0' is a procedural parameter and cannot be assigned to")
-DIAG(err_unrecognised_type, Error, "unrecognised type expression")
+DIAG(err_unrecognized_type, Error, "unrecognized type expression")
 DIAG(err_undefined_type, Error, "undefined type '%0'")
 DIAG(err_not_a_type, Error, "'%0' is not a type")
 
 // Forward declaration signature checks
+// TRANSLATORS: "parameter(s)" is an English plural dodge.  Use whatever
+// your language does for a count that may be one or many.
 DIAG(err_forward_param_count, Error, "implementation of '%0' has %1 parameter(s) but forward declaration had %2")
 DIAG(err_forward_param_type, Error, "parameter '%0' of '%1': type '%2' does not match forward declaration type '%3'")
 DIAG(err_forward_return_type, Error, "return type of '%0' does not match forward declaration")
@@ -199,6 +219,7 @@ DIAG(err_conformant_elem_mismatch, Error, "element type mismatch for conformant 
 
 // EP §6.4.7: Schema types
 DIAG(err_schema_not_defined, Error, "'%0' is not a schema type")
+// TRANSLATORS: "discriminant(s)" is an English plural dodge.
 DIAG(err_schema_wrong_arg_count, Error, "schema '%0' expects %1 discriminant(s), got %2")
 DIAG(err_schema_disc_not_const, Error, "schema discriminant '%0' must be a constant expression")
 DIAG(err_schema_disc_type_mismatch, Error, "schema discriminant '%0' has wrong type")
@@ -208,6 +229,7 @@ DIAG(err_schema_undiscriminated, Error,
 DIAG(err_schema_body_not_representable, Error,
      "schema '%0' cannot be used without discriminants: its size varies with "
      "them and its body is not an array")
+// TRANSLATORS: "discriminant(s)" is an English plural dodge.
 DIAG(err_schema_new_needs_discs, Error,
      "'new' for a pointer to schema '%0' needs %1 discriminant(s), got %2")
 DIAG(err_schema_new_disc_type, Error,
@@ -299,11 +321,18 @@ DIAG(warn_result_not_always_set, Warning,
 DIAG(warn_unreachable_code, Warning, "this statement cannot be reached")
 // The range of the operand's type settles the comparison, so the other operand
 // is not being consulted at all.
+// TRANSLATORS: %0 is the word "true" or "false", supplied by the compiler.
+// They are also Pascal keywords, so leaving them in English is correct.
 DIAG(warn_compare_always, Warning,
      "comparison is always %0: '%1' is of type '%2', whose range is %3..%4")
 // §6.8.3.5: a case-statement whose selector matches no case-constant is an
 // error.  When the selector's type is small enough to enumerate, the values
 // that would go unmatched can be named before the program runs.
+// TRANSLATORS: %0 is a list of values built in English at the call site --
+// joined with ", " and " or ", and ending " (and N more)" when there are
+// too many to show.  Translating the joining words is not possible from here.
+// Left as it is deliberately: it is one message, and the alternative is a
+// list-formatting mechanism no other diagnostic would use.
 DIAG(warn_case_not_exhaustive, Warning,
      "case does not cover %0 of type '%1', and has no 'otherwise' part; "
      "reaching it with such a value is an error")

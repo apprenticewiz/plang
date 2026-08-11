@@ -37,9 +37,10 @@ The phases are the conventional ones, each in its own directory under `lib/`:
 Several of clang's design choices are followed where Pascal gives the same
 reason for them.
 
-Diagnostics are catalogued in `.def` files split by the phase that raises them,
-and reached by identifier — `diag::err_undefined_identifier` — with the message
-text kept in a separate translation unit so that it can be translated.
+Diagnostics are cataloged in `.def` files split by the phase that raises them,
+and reached by identifier — `diag::err_undefined_identifier`.  The English text
+is written in those same files and compiled in; a translation of it is read at
+run time from a `.po` file.  See "Translations" below.
 
 Token kinds are likewise one list, `Basic/TokenKinds.def`, from which the
 enumeration, the spellings, the scanner's keyword table and the set of words
@@ -66,8 +67,13 @@ Where clang's reason does not apply, plang does not follow it.  Most of clang's
 `lib/Lex` is the C preprocessor, and Pascal has no macros, no `#include` and no
 pragmas, so plang's scanner is one file.  There is no tentative parsing,
 because Pascal has no declaration-versus-expression ambiguity to resolve.  The
-`.def` catalogues are x-macros rather than TableGen, which does the same job at
+`.def` catalogs are x-macros rather than TableGen, which does the same job at
 this scale without a build-time generator.
+
+`tools/plang-po` is a build-time generator, but not of that kind: nothing the
+compiler is built from comes out of it.  It reads the same `.def` files the
+compiler does and writes the `.po` a *translator* works from, which has to be a
+file on disk because the person editing it is not building plang.
 
 ### Language and style
 
@@ -97,11 +103,53 @@ plang: error: no input files
 ```
 
 These are the driver's, and they are about the command line or the toolchain
-rather than about a program.  They are catalogued in
+rather than about a program.  They are cataloged in
 `Basic/DiagnosticDriverKinds.def` alongside the rest and pass through the same
 `DiagnosticsEngine`, which is the one place the policy below is applied,
 whichever phase raised it.  A driver diagnostic went straight to stderr before,
-with its own idea of when to use colour, which put it outside all of it.
+with its own idea of when to use color, which put it outside all of it.
+
+### Translations
+
+Diagnostic messages can be translated; nothing else about plang can, and
+nothing else about it is locale-sensitive.
+
+The English lives in the four `Basic/Diagnostic*Kinds.def` catalogs and is
+compiled in, so the compiler can always say what is wrong with a program
+whatever else is missing.  A translation is a GNU gettext `.po` file read when
+plang starts, keyed by the diagnostic's identifier rather than by its English —
+`msgctxt "diag/err_undefined_identifier"` — so that rewording a message in
+English does not silently untranslate it everywhere.
+
+`tools/plang-po` writes `en_US.po` from the `.def` files at build time; it is
+the base a translator copies, and generating it is what keeps it from drifting
+away from what the compiler actually says.  It is a C++ tool rather than a
+script because 53 of the 193 messages are written as several adjacent string
+literals, and only the preprocessor concatenates those correctly.
+
+The format is gettext's, but libintl is not linked: the format is what buys a
+translator Poedit, Weblate and `msgmerge`, and macOS does not ship libintl in
+`libSystem`.  `Basic/MessageCatalog.cpp` reads the subset plang writes, and is
+deliberately strict about the rest — four escapes only, no plurals, no
+non-UTF-8 — because it is the one part of the compiler that parses bytes
+somebody else wrote.  A message's `%0..%9` may be reordered by a translation
+but not dropped or invented; one that does not use the same set is refused and
+the English is used for that message alone.
+
+Everything that can go wrong ends in English rather than in an error: a missing
+catalog, an unreadable one, one from a newer plang, one with a bad entry, one
+still being written, and an entry the translator has marked `#, fuzzy`.  That
+makes a catalog installed where plang cannot find it invisible, so `--version`
+reports which one it resolved, and both CI install checks assert it — using
+`qps_ploc`, a generated pseudo-locale in which every message is the English
+wrapped in `[!` and `!]`.
+
+Translations live in `po/`, one file per language, and are copied into the
+build tree beside the generated ones.  A regional catalog is a delta over the
+language below it — `es_MX.po` names only what Mexican usage spells differently
+and `es.po` supplies the rest — so the loader reads the whole chain, least
+specific first.  `fr` and `es` ship marked `#, fuzzy` and are therefore inert
+until reviewed; `po/README.md` is the translator's instructions.
 
 ### Warnings
 
@@ -127,7 +175,7 @@ rejects a program unless `-Werror` is given.
 | `unused-variable`       | A variable declared and never mentioned again             |
 | `unused-parameter`      | A parameter never named in the body                       |
 | `label-unreachable`     | A label no `goto` names                                   |
-| `unrecognised-argument` | An argument beginning with `-` that matches no option     |
+| `unrecognized-argument` | An argument beginning with `-` that matches no option     |
 
 The last is the only one about the command line rather than about the program,
 and the only one that can be reported before a source file has been opened.
@@ -146,9 +194,9 @@ spares the cascade that a single mistake early in a file can set off.  The
 compilation still fails.  Zero, the default, means no limit, and warnings are
 not counted against it.
 
-### Colour
+### Color
 
-Colour is used when standard error is a terminal, and
+Color is used when standard error is a terminal, and
 `-f{,no-}color-diagnostics` says otherwise.  The driver and the front end are
 separate processes and both print diagnostics, so both have to answer this;
 the option is `Both` in the table, so the driver acts on it and hands it on,

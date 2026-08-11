@@ -53,7 +53,7 @@ std::unique_ptr<TypeNode> Parser::parseTypeExpr() {
                 break;
             default:
                 emitError(Current.toLoc(),
-                          "'restricted' must be followed by the name of a type");
+                          diag::err_restricted_needs_type_name);
                 Node->Name = "integer";
                 break;
         }

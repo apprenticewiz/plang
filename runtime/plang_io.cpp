@@ -154,7 +154,7 @@ void plang_writeln_char(int8_t      V) { plangOutCh(static_cast<unsigned char>(V
 void plang_writeln_str (const char *S) { plangOutStr(S ? S : ""); plangOutCh('\n'); }
 void plang_writeln     ()              { plangOutCh('\n'); }
 
-// ---- EP §6.9.3.6: a complex value is written as a parenthesised real pair ----
+// ---- EP §6.9.3.6: a complex value is written as a parenthesized real pair ----
 
 void plang_write_cplx  (double Re, double Im) {
     plangOutCh('(');

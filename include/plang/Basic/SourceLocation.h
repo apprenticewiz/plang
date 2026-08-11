@@ -40,7 +40,7 @@ private:
 /// filename over and over.
 ///
 /// A default-constructed SourceLocation is invalid and means "nowhere",
-/// which is what a node the parser synthesised has.
+/// which is what a node the parser synthesized has.
 class SourceLocation {
 public:
     constexpr SourceLocation() = default;

@@ -103,8 +103,7 @@ std::unique_ptr<ExprNode> Parser::parseSimpleExpr() {
         // beside it, it is spelt as a symbol rather than a word, so nothing
         // else keeps it out of standard Pascal.
         if (Current.Kind == TokenKind::SymDiff && !Opts.extendedPascal())
-            emitError(Current.toLoc(), diag::err_ep_extension,
-                      {"the operator '><'"});
+            emitError(Current.toLoc(), diag::err_ep_operator, {"><"});
         auto Node  = std::make_unique<BinaryExpr>();
         Node->Loc  = Current;
         Node->Op   = Current.Kind;
@@ -125,8 +124,7 @@ std::unique_ptr<ExprNode> Parser::parsePower() {
         // plain identifier there, but '**' is a symbol and would otherwise be
         // read as one under either standard.
         if (!Opts.extendedPascal())
-            emitError(Current.toLoc(), diag::err_ep_extension,
-                      {"the operator '" + Current.Lexeme + "'"});
+            emitError(Current.toLoc(), diag::err_ep_operator, {Current.Lexeme});
         auto Node  = std::make_unique<BinaryExpr>();
         Node->Loc  = Current;
         Node->Op   = Current.Kind;

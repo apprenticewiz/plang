@@ -17,7 +17,7 @@
 // (should be) annotations the program prints beside each of its 743 checks.
 // The author's own reference output is not usable in its place, having been
 // produced by an implementation with 32-bit integers, single-precision reals
-// and capitalised booleans.  Every check either matches its annotation or
+// and capitalized booleans.  Every check either matches its annotation or
 // differs only in what ISO 7185 leaves to the implementation — the number of
 // exponent digits (§6.9.3.4.1, three here) and the precision of real
 // arithmetic — or in the spacing of an annotation the program writes as prose
@@ -89,7 +89,7 @@ TEST(Acceptance, ISO7185PascalAcceptanceTest) {
     const std::string Err = Work + "/compile.err";
 
     // The suite is re-run under other codegen settings by setting this; the
-    // program's output is the same at every optimisation level, which is
+    // program's output is the same at every optimization level, which is
     // itself worth holding to.
     const char* Extra = std::getenv("PLANG_TEST_EXTRA_FLAGS");
 

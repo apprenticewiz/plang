@@ -152,7 +152,7 @@ void Parser::parseModuleBlock(ModuleNode& Node) {
             match(TokenKind::Semicolon);
         } else {
             emitError(Current.toLoc(),
-                      "'to' in module body must be followed by 'begin' or 'end'");
+                      diag::err_module_to_needs_begin_or_end);
             break; // avoid infinite loop on unexpected token
         }
     }

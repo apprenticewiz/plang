@@ -38,7 +38,7 @@ std::optional<llvm::DataLayout> layoutFor(const llvm::Triple& triple) {
 } // namespace
 
 // ====================================================================
-// Initialise / reset for a new module
+// Initialize / reset for a new module
 // ====================================================================
 
 void Codegen::Impl::init(const std::string& progName) {

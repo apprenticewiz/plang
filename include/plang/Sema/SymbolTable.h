@@ -27,7 +27,7 @@ enum class SymbolKind {
     Label,      // label declared in a 'label' section
     EnumValue,  // a member of an enumerated type
     Builtin,    // built-in procedure or function (arity/type checks are relaxed)
-    Schema,     // EP §6.4.7: schema type definition (parameterised type)
+    Schema,     // EP §6.4.7: schema type definition (parameterized type)
 };
 
 // ---------------------------------------------------------------------------

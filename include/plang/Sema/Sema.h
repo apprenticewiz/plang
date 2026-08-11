@@ -39,7 +39,7 @@ public:
     /// entire pipeline uses one ordered diagnostic stream.
     explicit Sema(DiagnosticsEngine& Diags, LangOptions Opts = {});
 
-    /// Analyse the entire program.  Returns true iff no errors were collected.
+    /// Analyze the entire program.  Returns true iff no errors were collected.
     [[nodiscard]] bool check(const ProgramNode& Prog);
 
     [[nodiscard]] const std::vector<Diagnostic>& diagnostics() const {
@@ -137,7 +137,7 @@ private:
     /// which codegen follows, so they live as long as this Sema does.
     std::vector<std::unique_ptr<ProgramNode>> LoadedInterfaces_;
 
-    // The innermost procedure/function currently being analysed.
+    // The innermost procedure/function currently being analyzed.
     const ProcDecl*       CurrentProc{nullptr};
     // Resolved return type of CurrentProc (null when not inside a function).
     std::shared_ptr<Type> CurrentRetType;
@@ -285,7 +285,7 @@ private:
     // Extract a compile-time integer value from a constant expression.
     // Returns nothing when the expression is not a constant, so that a caller
     // cannot mistake "no value" for a bound.  Consults ActiveSchemaBindings_ so
-    // schema discriminant names are recognised.
+    // schema discriminant names are recognized.
     [[nodiscard]] std::optional<int64_t> constBound(const ExprNode& E) const;
 
     /// Reports the first statement of each run in this sequence that no path
@@ -376,7 +376,7 @@ private:
     // whichever is not constant.  Nothing means the type cannot be formed.
     [[nodiscard]] std::optional<std::pair<int64_t, int64_t>>
     foldBounds(const ExprNode& Low, const ExprNode& High,
-               const Type& Base, DiagID ID);
+               const Type& Base, DiagID LowID, DiagID HighID);
 
     // ---- statement checking ----
     void checkStmt      (const StmtNode*   Stmt);

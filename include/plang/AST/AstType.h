@@ -19,7 +19,7 @@ struct NamedTypeNode : TypeNode {
 };
 
 /// ISO §6.4.3.2.  The index is written either as a range of bounds, which is
-/// what Low and High hold, or as an ordinal type — `array[colour]` — which is
+/// what Low and High hold, or as an ordinal type — `array[color]` — which is
 /// what Index holds.  Exactly one of the two forms is filled in; the bounds
 /// stay the common representation so that the constant-folding paths that read
 /// them are unaffected, and only a named index has to go through Sema.

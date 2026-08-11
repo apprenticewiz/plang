@@ -155,7 +155,7 @@ std::shared_ptr<Type> Sema::checkExpr(const ExprNode& E) {
             error(E.Loc, diag::err_substring_non_varstring);
     }
     else {
-        error(E.Loc, diag::err_unrecognised_expr);
+        error(E.Loc, diag::err_unrecognized_expr);
         T = TyErr;
     }
 
@@ -641,8 +641,7 @@ bool Sema::checkBuiltinArity(const std::string& LowerName, SourceLocation Loc,
 
 bool Sema::checkEPOnly(const Symbol& Sym, SourceLocation Loc) {
     if (!Sym.IsEPOnly || Opts.extendedPascal()) return true;
-    const auto What = "'" + Sym.Name + "'";
-    error(Loc, diag::err_ep_extension, {What});
+    error(Loc, diag::err_ep_required_name, {Sym.Name});
     return false;
 }
 
@@ -690,8 +689,7 @@ std::shared_ptr<Type> Sema::checkCallExpr(const CallExpr& E) {
             auto ArgTy = checkExpr(*E.Args[0]);
             for (size_t I = 1; I < E.Args.size(); ++I) (void)checkExpr(*E.Args[I]);
             if (E.Args.size() > 1 && !Opts.extendedPascal()) {
-                const auto What = "the two-argument form of '" + Lo + "'";
-                error(E.Loc, diag::err_ep_extension, {What});
+                error(E.Loc, diag::err_ep_two_arg_form, {Lo});
                 return TyErr;
             }
             if (ArgTy->isError()) return TyErr;

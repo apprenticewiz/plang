@@ -123,6 +123,29 @@ jobs:
           printf 'program hello(output);\nbegin writeln(%s) end.\n' "'ok'" > hello.pas
           plang hello.pas -o hello
           test "$(./hello)" = "ok"
+          # The message catalogs.  Falling back to English is deliberate and
+          # total, so a catalog installed where plang cannot find it leaves a
+          # compiler that works perfectly and is silently never translated --
+          # invisible to every check above.  qps_ploc is not a language: every
+          # message is the English wrapped in [! !], so grepping for the
+          # sentinel is the one positive proof that a catalog was found, read
+          # and used.  Both halves are checked: the driver and the -pc1 child
+          # are separate processes and each resolves its own.
+          plang --version | grep -q 'Messages: en_US (built-in)'
+          # The installed path specifically.  Two weaker forms of this check
+          # both pass on a broken install: matching the tag alone passes
+          # because --version names the language it was asked for even when
+          # it found nothing, and matching any .po passes because the build
+          # tree is still on disk and is the compiled-in fallback.  Only the
+          # prefix says the install put the catalogs where plang looks.
+          LC_ALL=qps_ploc plang --version \
+            | grep -q 'Messages: qps_ploc (/usr/local/share/plang/locale/qps_ploc.po)'
+          LC_ALL=qps_ploc plang 2>&1 | grep -q '\[!no input files!\]'
+          printf 'program bad(output);\nbegin x := 1 end.\n' > bad.pas
+          LC_ALL=qps_ploc plang bad.pas -o bad 2>&1 | grep -q '\[!'
+          # ... and that the sentinel is absent without the locale, so the
+          # grep above cannot pass for some reason unrelated to the catalog.
+          ! plang bad.pas -o bad 2>&1 | grep -q '\[!'
 
   macos:
     name: macOS / ${{ matrix.build_type }}
@@ -188,6 +211,29 @@ jobs:
           printf 'program hello(output);\nbegin writeln(%s) end.\n' "'ok'" > hello.pas
           plang hello.pas -o hello
           test "$(./hello)" = "ok"
+          # The message catalogs.  Falling back to English is deliberate and
+          # total, so a catalog installed where plang cannot find it leaves a
+          # compiler that works perfectly and is silently never translated --
+          # invisible to every check above.  qps_ploc is not a language: every
+          # message is the English wrapped in [! !], so grepping for the
+          # sentinel is the one positive proof that a catalog was found, read
+          # and used.  Both halves are checked: the driver and the -pc1 child
+          # are separate processes and each resolves its own.
+          plang --version | grep -q 'Messages: en_US (built-in)'
+          # The installed path specifically.  Two weaker forms of this check
+          # both pass on a broken install: matching the tag alone passes
+          # because --version names the language it was asked for even when
+          # it found nothing, and matching any .po passes because the build
+          # tree is still on disk and is the compiled-in fallback.  Only the
+          # prefix says the install put the catalogs where plang looks.
+          LC_ALL=qps_ploc plang --version \
+            | grep -q 'Messages: qps_ploc (/usr/local/share/plang/locale/qps_ploc.po)'
+          LC_ALL=qps_ploc plang 2>&1 | grep -q '\[!no input files!\]'
+          printf 'program bad(output);\nbegin x := 1 end.\n' > bad.pas
+          LC_ALL=qps_ploc plang bad.pas -o bad 2>&1 | grep -q '\[!'
+          # ... and that the sentinel is absent without the locale, so the
+          # grep above cannot pass for some reason unrelated to the catalog.
+          ! plang bad.pas -o bad 2>&1 | grep -q '\[!'
 
   sanitizers:
     name: asan + ubsan

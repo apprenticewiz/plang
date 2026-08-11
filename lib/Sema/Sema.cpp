@@ -594,7 +594,7 @@ void Sema::loadPMI(const std::string& Key, const std::string& Path) {
 
     // Parse the wrapped content using an in-memory scanner.
     DiagnosticsEngine PMIDiags;
-    // Use EP mode so 'forward' and other EP keywords are recognised.
+    // Use EP mode so 'forward' and other EP keywords are recognized.
     LangOptions PMIOpts = Opts;
     PMIOpts.Std = LangOptions::Standard::ISO10206;
     SourceManager PMISrcMgr;

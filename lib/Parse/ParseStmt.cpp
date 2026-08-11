@@ -200,8 +200,7 @@ std::unique_ptr<StmtNode> Parser::parseForStmt() {
         // 'in' is a required word under both standards, being the membership
         // operator, so only this says the set form is not standard Pascal's.
         if (!Opts.extendedPascal())
-            emitError(Current.toLoc(), diag::err_ep_extension,
-                      {"the 'for ... in' statement"});
+            emitError(Current.toLoc(), diag::err_ep_for_in);
         advance();
         auto Node    = std::make_unique<ForInStmt>();
         Node->Loc    = Loc;
@@ -283,8 +282,7 @@ std::unique_ptr<CaseStmt> Parser::parseCaseStmt() {
         // there, so it is 'else' that would otherwise slip through.
         if (check(TokenKind::Else) || check(TokenKind::Otherwise)) {
             if (!Opts.extendedPascal())
-                emitError(Current.toLoc(), diag::err_ep_extension,
-                          {"an 'otherwise' part of a case-statement"});
+                emitError(Current.toLoc(), diag::err_ep_case_otherwise);
             advance();
             Node->HasElse = true;
             Node->Else    = parseStatement();
@@ -301,8 +299,7 @@ std::unique_ptr<CaseStmt> Parser::parseCaseStmt() {
             // is one constant, and every value has to be written out.
             if (check(TokenKind::DotDot)) {
                 if (!Opts.extendedPascal())
-                    emitError(Current.toLoc(), diag::err_ep_extension,
-                              {"a range as a case-constant"});
+                    emitError(Current.toLoc(), diag::err_ep_case_range);
                 advance();
                 Lbl.High = parseFactor();
             }

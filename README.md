@@ -83,7 +83,7 @@ encountered.
 | Document | Contents |
 |----------|----------|
 | [`docs/technical_info.md`](docs/technical_info.md) | How the compiler is put together, its diagnostics and warnings, and the test suite |
-| [`docs/conformance.md`](docs/conformance.md) | The ISO 7185 clause 5.1 documentation: implementation-defined and implementation-dependent behaviour, and which of the standard's errors are reported |
+| [`docs/conformance.md`](docs/conformance.md) | The ISO 7185 clause 5.1 documentation: implementation-defined and implementation-dependent behavior, and which of the standard's errors are reported |
 | [`docs/modules.md`](docs/modules.md) | Extended Pascal modules and separate compilation |
 
 
