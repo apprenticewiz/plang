@@ -56,6 +56,10 @@ OPTION("-frange-checks",    "-frange-checks",    Flag, Both,
        "Emit array-index and subrange bounds checks (the default)")
 OPTION("-fno-range-checks", "-fno-range-checks", Flag, Both,
        "Omit array-index and subrange bounds checks")
+OPTION("-fnil-checks",    "-fnil-checks",    Flag, Both,
+       "Emit the check that a dereferenced pointer is not nil (the default)")
+OPTION("-fno-nil-checks", "-fno-nil-checks", Flag, Both,
+       "Omit the nil-dereference check")
 
 //===----------------------------------------------------------------------===//
 // Language

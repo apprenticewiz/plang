@@ -433,6 +433,7 @@ void Sema::checkCallStmt(const CallStmt& S) {
         return;
     }
     if (Sym->Kind == SymbolKind::Builtin) {
+        S.ResolvedBuiltin = true;
         std::string Lo = toLower(S.Name);
 
         // ISO §6.8.2.3: a procedure-statement names a procedure.  A required

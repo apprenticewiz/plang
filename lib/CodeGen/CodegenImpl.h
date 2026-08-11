@@ -2,10 +2,12 @@
 // NOT installed; used only by the CodeGen translation units.
 #pragma once
 
+#include "plang/Basic/PascalFileLayout.h"
 #include "plang/CodeGen/Codegen.h"
 #include "plang/Sema/Type.h"
 
 #include <algorithm>
+#include <cstddef>
 #include <bit>
 #include <cfloat>
 #include <climits>
@@ -69,6 +71,43 @@ llvm::Constant* evalConst(
 [[noreturn]] inline void codegenICE(const llvm::Twine& What) {
     llvm::report_fatal_error(llvm::Twine("plang codegen: ") + What, false);
 }
+
+// ---------------------------------------------------------------------------
+// Name mangling
+//
+// Every symbol a compiled program defines for something the *source* named — a
+// procedure, a function, a variable — is built from one of these prefixes.  The
+// runtime's own ~150 entry points are the other half of the same link, and they
+// are spelled `plang_*`.
+//
+// So user code may not be spelled `plang_*` too, which it was until 0.1.3: a
+// procedure the program called `close`, `round`, `page` or `halt` — thirty-three
+// names collided, twenty-four of them required identifiers ISO §6.2.2.10
+// entitles a program to redeclare — was emitted as `plang_close`, the same
+// symbol the runtime defines.  Whether that was caught depended on whether the
+// runtime translation unit holding the twin happened to be pulled out of the
+// archive for some other reason, so it was a duplicate-symbol error in some
+// programs and silence in others.
+//
+// `pas_` and `pasg_` cannot collide with the runtime whatever the program
+// declares, since nothing in the runtime begins with either.
+//
+// An enclosing scope — a module, or a procedure a procedure is nested in — is
+// joined on with `$`.  Extended Pascal §6.1.3 allows an underscore inside an
+// identifier, so the `__` that used to join them was itself something a name
+// could contain, and a module `a` exporting `b` and a top-level `a__b` both
+// wanted the same symbol.  `$` is not in the Pascal alphabet, so a mangled name
+// now separates into its parts exactly one way.  It is accepted unquoted in an
+// LLVM identifier, and in an ELF and a Mach-O symbol.
+// ---------------------------------------------------------------------------
+
+/// Prefix for a procedure or function the source declares.
+inline constexpr const char* PlangProcPrefix   = "pas_";
+/// Prefix for a variable the source declares at file or module scope.
+inline constexpr const char* PlangGlobalPrefix = "pasg_";
+/// Joins an enclosing scope to what it declares.  Must be something no Pascal
+/// identifier can contain, or a mangled name is ambiguous; see above.
+inline constexpr const char* PlangScopeSep     = "$";
 
 // ---------------------------------------------------------------------------
 // Impl — contains all LLVM objects
@@ -168,8 +207,8 @@ struct Codegen::Impl {
     llvm::AllocaInst*   curRetAlloca{nullptr}; // alloca for function result
     llvm::Type*         curRetType{nullptr};    // return type (null for procedures)
     std::string         curFuncName;            // for result-variable detection
-    std::string         namePrefix{"plang_"};   // mangling prefix
-    std::string         globalPrefix{"g_"};     // mangling prefix for globals
+    std::string         namePrefix{PlangProcPrefix};   // mangling prefix
+    std::string         globalPrefix{PlangGlobalPrefix}; // ditto, for globals
 
     /// EP §6.11: a module is an outer naming scope, so what it declares is
     /// mangled with its name the way a nested procedure is mangled with its
@@ -177,7 +216,7 @@ struct Codegen::Impl {
     /// the symbol `plang_f`, and the second definition is renamed to
     /// `plang_f.1` and never called.
     static std::string moduleScope(const std::string& moduleName) {
-        return moduleName.empty() ? "" : toLower(moduleName) + "__";
+        return moduleName.empty() ? "" : toLower(moduleName) + PlangScopeSep;
     }
 
     /// Name of the unit being emitted: a lowercased module name, or empty for
@@ -462,6 +501,9 @@ struct Codegen::Impl {
     /// Mirrors LangOptions::RangeChecks; see emitRangeCheck.
     bool rangeChecks = true;
 
+    /// Mirrors LangOptions::NilChecks; see emitNilCheck.
+    bool nilChecks = true;
+
     /// Mirrors LangOptions::OptLevel; see optimize.
     unsigned optLevel = 0;
 
@@ -615,15 +657,50 @@ struct Codegen::Impl {
                                   std::vector<llvm::Type*> params);
 
     // ---- file-variable helpers ----
-    /// Returns the LLVM struct type matching the runtime's PascalFile
-    /// { FILE* Fp, void* Comp, int64 CompSize, int Buf, int8 Binding,
-    ///   int8 Readable, int8 CompLoaded }.  sizeof = 32 bytes on LP64; the
-    ///   runtime asserts the same size.
+    /// The LLVM type of a file variable: storage laid out to match the
+    /// runtime's PascalFile, which is declared once in
+    /// plang/Basic/PascalFileLayout.h and read by both sides.
+    ///
+    /// Building it from a list is only half the job — the list has to be the
+    /// same one the runtime compiled.  So every field's offset, and the whole
+    /// size, are checked against that struct here, the first time the type is
+    /// wanted.  A field added, widened or reordered on either side alone stops
+    /// the compiler rather than leaving generated code reading a field at an
+    /// offset nothing wrote it to.
     llvm::StructType* fileStructType() {
         static llvm::StructType* FST = nullptr;
-        if (!FST)
-            FST = llvm::StructType::get(
-                ctx, {ptrTy, ptrTy, i64Ty, i32Ty, i8Ty, i8Ty, i8Ty});
+        if (FST) return FST;
+
+        FST = llvm::StructType::get(
+            ctx, {
+#define PLANG_FILE_FIELD_TYPE(Member, LLVMTy) LLVMTy,
+                PLANG_FILE_FIELDS(PLANG_FILE_FIELD_TYPE)
+#undef PLANG_FILE_FIELD_TYPE
+            });
+
+        const auto& dl     = mod->getDataLayout();
+        const auto* layout = dl.getStructLayout(FST);
+        if (FST->getNumElements() != PlangFileFieldCount)
+            codegenICE("the file record has " + std::to_string(PlangFileFieldCount)
+                       + " fields and codegen built "
+                       + std::to_string(FST->getNumElements()));
+        if (dl.getTypeAllocSize(FST) != sizeof(PascalFile))
+            codegenICE("a file variable takes "
+                       + std::to_string(dl.getTypeAllocSize(FST).getFixedValue())
+                       + " bytes as codegen lays it out and "
+                       + std::to_string(sizeof(PascalFile))
+                       + " as the runtime declares it");
+        unsigned idx = 0;
+#define PLANG_FILE_FIELD_OFFSET(Member, LLVMTy)                                \
+        if (layout->getElementOffset(idx) != offsetof(PascalFile, Member))     \
+            codegenICE("the file record's '" #Member "' is at offset "         \
+                       + std::to_string(layout->getElementOffset(idx))         \
+                       + " as codegen lays it out and "                        \
+                       + std::to_string(offsetof(PascalFile, Member))          \
+                       + " as the runtime declares it");                       \
+        ++idx;
+        PLANG_FILE_FIELDS(PLANG_FILE_FIELD_OFFSET)
+#undef PLANG_FILE_FIELD_OFFSET
         return FST;
     }
 
@@ -826,21 +903,25 @@ struct Codegen::Impl {
     }
 
     std::string findMangledProc(const std::string& qualifiedName) const {
-        const std::string name = stripQualifier(qualifiedName);
+        const std::string      name = stripQualifier(qualifiedName);
+        const std::size_t      root = std::string_view(PlangProcPrefix).size();
+        const std::string_view sep(PlangScopeSep);
         std::string prefix = namePrefix;
         while (true) {
             std::string candidate = prefix + name;
             if (mod->getFunction(candidate)) return candidate;
-            // Strip the innermost nesting level: "plang_outer__" → "plang_"
-            if (prefix.size() <= 6) break; // "plang_" minimum
-            auto pos = prefix.rfind("__", prefix.size() - 3);
-            if (pos == std::string::npos || pos < 5) break;
-            prefix = prefix.substr(0, pos + 2);
+            // Strip the innermost enclosing scope: "pas_outer$inner$" →
+            // "pas_outer$".  prefix ends with the separator, so the search
+            // starts before it, at the last character of the scope name.
+            if (prefix.size() <= root) break; // the bare prefix is the last try
+            auto pos = prefix.rfind(sep, prefix.size() - sep.size() - 1);
+            if (pos == std::string::npos || pos + sep.size() < root) break;
+            prefix = prefix.substr(0, pos + sep.size());
         }
         // Nothing of that name is in scope here, so it is imported.  The walk
         // above runs first so a procedure this unit declares itself still wins
         // over one of the same name that it imports.
-        return "plang_" + moduleScope(importOwner(qualifiedName))
+        return PlangProcPrefix + moduleScope(importOwner(qualifiedName))
              + importLinkName(qualifiedName);
     }
 
@@ -850,7 +931,7 @@ struct Codegen::Impl {
         const std::string name = stripQualifier(qualifiedName);
         if (mod->getGlobalVariable(globalPrefix + name))
             return globalPrefix + name;
-        return "g_" + moduleScope(importOwner(qualifiedName))
+        return PlangGlobalPrefix + moduleScope(importOwner(qualifiedName))
              + importLinkName(qualifiedName);
     }
 
@@ -1038,6 +1119,10 @@ struct Codegen::Impl {
     void emitCase(const CaseStmt& s);
     void emitWith(const WithStmt& s);
     void emitCallStmt(const CallStmt& s);
+    /// The tail of emitCallStmt: a call to a procedure the program declared,
+    /// reached either by falling past the required ones or, when the name is
+    /// one of theirs, directly.  See CallStmt::ResolvedBuiltin.
+    void emitUserProcCall(const CallStmt& s);
 
     // ====================================================================
     // Built-in write / writeln / read
@@ -1093,6 +1178,9 @@ struct Codegen::Impl {
     llvm::Value* emitBinary(const BinaryExpr& e);
     llvm::Value* emitUnary(const UnaryExpr& e);
     llvm::Value* emitCallExpr(const CallExpr& e);
+    /// The tail of emitCallExpr: a functional parameter, or a call to a
+    /// function the program declared.  See CallExpr::ResolvedBuiltin.
+    llvm::Value* emitUserFuncCall(const CallExpr& e);
     llvm::Value* emitIndexGEP(const IndexExpr& e);
     llvm::Value* emitIndexLoad(const IndexExpr& e);
     llvm::StructType* resolveRecordStructType(const FieldExpr& e);

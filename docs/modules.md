@@ -395,10 +395,24 @@ resulting `ProgramNode` carries the module definitions in its `OwnedModules` /
 1. Module globals and procedures are emitted into the same LLVM module as the
    program. A module is an outer naming scope in the same sense a procedure is,
    so what it declares is mangled with its lowercased name the way a nested
-   procedure is mangled with its enclosing one: `plang_<module>__<proc>` and
-   `g_<module>__<var>`, and a procedure nested inside one of those becomes
-   `plang_<module>__<proc>__<inner>`. Two modules may each export an `f`, and
-   without this both want the symbol `plang_f`.
+   procedure is mangled with its enclosing one: `pas_<module>$<proc>` and
+   `pasg_<module>$<var>`, and a procedure nested inside one of those becomes
+   `pas_<module>$<proc>$<inner>`. Two modules may each export an `f`, and
+   without this both want the symbol `pas_f`.
+
+   `pas_` and `pasg_` are what everything the *source* names is built from, and
+   they are not what the runtime's own entry points use, which is `plang_`.
+   Until 0.1.3 both halves of the link shared `plang_`, so a program declaring
+   its own `close`, `round`, `page` or `halt` — thirty-three names collided,
+   twenty-four of them required identifiers ISO §6.2.2.10 entitles a program to
+   redeclare — asked the linker for a symbol the runtime had already defined.
+
+   The `$` joining a scope to what it declares is there because no Pascal
+   identifier can contain one, so a mangled name separates into its parts
+   exactly one way. Joined with `__`, as it was before 0.1.3, it did not: §6.1.3
+   allows an underscore inside an identifier, so a module `a` exporting `b` and
+   a top-level `a__b` were both `pas_a__b`, and every call reached whichever
+   was emitted first.
 
    Each body is also emitted in its own codegen scope, so an unqualified name
    in the program reaches an imported declaration through the import clauses
@@ -427,7 +441,7 @@ resulting `ProgramNode` carries the module definitions in its `OwnedModules` /
 For **separately compiled modules** (imported via `.pmi`), the program does not
 see the module's body in the current compilation unit. References to imported
 procedures and variables are emitted as external LLVM declarations
-(`declare`/`@g_<module>__<name> = external global`), under the same mangling the
+(`declare`/`@pasg_<module>__<name> = external global`), under the same mangling the
 module's own object file used. The linker resolves them against that `.o`.
 
 ### PMI file format

@@ -653,6 +653,7 @@ std::shared_ptr<Type> Sema::checkCallExpr(const CallExpr& E) {
         return TyErr;
     }
     if (Sym->Kind == SymbolKind::Builtin) {
+        E.ResolvedBuiltin = true;
         std::string Lo = toLower(E.Name);
         if (!checkEPOnly(*Sym, E.Loc)) {
             for (const auto& Arg : E.Args) (void)checkExpr(*Arg);

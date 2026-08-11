@@ -27,6 +27,8 @@
 
 #include "plang_real.h"
 
+#include "plang/Basic/PascalFileLayout.h"
+
 #include <cinttypes>
 #include <cstdint>
 #include <cstdio>
@@ -35,38 +37,11 @@
 
 namespace plang {
 
-namespace {
-constexpr int PlangFileUninit = -2;
-} // namespace
-
-/// What Fp is attached to.  Determines what a rewrite/reset with no file name
-/// means: rebinding a standard stream would be wrong, but an internal file
-/// must get fresh temporary storage rather than the terminal.
-enum PlangBinding : int8_t {
-    PlangBindNone = 0, ///< closed, or opened from an explicit file name
-    PlangBindTemp = 1, ///< tmpfile(): an ISO "internal" file
-    PlangBindStd  = 2, ///< stdin/stdout via a program file-parameter
-};
-
-struct PascalFile {
-    std::FILE *Fp       = nullptr;
-    /// ISO §6.5.5: storage for the buffer variable f^, allocated on first use
-    /// because only the generated code knows how wide a component is.
-    void      *Comp     = nullptr;
-    int64_t    CompSize = 0;
-    int        Buf      = PlangFileUninit;
-    int8_t     Binding  = PlangBindNone;
-    /// Whether the stream may be read, so that filling f^ by peeking is only
-    /// attempted where peeking can work.
-    int8_t     Readable = 0;
-    /// Whether Comp holds the component at the current position.  Cleared
-    /// wherever the position moves, so the next access reads it afresh.
-    int8_t     CompLoaded = 0;
-};
-
-/// Codegen hard-codes this layout as { ptr, ptr, i64, i32, i8, i8, i8 };
-/// see fileStructType().
-static_assert(sizeof(PascalFile) == 32, "PascalFile layout must match codegen");
+// PascalFile, PlangBinding and PlangFileUninit are declared in
+// plang/Basic/PascalFileLayout.h, which codegen reads as well: fileStructType()
+// checks the LLVM type it builds against that struct field by field, so the two
+// encodings of one layout can no longer drift apart.  A `sizeof` assert used to
+// stand here, and could not see the codegen side at all.
 
 extern "C" {
 

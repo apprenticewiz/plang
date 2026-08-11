@@ -635,6 +635,7 @@ int frontendPC1Main(int Argc, char *Argv[]) {
     bool                     SuppressWarnings = false;
     bool                     WarningsAsErrors = false;
     bool                     RangeChecks      = true;
+    bool                     NilChecks        = true;
     unsigned                 OptLevel         = 0;
     bool                     Debug            = false;
     bool                     DumpAst          = false;
@@ -682,6 +683,10 @@ int frontendPC1Main(int Argc, char *Argv[]) {
             RangeChecks = true;
         } else if (Arg == "-fno-range-checks") {
             RangeChecks = false;
+        } else if (Arg == "-fnil-checks") {
+            NilChecks = true;
+        } else if (Arg == "-fno-nil-checks") {
+            NilChecks = false;
         } else if (Arg == "-fcolor-diagnostics" || Arg == "-fno-color-diagnostics") {
             Color = colorDiagnosticsArg(Arg);
         } else if (Arg.size() == 3 && Arg.starts_with("-O")
@@ -750,6 +755,7 @@ int frontendPC1Main(int Argc, char *Argv[]) {
     if      (Std == "iso10206") Opts.Std = LangOptions::Standard::ISO10206;
     else                        Opts.Std = LangOptions::Standard::ISO7185;
     Opts.RangeChecks       = RangeChecks;
+    Opts.NilChecks         = NilChecks;
     Opts.OptLevel          = OptLevel;
     Opts.ModuleSearchPaths = std::move(ModuleSearchPaths);
 

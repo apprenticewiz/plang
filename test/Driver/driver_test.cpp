@@ -2177,6 +2177,181 @@ TEST(RuntimeChecks, DivisionByZeroCheckedEvenWithoutRangeChecks) {
     EXPECT_NE(R.Stderr.find("div by zero"), std::string::npos) << R.Stderr;
 }
 
+TEST(RuntimeChecks, NilDerefReports) {
+    auto R = compileAndRun(
+        "program p;\n"
+        "type pi = ^integer;\n"
+        "var q: pi;\n"
+        "begin q := nil; writeln(q^) end.\n");
+    EXPECT_EQ(R.ExitCode, 70);
+    EXPECT_NE(R.Stderr.find("dereference of nil"), std::string::npos) << R.Stderr;
+}
+
+// The nil check had been grouped with the bounds checks, so asking for the
+// bounds tests to be left out of a release build silently took this with it
+// and a nil dereference became a signal with no line number.  Turning off the
+// checks on indexing says nothing about wanting that.
+TEST(RuntimeChecks, NilDerefCheckedEvenWithoutRangeChecks) {
+    auto R = compileAndRun(
+        "program p;\n"
+        "type pi = ^integer;\n"
+        "var q: pi;\n"
+        "begin q := nil; writeln(q^) end.\n",
+        "-fno-range-checks");
+    EXPECT_EQ(R.ExitCode, 70);
+    EXPECT_NE(R.Stderr.find("dereference of nil"), std::string::npos) << R.Stderr;
+}
+
+TEST(RuntimeChecks, NoNilChecksFlagOmitsIt) {
+    // Without the check the dereference reaches the hardware, so this is a
+    // signal rather than a diagnostic — which is what the flag asks for.
+    auto R = compileAndRun(
+        "program p;\n"
+        "type pi = ^integer;\n"
+        "var q: pi;\n"
+        "begin q := nil; writeln(q^) end.\n",
+        "-fno-nil-checks");
+    EXPECT_NE(R.ExitCode, 70);
+    EXPECT_EQ(R.Stderr.find("dereference of nil"), std::string::npos) << R.Stderr;
+}
+
+TEST(RuntimeChecks, NoRangeChecksLeavesBoundsOutButKeepsNil) {
+    // Both flags in one compilation: the bounds test is gone, the nil test
+    // stays.  Written together because the two were one flag until 0.1.2.
+    auto R = compileAndRun(
+        "program p;\n"
+        "type pi = ^integer;\n"
+        "var a: array[1..5] of integer; i: integer; q: pi;\n"
+        "begin\n"
+        "  i := 9; a[i] := 1; writeln('past the bound');\n"
+        "  q := nil; writeln(q^)\n"
+        "end.\n",
+        "-fno-range-checks");
+    EXPECT_EQ(R.ExitCode, 70);
+    EXPECT_NE(R.Stdout.find("past the bound"), std::string::npos) << R.Stdout;
+    EXPECT_NE(R.Stderr.find("dereference of nil"), std::string::npos) << R.Stderr;
+}
+
+// ---------------------------------------------------------------------------
+// ISO §6.2.2.10 — a required identifier may be redeclared
+//
+// Codegen used to dispatch these on the spelling of the name alone, before
+// anything had asked which declaration the name denoted here, so the required
+// procedure or function won wherever the two were spelled alike: the program's
+// own body was compiled and never called.
+// ---------------------------------------------------------------------------
+
+TEST(RedeclaredRequired, UserFunctionWins) {
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "function abs(x: integer): integer;\n"
+        "begin abs := 999 end;\n"
+        "begin writeln(abs(-3)) end.\n");
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "999\n");
+}
+
+TEST(RedeclaredRequired, RequiredFunctionStillReachedWhenNotRedeclared) {
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "begin writeln(abs(-3)); writeln(round(2.6)); writeln(trunc(2.6)) end.\n");
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "3\n3\n2\n");
+}
+
+TEST(RedeclaredRequired, UserFunctionWinsInsideItsScopeOnly) {
+    // The inner abs is the program's; the one called before it is declared, in
+    // a procedure of its own, is still the required one.  Which declaration a
+    // name denotes is a question about where the call is written, and dispatch
+    // on spelling could not ask it.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "procedure outer;\n"
+        "begin writeln(abs(-7)) end;\n"
+        "procedure inner;\n"
+        "  function abs(x: integer): integer;\n"
+        "  begin abs := 999 end;\n"
+        "begin writeln(abs(-7)) end;\n"
+        "begin outer; inner end.\n");
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "7\n999\n");
+}
+
+TEST(RedeclaredRequired, UserProcedureWins) {
+    // A required procedure taking different arguments used to be reached with
+    // none of them, which the IR verifier caught as a null operand.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "procedure pack(n: integer);\n"
+        "begin writeln('mine ', n:1) end;\n"
+        "begin pack(7) end.\n");
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "mine 7\n");
+}
+
+// A routine the program declares used to be mangled `plang_<name>`, the
+// namespace the runtime's own entry points live in, so `page` here collided
+// with the runtime's `plang_page` and the link failed.  User code is mangled
+// `pas_` now; see the mangling note in CodegenImpl.h.
+TEST(RedeclaredRequired, UserProcedureWinsOverRuntimeSymbolName) {
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "procedure page(n: integer);\n"
+        "begin writeln('mine ', n:1) end;\n"
+        "begin page(7) end.\n");
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "mine 7\n");
+}
+
+// Every runtime entry point a program is at all likely to name for itself, in
+// one program, so that the mangling namespaces cannot quietly grow back into
+// each other.  Each of these was a duplicate-symbol error before 0.1.3 in some
+// program or other — which one depended on what else the program used, since
+// the twin only reaches the link when its translation unit is pulled out of
+// the archive for another reason.
+TEST(RedeclaredRequired, UserRoutinesMayBeNamedAfterRuntimeSymbols) {
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "procedure close;   begin write('a') end;\n"
+        "procedure reset;   begin write('b') end;\n"
+        "procedure rewrite; begin write('c') end;\n"
+        "procedure halt;    begin write('d') end;\n"
+        "procedure page;    begin write('e') end;\n"
+        "function  round: integer;  begin round := 1 end;\n"
+        "function  trunc: integer;  begin trunc := 2 end;\n"
+        "function  sqrt: integer;   begin sqrt  := 3 end;\n"
+        "function  sin: integer;    begin sin   := 4 end;\n"
+        "function  ln: integer;     begin ln    := 5 end;\n"
+        "begin\n"
+        "  close; reset; rewrite; halt; page;\n"
+        "  writeln(round:1, trunc:1, sqrt:1, sin:1, ln:1)\n"
+        "end.\n");
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "abcde12345\n");
+}
+
+// A global is mangled from its own prefix, and had the same problem.
+TEST(RedeclaredRequired, UserGlobalsMayBeNamedAfterRuntimeSymbols) {
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "var date, time, position, binding: integer;\n"
+        "begin\n"
+        "  date := 1; time := 2; position := 3; binding := 4;\n"
+        "  writeln(date + time + position + binding)\n"
+        "end.\n");
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "10\n");
+}
+
+TEST(RedeclaredRequired, UserVariableNamedAfterRequiredFunction) {
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "var odd: integer;\n"
+        "begin odd := 42; writeln(odd) end.\n");
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "42\n");
+}
+
 // ---------------------------------------------------------------------------
 // EP Tier 9 — Complex Number Type (§6.4.2.2 / §6.7.6.2–3 / §6.8.3.2)
 // ---------------------------------------------------------------------------
@@ -6477,7 +6652,7 @@ TEST(ProcParams, TheCallGoesThroughAPointerAndCarriesAFrame) {
     ASSERT_TRUE(R.Ok) << R.Stderr;
     // ap takes the pair, and addbase is wrapped so that a target needing no
     // frame would still fit the same signature.
-    EXPECT_TRUE(irContainsAll(R.IR, {"define i64 @plang_ap(ptr", "asparam"}))
+    EXPECT_TRUE(irContainsAll(R.IR, {"define i64 @pas_ap(ptr", "asparam"}))
         << R.IR;
 }
 
@@ -8295,6 +8470,30 @@ TEST(ModuleMangling, AModulesOwnDeclarationBeatsOneItImports) {
         "begin B.show; writeln(B.f) end.\n", kEP);
     ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
     EXPECT_EQ(R.Stdout, "102\n102\n");
+}
+
+// An enclosing scope is joined to what it declares with `$`, which no Pascal
+// identifier can contain.  Joined with `__`, as it was before 0.1.3, a mangled
+// name did not separate into its parts one way: EP §6.1.3 allows an underscore
+// inside an identifier, so module `a`'s `b` and a top-level `a__b` were both
+// `pas_a__b`.  Nothing reported it — the second definition was renamed by LLVM
+// and every call went to the first, so this printed 1 twice.
+TEST(ModuleMangling, AnUnderscoreInANameIsNotAScopeSeparator) {
+    auto R = compileAndRun(
+        "module a; function b: integer; begin b := 1 end; end.\n"
+        "program p(output); import a;\n"
+        "  function a__b: integer; begin a__b := 2 end;\n"
+        "begin writeln(b); writeln(a__b) end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "1\n2\n");
+}
+
+TEST(ModuleMangling, TheScopeSeparatorReachesTheObjectFile) {
+    auto R = compileAndEmitIR(
+        "module a; function b: integer; begin b := 1 end; end.\n"
+        "program p(output); import a;\n"
+        "begin writeln(b) end.\n", kEP);
+    EXPECT_TRUE(irContainsAll(R.IR, {"@\"pas_a$b\""})) << R.IR;
 }
 
 // .pmi files are written next to the source, and these tests share /tmp, so a

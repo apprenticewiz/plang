@@ -628,6 +628,16 @@ llvm::Value* Codegen::Impl::emitUnary(const UnaryExpr& e) {
 llvm::Value* Codegen::Impl::emitCallExpr(const CallExpr& e) {
     std::string lo = toLower(e.Name);
 
+    // ISO §6.2.2.10: a required function identifier may be redeclared, and
+    // then it denotes what the program declared and not the required one.  The
+    // chain below dispatches on spelling alone, so without this a program that
+    // declares its own `abs` calls the required one and never reaches the
+    // declared body.  Sema resolved the name in the scope it was written in
+    // and is the only thing that knows which won.  This also settles a
+    // functional parameter named after a required function, which the check at
+    // the head of emitUserFuncCall would otherwise not be reached to make.
+    if (!e.ResolvedBuiltin) return emitUserFuncCall(e);
+
     // ---- Math built-ins routed through plang_math.c ----
     if (lo == "sqrt" || lo == "sin" || lo == "cos" || lo == "exp"
         || lo == "ln"  || lo == "arctan") {
@@ -902,6 +912,10 @@ llvm::Value* Codegen::Impl::emitCallExpr(const CallExpr& e) {
         }
     }
 
+    return emitUserFuncCall(e);
+}
+
+llvm::Value* Codegen::Impl::emitUserFuncCall(const CallExpr& e) {
     // ISO §6.6.3.1: a functional parameter is called through the pair it
     // arrived as, so there is no name to resolve.
     if (auto* pve = findVar(e.Name); pve && pve->isProcParam)

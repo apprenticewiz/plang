@@ -180,6 +180,7 @@ void Codegen::Impl::optimize() {
 
 Codegen::Codegen(const LangOptions& Opts) : PascalImpl(std::make_unique<Impl>()) {
     PascalImpl->rangeChecks = Opts.RangeChecks;
+    PascalImpl->nilChecks   = Opts.NilChecks;
     PascalImpl->optLevel    = Opts.OptLevel;
 }
 Codegen::~Codegen() = default;
@@ -213,8 +214,8 @@ bool Codegen::emit(const ProgramNode& prog, std::ostream& os) {
         const std::string Unit = toLower(Mod->Name);
         PascalImpl->pushScope();
         PascalImpl->currentUnit_  = Unit;
-        PascalImpl->namePrefix    = "plang_" + Unit + "__";
-        PascalImpl->globalPrefix  = "g_" + Unit + "__";
+        PascalImpl->namePrefix    = PlangProcPrefix   + Unit + PlangScopeSep;
+        PascalImpl->globalPrefix  = PlangGlobalPrefix + Unit + PlangScopeSep;
         PascalImpl->moduleIfaceBlock_ = nullptr;
         if (Mod->Body) {
             PascalImpl->emitGlobals(*Mod->Body);
@@ -241,8 +242,8 @@ bool Codegen::emit(const ProgramNode& prog, std::ostream& os) {
         PascalImpl->popScope();
     }
     PascalImpl->currentUnit_.clear();
-    PascalImpl->namePrefix   = "plang_";
-    PascalImpl->globalPrefix = "g_";
+    PascalImpl->namePrefix   = PlangProcPrefix;
+    PascalImpl->globalPrefix = PlangGlobalPrefix;
 
     // A module compiled on its own is reached only through the program's import
     // clauses, and its initialiser has to be called from here or never at all.
@@ -271,11 +272,11 @@ bool Codegen::emit(const ProgramNode& prog, std::ostream& os) {
     // reads a pointer and a bound.
     for (const auto* Iface : PascalImpl->loadedInterfaces_) {
         if (!Iface->Body) continue;
-        PascalImpl->namePrefix = "plang_" + toLower(Iface->Name) + "__";
+        PascalImpl->namePrefix = PlangProcPrefix + toLower(Iface->Name) + PlangScopeSep;
         for (const auto& Proc : Iface->Body->Procs)
             PascalImpl->emitFunctionDef(*Proc, /*declareOnly=*/true);
     }
-    PascalImpl->namePrefix = "plang_";
+    PascalImpl->namePrefix = PlangProcPrefix;
 
     PascalImpl->emitFileParams(prog.FileParams);
     PascalImpl->emitGlobals(*prog.Block);
