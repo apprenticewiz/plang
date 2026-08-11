@@ -6,7 +6,18 @@ version numbers follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 
 ---
 
-## [Unreleased]
+## [0.1.3] - 2026-08-11
+
+Four bug fixes, all in code generation, and none of them new: every one was
+present in 0.1.0.  A program may now declare its own `abs` or `close` and have
+its own called, a nil dereference is still reported when the bounds checks are
+turned off, and the file record can no longer be changed on one side of the
+compiler without the other.
+
+The symbols a compiled program defines have been renamed, so this is not
+binary compatible with 0.1.2: recompile, rather than relink, anything built
+with `-c` under an earlier version.  Nothing about the language plang accepts
+has changed.
 
 ### Changed
 
@@ -229,6 +240,7 @@ Initial release.  Full support for ISO 7185 Standard Pascal at Level 1 and
 ISO 10206 Extended Pascal.  Support for other Pascal dialects and extensions
 planned for future releases.
 
+[0.1.3]: https://github.com/apprenticewiz/plang/releases/tag/v0.1.3
 [0.1.2]: https://github.com/apprenticewiz/plang/releases/tag/v0.1.2
 [0.1.1]: https://github.com/apprenticewiz/plang/releases/tag/v0.1.1
 [0.1.0]: https://github.com/apprenticewiz/plang/releases/tag/v0.1.0
