@@ -36,7 +36,7 @@ public:
 
 private:
     struct Impl;
-    std::unique_ptr<Impl> PascalImpl;
+    std::unique_ptr<Impl> PImpl;
 };
 
 } // namespace plang
