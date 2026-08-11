@@ -1,5 +1,41 @@
 cmake_minimum_required(VERSION 3.16)
-project(plang C CXX)
+
+# ---- Version ----------------------------------------------------------------
+#
+# The version is written here and nowhere else.  It used to be written in four
+# places by hand — this file's library VERSION, Version.h, the man page header
+# and the changelog — and cutting 0.1.2 updated two of them, so that release
+# shipped a compiler calling itself 0.1.2, a shared library built as 0.1.1 and a
+# man page whose header agreed with the library.
+#
+# CMake will not accept a pre-release suffix in a project version, and a shared
+# library named libplang-frontend.so.0.2.0-pre is not something anyone wants
+# either, so the two are separate: PROJECT_VERSION is the numeric one, and only
+# what a human reads carries the suffix.
+#
+# To cut a release:
+#   1. set the suffix below to ""      (a development build says 0.2.0-pre;
+#                                       the release says 0.2.0)
+#   2. set PLANG_MANPAGE_DATE to the release date
+#   3. move the changelog's [Unreleased] section under the new version
+#   4. after tagging, bump VERSION here and set the suffix back to "-pre"
+#
+project(plang VERSION 0.2.0 LANGUAGES C CXX)
+
+# Empty in a release, "-pre" between them, so that a development snapshot
+# cannot be mistaken for the release it is heading towards.  Semantic
+# Versioning §9 gives a pre-release lower precedence than the version it
+# qualifies, which is the right way round: 0.1.3 < 0.2.0-pre < 0.2.0.
+set(PLANG_VERSION_SUFFIX "-pre")
+set(PLANG_VERSION_STRING "${PROJECT_VERSION}${PLANG_VERSION_SUFFIX}")
+
+# The date in the man page header, which by convention is when the page last
+# changed rather than when it was built — a build date would make two builds of
+# the same source differ.
+set(PLANG_MANPAGE_DATE "2026-08-11")
+
+message(STATUS "plang version ${PLANG_VERSION_STRING}")
+
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS  OFF)
@@ -30,7 +66,22 @@ if(PLANG_SANITIZE)
     add_link_options(-fsanitize=${PLANG_SANITIZE} -fno-sanitize=vptr)
 endif()
 
+# Version.h is the one generated header, so the build directory joins the
+# include path — before the source one, though nothing there can shadow it now
+# that the hand-written copy is gone.
+configure_file(
+    ${CMAKE_SOURCE_DIR}/include/plang/Basic/Version.h.in
+    ${CMAKE_BINARY_DIR}/include/plang/Basic/Version.h
+    @ONLY
+)
+configure_file(
+    ${CMAKE_SOURCE_DIR}/docs/plang.1.in
+    ${CMAKE_BINARY_DIR}/docs/plang.1
+    @ONLY
+)
+
 # All plang headers live under include/; LLVM headers come from the LLVM install.
+include_directories(${CMAKE_BINARY_DIR}/include)
 include_directories(${CMAKE_SOURCE_DIR}/include)
 include_directories(${LLVM_INCLUDE_DIRS})
 add_definitions(${LLVM_DEFINITIONS})
@@ -52,14 +103,19 @@ install(TARGETS plang_runtime plang_runtime_shared
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )
-# Public headers for embedders (exclude internal AST detail headers)
+# Public headers for embedders (exclude internal AST detail headers).
+# Version.h.in is not matched, being a template rather than a header; the
+# header it generates is installed from the build directory below.
 install(DIRECTORY include/plang/
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/plang
     FILES_MATCHING PATTERN "*.h"
     PATTERN "AST/Ast*.h" EXCLUDE
 )
-# Man page
-install(FILES docs/plang.1
+install(FILES ${CMAKE_BINARY_DIR}/include/plang/Basic/Version.h
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/plang/Basic
+)
+# Man page, generated so that its header cannot disagree with the compiler
+install(FILES ${CMAKE_BINARY_DIR}/docs/plang.1
     DESTINATION ${CMAKE_INSTALL_MANDIR}/man1
 )
 
