@@ -58,9 +58,9 @@ struct CallStmt : StmtNode {
     std::string                            Name;  /// procedure name
     std::vector<std::unique_ptr<ExprNode>> Args;
 
-    /// True where Sema resolved this call to a required procedure rather than
-    /// to one the program declared.  See CallExpr::ResolvedBuiltin.
-    mutable bool ResolvedBuiltin{false};
+    /// Which required procedure Sema resolved this call to, or None where it
+    /// resolved to one the program declared.  See CallExpr::ResolvedBuiltin.
+    mutable BuiltinID ResolvedBuiltin{BuiltinID::None};
 };
 
 struct WithStmt : StmtNode {

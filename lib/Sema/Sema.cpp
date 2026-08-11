@@ -87,67 +87,59 @@ bool Sema::hasErrors() const { return Diags.hasErrors(); }
 // Built-in registration
 // ---------------------------------------------------------------------------
 
-namespace {
-// Helper to build a Builtin symbol with no arity checking.  EPOnly marks the
-// ones Extended Pascal adds, which are declared under both standards so that
-// a program compiled as ISO 7185 is told what they are.
-Symbol makeBuiltinProc(const std::string& Name, bool EPOnly = false) {
-    Symbol S;
-    S.Kind       = SymbolKind::Builtin;
-    S.Name       = Name;
-    S.IsFunction = false;
-    S.IsEPOnly   = EPOnly;
-    return S;
-}
-Symbol makeBuiltinFunc(const std::string& Name, std::shared_ptr<Type> Ret,
-                       bool EPOnly = false) {
-    Symbol S;
-    S.Kind       = SymbolKind::Builtin;
-    S.Name       = Name;
-    S.IsFunction = true;
-    S.ReturnType = std::move(Ret);
-    S.IsEPOnly   = EPOnly;
-    return S;
-}
-constexpr bool EPOnly = true;
-} // anonymous namespace
-
 void Sema::registerBuiltins() {
-    // Procedures (variadic / skip type checking)
-    for (auto Name : {"write","writeln","read","readln","new","dispose","page",
-                       "reset","rewrite","get","put","close","pack","unpack"})
-        (void)Symtab.define(makeBuiltinProc(Name));
-    // EP §6.7.5.5: halt
-    (void)Symtab.define(makeBuiltinProc("halt", EPOnly));
+    // BindingType first: `binding` is declared below with it as its result, and
+    // the loop that declares it cannot wait for a type built afterwards.
+    //
+    // EP §6.4.3.4 requires both 'name', of an implementation-defined
+    // variable-string-type, and 'bound'.  The capacity is this implementation's
+    // choice.
+    {
+        auto TyBindName = std::make_shared<Type>();
+        TyBindName->Kind        = TypeKind::VarString;
+        TyBindName->Name        = "string";
+        TyBindName->StrCapacity = PlangMaxBindingName;
 
-    // Functions with known return types
-    for (auto Name : {"sqrt","sin","cos","exp","ln","arctan"})
-        (void)Symtab.define(makeBuiltinFunc(Name, TyReal));
+        TyBindingType = std::make_shared<Type>();
+        TyBindingType->Kind = TypeKind::Record;
+        TyBindingType->Name = "BindingType";
+        TyBindingType->RecordFields = {
+            { "name",  TyBindName },
+            { "bound", TyBool     },
+        };
+    }
 
-    (void)Symtab.define(makeBuiltinFunc("trunc",  TyInt));
-    (void)Symtab.define(makeBuiltinFunc("round",  TyInt));
-    (void)Symtab.define(makeBuiltinFunc("ord",    TyInt));
-    (void)Symtab.define(makeBuiltinFunc("abs",    TyInt));  // polymorphic; TyInt is a placeholder
-    (void)Symtab.define(makeBuiltinFunc("sqr",    TyInt));  // same
-    (void)Symtab.define(makeBuiltinFunc("succ",   TyInt));
-    (void)Symtab.define(makeBuiltinFunc("pred",   TyInt));
-    (void)Symtab.define(makeBuiltinFunc("chr",    TyChar));
-    (void)Symtab.define(makeBuiltinFunc("odd",    TyBool));
-    (void)Symtab.define(makeBuiltinFunc("eof",    TyBool));
-    (void)Symtab.define(makeBuiltinFunc("eoln",   TyBool));
-    (void)Symtab.define(makeBuiltinFunc("card",   TyInt, EPOnly)); // EP §6.7.6.3
+    // One loop over Builtins.def.  Every name is declared whatever the dialect,
+    // NotInDialect records that this one is not for the dialect in force, so
+    // that using `card` under -std=iso7185 is told what it is rather than that
+    // it is undefined.  Before this, ten names worked that way and nineteen --
+    // the whole Extended Pascal block below the string functions -- did not.
+    const auto resultType = [&](BuiltinResult R) -> std::shared_ptr<Type> {
+        switch (R) {
+        case BuiltinResult::None:        return nullptr;
+        case BuiltinResult::Int:         return TyInt;
+        case BuiltinResult::Real:        return TyReal;
+        case BuiltinResult::Char:        return TyChar;
+        case BuiltinResult::Bool:        return TyBool;
+        case BuiltinResult::Str:         return TyStr;
+        case BuiltinResult::Complex:     return TyComplex;
+        case BuiltinResult::BindingType: return TyBindingType;
+        }
+        return nullptr;
+    };
 
-    // EP §6.7.6.7: string functions
-    (void)Symtab.define(makeBuiltinFunc("length", TyInt, EPOnly));
-    (void)Symtab.define(makeBuiltinFunc("index",  TyInt, EPOnly)); // index(s,pat) → integer
-    (void)Symtab.define(makeBuiltinFunc("substr", TyStr, EPOnly)); // substr(s,i[,j]) → string
-    (void)Symtab.define(makeBuiltinFunc("trim",   TyStr, EPOnly)); // trim(s) → string
-    // EP §6.7.6.7: string comparison functions
-    for (auto Name : {"EQ","NE","LT","GT","LE","GE"})
-        (void)Symtab.define(makeBuiltinFunc(Name, TyBool, EPOnly));
-    // EP §6.7.5.4: readstr / writestr
-    (void)Symtab.define(makeBuiltinProc("readstr",  EPOnly));
-    (void)Symtab.define(makeBuiltinProc("writestr", EPOnly));
+#define BUILTIN(Id_, Spelling_, Kind_, Dialects_, Min_, Max_, Result_)         \
+    {                                                                          \
+        Symbol S;                                                              \
+        S.Kind        = SymbolKind::Builtin;                                   \
+        S.Name        = Spelling_;                                             \
+        S.BuiltinKind = BuiltinID::Id_;                                        \
+        S.IsFunction  = builtinIsFunction(BuiltinID::Id_);                     \
+        S.ReturnType  = resultType(builtinResult(BuiltinID::Id_));             \
+        S.NotInDialect= !Opts.inDialect(builtinDialects(BuiltinID::Id_));      \
+        (void)Symtab.define(std::move(S));                                     \
+    }
+#include "plang/Basic/Builtins.def"
 
     // Predefined constants
     {
@@ -189,22 +181,6 @@ void Sema::registerBuiltins() {
         (void)Symtab.define(makeConst("maxreal", TyReal));
         (void)Symtab.define(makeConst("epsreal", TyReal));
 
-        // EP §6.7.6.3: complex constructors
-        (void)Symtab.define(makeBuiltinFunc("cmplx", TyComplex));
-        (void)Symtab.define(makeBuiltinFunc("polar", TyComplex));
-        // EP §6.7.6.2: component extraction (real results)
-        (void)Symtab.define(makeBuiltinFunc("re",    TyReal));
-        (void)Symtab.define(makeBuiltinFunc("im",    TyReal));
-        (void)Symtab.define(makeBuiltinFunc("arg",   TyReal));
-        // EP §6.7.5.2: direct-access file procedures
-        for (auto Name : {"extend","update","seekread","seekwrite","seekupdate"})
-            (void)Symtab.define(makeBuiltinProc(Name));
-        // EP §6.7.6.6: position / last-position functions
-        (void)Symtab.define(makeBuiltinFunc("position",     TyInt));
-        (void)Symtab.define(makeBuiltinFunc("lastposition", TyInt));
-        // EP §6.7.6.5: empty function
-        (void)Symtab.define(makeBuiltinFunc("empty",        TyBool));
-
         // EP §6.4.3.4: predefined TimeStamp record type
         {
             auto TyTS = std::make_shared<Type>();
@@ -226,27 +202,9 @@ void Sema::registerBuiltins() {
             TSym.Ty   = TyTS;
             (void)Symtab.define(std::move(TSym));
         }
-        // EP §6.7.5.8: GetTimeStamp procedure
-        (void)Symtab.define(makeBuiltinProc("gettimestamp"));
-        // EP §6.7.6.9: date/time formatting functions
-        (void)Symtab.define(makeBuiltinFunc("date", TyStr));
-        (void)Symtab.define(makeBuiltinFunc("time", TyStr));
-
-        // EP §6.4.3.4: predefined BindingType record.  Both 'name' (of an
-        // implementation-defined variable-string-type) and 'bound' are
-        // required fields; the capacity below is this implementation's choice.
-        auto TyBindName = std::make_shared<Type>();
-        TyBindName->Kind        = TypeKind::VarString;
-        TyBindName->Name        = "string";
-        TyBindName->StrCapacity = PlangMaxBindingName;
-
-        TyBindingType = std::make_shared<Type>();
-        TyBindingType->Kind = TypeKind::Record;
-        TyBindingType->Name = "BindingType";
-        TyBindingType->RecordFields = {
-            { "name",  TyBindName },
-            { "bound", TyBool     },
-        };
+        // The BindingType record itself is built at the top, because the
+        // builtin loop declares `binding` with it as a result type.  What is
+        // left here is making the name visible as a type.
         {
             Symbol BTSym;
             BTSym.Kind = SymbolKind::TypeAlias;
@@ -254,11 +212,6 @@ void Sema::registerBuiltins() {
             BTSym.Ty   = TyBindingType;
             (void)Symtab.define(std::move(BTSym));
         }
-        // EP §6.7.5.6: bind / unbind
-        (void)Symtab.define(makeBuiltinProc("bind"));
-        (void)Symtab.define(makeBuiltinProc("unbind"));
-        // EP §6.7.6.8: binding(f) → BindingType
-        (void)Symtab.define(makeBuiltinFunc("binding", TyBindingType));
     }
 }
 

@@ -98,7 +98,32 @@ version numbers follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html
   a compiler error means is worse than English — but a catalog that is entirely
   unreviewed is then inert, and this is how the person reviewing it reads it.
 
+### Fixed
+
+- **Nineteen Extended Pascal names came back as "undefined function".**
+  `cmplx`, `polar`, `re`, `im`, `arg`, the five direct-access procedures,
+  `position`, `lastposition`, `empty`, `gettimestamp`, `date`, `time`, `bind`,
+  `unbind` and `binding` were declared only inside `if (extendedPascal())`, so
+  under `-std=iso7185` a program using one was told the name was undefined --
+  which reads as a typo to go and fix rather than as a dialect boundary.  Ten
+  other names, `card` and the string functions among them, were declared under
+  either standard and said so properly.  The comment above the registration
+  already described the second behavior as the intent; the split was not
+  deliberate.  All of them now say what they are.
+
 ### Changed
+
+- **The required procedures and functions are one list.**
+  `Basic/Builtins.def` holds each name once, with the dialects that require it,
+  its arity and its result type.  Registration in `Sema.cpp` and the arity
+  table in `SemaExpr.cpp` are generated from it, and a call carries the
+  `BuiltinID` Sema resolved rather than a bare "was a builtin" flag, so what
+  the front end decided is what the back end acts on instead of matching the
+  spelling a second time.
+
+  The three lists could not see each other, which is how nineteen names ended
+  up declared one way and ten another.  Turbo Pascal adds about eighty more,
+  which is what made one list worth having before they arrive.
 
 - **Dialect gating asks what a dialect can do, not which one it is.**  A
   capability more than one dialect has is now named in

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "plang/Basic/BuiltinIDs.h"
+
 #include "plang/Basic/SourceLocation.h"
 #include "plang/Sema/Type.h"
 
@@ -117,11 +119,18 @@ struct Symbol {
     /// every variable declared with that name is bindable.
     bool IsBindable{false};
 
-    /// True for a required word of Extended Pascal that standard Pascal does
-    /// not have.  Such a name is declared under either standard so that using
-    /// it under -std=iso7185 can say what it is, rather than leaving it to
-    /// look like a name the program forgot to declare.
-    bool IsEPOnly{false};
+    /// True for a required word the active dialect does not have.  Such a name
+    /// is declared whatever the dialect, so that using it can say what it is
+    /// rather than leaving it to look like a name the program forgot to
+    /// declare.  Which dialects have which builtin is written in Builtins.def;
+    /// this is that answer for the dialect in force, decided once at
+    /// registration rather than re-derived at each use.
+    bool NotInDialect{false};
+
+    /// Which builtin this is, for a SymbolKind::Builtin; BuiltinID::None
+    /// otherwise.  Lets a resolved call be recorded as an identity rather than
+    /// re-matched on its spelling further down.
+    BuiltinID BuiltinKind{BuiltinID::None};
 
     // --- Schema symbols (EP §6.4.7) ---
     /// One declared discriminant parameter of this schema.

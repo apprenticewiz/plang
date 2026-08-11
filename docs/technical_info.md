@@ -49,6 +49,16 @@ one list in the same way, `Driver/Options.def`, read by both the driver and the
 front end so that the two cannot drift apart in what they accept or in what
 they say they accept.
 
+The required procedures and functions are one list too, `Basic/Builtins.def`:
+each name once, with the dialects that require it, its arity and its result
+type.  Sema declares them from it and checks their arity from it, and a
+resolved call carries the `BuiltinID` rather than a flag, so code generation
+acts on what Sema decided instead of matching the spelling against a list of
+its own.  This was three lists that could not see each other, and the drift it
+invites had already happened: nineteen of the Extended Pascal names were
+declared only under `-std=iso10206` and so came back as *undefined* under
+`-std=iso7185`, while ten others correctly said what they were.
+
 The AST uses LLVM's RTTI, with `classof` and `isa`/`dyn_cast` rather than a
 visitor.
 
@@ -148,6 +158,14 @@ The dialect names themselves are in `Basic/Dialects.def`, which generates the
 `Standard` enumeration, the `D_*` bits, and the validation both the driver and
 the front end do — two processes that must agree, and which previously held
 four copies of the list between them.
+
+The same `D_*` bits gate the builtins. A required procedure or function is
+declared *whatever the dialect*, and `Builtins.def` says which ones may use it;
+where the active dialect is not among them, the name resolves and is refused
+for being another dialect's. That is deliberate, and it is why `cmplx` under
+`-std=iso7185` names the dialect boundary rather than reporting an undefined
+identifier. It does not reserve the name: a program remains free to declare its
+own `date` or `cmplx`, which shadows the builtin as ISO §6.2.2.10 requires.
 
 ### Translations
 

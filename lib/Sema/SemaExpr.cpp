@@ -602,31 +602,15 @@ std::shared_ptr<Type> Sema::checkUnary(const UnaryExpr& E) {
     }
 }
 
-bool Sema::checkBuiltinArity(const std::string& LowerName, SourceLocation Loc,
-                             size_t NumArgs) {
-    // ISO §6.6.6 and EP §6.7.6 fix the shape of each required function.  Only
-    // the functions are listed: the required procedures are genuinely variadic
-    // (write) or already checked where they are lowered.  A name absent from
-    // the table is deliberately unconstrained.
-    struct Arity { int Min, Max; };  // Max == -1 means no upper bound
-    static const std::unordered_map<std::string, Arity> Table = {
-        {"abs", {1,1}},   {"sqr", {1,1}},    {"sqrt", {1,1}},  {"sin", {1,1}},
-        {"cos", {1,1}},   {"exp", {1,1}},    {"ln", {1,1}},    {"arctan", {1,1}},
-        {"trunc", {1,1}}, {"round", {1,1}},  {"ord", {1,1}},   {"chr", {1,1}},
-        {"odd", {1,1}},   {"length", {1,1}}, {"card", {1,1}},  {"trim", {1,1}},
-        {"succ", {1,2}},  {"pred", {1,2}},           // EP §6.7.6.5 adds the count
-        {"eof", {0,1}},   {"eoln", {0,1}},
-        {"index", {2,2}}, {"substr", {2,3}},
-        {"eq", {2,2}},    {"ne", {2,2}},     {"lt", {2,2}},    {"gt", {2,2}},
-        {"le", {2,2}},    {"ge", {2,2}},
-        {"cmplx", {2,2}}, {"polar", {2,2}},
-        {"re", {1,1}},    {"im", {1,1}},     {"arg", {1,1}},
-        {"position", {1,1}}, {"lastposition", {1,1}}, {"empty", {1,1}},
-        {"date", {1,1}},  {"time", {1,1}},
-    };
-    const auto It = Table.find(LowerName);
-    if (It == Table.end()) return true;
-    const auto [Min, Max] = It->second;
+bool Sema::checkBuiltinArity(BuiltinID ID, const std::string& LowerName,
+                             SourceLocation Loc, size_t NumArgs) {
+    // ISO §6.6.6 and EP §6.7.6 fix the shape of each required function, and
+    // Builtins.def is where that shape is written -- the same entry that
+    // declares the name.  A Max of -1 is deliberately unconstrained: the
+    // required procedures are genuinely variadic (write) or already checked
+    // where they are lowered.
+    if (ID == BuiltinID::None) return true;
+    const auto [Min, Max] = builtinArity(ID);
     if ((int)NumArgs >= Min && (Max < 0 || (int)NumArgs <= Max)) return true;
 
     const auto Expected = (Max < 0)   ? std::to_string(Min) + " or more"
@@ -641,7 +625,15 @@ bool Sema::checkBuiltinArity(const std::string& LowerName, SourceLocation Loc,
 }
 
 bool Sema::checkEPOnly(const Symbol& Sym, SourceLocation Loc) {
-    if (!Sym.IsEPOnly || Opts.extendedPascal()) return true;
+    // Every builtin plang has is Extended Pascal's, so the message names that
+    // standard; the first Turbo-only name is what will make it have to say
+    // which dialect, and the mask it would say it from is already recorded.
+    //
+    // The dialect test already happened, at registration, against the mask in
+    // Builtins.def.  Asking extendedPascal() again here would be a second
+    // answer to the same question, and the wrong one as soon as a third
+    // dialect declares a name the second does not.
+    if (!Sym.NotInDialect) return true;
     error(Loc, diag::err_ep_required_name, {Sym.Name});
     return false;
 }
@@ -653,13 +645,13 @@ std::shared_ptr<Type> Sema::checkCallExpr(const CallExpr& E) {
         return TyErr;
     }
     if (Sym->Kind == SymbolKind::Builtin) {
-        E.ResolvedBuiltin = true;
+        E.ResolvedBuiltin = Sym->BuiltinKind;
         std::string Lo = toLower(E.Name);
         if (!checkEPOnly(*Sym, E.Loc)) {
             for (const auto& Arg : E.Args) (void)checkExpr(*Arg);
             return TyErr;
         }
-        if (!checkBuiltinArity(Lo, E.Loc, E.Args.size())) {
+        if (!checkBuiltinArity(Sym->BuiltinKind, Lo, E.Loc, E.Args.size())) {
             for (const auto& Arg : E.Args) (void)checkExpr(*Arg);
             return TyErr;
         }

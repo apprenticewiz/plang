@@ -636,7 +636,7 @@ llvm::Value* Codegen::Impl::emitCallExpr(const CallExpr& e) {
     // and is the only thing that knows which won.  This also settles a
     // functional parameter named after a required function, which the check at
     // the head of emitUserFuncCall would otherwise not be reached to make.
-    if (!e.ResolvedBuiltin) return emitUserFuncCall(e);
+    if (e.ResolvedBuiltin == BuiltinID::None) return emitUserFuncCall(e);
 
     // ---- Math built-ins routed through plang_math.c ----
     if (lo == "sqrt" || lo == "sin" || lo == "cos" || lo == "exp"

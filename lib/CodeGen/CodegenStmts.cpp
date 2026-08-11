@@ -589,7 +589,7 @@ void Codegen::Impl::emitCallStmt(const CallStmt& s) {
     // different arguments — which it then emitted a call to with none of them.
     // Sema resolved the name in the scope it was written in and is the only
     // thing that knows which won.
-    if (!s.ResolvedBuiltin) {
+    if (s.ResolvedBuiltin == BuiltinID::None) {
         emitUserProcCall(s);
         return;
     }

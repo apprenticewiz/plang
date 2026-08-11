@@ -1,6 +1,10 @@
 #include "TestHelper.h"
 
+#include "plang/Basic/BuiltinIDs.h"
+
 #include <gtest/gtest.h>
+
+#include <string>
 
 using namespace plang;
 
@@ -1316,4 +1320,102 @@ TEST(DialectGating, UnderscoreInIdentifier) {
     EXPECT_TRUE(check(Src, epOpts()).Ok);
     EXPECT_TRUE(check(Src).hasError(
         "an underscore in an identifier is an Extended Pascal extension"));
+}
+
+// ---------------------------------------------------------------------------
+// The builtin catalogue
+//
+// Builtins.def is one list, and these check the two things folding three lists
+// into one was for: that a name is declared whatever the dialect, and that the
+// arity checked is the arity written beside the declaration.
+// ---------------------------------------------------------------------------
+
+TEST(Builtins, ANameOfAnotherDialectIsDeclaredRatherThanUndefined) {
+    // Nineteen of these -- the whole complex, direct-access, date/time and
+    // binding block -- were declared only inside `if (extendedPascal())`, so
+    // `cmplx(1.0, 2.0)` under -std=iso7185 came back as "undefined function".
+    // That reads as a typo rather than as a dialect boundary, and the ten names
+    // that were declared both ways showed what it should have said.
+    //
+    // Driven from the .def so that a name added there is covered here without
+    // anyone remembering to add it.
+    const auto probe = [](const char* Name, bool IsFunc) {
+        std::string Src = "program p(output);\nvar r: real;\nbegin ";
+        if (IsFunc) Src += "r := ";
+        Src += Name;
+        Src += "(r) end.\n";
+        return check(Src);
+    };
+    std::size_t Probed = 0;
+#define BUILTIN(Id_, Spelling_, Kind_, Dialects_, Min_, Max_, Result_)         \
+    if (!LangOptions{}.inDialect(Dialects_)) {                                 \
+        ++Probed;                                                              \
+        const auto R = probe(Spelling_, builtinIsFunction(BuiltinID::Id_));    \
+        EXPECT_TRUE(R.hasError("'" Spelling_ "' is an Extended Pascal"))       \
+            << Spelling_;                                                      \
+        EXPECT_FALSE(R.hasError("undefined")) << Spelling_;                    \
+    }
+#include "plang/Basic/Builtins.def"
+    // A loop written over a .def can pass by iterating over nothing, and this
+    // one would if the dialect masks were ever all-inclusive.
+    EXPECT_GT(Probed, 0u);
+}
+
+TEST(Builtins, ANameOfThisDialectIsNotRefusedForBeingOne) {
+    // The other half of the pair above: declaring every name whatever the
+    // dialect must not start refusing the ones that belong to the dialect in
+    // force.  A wrong dialect mask in the .def would fail exactly here.
+    std::size_t Probed = 0;
+#define BUILTIN(Id_, Spelling_, Kind_, Dialects_, Min_, Max_, Result_)         \
+    if (LangOptions{}.inDialect(Dialects_)) {                                  \
+        ++Probed;                                                              \
+        std::string Src = "program p(output);\nvar r: real;\nbegin ";          \
+        if (builtinIsFunction(BuiltinID::Id_)) Src += "r := ";                 \
+        Src += Spelling_;                                                      \
+        Src += "(r) end.\n";                                                   \
+        EXPECT_FALSE(check(Src).hasError("is an Extended Pascal"))             \
+            << Spelling_;                                                      \
+    }
+#include "plang/Basic/Builtins.def"
+    // Every builtin is in exactly one of the two halves, so the two counts
+    // together are the whole list -- which is what says both loops really ran
+    // over it rather than over an empty selection.
+    EXPECT_GT(Probed, 0u);
+    std::size_t EPOnly = 0;
+#define BUILTIN(Id_, Spelling_, Kind_, Dialects_, Min_, Max_, Result_)         \
+    if (!LangOptions{}.inDialect(Dialects_)) ++EPOnly;
+#include "plang/Basic/Builtins.def"
+    EXPECT_EQ(Probed + EPOnly, NumBuiltins);
+}
+
+TEST(Builtins, AProgramMayDeclareItsOwnNameOverOneOfAnotherDialect) {
+    // ISO §6.2.2.10.  Declaring the Extended Pascal names under -std=iso7185
+    // must not reserve them: a standard Pascal program is entitled to a
+    // variable called `date`, and it was entitled to one before this too.
+    EXPECT_TRUE(check(
+        "program p(output);\n"
+        "var date: integer;\n"
+        "begin date := 3; writeln(date) end.\n").Ok);
+    EXPECT_TRUE(check(
+        "program p(output);\n"
+        "function cmplx(x: integer): integer; begin cmplx := x end;\n"
+        "begin writeln(cmplx(1)) end.\n").Ok);
+}
+
+TEST(Builtins, ArityComesFromTheCatalogue) {
+    // The arity used to live in its own table in SemaExpr, keyed by spelling,
+    // with nothing to notice if it disagreed with the declaration.
+    EXPECT_TRUE(check("program p; var i: integer; begin i := abs() end.")
+                    .hasError("'abs' expects 1 argument(s), got 0"));
+    EXPECT_TRUE(check("program p; var i: integer; begin i := abs(1, 2) end.")
+                    .hasError("'abs' expects 1 argument(s), got 2"));
+    // succ takes the EP count argument, so its upper bound is two under either
+    // standard and the second argument is refused for the dialect, not the count.
+    EXPECT_TRUE(check("program p; var i: integer; begin i := succ(1, 2, 3) end.")
+                    .hasError("'succ' expects 1 or 2 argument(s), got 3"));
+    EXPECT_TRUE(check("program p; var s: string(8); begin s := substr('abc', 1, 2) end.",
+                      epOpts()).Ok);
+    EXPECT_TRUE(check("program p; var s: string(8); begin s := substr('abc') end.",
+                      epOpts())
+                    .hasError("'substr' expects 2 or 3 argument(s), got 1"));
 }
