@@ -24,7 +24,7 @@ add_library(plang_frontend SHARED
 set_target_properties(plang_frontend PROPERTIES
     OUTPUT_NAME "plang-frontend"
     SOVERSION   0
-    VERSION     0.1.3
+    VERSION     ${PROJECT_VERSION}
 )
 if(TARGET LLVM)
     target_link_libraries(plang_frontend PRIVATE LLVM)

@@ -6,6 +6,34 @@ version numbers follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 
 ---
 
+## [Unreleased]
+
+### Changed
+
+- **The version is written in one place.**  It was written by hand in four —
+  the shared library's `VERSION`, `Version.h`, the man page header and this
+  file — and cutting 0.1.2 updated two of them, so that release shipped a
+  compiler calling itself 0.1.2, a shared library built as 0.1.1, and a man
+  page whose header agreed with the library rather than the compiler.  0.1.3
+  brought them back together by hand, which fixes the symptom and not the
+  reason.
+
+  The root `CMakeLists.txt` now holds it, and `Version.h` and the man page are
+  generated from templates.  Two of them cannot disagree because there is no
+  longer a second one to disagree with.
+
+- **A build between releases says so.**  It used to report the version of the
+  release it came after, so a snapshot of the work leading to 0.2.0 called
+  itself 0.1.3 and was indistinguishable from the release of that name.  It now
+  says `0.2.0-pre`, and the suffix is emptied when the release is cut.  Semantic
+  Versioning §9 orders a pre-release below the version it qualifies, which is
+  the way round this wants: `0.1.3` < `0.2.0-pre` < `0.2.0`.
+
+  Only what a human reads carries the suffix.  CMake rejects a pre-release in a
+  project version outright, and a shared library called
+  `libplang-frontend.so.0.2.0-pre` would be no better an idea for being
+  accepted, so the soname stays numeric.
+
 ## [0.1.3] - 2026-08-11
 
 Four bug fixes, all in code generation, and none of them new: every one was
