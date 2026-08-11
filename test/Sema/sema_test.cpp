@@ -1188,3 +1188,132 @@ TEST(EP13Modules, ModuleInterface) {
         "end.\n",
         epOpts()).Ok);
 }
+
+// ---------------------------------------------------------------------------
+// Dialect gating: the capabilities Extended Pascal adds that Turbo wants too
+//
+// These pin the *negative* direction, which almost nothing else does.  There
+// are 328 uses of the EP flag across the driver suite, all checking that an EP
+// feature works when asked for; barely any check that it is refused when it is
+// not.  The 377 Pascal-P5 cases cannot help -- they are ISO 7185 programs
+// breaking ISO 7185 rules, so an ISO 7185 mode that quietly grew an extension
+// would pass every one of them.
+//
+// That is the direction the dialect-gating work endangers.  These are the
+// capabilities Turbo also wants, so they are the ones whose gating expression
+// gets rewritten in terms of a named feature, and the ones where an ISO 7185
+// column is authored by hand and could be wrong.  The twenty Extended Pascal
+// only gates keep their existing predicate and need nothing here.
+//
+// Each case asserts the *specific* diagnostic rather than just that the
+// program was refused.  That is not pedantry: written the loose way, the
+// `case ... else` case below still passed with its gate deliberately disabled,
+// because ISO 7185 hands `otherwise` back as an identifier and the program
+// then failed one token later for an unrelated reason.  A pair that cannot
+// tell those apart is not testing the gate.
+// ---------------------------------------------------------------------------
+
+TEST(DialectGating, FreeDeclarationOrder) {
+    // EP §6.2.1: sections in any order and repeated.  ISO 7185 fixes the order
+    // label, const, type, var, and allows one of each.
+    const char* Src =
+        "program p(output);\n"
+        "var a: integer;\n"
+        "const c = 1;\n"
+        "begin a := c end.\n";
+    EXPECT_TRUE(check(Src, epOpts()).Ok);
+    EXPECT_TRUE(check(Src).hasError("expected 'begin', got 'const'"));
+}
+
+TEST(DialectGating, ConstantExpressionInConst) {
+    // EP §6.8.2 allows any nonvarying expression; ISO 7185 parses only a
+    // simple-expression there, so a relational operator is the boundary.
+    const char* Src =
+        "program p(output);\n"
+        "const c = 1 < 2;\n"
+        "begin writeln(c) end.\n";
+    EXPECT_TRUE(check(Src, epOpts()).Ok);
+    EXPECT_TRUE(check(Src).hasError("expected ';', got '<'"));
+}
+
+TEST(DialectGating, AdditiveConstantExpressionIsNotTheBoundary) {
+    // Guards the case above.  '2 + 3' is a simple-expression and both dialects
+    // take it; if this ever starts failing under ISO 7185 the gate has moved
+    // and the pair above is measuring something else.
+    const char* Src =
+        "program p(output);\n"
+        "const c = 2 + 3;\n"
+        "begin writeln(c) end.\n";
+    EXPECT_TRUE(check(Src, epOpts()).Ok);
+    EXPECT_TRUE(check(Src).Ok);
+}
+
+TEST(DialectGating, CaseDefaultArm) {
+    // Spelled with 'else', not 'otherwise'.  ISO 7185 does not reserve
+    // 'otherwise', so the scanner returns it as an identifier and the parser
+    // fails on the missing ':' before this gate is ever consulted -- which is
+    // how the first version of this test passed with the gate disabled.
+    const char* Src =
+        "program p(output);\n"
+        "var i: integer;\n"
+        "begin i := 1; case i of 1: ; else ; end end.\n";
+    EXPECT_TRUE(check(Src, epOpts()).Ok);
+    EXPECT_TRUE(check(Src).hasError(
+        "an 'otherwise' part of a case-statement is an Extended Pascal extension"));
+}
+
+TEST(DialectGating, CaseConstantRange) {
+    const char* Src =
+        "program p(output);\n"
+        "var i: integer;\n"
+        "begin i := 1; case i of 1..3: ; end end.\n";
+    EXPECT_TRUE(check(Src, epOpts()).Ok);
+    EXPECT_TRUE(check(Src).hasError(
+        "a range as a case-constant is an Extended Pascal extension"));
+}
+
+TEST(DialectGating, SubrangeBoundsMayBeExpressions) {
+    const char* Src =
+        "program p(output);\n"
+        "const n = 5;\n"
+        "type t = 1..n+1;\n"
+        "var x: t;\n"
+        "begin x := 1 end.\n";
+    EXPECT_TRUE(check(Src, epOpts()).Ok);
+    EXPECT_TRUE(check(Src).hasError("expected ';', got '+'"));
+}
+
+TEST(DialectGating, EmptyStringLiteral) {
+    // ISO 7185 §6.1.7 requires at least one character; EP and Turbo allow none.
+    const char* Src =
+        "program p(output);\n"
+        "begin writeln('') end.\n";
+    EXPECT_TRUE(check(Src, epOpts()).Ok);
+    EXPECT_TRUE(check(Src).hasError("string constant must contain at least one character"));
+}
+
+TEST(DialectGating, CharPlusCharConcatenates) {
+    // Only char + char.  A char with a string, or two strings, concatenate in
+    // every dialect -- which is why an earlier attempt at this test using
+    // 'a' + 'bc' found no boundary at all and had to be thrown away.  The
+    // program names no EP-only type either: written with a string(4) target it
+    // was refused for the declaration rather than for the operator.
+    const char* Src =
+        "program p(output);\n"
+        "begin writeln('a' + 'b') end.\n";
+    EXPECT_TRUE(check(Src, epOpts()).Ok);
+    EXPECT_TRUE(check(Src).hasError(
+        "operator '+' requires numeric operands, got 'char' and 'char'"));
+}
+
+TEST(DialectGating, UnderscoreInIdentifier) {
+    // scanner_test covers this at the token level; this is the same gate seen
+    // from the far end of the front end.
+    const char* Src =
+        "program p(output);\n"
+        "var my_var: integer;\n"
+        "begin my_var := 1 end.\n";
+    EXPECT_TRUE(check(Src, epOpts()).Ok);
+    EXPECT_TRUE(check(Src).hasError(
+        "an underscore in an identifier is an Extended Pascal extension"));
+}

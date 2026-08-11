@@ -11176,3 +11176,71 @@ TEST(ColorDiagnostics, TurningItOffIsAccepted) {
     std::string Out = runPlang("-fno-color-diagnostics nosuchfile.pas");
     EXPECT_EQ(Out, "plang: error: no such file or directory: 'nosuchfile.pas'\n");
 }
+
+// ---------------------------------------------------------------------------
+// Codegen can see the dialect
+//
+// It could not until now: Codegen::Codegen took a LangOptions and copied three
+// scalars out of it, keeping no record of which language it was compiling.
+// That was survivable while every dialect difference lived in the front end --
+// of the thirty-four sites that ask, none were in CodeGen -- but Turbo's
+// differences are largely decisions made while generating code.
+//
+// There is nothing yet that reads it, so this asserts the wiring rather than a
+// behaviour: an -emit-llvm run under each dialect must still produce identical
+// IR for a program that uses no dialect-specific feature.  When Turbo starts
+// reading langOpts, this is the case that says the two were ever equal.
+// ---------------------------------------------------------------------------
+
+TEST(DialectWiring, TheSameProgramGivesTheSameIRUnderBothDialects) {
+    const std::string Src =
+        "program p(output);\n"
+        "var i: integer;\n"
+        "begin for i := 1 to 3 do writeln(i) end.\n";
+    auto Iso = compileAndEmitIR(Src);
+    auto EP  = compileAndEmitIR(Src, kEP);
+    ASSERT_FALSE(Iso.IR.empty()) << Iso.Stderr;
+    ASSERT_FALSE(EP.IR.empty())  << EP.Stderr;
+    EXPECT_EQ(Iso.IR, EP.IR)
+        << "a program using no dialect feature must lower identically";
+}
+
+// ---------------------------------------------------------------------------
+// The dialect list is one list
+//
+// The driver and the front end are separate processes and both validate
+// -std=.  They each used to hold their own copy of the names, and had already
+// drifted: the front end listed them in a different order and called them
+// something else.  Both now read Dialects.def.
+// ---------------------------------------------------------------------------
+
+TEST(DialectList, BothProcessesRejectAnUnknownDialectTheSameWay) {
+    const std::string D = runPlang("-std=nonesuch nosuchfile.pas");
+    const std::string F = runPC1("-std=nonesuch nosuchfile.pas");
+    for (const char* Name : {"iso7185", "iso10206", "fpc", "delphi", "turbo"}) {
+        EXPECT_NE(D.find(Name), std::string::npos) << "driver: " << D;
+        EXPECT_NE(F.find(Name), std::string::npos) << "front end: " << F;
+    }
+}
+
+TEST(DialectList, BothProcessesAgreeOnWhatIsImplemented) {
+    const std::string D = runPlang("-std=turbo nosuchfile.pas");
+    const std::string F = runPC1("-std=turbo nosuchfile.pas");
+    EXPECT_NE(D.find("not yet implemented"), std::string::npos) << D;
+    EXPECT_NE(F.find("not yet implemented"), std::string::npos) << F;
+    // The same two, in the same order, from the same list.
+    EXPECT_NE(D.find("iso7185, iso10206"), std::string::npos) << D;
+    EXPECT_NE(F.find("iso7185, iso10206"), std::string::npos) << F;
+}
+
+TEST(DialectList, AnUnimplementedDialectIsRefusedRatherThanSilentlyDemoted) {
+    // The front end mapped every -std= that was not iso10206 onto ISO 7185, so
+    // an unimplemented dialect would have compiled as standard Pascal and said
+    // nothing.  It is rejected in both processes; when turbo becomes real the
+    // mapping now carries it rather than dropping it.
+    for (const char* Std : {"turbo", "delphi", "fpc"}) {
+        const std::string F = runPC1(std::string("-std=") + Std + " nosuchfile.pas");
+        EXPECT_NE(F.find("not yet implemented"), std::string::npos)
+            << Std << ": " << F;
+    }
+}

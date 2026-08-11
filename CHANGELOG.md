@@ -100,6 +100,40 @@ version numbers follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 
 ### Changed
 
+- **Dialect gating asks what a dialect can do, not which one it is.**  A
+  capability more than one dialect has is now named in
+  `Basic/LangFeatures.def` and asked for as `Opts.has(Feature::X)`; the eight
+  are declaration order, constant expressions in `const`, `case` ranges, the
+  `case` default arm, subrange bound expressions, empty string literals,
+  underscores in identifiers, and char concatenation.  The twenty-five sites
+  that mean *Extended Pascal specifically* still say `extendedPascal()`, which
+  is what they mean.
+
+  Only shared capabilities are listed, deliberately.  Writing Extended Pascal's
+  thirty extensions out as a matrix would mean transcribing a column by hand,
+  and a wrong cell is invisible: both conformance corpora are ISO 7185
+  programs, so neither an ISO 7185 mode that gained an extension nor an
+  Extended Pascal mode that lost one would fail any of the 377.  A new
+  `DialectGating` suite covers that direction with a pair per capability,
+  asserting the specific diagnostic rather than mere rejection -- written the
+  loose way, one of them passed with its gate deliberately disabled.
+
+- **Code generation can see the dialect.**  `Codegen` took three scalars out of
+  `LangOptions` and kept no record of which language it was compiling.  That
+  held while every dialect difference was settled in the front end -- of the
+  thirty-four sites that ask, none were in CodeGen -- but it is not where Turbo
+  Pascal's differences live.
+
+- **The dialect list is one list.**  `Basic/Dialects.def` generates the
+  `Standard` enumeration and the validation both the driver and the front end
+  perform.  They held four copies between them and had drifted: the front end
+  listed the dialects in a different order and under a different word.
+
+  It also fixes a latent bug.  The front end mapped every `-std=` that was not
+  `iso10206` onto ISO 7185, so an unimplemented dialect would have compiled as
+  standard Pascal without saying so -- harmless only for as long as the
+  not-implemented check rejects it first.
+
 - **The version is written in one place.**  It was written by hand in four —
   the shared library's `VERSION`, `Version.h`, the man page header and this
   file — and cutting 0.1.2 updated two of them, so that release shipped a

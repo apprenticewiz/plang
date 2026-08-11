@@ -109,6 +109,46 @@ rather than about a program.  They are cataloged in
 whichever phase raised it.  A driver diagnostic went straight to stderr before,
 with its own idea of when to use color, which put it outside all of it.
 
+### Dialects
+
+plang answers two different questions about the language it is compiling, and
+keeping them apart is what lets a second dialect exist at all.
+
+`LangOptions::extendedPascal()` asks *which standard this is*. It is the right
+question for the thirty-odd extensions that belong to Extended Pascal alone —
+schema types, `type of`, `bindable`, `restricted`, `**`, `><`, `value`,
+`for ... in`, modules — and twenty-five sites ask it. Turbo Pascal must never
+inherit any of them: `Vector(10)` is a call there, not a type.
+
+`LangOptions::has(Feature::X)` asks whether the dialect has a *capability*, and
+is the right question for the handful more than one dialect has — declaration
+order, constant expressions in `const`, `case` ranges and default arms,
+subrange bound expressions, empty string literals, underscores in identifiers,
+char concatenation. Those are listed in `Basic/LangFeatures.def` with the
+dialects that have them, and eight sites ask it.
+
+Only shared capabilities are listed. Writing all thirty out as a dialect matrix
+would mean transcribing an Extended Pascal column by hand, and a mistranscribed
+cell changes Extended Pascal silently: both conformance corpora are ISO 7185
+programs, so an ISO 7185 mode that grew an extension — or an Extended Pascal
+mode that lost one — passes all 377 of them. The `DialectGating` suite in
+`test/Sema/sema_test.cpp` is what covers that direction: one program per shared
+capability, accepted under a dialect that has it and refused with a *named*
+diagnostic under one that does not. The named diagnostic matters — written as a
+bare "was rejected", the `case ... else` pair passed with its gate deliberately
+disabled, because ISO 7185 hands `otherwise` back as an identifier and the
+program failed a token later for an unrelated reason.
+
+A feature's dialects are derived from `Std` rather than stored, so there is no
+seeded copy to fall out of step. Per-feature overrides, if FPC's
+`{$MODESWITCH}` ever wants them, go behind `has()` without any call site
+changing.
+
+The dialect names themselves are in `Basic/Dialects.def`, which generates the
+`Standard` enumeration, the `D_*` bits, and the validation both the driver and
+the front end do — two processes that must agree, and which previously held
+four copies of the list between them.
+
 ### Translations
 
 Diagnostic messages can be translated; nothing else about plang can, and

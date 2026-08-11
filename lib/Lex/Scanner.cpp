@@ -141,7 +141,7 @@ Token Scanner::scanIdentifierOrKeyword(size_t TokenStart) {
     // underscore is one of the things ISO 10206 §6.1.3 added.  Clause 5.1 h)
     // asks that a use of an extension be reportable, and -std=iso7185 is where
     // that reporting happens, so this cannot pass silently there.
-    if (Underscore && !Opts.extendedPascal())
+    if (Underscore && !Opts.has(LangOptions::Feature::UnderscoreIdentifiers))
         emitError(locAt(TokenStart), diag::err_ep_underscore_in_identifier);
     std::string Lower = toLower(Word);
     auto It = std::ranges::lower_bound(keywords, Lower, {}, &KW::first);

@@ -281,7 +281,7 @@ std::unique_ptr<CaseStmt> Parser::parseCaseStmt() {
         // must match one of the case-constants.  'otherwise' is not a word
         // there, so it is 'else' that would otherwise slip through.
         if (check(TokenKind::Else) || check(TokenKind::Otherwise)) {
-            if (!Opts.extendedPascal())
+            if (!Opts.has(LangOptions::Feature::CaseDefaultArm))
                 emitError(Current.toLoc(), diag::err_ep_case_otherwise);
             advance();
             Node->HasElse = true;
@@ -298,7 +298,7 @@ std::unique_ptr<CaseStmt> Parser::parseCaseStmt() {
             // EP §6.9.3.5: a case-constant may be a range.  Standard Pascal's
             // is one constant, and every value has to be written out.
             if (check(TokenKind::DotDot)) {
-                if (!Opts.extendedPascal())
+                if (!Opts.has(LangOptions::Feature::CaseConstantRanges))
                     emitError(Current.toLoc(), diag::err_ep_case_range);
                 advance();
                 Lbl.High = parseFactor();

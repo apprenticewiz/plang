@@ -2,6 +2,7 @@
 // NOT installed; used only by the CodeGen translation units.
 #pragma once
 
+#include "plang/Basic/LangOptions.h"
 #include "plang/Basic/PascalFileLayout.h"
 #include "plang/CodeGen/Codegen.h"
 #include "plang/Sema/Type.h"
@@ -506,6 +507,22 @@ struct Codegen::Impl {
 
     /// Mirrors LangOptions::OptLevel; see optimize.
     unsigned optLevel = 0;
+
+    /// The language options this module is being generated under.
+    ///
+    /// Codegen took three scalars out of LangOptions and kept none of the rest,
+    /// so it could not tell one dialect from another -- which was survivable
+    /// only because every dialect difference so far is settled in the front
+    /// end: of the thirty-four sites that ask, twenty-one are in Parse, nine in
+    /// Sema, three in Lex and none here.
+    ///
+    /// Turbo is not like that.  Short-circuit `and`/`or`, the write field
+    /// widths, the numbered run-time errors, one-byte enumerations and the
+    /// whole parallel runtime are decisions made while generating code, and
+    /// none of them can be made by a phase that does not know which language it
+    /// is compiling.  The three scalars above stay as they are: they are read
+    /// on hot paths and predate this.
+    LangOptions langOpts;
 
     // ====================================================================
     // Initialize / reset for a new module

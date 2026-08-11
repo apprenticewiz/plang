@@ -12,6 +12,7 @@
 #include "plang/Frontend/Frontend.h"
 #include "plang/Basic/Diagnostic.h"
 #include "plang/Basic/DiagnosticPrinter.h"
+#include "plang/Basic/LangOptions.h"
 #include "plang/Basic/MessageCatalog.h"
 #include "plang/Basic/Version.h"
 
@@ -963,22 +964,17 @@ int Driver::run(int Argc, char *Argv[]) {
         diag(diag::err_no_input_files);
         return 1;
     }
+    // Both names and both lists come from Dialects.def, so the driver and the
+    // front end cannot disagree about what -std= takes.
     if (!Opts.std.empty()) {
-        static constexpr std::string_view Known[] =
-            {"iso7185", "iso10206", "turbo", "delphi", "fpc"};
-        bool IsKnown = false;
-        for (auto D : Known) if (Opts.std == D) { IsKnown = true; break; }
-        if (!IsKnown) {
-            diag(diag::err_unknown_dialect,
-                 {Opts.std, "iso7185, iso10206, turbo, delphi, fpc"});
+        const std::string Known = LangOptions::knownDialects();
+        if (!LangOptions::parseDialect(Opts.std)) {
+            diag(diag::err_unknown_dialect, {Opts.std, Known});
             return 1;
         }
-        static constexpr std::string_view Implemented[] = {"iso7185", "iso10206"};
-        bool IsImplemented = false;
-        for (auto D : Implemented) if (Opts.std == D) { IsImplemented = true; break; }
-        if (!IsImplemented) {
-            diag(diag::err_dialect_not_implemented,
-                 {Opts.std, "iso7185, iso10206"});
+        const std::string Impl = LangOptions::implementedDialects();
+        if (!LangOptions::isImplementedDialect(Opts.std)) {
+            diag(diag::err_dialect_not_implemented, {Opts.std, Impl});
             return 1;
         }
     }

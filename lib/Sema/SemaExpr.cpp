@@ -115,7 +115,7 @@ std::shared_ptr<Type> Sema::checkExpr(const ExprNode& E) {
         // ISO §6.1.7 requires at least one string-element, but EP §6.1.8 adds
         // the zero-length string: '' is how a string variable is cleared, and
         // how a recursive string function reaches its base case.
-        if (N->Value.empty() && !Opts.extendedPascal())
+        if (N->Value.empty() && !Opts.has(LangOptions::Feature::EmptyStringLiteral))
             error(E.Loc, diag::err_empty_string_const);
         if (N->Value.empty())
             T = Type::makeVarString(0);
@@ -358,8 +358,9 @@ std::shared_ptr<Type> Sema::checkBinary(const BinaryExpr& E) {
                                                  || Lt->Kind == TypeKind::String))
                 // EP §6.8.3.2: a char is a string-compatible operand of '+', so
                 // two of them concatenate rather than failing as non-numeric.
-                || (Opts.extendedPascal() && Lt->Kind == TypeKind::Char
-                                          && Rt->Kind == TypeKind::Char)) {
+                || (Opts.has(LangOptions::Feature::CharConcatenation)
+                        && Lt->Kind == TypeKind::Char
+                        && Rt->Kind == TypeKind::Char)) {
                 auto cap = [](const std::shared_ptr<Type>& T) -> int64_t {
                     if (T->Kind == TypeKind::VarString) return T->StrCapacity;
                     if (T->Kind == TypeKind::Char)      return 1;

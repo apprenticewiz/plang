@@ -1,0 +1,71 @@
+//===- LangFeatures.def - Capabilities more than one dialect has -*- C++ -*-===//
+//
+// A capability that some dialects have and others do not, named so that the
+// code gating it can say which capability it means rather than which standard
+// happens to have it.
+//
+//   FEATURE(Id, Dialects)
+//
+//     Id        The name the compiler asks for: Opts.has(Feature::Id).
+//     Dialects  Which dialects have it, as D_* bits from LangOptions.h.
+//
+// WHAT BELONGS HERE, AND WHAT DOES NOT
+//
+// Only a capability *shared* by more than one dialect.  Extended Pascal has
+// about thirty extensions over ISO 7185, and most of them -- schema types,
+// `type of`, `bindable`, `restricted`, `**`, `><`, `value`, `for ... in`,
+// structured value constructors, non-decimal literals, modules -- are its
+// alone, and Turbo must never inherit them.  `Vector(10)` in Turbo is a call,
+// not a type.  Those sites keep asking `extendedPascal()`, which is exactly
+// what they mean, and are not listed here.
+//
+// Writing them all out as a dialect matrix would mean transcribing an Extended
+// Pascal column by hand for thirty rows, and a mistranscribed cell changes
+// Extended Pascal silently: both of plang's conformance corpora are ISO 7185
+// programs, so an ISO 7185 mode that grew an extension, or an Extended Pascal
+// mode that lost one, passes all 377 of them.  The narrower list is the safer
+// one.
+//
+// The pairs in test/Sema/sema_test.cpp's DialectGating suite are what keep
+// these honest: one program per capability, accepted under a dialect that has
+// it and refused with a named diagnostic under one that does not.  Adding a
+// FEATURE here without adding that pair leaves the new cell untested.
+//
+//===----------------------------------------------------------------------===//
+
+#ifndef FEATURE
+#define FEATURE(Id, Dialects)
+#endif
+
+// ISO 10206 §6.2.1 / Turbo: declaration sections in any order, and repeated.
+// ISO 7185 fixes the order label, const, type, var and allows one of each.
+FEATURE(FreeDeclarationOrder,   D_ISO10206 | D_Turbo)
+
+// EP §6.8.2 / Turbo: any nonvarying expression where ISO 7185 takes only a
+// simple-expression, so a relational operator is the boundary and `2 + 3` is
+// not: both dialects parse that.
+FEATURE(ConstantExpressions,    D_ISO10206 | D_Turbo)
+
+// EP §6.9.3.5 `otherwise`; Turbo spells the same arm `else`.
+FEATURE(CaseDefaultArm,         D_ISO10206 | D_Turbo)
+
+// EP §6.4.3.4 / Turbo: `1..3:` as a case-constant.
+FEATURE(CaseConstantRanges,     D_ISO10206 | D_Turbo)
+
+// EP §6.4.2.4 / Turbo: a subrange bound may be a constant expression.
+FEATURE(SubrangeBoundExprs,     D_ISO10206 | D_Turbo)
+
+// ISO 7185 §6.1.7 wants at least one character in a string literal; EP and
+// Turbo both allow none.
+FEATURE(EmptyStringLiteral,     D_ISO10206 | D_Turbo)
+
+// EP §6.1.3 / Turbo: `_` is a letter inside an identifier.
+FEATURE(UnderscoreIdentifiers,  D_ISO10206 | D_Turbo)
+
+// EP §6.8.3.2 / Turbo: two chars concatenate with `+` rather than failing as
+// non-numeric operands.  Only char + char: a char with a string, or two
+// strings, already concatenate in every dialect, so this one operand pair is
+// the whole of the difference.
+FEATURE(CharConcatenation,      D_ISO10206 | D_Turbo)
+
+#undef FEATURE
