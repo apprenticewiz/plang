@@ -286,7 +286,7 @@ struct Type {
 
 /// The first and last values of an ordinal type, or nothing when it has no
 /// bounded range.  ISO §6.4.3.2 lets an array index be named by its type —
-/// `array[colour]` — and the extent then has to come from the type itself.
+/// `array[color]` — and the extent then has to come from the type itself.
 /// `integer` is deliberately excluded: an array over the whole of it is not
 /// something an implementation can lay out.
 [[nodiscard]] inline std::optional<std::pair<int64_t, int64_t>>

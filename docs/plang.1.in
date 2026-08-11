@@ -46,10 +46,10 @@ The default output file is \fI<source>.ll\fR.
 .TP
 .BI \-o " file"
 Write the primary output to \fIfile\fR instead of the default name.
-.SS "Optimisation"
+.SS "Optimization"
 .TP
 .BR \-O0 " / " \-O1 " / " \-O2 " / " \-O3
-Set the optimisation level passed to
+Set the optimization level passed to
 .BR llc .
 The default is
 .BR \-O0 .
@@ -78,6 +78,47 @@ Division by zero and a
 .B case
 statement matching no label are always checked; neither costs anything
 measurable.
+.SS "Diagnostic language"
+.TP
+.BI \-fdiagnostics\-language= tag
+Print diagnostics in the language named by
+.IR tag ,
+a POSIX locale name such as
+.BR fr ,
+.B fr_CA
+or
+.BR es_MX .
+.B C
+and
+.B en
+select the built\-in English.  A region falls back to its language, so
+.B fr_CA
+uses
+.I fr_CA.po
+if there is one and
+.I fr.po
+otherwise; a language plang has no catalog for falls back to English, as does a
+catalog that is missing, unreadable or incomplete.
+.IP
+Without this option,
+.BR LC_ALL ,
+.B LC_MESSAGES
+and
+.B LANG
+are consulted in that order.  This option overrides all of them.
+.IP
+Only the messages are affected.  plang never calls
+.BR setlocale (3):
+its scanner decides what a letter and a digit are, so a locale that changed
+those would change which programs it accepts, and what a compiler compiles must
+not depend on the environment it is run in.
+.TP
+.B \-fdiagnostics\-show\-fuzzy
+Use translations marked
+.B "#, fuzzy"
+in the catalog, which are otherwise ignored.  A fuzzy entry is one no reviewer
+has approved, and an unreviewed guess at what a compiler error means is worse
+than the English; this exists so that whoever reviews a translation can read it.
 .SS "Language"
 .TP
 .BI \-std= dialect
@@ -159,12 +200,12 @@ Enable the named warning, undoing an earlier
 Disable the named warning.
 .TP
 .B \-fcolor\-diagnostics
-Colourise diagnostics even when standard error is not a terminal, which is what
+Colorize diagnostics even when standard error is not a terminal, which is what
 a build log read back through a pager wants.
 .TP
 .B \-fno\-color\-diagnostics
-Do not colourise diagnostics.  Neither option is needed in the ordinary case:
-colour is used when standard error is a terminal and not otherwise.  The driver
+Do not colorize diagnostics.  Neither option is needed in the ordinary case:
+color is used when standard error is a terminal and not otherwise.  The driver
 and the front end are separate processes and both print diagnostics, and the
 option settles it for both.
 .TP
@@ -225,7 +266,7 @@ A label is defined but no
 .B goto
 names it.
 .TP
-.B unrecognised\-argument
+.B unrecognized\-argument
 An argument beginning with
 .B \-
 matches no option.  It is passed over rather than rejected, since a build
@@ -334,6 +375,19 @@ Print a usage summary and exit.
 .B \-\-version
 Print the compiler version, target, and thread model, then exit.
 .SH "ENVIRONMENT"
+.TP
+.BR LC_ALL ", " LC_MESSAGES ", " LANG
+Consulted in that order for the diagnostic message language, unless
+.B \-fdiagnostics\-language=
+is given.  A value of
+.B C
+or
+.B POSIX
+means the built\-in English.  Nothing else about plang is locale\-sensitive.
+.TP
+.B PLANG_LOCALE_DIR
+Directory to search for message catalogs before the one installed beside the
+compiler.  For trying out a translation without installing it.
 The first two apply when linking for an ELF target, the rest when linking for
 macOS.
 .TP
@@ -389,7 +443,7 @@ plang \-emit\-llvm hello.pas \-o hello.ll
 .EE
 .RE
 .PP
-Optimise and compile:
+Optimize and compile:
 .PP
 .RS
 .EX

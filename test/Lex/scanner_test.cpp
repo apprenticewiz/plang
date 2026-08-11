@@ -681,7 +681,7 @@ TEST(ScannerErrors, FileNotFound) {
 }
 
 // ---------------------------------------------------------------------------
-// EOF behaviour
+// EOF behavior
 // ---------------------------------------------------------------------------
 
 TEST(ScannerEof, EmptyFile) {
@@ -783,7 +783,7 @@ TEST(ScannerIntegration, SmallProgram) {
 
 // --- EP reserved words: recognized as keywords in iso10206 mode ------------
 
-TEST(ScannerEP, EPKeywordsRecognised) {
+TEST(ScannerEP, EPKeywordsRecognized) {
     // Spot-check a representative set of EP-only reserved words.
     struct Expect { const char* Src; TokenKind Kind; };
     static const Expect Cases[] = {
@@ -805,7 +805,7 @@ TEST(ScannerEP, EPKeywordsRecognised) {
         TempFile F(C.Src);
         auto S = makeScannerEP(F.path());
         Token T = S.next();
-        EXPECT_EQ(T.Kind, C.Kind) << "EP keyword '" << C.Src << "' not recognised";
+        EXPECT_EQ(T.Kind, C.Kind) << "EP keyword '" << C.Src << "' not recognized";
     }
 }
 
@@ -885,7 +885,7 @@ TEST(ScannerEP, NondecimalHexUpperCase) {
     EXPECT_EQ(T.Lexeme, "255");
 }
 
-TEST(ScannerEP, NondecimalNotRecognisedIn7185) {
+TEST(ScannerEP, NondecimalNotRecognizedIn7185) {
     // In iso7185 mode, "16" is an IntLit and "#ff" starts with '#' (error token).
     TempFile F("16#ff");
     auto S = makeScanner(F.path());   // iso7185

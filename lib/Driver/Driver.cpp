@@ -12,6 +12,7 @@
 #include "plang/Frontend/Frontend.h"
 #include "plang/Basic/Diagnostic.h"
 #include "plang/Basic/DiagnosticPrinter.h"
+#include "plang/Basic/MessageCatalog.h"
 #include "plang/Basic/Version.h"
 
 #include <algorithm>
@@ -112,10 +113,15 @@ static std::string captureOutput(const std::string &Prog,
 void Driver::configureDiagnostics(int Argc, char *Argv[]) {
     DiagnosticOptions DO;
     ColorDiagnostics  Color = ColorDiagnostics::Auto;
+    std::string_view  Lang;
+    bool              ShowFuzzy = false;
 
     for (int I = 1; I < Argc; ++I) {
         const std::string_view Arg = Argv[I];
-        if (Arg == "-w")               DO.SuppressWarnings = true;
+        if (Arg.starts_with("-fdiagnostics-language="))
+            Lang = Arg.substr(std::string_view("-fdiagnostics-language=").size());
+        else if (Arg == "-fdiagnostics-show-fuzzy") ShowFuzzy = true;
+        else if (Arg == "-w")          DO.SuppressWarnings = true;
         else if (Arg == "-Werror")     DO.WarningsAsErrors = true;
         else if (Arg == "-Wall")       DO.DisabledWarnings.clear();
         else if (Arg == "-Wno-all")    DO.SuppressWarnings = true;
@@ -130,6 +136,12 @@ void Driver::configureDiagnostics(int Argc, char *Argv[]) {
     // A name no warning answers to is not reported here.  The front end parses
     // the same -W options and reports it there, and every one of them reaches
     // the front end; reporting it in both places would say it twice.
+    // Before setOptions, because the very next thing the driver does is parse
+    // the rest of the command line and report what is wrong with it.  A locale
+    // chosen any later would leave those first messages in English and the
+    // rest translated.
+    (void)selectLocale(Lang, findInstallDir(), ShowFuzzy);
+
     Diags_.setOptions(std::move(DO));
     UseColor_ = useColor(Color, llvm::sys::Process::StandardErrIsDisplayed());
 }
@@ -421,9 +433,10 @@ static DarwinToolchain detectDarwinToolchain() {
 // ---------------------------------------------------------------------------
 
 void Driver::printVersion() {
+    const std::string Dir = Driver().findInstallDir();
     std::println("plang version {}\nTarget: {}\nThread model: {}\nInstalledDir: {}",
-                 PLANG_VERSION_STRING, hostTriple(), threadModel(),
-                 Driver().findInstallDir());
+                 PLANG_VERSION_STRING, hostTriple(), threadModel(), Dir);
+    std::println("Messages: {}", describeLocale());
 }
 
 void Driver::usage() {
@@ -554,6 +567,10 @@ Options Driver::parseArgs(int Argc, char *Argv[]) {
             Opts.debug = true;
         } else if (Arg.starts_with("--target=")) {
             Opts.target = Arg.substr(9);
+        } else if (Arg.starts_with("-fdiagnostics-language=") ||
+                   Arg == "-fdiagnostics-show-fuzzy") {
+            // Read by configureDiagnostics before parsing began; forwarded below.
+            Opts.frontendArgs.push_back(Arg);
         } else if (Arg.starts_with("-std=")) {
             Opts.std = Arg.substr(5);
 
@@ -604,7 +621,7 @@ Options Driver::parseArgs(int Argc, char *Argv[]) {
                 Opts.frontendArgs.push_back(Argv[++I]);
             }
         } else if (!Arg.empty() && Arg[0] == '-') {
-            diag(diag::warn_unrecognised_argument, {Arg});
+            diag(diag::warn_unrecognized_argument, {Arg});
         } else {
             // Detect file type by extension: .o / .a → pass to linker directly.
             bool IsObjOrLib = (Arg.size() >= 2 &&

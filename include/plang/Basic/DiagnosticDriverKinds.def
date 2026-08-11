@@ -6,7 +6,7 @@
 // Pascal source file.  DiagnosticPrinter writes them under the program name
 // instead of a file, line and column — "plang: error: no input files".
 //
-// A missing input file is not here.  The scanner already catalogues that as
+// A missing input file is not here.  The scanner already catalogs that as
 // err_file_not_found, with the wording the driver was using anyway, and one
 // message for one condition is the point of a shared catalog.
 
@@ -36,4 +36,9 @@ DIAG(err_cannot_create_temp_file, Error, "cannot create temporary file: %0")
 // it, and because a build system passing a flag plang does not know is a
 // common enough thing that failing on it would be unkind.  -Werror still
 // makes it fatal, which is the point of it having a name.
-DIAG(warn_unrecognised_argument, Warning, "unrecognised argument '%0'")
+// TRANSLATORS: keep the spelling "unrecognized".  The warning this belongs
+// to is named after its enumerator, so it is turned off with
+// -Wno-unrecognized-argument; a message spelling it the other way would
+// send a reader to a flag that does not exist.  A command line is syntax
+// and is not translated, even between two spellings of English.
+DIAG(warn_unrecognized_argument, Warning, "unrecognized argument '%0'")

@@ -1,0 +1,34 @@
+# plang diagnostic messages -- English (United Kingdom).
+#
+# A delta, not a translation.  Every message plang has is already English; this
+# names only the few whose spelling differs, and everything it does not name
+# falls back to the compiled-in en_US one message at a time.  That is the same
+# mechanism a half-finished translation relies on, which is why it is worth
+# having these: they exercise it with no linguistic risk at all.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: plang\n"
+"Language: en_GB\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"X-Plang-Catalog-ABI: 1\n"
+
+msgctxt "diag/err_label_never_placed"
+msgid "label '%0' declared but never defined as a labeled statement"
+msgstr "label '%0' declared but never defined as a labelled statement"
+
+msgctxt "diag/err_unrecognized_expr"
+msgid "unrecognized expression node"
+msgstr "unrecognised expression node"
+
+msgctxt "diag/err_unrecognized_type"
+msgid "unrecognized type expression"
+msgstr "unrecognised type expression"
+
+#. warn_unrecognized_argument is deliberately absent, and must stay so.  Its
+#. warning is turned off with -Wno-unrecognized-argument, a name derived from
+#. the enumerator, and a message spelling it "unrecognised" would send a reader
+#. to a flag that does not exist.  A command line is syntax, and is not
+#. translated even between two spellings of English.

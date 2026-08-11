@@ -31,7 +31,7 @@ extern "C" {
 [[noreturn]] void plang_err_substr_assign(int64_t Len, int64_t N);
 [[noreturn]] void plang_err_str_capacity(int64_t Len, int64_t Cap);
 
-// ---- initialisation --------------------------------------------------------
+// ---- initialization --------------------------------------------------------
 
 void plang_str_init(void* s, int64_t cap) {
     strLen(s) = 0;

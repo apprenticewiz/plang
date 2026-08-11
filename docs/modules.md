@@ -165,9 +165,9 @@ leaves it readable where it is imported but not assignable:
 ```pascal
 module Arith interface;
 
-export Arith = (InternalSqrt => Sqrt, protected Count, Colour, red..green);
+export Arith = (InternalSqrt => Sqrt, protected Count, Color, red..green);
 
-type Colour = (red, orange, yellow, green, blue);
+type Color = (red, orange, yellow, green, blue);
 var Count: integer;
 function InternalSqrt(x: real): real;
 
@@ -435,7 +435,7 @@ resulting `ProgramNode` carries the module definitions in its `OwnedModules` /
 3. If a module has a `to end do` statement, a `void __plang_fini_<name>()` is
    generated, and its initialiser ends by handing it to the runtime
    (`plang_module_final_push`). `main()` ends with `plang_module_finals_run()`,
-   which runs them most-recently-initialised first. Taking the order from what
+   which runs them most-recently-initialized first. Taking the order from what
    actually happened is what makes it right across compilation units.
 
 For **separately compiled modules** (imported via `.pmi`), the program does not

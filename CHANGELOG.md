@@ -8,6 +8,96 @@ version numbers follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 
 ## [Unreleased]
 
+### Added
+
+- **Diagnostics can be translated.**  The English is still written in the four
+  `Diagnostic*Kinds.def` catalogs and still compiled in; a translation of it
+  is a GNU gettext `.po` file, read when plang starts.  `-fdiagnostics-language=`
+  chooses one, and without it `LC_ALL`, `LC_MESSAGES` and `LANG` are consulted
+  in that order.
+
+  Entries are keyed by the diagnostic's identifier rather than by its English
+  text, so rewording a message does not silently untranslate it in every
+  language at once.  A translation may reorder the `%0..%9` arguments, which is
+  what those have always been for, but one that drops or invents a placeholder
+  is refused: `formatDiagMsg` substitutes nothing for an argument it has not
+  got, and the result would be a sentence with a hole in it and nothing to say
+  so.
+
+  libintl is not linked.  The .po *format* is what buys a translator Poedit,
+  Weblate and `msgmerge`; the library would buy a dependency macOS does not
+  ship in `libSystem`.
+
+  Everything that can go wrong ends in English: no catalog, an unreadable one,
+  one from a newer plang, one with a malformed entry, one still half-written,
+  and any entry marked `#, fuzzy`.  A malformed entry costs that entry and not
+  the other 192.
+
+  Because all of that is silent, `--version` now reports which catalog it
+  resolved, and both CI install checks assert it — a catalog built but
+  installed out of reach would otherwise leave a compiler that works perfectly
+  and is never translated.
+
+  There was a hook for this before, and it did not work.  `en_US.cpp` told a
+  translator to copy it and "translate every string in the `Messages[]` table",
+  but there are no strings in that file: it macro-expands the `.def`.  Anyone
+  following the instructions had nothing to edit.  `-DPLANG_LOCALE`, which
+  chose one such file at configure time, is gone; the language is chosen when
+  plang runs.
+
+- **The whole diagnostic line is translatable, not just the message.**  The
+  severity label and the token descriptions are cataloged too, under
+  `label/` and `token/`.  Without them a translated build would say
+  "error: attendu identifier, obtenu end of file" -- the frame in one language
+  and, first and last on the line, three words in another.
+
+  A token with a fixed spelling is not offered to a translator at all.  `;`
+  and `begin` are Pascal syntax and mean the same in every language.
+
+- **Ten diagnostics that built a sentence out of two languages now say it
+  themselves.**  `err_ep_extension` was "%0 is an Extended Pascal extension and
+  is not available under -std=iso7185", with the subject arriving as an English
+  noun phrase from each of ten call sites -- "an underscore in an identifier",
+  "a range as a case-constant".  A language with grammatical gender or case
+  needs the frame and the subject to agree, and English already needed a
+  different article at each site.  It is eight complete diagnostics now.
+
+  Where the inserted text is not prose -- an operator, a type name, an
+  identifier -- it stays an argument, because Pascal syntax is not translated.
+  The same split was made for the "lower"/"upper" bound diagnostics, the
+  "packed"/"unpacked" arguments of `pack` and `unpack`, and the component type
+  of a file.  None of this changes a word of the English output.
+
+  The three places where a sentence is still assembled -- the list in
+  `warn_case_not_exhaustive`, the "N or more" arity phrases, and the "(s)"
+  plural dodge -- carry a TRANSLATORS note in the catalog saying so.  Fixing
+  them properly costs more than it is worth for one message each.
+
+- **Seven catalogs**, in `po/`.  `en_GB` and `en_CA` are in use: they are
+  spelling deltas of three entries and one respectively, and they exist as much
+  to exercise the machinery on something with no linguistic risk as for their
+  own sake.  `fr`, `fr_CA`, `es` and `es_MX` are drafted but **marked fuzzy
+  throughout**, so plang prints English for them until a native speaker clears
+  each entry; `-fdiagnostics-show-fuzzy` reads the draft.
+
+  A regional catalog is a delta laid over its language: `es_MX.po` is 31
+  entries over `es.po`'s 214, and `es_ES` has no file at all and resolves to
+  `es.po`.  The differences carried are the well-known ones —
+  `fichero`/`archivo`, `matriz`/`arreglo`, `identifiant`/`identificateur`.
+
+  The English catalog turns out to contain only two words that differ across
+  en_US, en_GB and en_CA, and it is inconsistent with itself: it writes the
+  American `labeled` and the British `unrecognized`.  The second cannot be
+  corrected, because warning names are derived from their enumerator and the
+  flag is `-Wno-unrecognized-argument`; a message spelling it the other way
+  would send a reader to a flag that does not exist.  It keeps the British
+  spelling in every English, with a note in the catalog saying why.
+
+- **`-fdiagnostics-show-fuzzy`**, which uses translations a reviewer has not
+  yet approved.  They are ignored by default, since an unreviewed guess at what
+  a compiler error means is worse than English — but a catalog that is entirely
+  unreviewed is then inert, and this is how the person reviewing it reads it.
+
 ### Changed
 
 - **The version is written in one place.**  It was written by hand in four —
@@ -48,6 +138,24 @@ with `-c` under an earlier version.  Nothing about the language plang accepts
 has changed.
 
 ### Changed
+
+- **American spellings throughout.**  The source mixed the two: it wrote the
+  American `labeled` and the British `unrecognised`, `colour`, `initialised`,
+  `finalisation`, `tokenise` and a dozen more, in comments, message text,
+  identifiers and test names alike.  All of it is American now, in one pass.
+
+  One of those is user-visible.  A warning is named after its enumerator, so
+  renaming `warn_unrecognised_argument` renames the flag: **`-Wno-unrecognised-argument`
+  is now `-Wno-unrecognized-argument`**, and the old spelling is rejected as an
+  unknown warning.  It was the one British spelling that could not simply be
+  corrected in place, because before this the message and the flag had to agree
+  and the flag was the British one; now they agree on the American.
+
+  The language catalogs are deliberately untouched: `en_GB.po` and `en_CA.po`
+  exist to spell things the other way, and `fr`, `es` and their regional deltas
+  are not English at all.  Their `msgctxt` keys did have to follow the renamed
+  identifiers, since a key names a diagnostic rather than a message, and a test
+  asserts every shipped catalog resolves against the current source.
 
 - **`Codegen`'s pointer to its implementation is called `PImpl` again.**  It was
   `PascalImpl`, which reads as though it were the Pascal half of something with

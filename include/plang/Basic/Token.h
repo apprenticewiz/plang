@@ -70,12 +70,27 @@ namespace plang {
         return spelling(K);
     }
 
+    /// The translated description of a token kind that has no fixed spelling,
+    /// or null.  Defined in lib/Basic/MessageCatalog.cpp; declared rather than
+    /// included so that Token.h, which half the compiler includes, does not
+    /// pull the diagnostic machinery in with it.
+    const char* localizedTokenDescription(TokenKind K);
+
     /// Name a token kind the way a diagnostic should: a fixed spelling in
     /// quotes, and anything else described in words.  Gives "';'" for a
     /// semicolon and "identifier" for an identifier, so that "expected %0"
     /// reads correctly either way.
+    ///
+    /// The words are translated; the spellings are not.  "identifier" and "end
+    /// of file" are English prose that arrives as %0 of "expected %0, got %1",
+    /// so a build that translated the frame and not these would say "attendu
+    /// identifier".  A ';' or a 'begin' is Pascal syntax and means the same in
+    /// every language.
     [[nodiscard]] inline std::string describe(TokenKind K) {
-        if (!hasFixedSpelling(K)) return std::string(spelling(K));
+        if (!hasFixedSpelling(K)) {
+            if (const char* T = localizedTokenDescription(K)) return T;
+            return std::string(spelling(K));
+        }
         return "'" + std::string(spelling(K)) + "'";
     }
 

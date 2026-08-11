@@ -48,7 +48,7 @@ extern "C" {
 // ---- Internal helpers ----
 
 /// Defined with the binding table further down; reset and rewrite need it to
-/// honour a name established by an earlier bind (EP §6.7.5.6).
+/// honor a name established by an earlier bind (EP §6.7.5.6).
 static const char* findBinding(PascalFile *F);
 
 /// Look at the next character without consuming it.
@@ -427,7 +427,7 @@ void plang_write_file_char_w(PascalFile *F, int8_t V, int64_t W)
 void plang_write_file_str_w (PascalFile *F, const char *S, int64_t W)
     { abortIfClosed(F,"write"); writePadded(F, S, W); }
 
-// EP §6.9.3.6: a complex is written as a parenthesised pair of reals — in the
+// EP §6.9.3.6: a complex is written as a parenthesized pair of reals — in the
 // representation reals are written in, which is why each half goes through the
 // real writer rather than being formatted alongside the parentheses.
 void plang_write_file_cplx (PascalFile *F, double Re, double Im) {

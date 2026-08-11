@@ -36,7 +36,7 @@ using ImportedNameMap = std::map<std::string, ImportedName>;
 using ImportOwnerTable = std::map<std::string, ImportedNameMap>;
 
 /// EP §6.11: modules the implementation provides rather than the program.
-/// They have no declaration to find and nothing to initialise, so importing
+/// They have no declaration to find and nothing to initialize, so importing
 /// one is not a reason to look for a .pmi or an __plang_init_ symbol.
 [[nodiscard]] inline bool isBuiltinModule(std::string_view Name) {
     return eqCI(Name, "standardinput") || eqCI(Name, "standardoutput");

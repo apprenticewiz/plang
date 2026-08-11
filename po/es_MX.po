@@ -1,0 +1,174 @@
+# plang diagnostic messages -- Spanish (Mexico).
+#
+# A delta on es.po, not a translation in its own right: it names only what
+# differs regionally, and everything else falls through to es.po and then
+# to the compiled-in English, one message at a time.
+#
+# DRAFTED, NOT REVIEWED -- see es.po.
+#
+# Latin American usage writes "archivo" for a file where Spain writes
+# "fichero", and "arreglo" for an array where Spain writes "matriz".
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: plang\n"
+"Language: es_MX\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"X-Plang-Catalog-ABI: 1\n"
+
+#, fuzzy
+msgctxt "token/Eof"
+msgid "end of file"
+msgstr "fin de archivo"
+
+#, fuzzy
+msgctxt "diag/err_no_input_files"
+msgid "no input files"
+msgstr "no hay archivos de entrada"
+
+#, fuzzy
+msgctxt "diag/err_cannot_create_temp_file"
+msgid "cannot create temporary file: %0"
+msgstr "no se puede crear un archivo temporal: %0"
+
+#, fuzzy
+msgctxt "diag/err_file_not_found"
+msgid "no such file or directory: '%0'"
+msgstr "no existe el archivo o el directorio: «%0»"
+
+#, fuzzy
+msgctxt "diag/err_packed_conformant_shape"
+msgid "a packed conformant array parameter has one dimension"
+msgstr "un parámetro de arreglo conformante packed tiene una sola dimensión"
+
+#, fuzzy
+msgctxt "diag/err_restricted_file_component"
+msgid "'%0' is a restricted type and cannot be the component type of a file"
+msgstr "«%0» es un tipo restricted y no puede ser el tipo componente de un archivo"
+
+#, fuzzy
+msgctxt "diag/err_subscript_non_array"
+msgid "subscript operator applied to non-array type '%0'"
+msgstr "operador de indexación aplicado al tipo no de arreglo «%0»"
+
+#, fuzzy
+msgctxt "diag/err_index_not_ordinal"
+msgid "array index must be ordinal, got '%0'"
+msgstr "un índice de arreglo debe ser ordinal, se obtuvo «%0»"
+
+#, fuzzy
+msgctxt "diag/err_index_type_mismatch"
+msgid "array index type mismatch: index type is '%0' but array expects '%1'"
+msgstr "tipo de índice incompatible: el índice es de tipo «%0» pero el arreglo espera «%1»"
+
+#, fuzzy
+msgctxt "diag/err_packed_array_var_param"
+msgid "element of packed array cannot be passed as a var parameter"
+msgstr "un elemento de un arreglo packed no se puede pasar como parámetro var"
+
+#, fuzzy
+msgctxt "diag/err_file_value_param"
+msgid "value parameter '%0' has a type containing a file component, which is not permitted"
+msgstr "el parámetro por valor «%0» tiene un tipo que contiene un componente de archivo, lo cual no está permitido"
+
+#, fuzzy
+msgctxt "diag/err_readln_not_text"
+msgid "readln is only valid for text files, got 'file of %0'"
+msgstr "readln solo es válido para archivos de texto, se obtuvo «file of %0»"
+
+#, fuzzy
+msgctxt "diag/err_read_type_mismatch"
+msgid "type mismatch in read: file element type is '%0', but variable has type '%1'"
+msgstr "tipo incompatible en read: el tipo de elemento del archivo es «%0», pero la variable es de tipo «%1»"
+
+#, fuzzy
+msgctxt "diag/err_write_type_mismatch"
+msgid "type mismatch in write: file element type is '%0', but value has type '%1'"
+msgstr "tipo incompatible en write: el tipo de elemento del archivo es «%0», pero el valor es de tipo «%1»"
+
+#, fuzzy
+msgctxt "diag/err_pack_index_mismatch"
+msgid "pack: start index type '%0' is not compatible with array index type '%1'"
+msgstr "pack: el tipo del índice inicial «%0» no es compatible con el tipo de índice de el arreglo «%1»"
+
+#, fuzzy
+msgctxt "diag/err_unpack_index_mismatch"
+msgid "unpack: start index type '%0' is not compatible with array index type '%1'"
+msgstr "unpack: el tipo del índice inicial «%0» no es compatible con el tipo de índice de el arreglo «%1»"
+
+#, fuzzy
+msgctxt "diag/err_pack_operand_not_array_unpacked"
+msgid "%0 expects an array as its unpacked argument, got '%1'"
+msgstr "%0 espera un arreglo como argumento no packed, se obtuvo «%1»"
+
+#, fuzzy
+msgctxt "diag/err_pack_operand_not_array_packed"
+msgid "%0 expects an array as its packed argument, got '%1'"
+msgstr "%0 espera un arreglo como argumento packed, se obtuvo «%1»"
+
+#, fuzzy
+msgctxt "diag/err_line_proc_not_text"
+msgid "'%0' applies to a text file only, not to 'file of %1'"
+msgstr "«%0» solo se aplica a un archivo de texto, no a «file of %1»"
+
+#, fuzzy
+msgctxt "diag/err_assign_file"
+msgid "a variable of a file type, or with a file component, cannot be assigned"
+msgstr "no se puede asignar a una variable de tipo archivo, o que contenga un componente de archivo"
+
+#, fuzzy
+msgctxt "diag/err_file_component_is_file"
+msgid "file component type must not itself be a file type"
+msgstr "el tipo componente de un archivo no debe ser a su vez un tipo archivo"
+
+#, fuzzy
+msgctxt "diag/err_file_field_has_file"
+msgid "file component type must not contain a file field (field '%0' is a file type)"
+msgstr "el tipo componente de un archivo no debe contener un campo de archivo (el campo «%0» es de tipo archivo)"
+
+#, fuzzy
+msgctxt "diag/err_array_lower_bound_not_const"
+msgid "lower bound of array index type is not a constant expression; for a run-time length use a schema type, 'type t(n: integer) = array[1..n]'"
+msgstr "el límite inferior del tipo de índice de el arreglo no es una expresión constante; para una longitud determinada en ejecución use un tipo esquema, «type t(n: integer) = array[1..n]»"
+
+#, fuzzy
+msgctxt "diag/err_array_upper_bound_not_const"
+msgid "upper bound of array index type is not a constant expression; for a run-time length use a schema type, 'type t(n: integer) = array[1..n]'"
+msgstr "el límite superior del tipo de índice de el arreglo no es una expresión constante; para una longitud determinada en ejecución use un tipo esquema, «type t(n: integer) = array[1..n]»"
+
+#, fuzzy
+msgctxt "diag/err_array_index_not_ordinal"
+msgid "'%0' cannot be an array index type; an index type is an ordinal type with a bounded range"
+msgstr "«%0» no puede ser un tipo de índice de arreglo; un tipo de índice es un tipo ordinal de rango acotado"
+
+#, fuzzy
+msgctxt "diag/err_conformant_actual_not_array"
+msgid "conformant array parameter '%0' requires an array argument, got '%1'"
+msgstr "el parámetro de arreglo conformante «%0» requiere un argumento de tipo arreglo, se obtuvo «%1»"
+
+#, fuzzy
+msgctxt "diag/err_conformant_elem_mismatch"
+msgid "element type mismatch for conformant array parameter '%0': expected '%1', got '%2'"
+msgstr "tipo de elemento incompatible para el parámetro de arreglo conformante «%0»: se esperaba «%1», se obtuvo «%2»"
+
+#, fuzzy
+msgctxt "diag/err_schema_body_not_representable"
+msgid "schema '%0' cannot be used without discriminants: its size varies with them and its body is not an array"
+msgstr "el esquema «%0» no se puede usar sin discriminantes: su tamaño varía con ellos y su cuerpo no es un arreglo"
+
+#, fuzzy
+msgctxt "diag/err_constructor_not_aggregate"
+msgid "value constructor type must be array, record, or set, got '%0'"
+msgstr "el tipo de un constructor de valor debe ser arreglo, registro o conjunto, se obtuvo «%0»"
+
+#, fuzzy
+msgctxt "diag/err_bind_nonfile_unsupported"
+msgid "'%0' is of type '%1'; plang can bind only a file variable"
+msgstr "«%0» es de tipo «%1»; plang solo puede vincular una variable de archivo"
+
+#, fuzzy
+msgctxt "diag/err_unknown_module"
+msgid "no module named '%0' was found; it must be defined in this file or have an interface file on the module search path"
+msgstr "no se ha encontrado ningún módulo llamado «%0»; debe estar definido en este archivo o tener un archivo de interfaz en la ruta de búsqueda de módulos"

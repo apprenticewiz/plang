@@ -330,7 +330,7 @@ Parser::parseStructuredValueOrIndex(std::string Name, Token Loc) {
             return parsePostfix(std::move(idx));
         }
         if (labels.size() == 1 && firstIsRange) {
-            // Single range: preserve old parsePostfix behaviour — this is a
+            // Single range: preserve old parsePostfix behavior — this is a
             // substring variable s[lo..hi] (EP §6.5.6).
             // (Sema rejects it if the identifier is not a string(N) variable.)
             auto* rng  = llvm::dyn_cast<SetRangeExpr>(labels[0].get());

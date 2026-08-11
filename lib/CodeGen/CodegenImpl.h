@@ -264,7 +264,7 @@ struct Codegen::Impl {
     /// "module.name".  Each module body is emitted in its own scope so that one
     /// module's `count` is not mistaken for another's, and an importer finds
     /// the variable here instead — with its TypeNode, which a declaration
-    /// synthesised from the LLVM type alone would lack.
+    /// synthesized from the LLVM type alone would lack.
     std::map<std::string, VarEntry> moduleGlobals_;
 
     /// The module that declares \p name as this unit sees it, or "" when the
@@ -478,14 +478,14 @@ struct Codegen::Impl {
     /// is the jump buffer to record in — a global for the program's block,
     /// whose one activation lasts the run, and an alloca for a procedure's,
     /// which nested procedures reach over the static link.  Emits at the
-    /// current insertion point, which must be past the block's initialisation:
+    /// current insertion point, which must be past the block's initialization:
     /// a goto landing here resumes the block, it does not restart it.
     void openLabelScope(const BlockNode& block, bool programBlock);
 
     /// Plant the setjmp and the switch that dispatches on what it returns.
     /// Done for a procedure by openLabelScope; the program's block registers
     /// itself before its procedures are emitted and lands here later, once
-    /// main exists to hold the setjmp and its variables are initialised.
+    /// main exists to hold the setjmp and its variables are initialized.
     void emitLabelLanding();
 
     /// Point the landing pad at the label blocks the body has by now created.
@@ -508,7 +508,7 @@ struct Codegen::Impl {
     unsigned optLevel = 0;
 
     // ====================================================================
-    // Initialise / reset for a new module
+    // Initialize / reset for a new module
     // ====================================================================
     void init(const std::string& progName);
 
@@ -547,7 +547,7 @@ struct Codegen::Impl {
 
     /// The first and last index of \p n, or nothing when neither the bounds nor
     /// Sema's resolved type can supply them.  An index written as an ordinal
-    /// type — `array[colour]` — has no bound expressions to fold, so the range
+    /// type — `array[color]` — has no bound expressions to fold, so the range
     /// comes from the type Sema resolved for the node.
     std::optional<std::pair<int64_t, int64_t>>
     arrayIndexRange(const ArrayTypeNode& n) const;
@@ -626,7 +626,7 @@ struct Codegen::Impl {
 
     llvm::Type* llvmTypeOfNode(const TypeNode& node);
     /// Convert a semantic Type (from Sema) directly to an LLVM type.
-    /// Used by schema instance handling where the AST TypeNode is parameterised.
+    /// Used by schema instance handling where the AST TypeNode is parameterized.
     llvm::Type* llvmTypeOfSemaType(const Type& T);
 
     // ====================================================================
@@ -1079,7 +1079,7 @@ struct Codegen::Impl {
 
     void emitGlobalVarInits(const BlockNode& block);
     void emitGlobalVarInit(const VarGroup& vg);
-    /// EP §6.11.2: the runtime initialisation of a module's own globals, for
+    /// EP §6.11.2: the runtime initialization of a module's own globals, for
     /// its initialiser to run.  \p iface is the module's heading, whose
     /// declarations are the block's too, or null when it has none.
     void emitModuleGlobalInits(const BlockNode& own, const BlockNode* iface);
@@ -1089,7 +1089,7 @@ struct Codegen::Impl {
                   const std::vector<std::string>& fileParams,
                   const std::vector<std::string>& initModules = {});
 
-    /// EP §6.11: emit a module initialisation or finalisation function.
+    /// EP §6.11: emit a module initialization or finalization function.
     /// The function is named fnName, emits stmt, and returns void.
     void emitModuleLifecycleFn(const std::string& fnName, const StmtNode& stmt);
 

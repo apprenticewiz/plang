@@ -8,6 +8,25 @@
 #include <unistd.h>
 #include <utility>
 
+/// Pins the message language for every child process this file starts.
+///
+/// These cases run the real binary, which resolves its own catalog from the
+/// environment, and ~180 of the assertions below match English message text.
+/// Without this, a developer whose shell is set to a language plang ships a
+/// catalog for would see those fail for a reason that has nothing to do with
+/// what they are testing.  LC_ALL is enough on its own: it is the first thing
+/// the resolver reads, and "C" means "no locale", so the child uses the
+/// compiled-in English and opens no catalog at all.
+///
+/// The in-process suites -- scanner, parser, sema, conformance -- need no
+/// equivalent: they drive Scanner, Parser and Sema directly and never call
+/// selectLocale, so their catalog is empty and every message is English by
+/// construction.
+const int PinnedLocale = [] {
+    ::setenv("LC_ALL", "C", /*overwrite=*/1);
+    return 0;
+}();
+
 /// A directory of this test's own.  The compiler writes a module's interface
 /// file beside its source, under the module's own name, so two tests that use
 /// the same module name would otherwise overwrite each other's under `-j`.
@@ -507,27 +526,27 @@ TEST(IRCodeGen, OrElseProducesPhi) {
 
 TEST(IRCodeGen, EPStringLiteralMaterialisesAsStruct) {
     // In EP mode a multi-char string literal used in an expression (not just
-    // passed to writeln) must be materialised as a VarString struct alloca,
+    // passed to writeln) must be materialized as a VarString struct alloca,
     // not left as a bare global char array pointer.  This guards the invariant:
     //   exprIsVarStr(e) → emitExpr(e) returns ptr to struct.
     auto R = compileAndEmitIR(
         "program p; var s: string(20); b: boolean;\n"
-        "begin b := s = 'hello' end.\n",   // comparison forces literal materialisation
+        "begin b := s = 'hello' end.\n",   // comparison forces literal materialization
         "-std=iso10206");
     ASSERT_TRUE(R.Ok) << R.Stderr;
     // plang_str_from_cstr must be called to wrap the literal in a struct.
     EXPECT_TRUE(irContainsAll(R.IR, {"plang_str_from_cstr", "plang_str_eq"}))
-        << "EP string literal must be materialised before comparison\n" << R.IR;
+        << "EP string literal must be materialized before comparison\n" << R.IR;
 }
 
 TEST(IRCodeGen, ISO7185StringLiteralStaysAsPtr) {
     // In iso7185 mode a string literal passed to writeln stays as a bare ptr
-    // (no materialisation).  There must be no plang_str_from_cstr call.
+    // (no materialization).  There must be no plang_str_from_cstr call.
     auto R = compileAndEmitIR(
         "program p; begin writeln('hello') end.\n");
     ASSERT_TRUE(R.Ok) << R.Stderr;
     EXPECT_TRUE(irContainsNone(R.IR, {"plang_str_from_cstr"}))
-        << "iso7185 literal must not be materialised as a struct\n" << R.IR;
+        << "iso7185 literal must not be materialized as a struct\n" << R.IR;
     EXPECT_TRUE(irContainsAll(R.IR, {"plang_writeln_str"}))
         << "iso7185 literal must go through plang_writeln_str\n" << R.IR;
 }
@@ -1250,7 +1269,7 @@ TEST(CodegenGlobals, NestedProcedureSharesGlobalWithProgramBody) {
         << "global not shared with nested procedure; stdout: " << R.Stdout;
 }
 
-TEST(CodegenGlobals, StringGlobalIsInitialisedAndShared) {
+TEST(CodegenGlobals, StringGlobalIsInitializedAndShared) {
     // main no longer allocas globals, so plang_str_init must still run against
     // the global storage for string(N) program variables.
     auto R = compileAndRun(
@@ -2230,6 +2249,90 @@ TEST(RuntimeChecks, NoRangeChecksLeavesBoundsOutButKeepsNil) {
     EXPECT_EQ(R.ExitCode, 70);
     EXPECT_NE(R.Stdout.find("past the bound"), std::string::npos) << R.Stdout;
     EXPECT_NE(R.Stderr.find("dereference of nil"), std::string::npos) << R.Stderr;
+}
+
+// ---------------------------------------------------------------------------
+// Diagnostic language
+//
+// qps_ploc is not a language: it is the English wrapped in [! !], generated
+// alongside en_US.po.  It is what lets a test tell a build that read a catalog
+// from one that fell back to English -- which is otherwise indistinguishable,
+// because falling back is deliberate, total and silent.
+//
+// These cases run against the build tree, where PinnedLocale has set LC_ALL=C
+// for every child, so anything they see comes from the flag and not from the
+// machine the suite happens to be running on.
+// ---------------------------------------------------------------------------
+
+TEST(DiagnosticLanguage, TheDefaultIsTheBuiltInEnglish) {
+    auto R = compileAndRun("program p(output);\nbegin x := 1 end.\n");
+    EXPECT_NE(R.ExitCode, 0);
+    EXPECT_EQ(R.Stderr.find("[!"), std::string::npos) << R.Stderr;
+    EXPECT_NE(R.Stderr.find("not an assignable variable"), std::string::npos)
+        << R.Stderr;
+}
+
+TEST(DiagnosticLanguage, TheFlagReachesTheFrontEnd) {
+    // The message comes from -pc1, a separate process the driver spawns, so
+    // this is really asking whether the option was forwarded and understood.
+    auto R = compileAndRun("program p(output);\nbegin x := 1 end.\n",
+                           "-fdiagnostics-language=qps_ploc");
+    EXPECT_NE(R.Stderr.find("[!"), std::string::npos) << R.Stderr;
+}
+
+TEST(DiagnosticLanguage, TheFlagReachesTheDriverToo) {
+    // err_no_input_files is the driver's own, reported before -pc1 is spawned.
+    std::string Out = runPlang("-fdiagnostics-language=qps_ploc");
+    EXPECT_NE(Out.find("[!no input files!]"), std::string::npos) << Out;
+}
+
+TEST(DiagnosticLanguage, ForwardingItDoesNotMakeTheFrontEndComplain) {
+    // The front end parses with a hand-written chain ending in "unrecognized
+    // argument".  The driver forwards this option, so without an arm for it
+    // there every single compile would warn about it.
+    auto R = compileAndRun("program p(output);\nbegin writeln('ok') end.\n",
+                           "-fdiagnostics-language=qps_ploc");
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stderr.find("unrecognized"), std::string::npos) << R.Stderr;
+}
+
+TEST(DiagnosticLanguage, CMeansTheBuiltInEnglish) {
+    auto R = compileAndRun("program p(output);\nbegin x := 1 end.\n",
+                           "-fdiagnostics-language=C");
+    EXPECT_EQ(R.Stderr.find("[!"), std::string::npos) << R.Stderr;
+}
+
+TEST(DiagnosticLanguage, AnUnknownLanguageIsNotAnError) {
+    // Everything that can go wrong ends in English rather than in a failure:
+    // a compiler that would not compile because a translation is missing would
+    // be a worse compiler.
+    auto R = compileAndRun("program p(output);\nbegin writeln('ok') end.\n",
+                           "-fdiagnostics-language=zz_ZZ");
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "ok\n");
+}
+
+TEST(DiagnosticLanguage, VersionSaysWhichCatalogItFound) {
+    // The only positive evidence a catalog was found.  Everything else about a
+    // missing one looks exactly like not having asked for one.
+    std::string Out = runPlang("--version");
+    EXPECT_NE(Out.find("Messages: en_US (built-in)"), std::string::npos) << Out;
+
+    std::string Loc = runPlang("-fdiagnostics-language=qps_ploc --version");
+    EXPECT_NE(Loc.find("qps_ploc.po"), std::string::npos) << Loc;
+}
+
+TEST(DiagnosticLanguage, TheFrontEndAgreesWithTheDriverAboutTheCatalog) {
+    // Two processes resolving independently; if they disagreed, half a
+    // compilation's messages would be in one language and half in the other.
+    std::string D = runPlang("-fdiagnostics-language=qps_ploc --version");
+    std::string F = runPC1("-fdiagnostics-language=qps_ploc --version");
+    const auto line = [](const std::string &S) {
+        const auto P = S.find("Messages: ");
+        return P == std::string::npos ? std::string() : S.substr(P);
+    };
+    EXPECT_FALSE(line(D).empty()) << D;
+    EXPECT_EQ(line(D), line(F));
 }
 
 // ---------------------------------------------------------------------------
@@ -4106,7 +4209,7 @@ TEST(EP8RecordConstructor, AllFields) {
 }
 
 TEST(EP8RecordConstructor, PartialFields) {
-    // Point[x: 7] leaves y as zero (zero-initialised).
+    // Point[x: 7] leaves y as zero (zero-initialized).
     auto R = compileAndRun(
         "program p;\n"
         "type Point = record x, y: integer end;\n"
@@ -4603,7 +4706,7 @@ TEST(EP12Binding, ABindableVarParameterCanBeBound) {
 //
 // The flag selected the dialect for the required words and for most of the
 // syntax, but the rest of Extended Pascal came along regardless: string(n),
-// '**', substr, card, halt and their neighbours were all available under
+// '**', substr, card, halt and their neighbors were all available under
 // either standard, so nothing said what was standard and what was not.
 // ---------------------------------------------------------------------------
 
@@ -4837,7 +4940,7 @@ TEST(EP13Modules, ModuleBodyCallableFromProgram) {
 }
 
 // ---------------------------------------------------------------------------
-// A module body is analysed like a program block (EP §6.11).
+// A module body is analyzed like a program block (EP §6.11).
 //
 // It used to be scanned only for the signatures an importer needs, so nothing
 // written inside a module was ever type-checked: an error there reached codegen
@@ -4921,16 +5024,16 @@ TEST(ModuleBodyChecking, DuplicateDeclarationIsRejected) {
 // scope, so these cover the shapes that harvest has to carry across.
 
 TEST(ModuleBodyChecking, EnumConstantsOfAnExportedTypeAreVisible) {
-    // Exporting 'colour' without 'red' and 'green' left the type unusable:
+    // Exporting 'color' without 'red' and 'green' left the type unusable:
     // the importer could declare a variable of it but could not name a value.
     auto R = compileAndRun(
         "module M;\n"
-        "  type colour = (red, green, blue);\n"
-        "  function code(c: colour): integer; begin code := ord(c) end;\n"
+        "  type color = (red, green, blue);\n"
+        "  function code(c: color): integer; begin code := ord(c) end;\n"
         "end.\n"
         "program p;\n"
         "  import M;\n"
-        "var c: colour;\n"
+        "var c: color;\n"
         "begin c := green; writeln(code(c)) end.\n", kEP13);
     ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
     EXPECT_EQ(R.Stdout, "1\n");
@@ -4969,7 +5072,7 @@ TEST(ModuleBodyChecking, WhatAModuleImportsIsNotReExported) {
     EXPECT_NE(R.ExitCode, 0) << "'one' leaked out of B; stdout: " << R.Stdout;
 }
 
-TEST(ModuleBodyChecking, ConstsTypesVarsAndInitialisationStillWork) {
+TEST(ModuleBodyChecking, ConstsTypesVarsAndInitializationStillWork) {
     auto R = compileAndRun(
         "module M;\n"
         "  const k = 10;\n"
@@ -5001,7 +5104,7 @@ TEST(ModuleBodyChecking, ANestedProcedureInsideAModuleStillWorks) {
 }
 
 TEST(ModuleBodyChecking, ALabelPlacedInToBeginDoCountsAsPlaced) {
-    // The label audit and the initialisation statement both belong to the
+    // The label audit and the initialization statement both belong to the
     // module's scope, so the statement has to be checked first — otherwise a
     // label used there is reported as declared and never placed.
     auto R = compileAndRun(
@@ -5709,15 +5812,15 @@ TEST(ExportRename, TheOldNameNoLongerReaches) {
 TEST(ExportList, ARangeCoversTheConstantsBetweenItsEnds) {
     auto R = compileAndRun(
         "module pal interface;\n"
-        "  export pal = (colour, red..green);\n"
-        "  type colour = (red, orange, yellow, green, blue);\n"
+        "  export pal = (color, red..green);\n"
+        "  type color = (red, orange, yellow, green, blue);\n"
         "end.\n"
         "module pal;\n"
-        "  type colour = (red, orange, yellow, green, blue);\n"
+        "  type color = (red, orange, yellow, green, blue);\n"
         "end.\n"
         "program p;\n"
         "  import pal;\n"
-        "var c: colour;\n"
+        "var c: color;\n"
         "begin c := yellow; writeln(ord(c)) end.\n", kEP);
     ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
     EXPECT_EQ(R.Stdout, "2\n");
@@ -5726,15 +5829,15 @@ TEST(ExportList, ARangeCoversTheConstantsBetweenItsEnds) {
 TEST(ExportList, AConstantOutsideTheRangeStaysIn) {
     auto R = compileAndRun(
         "module pal interface;\n"
-        "  export pal = (colour, red..green);\n"
-        "  type colour = (red, orange, yellow, green, blue);\n"
+        "  export pal = (color, red..green);\n"
+        "  type color = (red, orange, yellow, green, blue);\n"
         "end.\n"
         "module pal;\n"
-        "  type colour = (red, orange, yellow, green, blue);\n"
+        "  type color = (red, orange, yellow, green, blue);\n"
         "end.\n"
         "program p;\n"
         "  import pal;\n"
-        "var c: colour;\n"
+        "var c: color;\n"
         "begin c := blue end.\n", kEP);
     EXPECT_NE(R.ExitCode, 0);
     EXPECT_NE(R.Stderr.find("blue"), std::string::npos);
@@ -6273,7 +6376,7 @@ TEST(ProcParams, NestedTargetStillSeesItsOuterVariables) {
 
 TEST(ProcParams, NestedTargetReachesATopLevelReceiver) {
     // ap is top level, so 'base' is nowhere in scope where the call happens.
-    // The frame must have travelled with addbase.
+    // The frame must have traveled with addbase.
     auto R = compileAndRun(
         "program p;\n"
         "function ap(function f(x: integer): integer; v: integer): integer;\n"
@@ -6344,7 +6447,7 @@ TEST(ProcParams, ParameterIsHandedOnwards) {
 
 TEST(ProcParams, ParameterlessFunctionalParameter) {
     // ISO §6.8.2.2: naming it in an expression is a call, and it has to be
-    // recognised as one before it is read as if it were storage.
+    // recognized as one before it is read as if it were storage.
     auto R = compileAndRun(
         "program p;\n"
         "function ap(function f: integer): integer;\n"
@@ -8096,7 +8199,7 @@ TEST(UndiscriminatedString, PassesThroughAProceduralParameter) {
 }
 
 // ---------------------------------------------------------------------------
-// EP §6.11.2: module finalisers unwind in reverse initialisation order
+// EP §6.11.2: module finalisers unwind in reverse initialization order
 // ---------------------------------------------------------------------------
 
 TEST(ModuleLifecycle, FinalisersRunInReverseOrder) {
@@ -8114,7 +8217,7 @@ TEST(ModuleLifecycle, FinalisersRunInReverseOrder) {
     EXPECT_EQ(R.Stdout, "A init\nB init\nbody\nB fini\nA fini\n");
 }
 
-TEST(ModuleLifecycle, AModuleNotImportedIsStillInitialised) {
+TEST(ModuleLifecycle, AModuleNotImportedIsStillInitialized) {
     // It is in this compilation unit, so its variables exist and its 'to begin
     // do' has to have run before anything could reach them.
     auto R = compileAndRun(
@@ -8524,7 +8627,7 @@ TEST(ModuleMangling, SurvivesSeparateCompilation) {
 
 TEST(ModuleMangling, AnImportedParameterlessFunctionIsCalledNotRead) {
     // Separately compiled, so nothing named `answer` has been emitted here to
-    // recognise it by.  Read as a variable it links against a global that does
+    // recognize it by.  Read as a variable it links against a global that does
     // not exist.
     auto R = compileTwoFiles(
         "module MangleNullary;\n"
@@ -8614,8 +8717,8 @@ TEST(MultiDimArray, AnInnerIndexIsBoundsCheckedToo) {
 TEST(ArrayIndexType, ANamedEnumerationSpansTheWholeType) {
     auto R = compileAndRun(
         "program p(output);\n"
-        "type colour = (red, green, blue);\n"
-        "var a: array[colour] of integer; c: colour;\n"
+        "type color = (red, green, blue);\n"
+        "var a: array[color] of integer; c: color;\n"
         "begin\n"
         "  for c := red to blue do a[c] := ord(c) + 1;\n"
         "  writeln(a[red], ' ', a[green], ' ', a[blue])\n"
@@ -9592,15 +9695,15 @@ TEST(SeparateCompilation, AnImportedArrayKeepsItsIndexRange) {
 TEST(ExportList, TheFirstConstantOfARangeIsExported) {
     auto R = compileAndRun(
         "module pal interface;\n"
-        "  export pal = (colour, red..green);\n"
-        "  type colour = (red, orange, yellow, green, blue);\n"
+        "  export pal = (color, red..green);\n"
+        "  type color = (red, orange, yellow, green, blue);\n"
         "end.\n"
         "module pal;\n"
-        "  type colour = (red, orange, yellow, green, blue);\n"
+        "  type color = (red, orange, yellow, green, blue);\n"
         "end.\n"
         "program p(output);\n"
         "  import pal;\n"
-        "var c: colour;\n"
+        "var c: color;\n"
         "begin c := red; writeln(ord(c)) end.\n", kEP);
     ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
     EXPECT_EQ(R.Stdout, "0\n");
@@ -9880,7 +9983,7 @@ TEST(Ordinals, SuccAndPredKeepTheArgumentsType) {
     // boolean result is written as 1 and 0.
     auto R = compileAndRun(
         "program p(output);\n"
-        "type colour = (red, green, blue);\n"
+        "type color = (red, green, blue);\n"
         "begin\n"
         "  writeln(succ(false), ' ', pred(true));\n"
         "  writeln(succ('a'), pred('z'));\n"
@@ -10553,8 +10656,8 @@ TEST(SubrangeCompare, TwoDistinctEnumerationsAreNotComparable) {
     auto R = compileAndRun(
         "program p(output);\n"
         "type day = (mon, tue, wed);\n"
-        "     colour = (red, green, blue);\n"
-        "var d: day; k: colour;\n"
+        "     color = (red, green, blue);\n"
+        "var d: day; k: color;\n"
         "begin d := mon; k := red; writeln(d = k) end.\n");
     EXPECT_NE(R.ExitCode, 0);
     EXPECT_NE(R.Stderr.find("cannot compare"), std::string::npos) << R.Stderr;
@@ -10918,20 +11021,20 @@ TEST(ErrorLimit, TheProgramStillFails) {
 // The driver and the front end share one list of options
 //
 // They used to keep separate ones, and an option added to the front end alone
-// was called "unrecognised" by the driver and dropped instead of forwarded.
+// was called "unrecognized" by the driver and dropped instead of forwarded.
 // ---------------------------------------------------------------------------
 
 TEST(OptionTable, DriverForwardsAFrontEndOptionItHasNoUseFor) {
     auto R = compileAndRun("program p;\nbegin a:=1; b:=2; c:=3 end.\n",
                            "-ferror-limit=1");
-    EXPECT_EQ(R.Stderr.find("unrecognised argument"), std::string::npos)
+    EXPECT_EQ(R.Stderr.find("unrecognized argument"), std::string::npos)
         << R.Stderr;
     EXPECT_EQ(diagCount(R.Stderr), 1) << R.Stderr;
 }
 
 TEST(OptionTable, AnOptionNobodyKnowsIsStillReported) {
     std::string Out = runPlang("-fnot-a-real-option /dev/null");
-    EXPECT_NE(Out.find("unrecognised argument"), std::string::npos) << Out;
+    EXPECT_NE(Out.find("unrecognized argument"), std::string::npos) << Out;
 }
 
 TEST(OptionTable, BothHelpTextsListTheWarningOptions) {
@@ -10955,9 +11058,9 @@ TEST(OptionTable, TheFrontEndHelpOmitsWhatOnlyTheDriverDoes) {
 // Driver diagnostics
 //
 // The driver used to print its errors straight to stderr with its own
-// colouring, which put them outside everything -w, -Werror, -Wno-<name> and
+// coloring, which put them outside everything -w, -Werror, -Wno-<name> and
 // -ferror-limit decide.  They go through the same DiagnosticsEngine as the
-// rest now, and are catalogued in DiagnosticDriverKinds.def.
+// rest now, and are cataloged in DiagnosticDriverKinds.def.
 // ---------------------------------------------------------------------------
 
 /// Run "plang <args>" and return the exit status along with what it printed.
@@ -10991,18 +11094,18 @@ TEST(DriverDiagnostics, TheDriverAndTheFrontEndAgreeOnAMissingFile) {
     EXPECT_EQ(Frontend, "error: no such file or directory: 'nosuchfile.pas'\n");
 }
 
-TEST(DriverDiagnostics, AnUnrecognisedArgumentAnswersToItsOwnName) {
-    // Catalogued as a warning, so it has a -W name derived from the DiagID
+TEST(DriverDiagnostics, AnUnrecognizedArgumentAnswersToItsOwnName) {
+    // Cataloged as a warning, so it has a -W name derived from the DiagID
     // like every other warning, and can be turned off on its own.
     std::string On  = runPlang("-fnot-a-real-option /dev/null");
-    std::string Off = runPlang("-fnot-a-real-option -Wno-unrecognised-argument /dev/null");
-    EXPECT_NE(On.find("plang: warning: unrecognised argument"), std::string::npos) << On;
-    EXPECT_EQ(Off.find("unrecognised argument"), std::string::npos) << Off;
+    std::string Off = runPlang("-fnot-a-real-option -Wno-unrecognized-argument /dev/null");
+    EXPECT_NE(On.find("plang: warning: unrecognized argument"), std::string::npos) << On;
+    EXPECT_EQ(Off.find("unrecognized argument"), std::string::npos) << Off;
 }
 
 TEST(DriverDiagnostics, MinusWSilencesADriverWarning) {
     std::string Out = runPlang("-fnot-a-real-option -w /dev/null");
-    EXPECT_EQ(Out.find("unrecognised argument"), std::string::npos) << Out;
+    EXPECT_EQ(Out.find("unrecognized argument"), std::string::npos) << Out;
 }
 
 TEST(DriverDiagnostics, WerrorMakesADriverWarningFatal) {
@@ -11010,12 +11113,12 @@ TEST(DriverDiagnostics, WerrorMakesADriverWarningFatal) {
     // so a driver warning stayed a warning and the compilation went ahead.
     auto [Rc, Out] = runPlangRc("-fnot-a-real-option -Werror /dev/null");
     EXPECT_EQ(Rc, 1) << Out;
-    EXPECT_NE(Out.find("plang: error: unrecognised argument"), std::string::npos) << Out;
+    EXPECT_NE(Out.find("plang: error: unrecognized argument"), std::string::npos) << Out;
 }
 
 TEST(DriverDiagnostics, TheDriverWarningIsListedWithTheRest) {
     std::string Out = runPlang("--help-warnings");
-    EXPECT_NE(Out.find("-Wno-unrecognised-argument"), std::string::npos) << Out;
+    EXPECT_NE(Out.find("-Wno-unrecognized-argument"), std::string::npos) << Out;
 }
 
 TEST(DriverDiagnostics, AnOptionMissingItsValueIsReportedNotAsserted) {
@@ -11036,9 +11139,9 @@ TEST(DriverDiagnostics, AnUnknownDialectNamesTheOnesThereAre) {
 }
 
 // ---------------------------------------------------------------------------
-// Colour
+// Color
 //
-// Two processes print diagnostics, and both used to decide colour for
+// Two processes print diagnostics, and both used to decide color for
 // themselves by probing stderr, with no way to be told otherwise.
 // ---------------------------------------------------------------------------
 
@@ -11060,9 +11163,9 @@ TEST(ColorDiagnostics, TheFlagReachesTheFrontEndToo) {
     const std::string Src = Dir + "/c.pas";
     ASSERT_TRUE(writeFileAt(Src, "program p; var x: integer;\nbegin x := true end.\n"));
 
-    std::string Colour = runPlang("-fcolor-diagnostics " + Src);
+    std::string Color = runPlang("-fcolor-diagnostics " + Src);
     std::string Plain  = runPlang(Src);
-    EXPECT_NE(Colour.find("\033[1;31merror\033[0m"), std::string::npos) << Colour;
+    EXPECT_NE(Color.find("\033[1;31merror\033[0m"), std::string::npos) << Color;
     EXPECT_EQ(Plain.find("\033["), std::string::npos) << Plain;
     removeTempDir(Dir);
 }

@@ -52,7 +52,7 @@ TOK(StringLit,  "string literal")
 TOK(Identifier, "identifier")
 TOK(Eof,        "end of file")
 
-// Produced by the Scanner for a character it cannot tokenise; the lexeme holds
+// Produced by the Scanner for a character it cannot tokenize; the lexeme holds
 // the offending character.  The Parser skips these so that scanning continues.
 TOK(Error,      "invalid character")
 

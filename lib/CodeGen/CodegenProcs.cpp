@@ -901,7 +901,7 @@ const ExprNode* Codegen::Impl::writtenInitialState(const TypeNode* tn,
 }
 
 // EP §6.6: a structured type begins in the state its components begin in, so
-// a record with one initialised field has an initial state of its own even
+// a record with one initialized field has an initial state of its own even
 // though nothing was written beside the record.
 bool Codegen::Impl::hasInitialState(const TypeNode* tn, int depth) const {
     if (!tn || depth > 16) return false;
@@ -1071,7 +1071,7 @@ void Codegen::Impl::emitGlobalVarInits(const BlockNode& block) {
     }
 
     // Storage for program-level variables already exists as module globals, so
-    // only the runtime initialisation still has to be emitted into main.
+    // only the runtime initialization still has to be emitted into main.
     for (const auto& vg : block.Vars) emitGlobalVarInit(vg);
 }
 
@@ -1164,9 +1164,9 @@ void Codegen::Impl::emitMain(const BlockNode& block,
     closeLabelScope();
 
     // EP §6.11.2: the finalisers run in the reverse of the order the
-    // initialisers did.  A module is initialised after the ones it imports, so
+    // initialisers did.  A module is initialized after the ones it imports, so
     // running the finalisers forward would tear down a module while one that
-    // depends on it is still to be finalised.  Each initialiser registered its
+    // depends on it is still to be finalized.  Each initialiser registered its
     // own finaliser as it completed, which is the order the runtime unwinds.
     if (!isTerminated())
         builder.CreateCall(getExternFnN("plang_module_finals_run",
@@ -1197,7 +1197,7 @@ llvm::Function* Codegen::Impl::moduleInitFn(const std::string& moduleName) {
                                    fnName, mod.get());
 }
 
-// A module is initialised after every module it imports, and at most once
+// A module is initialized after every module it imports, and at most once
 // however many paths reach it (EP §6.11.2).  The order cannot be settled by
 // the program, which sees only its own import clauses and cannot tell what a
 // separately compiled module imports in turn.  So each initialiser guards
@@ -1254,7 +1254,7 @@ std::string Codegen::Impl::emitModuleInitFn(const ModuleNode& modNode) {
     if (modNode.InitStmt) emitStmt(modNode.InitStmt.get());
     popScope();
 
-    // Registered after the body, so finalisation unwinds in the reverse of the
+    // Registered after the body, so finalization unwinds in the reverse of the
     // order the modules actually came up in.
     if (modNode.FinalStmt) {
         auto* push = getExternFnN("plang_module_final_push",

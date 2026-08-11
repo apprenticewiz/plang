@@ -86,7 +86,7 @@ bool alwaysTransfers(const StmtNode* S) {
     if (auto* I = llvm::dyn_cast<IfStmt>(S))
         return I->Else && alwaysTransfers(I->Then.get())
                        && alwaysTransfers(I->Else.get());
-    // A loop may run no times, a labelled statement may be jumped into, and
+    // A loop may run no times, a labeled statement may be jumped into, and
     // everything else simply finishes.
     return false;
 }
@@ -601,11 +601,11 @@ void Sema::checkCallStmt(const CallStmt& S) {
             const bool ArrOk = ArrTy->Kind == TypeKind::Array
                             || ArrTy->Kind == TypeKind::ConformantArray;
             if (!ArrTy->isError() && !ArrOk)
-                error(ArrArg.Loc, diag::err_pack_operand_not_array,
-                      {Lo, "unpacked", ArrTy->Name});
+                error(ArrArg.Loc, diag::err_pack_operand_not_array_unpacked,
+                      {Lo, ArrTy->Name});
             if (!PkdTy->isError() && PkdTy->Kind != TypeKind::Array)
-                error(PkdArg.Loc, diag::err_pack_operand_not_array,
-                      {Lo, "packed", PkdTy->Name});
+                error(PkdArg.Loc, diag::err_pack_operand_not_array_packed,
+                      {Lo, PkdTy->Name});
             // The index type of a conformant array is the ordinal its bounds
             // were declared with, which is as much a type as a written range.
             if (ArrOk && ArrTy->IndexType && !IdxTy->isError()

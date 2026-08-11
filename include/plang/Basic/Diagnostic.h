@@ -184,16 +184,27 @@ struct Diagnostic {
     DiagID         ID{diag::none};
 };
 
-/// The label a severity is printed under, and the colour it is printed in.
+/// The word in front of every message, translated if the catalog has it.
+/// Defined in lib/Basic/MessageCatalog.cpp; declared here because
+/// severityLabel below is what prints it and MessageCatalog.h includes this
+/// header, so the dependency can only go this way.
+const char* localizedSeverityLabel(DiagSeverity Sev);
+
+/// The label a severity is printed under, and the color it is printed in.
+///
+/// The label is translated with the messages: a French diagnostic reading
+/// "error: <French>" would be half the job, and the half a reader sees first.
+/// The color is not: an SGR sequence is not language.
 [[nodiscard]] inline std::string severityLabel(DiagSeverity Sev, bool UseColor) {
-    std::string_view Label, On;
+    const std::string Label = localizedSeverityLabel(Sev);
+    if (!UseColor) return Label;
+    std::string_view On;
     switch (Sev) {
-        case DiagSeverity::Error:   Label = "error";   On = "\033[1;31m"; break;
-        case DiagSeverity::Warning: Label = "warning"; On = "\033[1;33m"; break;
-        case DiagSeverity::Info:    Label = "note";    On = "\033[1;32m"; break;
+        case DiagSeverity::Error:   On = "\033[1;31m"; break;
+        case DiagSeverity::Warning: On = "\033[1;33m"; break;
+        case DiagSeverity::Info:    On = "\033[1;32m"; break;
     }
-    if (!UseColor) return std::string(Label);
-    return std::string(On) + std::string(Label) + "\033[0m";
+    return std::string(On) + Label + "\033[0m";
 }
 
 // ---------------------------------------------------------------------------
@@ -219,24 +230,24 @@ struct DiagnosticOptions {
 };
 
 // ---------------------------------------------------------------------------
-// Colour — one decision, made in one place
+// Color — one decision, made in one place
 // ---------------------------------------------------------------------------
 
-/// What the command line asked for about colour.
+/// What the command line asked for about color.
 enum class ColorDiagnostics {
-    Auto,   ///< colour if stderr is a terminal (the default)
+    Auto,   ///< color if stderr is a terminal (the default)
     Always, ///< -fcolor-diagnostics
     Never,  ///< -fno-color-diagnostics
 };
 
-/// The choice \p Arg expresses, or Auto if it is not one of the colour options.
+/// The choice \p Arg expresses, or Auto if it is not one of the color options.
 [[nodiscard]] inline ColorDiagnostics colorDiagnosticsArg(std::string_view Arg) {
     if (Arg == "-fcolor-diagnostics")    return ColorDiagnostics::Always;
     if (Arg == "-fno-color-diagnostics") return ColorDiagnostics::Never;
     return ColorDiagnostics::Auto;
 }
 
-/// Whether to colourise, given the choice and whether stderr is a terminal.
+/// Whether to colorize, given the choice and whether stderr is a terminal.
 ///
 /// The driver and the front end are separate processes and both print
 /// diagnostics, so both have to answer this.  They used to answer it
@@ -292,7 +303,7 @@ public:
         return Opts.WarningsAsErrors ? Level::Error : Level::Warning;
     }
 
-    /// Report a catalogued diagnostic.  Returns false if policy discarded it.
+    /// Report a cataloged diagnostic.  Returns false if policy discarded it.
     bool report(SourceLocation Loc, DiagID ID,
                 std::initializer_list<std::string_view> Args = {}) {
         const Level L = levelOf(ID);

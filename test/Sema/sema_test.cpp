@@ -1102,9 +1102,9 @@ TEST(EP13Modules, QualifiedImportAccepted) {
 TEST(EP13Modules, ExportPartAndInterfaceDeclarations) {
     EXPECT_TRUE(check(
         "module M interface;\n"
-        "  export M = (K, Colour, Count, Scale);\n"
+        "  export M = (K, Color, Count, Scale);\n"
         "  const K = 3;\n"
-        "  type Colour = (red, green);\n"
+        "  type Color = (red, green);\n"
         "  var Count: integer;\n"
         "  function Scale(x: real; k: integer): real;\n"
         "end.\n"
@@ -1127,7 +1127,7 @@ TEST(EP13Modules, SeveralExportPartsAreAccepted) {
         epOpts()).Ok);
 }
 
-// EP §6.11.3: the parenthesised import-list, with and without 'only'.
+// EP §6.11.3: the parenthesized import-list, with and without 'only'.
 TEST(EP13Modules, ImportListSyntaxAccepted) {
     EXPECT_TRUE(check(
         "module M;\n"

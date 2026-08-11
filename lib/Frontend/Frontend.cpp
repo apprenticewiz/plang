@@ -11,6 +11,7 @@
 ///   argv[2…] = front-end options and the source file
 
 #include "plang/Frontend/Frontend.h"
+#include "plang/Basic/MessageCatalog.h"
 #include "plang/Basic/Version.h"
 
 #include "plang/AST/AstPrinter.h"
@@ -71,10 +72,11 @@ std::string findInstallDir(const char *Argv0) {
 
 void printVersion(const char *Argv0) {
     llvm::Triple T(llvm::sys::getDefaultTargetTriple());
+    const std::string Dir = findInstallDir(Argv0);
     std::println("plang version {}\nTarget: {}\nThread model: {}\nInstalledDir: {}",
                  PLANG_VERSION_STRING, T.str(),
-                 T.isOSWindows() ? "win32" : "posix",
-                 findInstallDir(Argv0));
+                 T.isOSWindows() ? "win32" : "posix", Dir);
+    std::println("Messages: {}", describeLocale());
 }
 
 void usagePC1() {
@@ -93,7 +95,7 @@ bool isKnownDialect(const std::string &D) {
 }
 
 // ---------------------------------------------------------------------------
-// PMI writer — serialise a module's exported declarations to Pascal text
+// PMI writer — serialize a module's exported declarations to Pascal text
 // ---------------------------------------------------------------------------
 
 /// Convert an ExprNode back to a Pascal constant expression string.
@@ -476,7 +478,7 @@ static std::string buildPMIContent(const ModuleNode& Mod,
 
     // What an interface says is what a .pmi has to say, and the interface is
     // where it is written: a body repeats none of the types and writes its
-    // routines as the name alone, so serialising the body left an importer
+    // routines as the name alone, so serializing the body left an importer
     // with types it had never heard of and headings with no parameters.
     const BlockNode& Decls =
         (Iface && Iface->Body) ? *Iface->Body : *Mod.Body;
@@ -629,6 +631,24 @@ static void writePMIFiles(const ProgramNode& Program,
 } // namespace
 
 int frontendPC1Main(int Argc, char *Argv[]) {
+    // The front end is a separate process from the driver and prints its own
+    // diagnostics, so it resolves its own catalog.  This is a prescan rather
+    // than a case in the loop below, because that loop reports as it goes and
+    // a locale chosen partway through would translate only the messages after
+    // it.
+    {
+        std::string_view Lang;
+        bool ShowFuzzy = false;
+        constexpr std::string_view LangOpt = "-fdiagnostics-language=";
+        for (int I = 2; I < Argc; ++I) {
+            const std::string_view A = Argv[I];
+            if (A.starts_with(LangOpt))            Lang = A.substr(LangOpt.size());
+            else if (A == "-fdiagnostics-show-fuzzy") ShowFuzzy = true;
+        }
+        (void)selectLocale(Lang, findInstallDir(Argc > 0 ? Argv[0] : nullptr),
+                           ShowFuzzy);
+    }
+
     std::string              InputFile;
     std::string              OutputFile;
     std::string              Std;
@@ -660,6 +680,12 @@ int frontendPC1Main(int Argc, char *Argv[]) {
                 return 1;
             }
             OutputFile = Argv[++I];
+        } else if (Arg.starts_with("-fdiagnostics-language=") ||
+                   Arg == "-fdiagnostics-show-fuzzy") {
+            // Acted on by the prescan above.  The arm is still required: this
+            // chain ends in "unrecognized argument", and the driver forwards
+            // both of these, so without it every driver-mediated compile would
+            // warn about an option the driver itself just passed on.
         } else if (Arg.starts_with("-std=")) {
             Std = Arg.substr(5);
             if (!isKnownDialect(Std)) {
@@ -734,7 +760,7 @@ int frontendPC1Main(int Argc, char *Argv[]) {
             }
             std::erase(DisabledWarnings, Name);
         } else if (!Arg.empty() && Arg[0] == '-') {
-            std::cerr << "plang -pc1: warning: unrecognised argument '" << Arg << "'\n";
+            std::cerr << "plang -pc1: warning: unrecognized argument '" << Arg << "'\n";
         } else {
             if (!InputFile.empty()) {
                 std::cerr << "plang -pc1: error: only one input file is supported\n";

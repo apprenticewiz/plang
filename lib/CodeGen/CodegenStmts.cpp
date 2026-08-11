@@ -102,7 +102,7 @@ void Codegen::Impl::emitLabelLanding() {
     // ISO §6.8.1 permits the jump only to a label at the outermost level of
     // the statement part, so the landing pad may sit here, ahead of the body,
     // and reach every target with a branch.  It sits after the block's
-    // initialisation because a goto landing here resumes the block rather than
+    // initialization because a goto landing here resumes the block rather than
     // starting it again.
     auto* setjmpFn = getExternFnN("_setjmp", i32Ty, {ptrTy});
     if (auto* f = llvm::dyn_cast<llvm::Function>(setjmpFn))

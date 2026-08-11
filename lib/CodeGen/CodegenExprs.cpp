@@ -26,7 +26,7 @@ llvm::Value* Codegen::Impl::emitExpr(const ExprNode& e) {
         if (n->Value.size() == 1)
             return llvm::ConstantInt::get(i8Ty,
                 static_cast<unsigned char>(n->Value[0]));
-        // EP: string literals carry VarString type — materialise as a struct so
+        // EP: string literals carry VarString type — materialize as a struct so
         // that the invariant "exprIsVarStr → emitExpr returns ptr to struct" holds.
         if (exprIsVarStr(e)) {
             int64_t cap  = (int64_t)n->Value.size();
@@ -79,7 +79,7 @@ llvm::Value* Codegen::Impl::emitExpr(const ExprNode& e) {
             // ISO §6.8.2.2: a parameterless function-identifier in an
             // expression is a call, not a variable.  Route it through the call
             // path so it still gets a static link when it is nested.
-            // An imported one has nothing emitted here to recognise it by, so
+            // An imported one has nothing emitted here to recognize it by, so
             // the import table has to say; otherwise it is read as a variable
             // and the link fails on a global that was never a global.
             CallExpr Call;

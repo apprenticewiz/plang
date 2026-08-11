@@ -4,7 +4,7 @@
 // keep four lists of the options — the driver's parser, the driver's help text,
 // the front end's parser, and the front end's help text — and they had drifted:
 // the front end accepted -Wno-<name>, -Wall and -I without mentioning them, and
-// the driver called any option it had not been taught about "unrecognised" and
+// the driver called any option it had not been taught about "unrecognized" and
 // dropped it rather than passing it on.
 //
 //   OPTION(Spelling, Display, Kind, Consumer, Help)
@@ -23,7 +23,7 @@
 //                 Both      both act on it, and the driver passes it through
 //     Help      One line, or several if it needs them; empty hides the option.
 //
-// Adding an option here is enough for the driver to recognise it, to hand it to
+// Adding an option here is enough for the driver to recognize it, to hand it to
 // the front end if that is where it belongs, and for both help texts to
 // mention it.  What the option then *does* is still written where it acts.
 //
@@ -74,6 +74,14 @@ OPTION("-std=", "-std=<dialect>", Joined, Both,
        "                       fpc       Free Pascal extensions     [not yet implemented]")
 OPTION("-I", "-I<dir>", JoinedOrSeparate, Both,
        "Add <dir> to the module (.pmi) search path")
+OPTION("-fdiagnostics-language=", "-fdiagnostics-language=<tag>", Joined, Both,
+       "Language for diagnostic messages, e.g. fr or es_MX; 'C' or 'en'\n"
+       "                     for the built-in English.  Without it LC_ALL, LC_MESSAGES\n"
+       "                     and LANG are consulted in that order.  Only the messages\n"
+       "                     are affected: what plang compiles never depends on it")
+OPTION("-fdiagnostics-show-fuzzy", "-fdiagnostics-show-fuzzy", Flag, Both,
+       "Use translations marked '#, fuzzy', which are otherwise ignored.\n"
+       "                     For reviewing a translation before it is approved")
 
 //===----------------------------------------------------------------------===//
 // Diagnostics
@@ -90,9 +98,9 @@ OPTION("-W",       "-W<warning>",     Joined, Both, "Enable a named warning")
 OPTION("-ferror-limit=", "-ferror-limit=<n>", Joined, Both,
        "Stop after <n> errors; 0 means no limit (default: 0)")
 OPTION("-fcolor-diagnostics",    "-fcolor-diagnostics",    Flag, Both,
-       "Colourise diagnostics even when stderr is not a terminal")
+       "Colorize diagnostics even when stderr is not a terminal")
 OPTION("-fno-color-diagnostics", "-fno-color-diagnostics", Flag, Both,
-       "Do not colourise diagnostics (default: colour when stderr is a terminal)")
+       "Do not colorize diagnostics (default: color when stderr is a terminal)")
 OPTION("--help-warnings", "--help-warnings", Flag, Both, "List the named warnings")
 
 //===----------------------------------------------------------------------===//
