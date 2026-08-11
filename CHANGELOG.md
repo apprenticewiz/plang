@@ -8,6 +8,14 @@ version numbers follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 
 ## [Unreleased]
 
+### Changed
+
+- **`Codegen`'s pointer to its implementation is called `PImpl` again.**  It was
+  `PascalImpl`, which reads as though it were the Pascal half of something with
+  another half somewhere.  `PImpl` is what the idiom is called, so it says what
+  the member is to anyone who has met it before.  Naming only; nothing about
+  what is generated has changed.
+
 ### Fixed
 
 - **A program may declare its own `abs`.**  ISO §6.2.2.10 lets a program

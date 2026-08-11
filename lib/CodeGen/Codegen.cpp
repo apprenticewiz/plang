@@ -178,26 +178,26 @@ void Codegen::Impl::optimize() {
     pb.buildPerModuleDefaultPipeline(level).run(*mod, mam);
 }
 
-Codegen::Codegen(const LangOptions& Opts) : PascalImpl(std::make_unique<Impl>()) {
-    PascalImpl->rangeChecks = Opts.RangeChecks;
-    PascalImpl->nilChecks   = Opts.NilChecks;
-    PascalImpl->optLevel    = Opts.OptLevel;
+Codegen::Codegen(const LangOptions& Opts) : PImpl(std::make_unique<Impl>()) {
+    PImpl->rangeChecks = Opts.RangeChecks;
+    PImpl->nilChecks   = Opts.NilChecks;
+    PImpl->optLevel    = Opts.OptLevel;
 }
 Codegen::~Codegen() = default;
 
 void Codegen::setImportOwners(const ImportOwnerTable& Owners) {
-    PascalImpl->importOwners_ = &Owners;
+    PImpl->importOwners_ = &Owners;
 }
 
 void Codegen::setLoadedInterfaces(std::vector<const ModuleNode*> Ifaces) {
-    PascalImpl->loadedInterfaces_ = std::move(Ifaces);
+    PImpl->loadedInterfaces_ = std::move(Ifaces);
 }
 
 bool Codegen::emit(const ProgramNode& prog, std::ostream& os) {
-    PascalImpl->init(prog.Name);
-    PascalImpl->labelBlocks.clear();
+    PImpl->init(prog.Name);
+    PImpl->labelBlocks.clear();
 
-    PascalImpl->pushScope(); // global scope
+    PImpl->pushScope(); // global scope
 
     // EP §6.11: emit module bodies (globals + procedures) before the program.
     //
@@ -212,38 +212,38 @@ bool Codegen::emit(const ProgramNode& prog, std::ostream& os) {
     for (auto* Mod : prog.Modules) {
         if (Mod->IsInterface) continue;
         const std::string Unit = toLower(Mod->Name);
-        PascalImpl->pushScope();
-        PascalImpl->currentUnit_  = Unit;
-        PascalImpl->namePrefix    = PlangProcPrefix   + Unit + PlangScopeSep;
-        PascalImpl->globalPrefix  = PlangGlobalPrefix + Unit + PlangScopeSep;
-        PascalImpl->moduleIfaceBlock_ = nullptr;
+        PImpl->pushScope();
+        PImpl->currentUnit_  = Unit;
+        PImpl->namePrefix    = PlangProcPrefix   + Unit + PlangScopeSep;
+        PImpl->globalPrefix  = PlangGlobalPrefix + Unit + PlangScopeSep;
+        PImpl->moduleIfaceBlock_ = nullptr;
         if (Mod->Body) {
-            PascalImpl->emitGlobals(*Mod->Body);
+            PImpl->emitGlobals(*Mod->Body);
             // EP §6.11.1: whatever the module's heading declares is the
             // block's too, and this module is where it lives.
             for (auto* Iface : prog.Modules)
                 if (Iface->IsInterface && Iface->Body
                         && eqCI(Iface->Name, Mod->Name)) {
-                    PascalImpl->moduleIfaceBlock_ = Iface->Body.get();
-                    PascalImpl->emitInheritedGlobals(*Iface->Body, *Mod->Body);
+                    PImpl->moduleIfaceBlock_ = Iface->Body.get();
+                    PImpl->emitInheritedGlobals(*Iface->Body, *Mod->Body);
                     break;
                 }
-            PascalImpl->emitAllProcedures(*Mod->Body);
+            PImpl->emitAllProcedures(*Mod->Body);
         }
         // The lifecycle blocks read the module's own variables, so they are
         // emitted here, while its scope is still standing.  The finaliser goes
         // first because the initialiser ends by registering it.
         if (Mod->FinalStmt)
-            PascalImpl->emitModuleLifecycleFn("__plang_fini_" + Unit,
+            PImpl->emitModuleLifecycleFn("__plang_fini_" + Unit,
                                               *Mod->FinalStmt);
-        PascalImpl->emitModuleInitFn(*Mod);
+        PImpl->emitModuleInitFn(*Mod);
         InitModules.push_back(Mod->Name);
-        PascalImpl->moduleIfaceBlock_ = nullptr;
-        PascalImpl->popScope();
+        PImpl->moduleIfaceBlock_ = nullptr;
+        PImpl->popScope();
     }
-    PascalImpl->currentUnit_.clear();
-    PascalImpl->namePrefix   = PlangProcPrefix;
-    PascalImpl->globalPrefix = PlangGlobalPrefix;
+    PImpl->currentUnit_.clear();
+    PImpl->namePrefix   = PlangProcPrefix;
+    PImpl->globalPrefix = PlangGlobalPrefix;
 
     // A module compiled on its own is reached only through the program's import
     // clauses, and its initialiser has to be called from here or never at all.
@@ -259,9 +259,9 @@ bool Codegen::emit(const ProgramNode& prog, std::ostream& os) {
     // out and, where the interface says so, initialises — and the declaration
     // it does that from is the one read back from the .pmi.  The program's own
     // declarations come after, so a name it declares itself stays its own.
-    for (const auto* Iface : PascalImpl->loadedInterfaces_)
+    for (const auto* Iface : PImpl->loadedInterfaces_)
         if (Iface->Body)
-            PascalImpl->registerInterfaceTypes(*Iface->Body, toLower(Iface->Name));
+            PImpl->registerInterfaceTypes(*Iface->Body, toLower(Iface->Name));
 
     // A routine of an imported module is called with whatever hidden arguments
     // its parameters ask for — the bounds of a conformant array, the
@@ -270,29 +270,29 @@ bool Codegen::emit(const ProgramNode& prog, std::ostream& os) {
     // declared here; a call site that found no declaration would invent one
     // from the shape of the argument list and pass an array where the module
     // reads a pointer and a bound.
-    for (const auto* Iface : PascalImpl->loadedInterfaces_) {
+    for (const auto* Iface : PImpl->loadedInterfaces_) {
         if (!Iface->Body) continue;
-        PascalImpl->namePrefix = PlangProcPrefix + toLower(Iface->Name) + PlangScopeSep;
+        PImpl->namePrefix = PlangProcPrefix + toLower(Iface->Name) + PlangScopeSep;
         for (const auto& Proc : Iface->Body->Procs)
-            PascalImpl->emitFunctionDef(*Proc, /*declareOnly=*/true);
+            PImpl->emitFunctionDef(*Proc, /*declareOnly=*/true);
     }
-    PascalImpl->namePrefix = PlangProcPrefix;
+    PImpl->namePrefix = PlangProcPrefix;
 
-    PascalImpl->emitFileParams(prog.FileParams);
-    PascalImpl->emitGlobals(*prog.Block);
+    PImpl->emitFileParams(prog.FileParams);
+    PImpl->emitGlobals(*prog.Block);
     // ISO §6.8.1: a procedure may goto a label of the program's block, so the
     // buffer that goto returns to has to exist before the procedures do.
-    PascalImpl->openLabelScope(*prog.Block, /*programBlock=*/true);
-    PascalImpl->emitAllProcedures(*prog.Block);
+    PImpl->openLabelScope(*prog.Block, /*programBlock=*/true);
+    PImpl->emitAllProcedures(*prog.Block);
 
     // For module-only compilation units (no program body), skip emitting
     // main() so the object file can be linked with a separate program object.
     bool IsModuleOnly = prog.Block->Body == nullptr && !prog.OwnedModules.empty();
     if (!IsModuleOnly)
-        PascalImpl->emitMain(*prog.Block, prog.FileParams, InitModules);
+        PImpl->emitMain(*prog.Block, prog.FileParams, InitModules);
     else
-        PascalImpl->closeLabelScope(); // main, which would have closed it, is absent
-    PascalImpl->popScope();
+        PImpl->closeLabelScope(); // main, which would have closed it, is absent
+    PImpl->popScope();
 
     // Verify the module before emitting — a failed verify indicates a codegen
     // bug and must not produce output that downstream tools would accept.
@@ -300,15 +300,15 @@ bool Codegen::emit(const ProgramNode& prog, std::ostream& os) {
     // whatever the pipeline made of it.
     std::string errs;
     llvm::raw_string_ostream errStream(errs);
-    if (llvm::verifyModule(*PascalImpl->mod, &errStream)) {
+    if (llvm::verifyModule(*PImpl->mod, &errStream)) {
         std::cerr << "plang: internal error: LLVM IR verification failed\n"
                   << errs << "\n";
         return false;
     }
 
-    PascalImpl->optimize();
+    PImpl->optimize();
 
     llvm::raw_os_ostream llvmOs(os);
-    PascalImpl->mod->print(llvmOs, nullptr);
+    PImpl->mod->print(llvmOs, nullptr);
     return true;
 }
