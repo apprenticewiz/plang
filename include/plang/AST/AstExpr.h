@@ -1,5 +1,7 @@
 #pragma once
 
+#include "plang/Basic/BuiltinIDs.h"
+
 #include "plang/AST/AstBase.h"
 #include <cstdint>
 
@@ -85,13 +87,16 @@ struct CallExpr : ExprNode {
     std::string                            Name;  /// function name
     std::vector<std::unique_ptr<ExprNode>> Args;  /// actual arguments, in order
 
-    /// True where Sema resolved this call to a required function rather than
-    /// to one the program declared.  ISO §6.2.2.10 lets a program declare its
-    /// own `abs` or `round`, and the name alone cannot say which was meant —
-    /// only the scope the call was written in can, and Sema is what knows it.
+    /// Which required function Sema resolved this call to, or None where it
+    /// resolved to one the program declared.  ISO §6.2.2.10 lets a program
+    /// declare its own `abs` or `round`, and the name alone cannot say which
+    /// was meant — only the scope the call was written in can, and Sema is
+    /// what knows it.  Carrying the identity rather than a flag means what
+    /// Sema decided is what codegen acts on, without matching the spelling a
+    /// second time against a second list.
     /// Mutable so that Sema can annotate through a const reference, as it does
     /// for TypeNode::ResolvedType.
-    mutable bool ResolvedBuiltin{false};
+    mutable BuiltinID ResolvedBuiltin{BuiltinID::None};
 };
 
 struct SetRangeExpr : ExprNode {

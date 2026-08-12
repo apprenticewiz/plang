@@ -636,7 +636,7 @@ llvm::Value* Codegen::Impl::emitCallExpr(const CallExpr& e) {
     // and is the only thing that knows which won.  This also settles a
     // functional parameter named after a required function, which the check at
     // the head of emitUserFuncCall would otherwise not be reached to make.
-    if (!e.ResolvedBuiltin) return emitUserFuncCall(e);
+    if (e.ResolvedBuiltin == BuiltinID::None) return emitUserFuncCall(e);
 
     // ---- Math built-ins routed through plang_math.c ----
     if (lo == "sqrt" || lo == "sin" || lo == "cos" || lo == "exp"
@@ -1069,7 +1069,7 @@ llvm::Value* Codegen::Impl::emitIndexGEP(const IndexExpr& e) {
         auto [lo, hi] = schemaArrayBounds(*ref);
         auto* elemTy  = schemaStorageType(*ref);
         auto* idx     = toI64(emitExpr(*e.Index));
-        emitRangeCheckDyn(idx, lo, hi, /*isIndex=*/true);
+        emitRangeCheckDyn(idx, lo, hi, /*isIndex=*/true, e.Loc);
         idx = builder.CreateSub(idx, lo, "idx.adj.sch");
         return builder.CreateGEP(elemTy, ref->data, {idx}, "elem.ptr");
     }
@@ -1079,7 +1079,7 @@ llvm::Value* Codegen::Impl::emitIndexGEP(const IndexExpr& e) {
     if (exprIsVarStr(*e.Array)) {
         auto* strPtr = emitStrAddr(*e.Array);
         auto* idx    = toI64(emitExpr(*e.Index));
-        if (rangeChecks) {
+        if (rangeChecksAt(e.Loc)) {
             auto* len   = strLoadLen(strPtr);
             auto* one   = llvm::ConstantInt::get(i64Ty, 1);
             auto* bad   = builder.CreateOr(
@@ -1177,7 +1177,7 @@ llvm::Value* Codegen::Impl::emitIndexGEP(const IndexExpr& e) {
     // are the ones the source actually wrote.
     if (auto* at = llvm::dyn_cast_or_null<llvm::ArrayType>(arrTy)) {
         auto n = static_cast<int64_t>(at->getNumElements());
-        if (n > 0) emitRangeCheck(idx, Low, Low + n - 1, /*isIndex=*/true);
+        if (n > 0) emitRangeCheck(idx, Low, Low + n - 1, /*isIndex=*/true, e.Loc);
     }
     if (Low != 0)
         idx = builder.CreateSub(idx, llvm::ConstantInt::get(i64Ty, Low), "idx.adj");

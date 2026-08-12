@@ -98,7 +98,128 @@ version numbers follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html
   a compiler error means is worse than English — but a catalog that is entirely
   unreviewed is then inert, and this is how the person reviewing it reads it.
 
+### Fixed
+
+- **Nineteen Extended Pascal names came back as "undefined function".**
+  `cmplx`, `polar`, `re`, `im`, `arg`, the five direct-access procedures,
+  `position`, `lastposition`, `empty`, `gettimestamp`, `date`, `time`, `bind`,
+  `unbind` and `binding` were declared only inside `if (extendedPascal())`, so
+  under `-std=iso7185` a program using one was told the name was undefined --
+  which reads as a typo to go and fix rather than as a dialect boundary.  Ten
+  other names, `card` and the string functions among them, were declared under
+  either standard and said so properly.  The comment above the registration
+  already described the second behavior as the intent; the split was not
+  deliberate.  All of them now say what they are.
+
 ### Changed
+
+- **Compiler-switch state is positional.**  Turbo Pascal's `{$R+}` applies from
+  where it is written to the end of the file, so one compilation can check one
+  loop and not the next.  Nothing on `LangOptions` can say that, so the answer
+  is a table of the places the state changed — `Basic/SwitchTable.h`,
+  binary-searched by source location, with the switches themselves listed once
+  in `Basic/CompilerSwitches.def`.  Range checking is the first consumer:
+  `emitRangeCheck` asks where it is rather than reading a flag.
+
+  A null table means the flag, and ISO 7185 and Extended Pascal have no
+  directives to build one.  The 181 modules the conformance corpus and the
+  acceptance test produce, across `-std=iso7185`, `-std=iso10206` and
+  `-fno-range-checks`, are byte-identical either side of this.
+
+  No `-fio-checks`/`-fno-io-checks` yet, though the roadmap called for one:
+  ISO 7185 and Extended Pascal report an I/O failure by aborting, and
+  `IOResult` — the whole reason to turn the check off — arrives with the Turbo
+  file runtime.  The flag would have changed nothing and looked like it worked.
+  `{$I}` is in the list and has a default for `{$I-}` to override.
+
+- **A missing semantic type kind stops the build.**  `NumTypeKinds` counts the
+  fourteen *type denoters* the parser produces, and four walks state the count
+  they were written against so that adding one breaks the build at each of
+  them.  What the denoters resolve to — `TypeKind` in `Sema/Type.h`, twenty-one
+  kinds — had no such count, and the switches over it end in a `default:` and
+  have to: most of them are asking a question only a few kinds answer.
+
+  Four of those defaults are wrong rather than conservative, and now say so.  A
+  scalar kind the definite-assignment walk has not been taught is silently not
+  tracked, so using a variable of it before it is given a value stops being
+  reported.  A structured kind the file check has not been taught lets a file
+  be passed by value, against ISO §6.6.3.3.  A kind codegen has not been taught
+  is reported as not lowerable, for no stated reason.  An ordinal kind the set
+  check has not been taught skips the width check, which is the silent
+  mask-truncation that check exists to prevent.
+
+  The two walks in `Basic/SemaUtil.h` are counted now too.  They are `dyn_cast`
+  chains rather than switches, so a kind left out is not a missing case but a
+  subtree the walk never enters — and the §6.8.3.9 for-loop analysis and the
+  definite-assignment walk both ride on them, so an omission there is a class
+  of error that stops being reported rather than a line of output that goes
+  missing.  Both are complete as written; that is what the counts pin.
+
+- **The end-to-end suite is four binaries and a shared harness.**
+  `driver_test.cpp` had reached eleven thousand lines and 742 cases, compiled
+  as one translation unit however many cores `ctest` was given, and held the
+  harness the next suite would need inside it — leaving that suite a choice
+  between adding to the file and copying out of it.  It is now
+  `DriverHarness.h` and four files split by what a case is about: the driver
+  and the command line, what the generated code does when it runs, Extended
+  Pascal, and modules.  Every one of the 742 cases came across; the test-name
+  set was compared before and after.
+
+  A case that needs several *named* files now gets a `CaseDir`: a directory of
+  its own, removed with the case, and the working directory the program runs
+  in.  Programs ran in whatever directory `ctest` was started from before, so
+  a case that wrote `r.txt` wrote it into the build tree and left it there —
+  three such files were sitting in `build/test/Driver` when this was written.
+
+  `kEP11`, `kEP12` and `kEP13` were three names for `-std=iso10206`, each
+  introduced beside a tier and used well away from it.  Splitting the file is
+  what surfaced that; there is one now.
+
+- **The required procedures and functions are one list.**
+  `Basic/Builtins.def` holds each name once, with the dialects that require it,
+  its arity and its result type.  Registration in `Sema.cpp` and the arity
+  table in `SemaExpr.cpp` are generated from it, and a call carries the
+  `BuiltinID` Sema resolved rather than a bare "was a builtin" flag, so what
+  the front end decided is what the back end acts on instead of matching the
+  spelling a second time.
+
+  The three lists could not see each other, which is how nineteen names ended
+  up declared one way and ten another.  Turbo Pascal adds about eighty more,
+  which is what made one list worth having before they arrive.
+
+- **Dialect gating asks what a dialect can do, not which one it is.**  A
+  capability more than one dialect has is now named in
+  `Basic/LangFeatures.def` and asked for as `Opts.has(Feature::X)`; the eight
+  are declaration order, constant expressions in `const`, `case` ranges, the
+  `case` default arm, subrange bound expressions, empty string literals,
+  underscores in identifiers, and char concatenation.  The twenty-five sites
+  that mean *Extended Pascal specifically* still say `extendedPascal()`, which
+  is what they mean.
+
+  Only shared capabilities are listed, deliberately.  Writing Extended Pascal's
+  thirty extensions out as a matrix would mean transcribing a column by hand,
+  and a wrong cell is invisible: both conformance corpora are ISO 7185
+  programs, so neither an ISO 7185 mode that gained an extension nor an
+  Extended Pascal mode that lost one would fail any of the 377.  A new
+  `DialectGating` suite covers that direction with a pair per capability,
+  asserting the specific diagnostic rather than mere rejection -- written the
+  loose way, one of them passed with its gate deliberately disabled.
+
+- **Code generation can see the dialect.**  `Codegen` took three scalars out of
+  `LangOptions` and kept no record of which language it was compiling.  That
+  held while every dialect difference was settled in the front end -- of the
+  thirty-four sites that ask, none were in CodeGen -- but it is not where Turbo
+  Pascal's differences live.
+
+- **The dialect list is one list.**  `Basic/Dialects.def` generates the
+  `Standard` enumeration and the validation both the driver and the front end
+  perform.  They held four copies between them and had drifted: the front end
+  listed the dialects in a different order and under a different word.
+
+  It also fixes a latent bug.  The front end mapped every `-std=` that was not
+  `iso10206` onto ISO 7185, so an unimplemented dialect would have compiled as
+  standard Pascal without saying so -- harmless only for as long as the
+  not-implemented check rejects it first.
 
 - **The version is written in one place.**  It was written by hand in four —
   the shared library's `VERSION`, `Version.h`, the man page header and this

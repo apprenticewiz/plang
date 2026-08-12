@@ -49,6 +49,16 @@ one list in the same way, `Driver/Options.def`, read by both the driver and the
 front end so that the two cannot drift apart in what they accept or in what
 they say they accept.
 
+The required procedures and functions are one list too, `Basic/Builtins.def`:
+each name once, with the dialects that require it, its arity and its result
+type.  Sema declares them from it and checks their arity from it, and a
+resolved call carries the `BuiltinID` rather than a flag, so code generation
+acts on what Sema decided instead of matching the spelling against a list of
+its own.  This was three lists that could not see each other, and the drift it
+invites had already happened: nineteen of the Extended Pascal names were
+declared only under `-std=iso10206` and so came back as *undefined* under
+`-std=iso7185`, while ten others correctly said what they were.
+
 The AST uses LLVM's RTTI, with `classof` and `isa`/`dyn_cast` rather than a
 visitor.
 
@@ -108,6 +118,84 @@ rather than about a program.  They are cataloged in
 `DiagnosticsEngine`, which is the one place the policy below is applied,
 whichever phase raised it.  A driver diagnostic went straight to stderr before,
 with its own idea of when to use color, which put it outside all of it.
+
+### Dialects
+
+plang answers two different questions about the language it is compiling, and
+keeping them apart is what lets a second dialect exist at all.
+
+`LangOptions::extendedPascal()` asks *which standard this is*. It is the right
+question for the thirty-odd extensions that belong to Extended Pascal alone —
+schema types, `type of`, `bindable`, `restricted`, `**`, `><`, `value`,
+`for ... in`, modules — and twenty-five sites ask it. Turbo Pascal must never
+inherit any of them: `Vector(10)` is a call there, not a type.
+
+`LangOptions::has(Feature::X)` asks whether the dialect has a *capability*, and
+is the right question for the handful more than one dialect has — declaration
+order, constant expressions in `const`, `case` ranges and default arms,
+subrange bound expressions, empty string literals, underscores in identifiers,
+char concatenation. Those are listed in `Basic/LangFeatures.def` with the
+dialects that have them, and eight sites ask it.
+
+Only shared capabilities are listed. Writing all thirty out as a dialect matrix
+would mean transcribing an Extended Pascal column by hand, and a mistranscribed
+cell changes Extended Pascal silently: both conformance corpora are ISO 7185
+programs, so an ISO 7185 mode that grew an extension — or an Extended Pascal
+mode that lost one — passes all 377 of them. The `DialectGating` suite in
+`test/Sema/sema_test.cpp` is what covers that direction: one program per shared
+capability, accepted under a dialect that has it and refused with a *named*
+diagnostic under one that does not. The named diagnostic matters — written as a
+bare "was rejected", the `case ... else` pair passed with its gate deliberately
+disabled, because ISO 7185 hands `otherwise` back as an identifier and the
+program failed a token later for an unrelated reason.
+
+A feature's dialects are derived from `Std` rather than stored, so there is no
+seeded copy to fall out of step. Per-feature overrides, if FPC's
+`{$MODESWITCH}` ever wants them, go behind `has()` without any call site
+changing.
+
+The dialect names themselves are in `Basic/Dialects.def`, which generates the
+`Standard` enumeration, the `D_*` bits, and the validation both the driver and
+the front end do — two processes that must agree, and which previously held
+four copies of the list between them.
+
+### Positional compiler switches
+
+Turbo Pascal's `{$R+}` is textual: it applies from where it is written to the
+end of the file, so one compilation can check one loop and not the next.  There
+is nowhere on `LangOptions` to say that — a flag there is a statement about the
+whole compilation — so the answer lives in a table of the places the state
+changed, `Basic/SwitchTable.h`, binary-searched by source location.  The
+switches themselves are one list, `Basic/CompilerSwitches.def`, which carries
+each one's letter, its long name, what Turbo starts it at, and whether plang
+acts on it or merely records it so `{$IFOPT}` can answer truthfully.
+
+The alternative designs were a field snapshotted onto every AST node, which
+costs bytes on every node and makes the AST printer and the interface writer
+learn about switches to stay correct, and a coarser map, which cannot answer
+`{$IFOPT}` at all.
+
+**A null table means the flag.**  ISO 7185 and Extended Pascal have no
+directives, so they build no table, so every query returns the command-line
+default and nothing is searched.  That is what keeps their generated code
+exactly what it was: the 181 modules the conformance corpus and the acceptance
+test produce, across `-std=iso7185`, `-std=iso10206` and `-fno-range-checks`,
+are byte-identical either side of the change that introduced this.
+
+The consumer today is range checking.  There are no directives yet to fill a
+table in — that is the Turbo Pascal front end — so the positional behavior is
+tested by building a table by hand and compiling through it in process, in
+`test/CodeGen/switches_test.cpp`.  Doing it by hand is also the only way to
+reach the case that matters most: a location *before* a change still gets the
+old state, which a scanner reading in source order cannot produce.
+
+The same `D_*` bits gate the builtins. A required procedure or function is
+declared *whatever the dialect*, and `Builtins.def` says which ones may use it;
+where the active dialect is not among them, the name resolves and is refused
+for being another dialect's. That is deliberate, and it is why `cmplx` under
+`-std=iso7185` names the dialect boundary rather than reporting an undefined
+identifier. It does not reserve the name: a program remains free to declare its
+own `date` or `cmplx`, which shadows the builtin as ISO §6.2.2.10 requires.
 
 ### Translations
 
@@ -204,21 +292,30 @@ and the two cannot disagree.
 
 ## The test suite
 
-1511 tests, in six binaries:
+1616 tests, in ten binaries:
 
 | Binary                              | Tests | What it covers                        |
 |-------------------------------------|-------|---------------------------------------|
 | `test/Lex/scanner_test`             | 139   | Tokens, literals, keywords, EP gating |
 | `test/Parse/parser_test`            | 130   | Declarations, statements, expressions |
-| `test/Sema/sema_test`               | 148   | Name resolution and type checking     |
-| `test/Driver/driver_test`           | 716   | Compile, link, run, compare output    |
+| `test/Sema/sema_test`               | 161   | Name resolution and type checking     |
+| `test/Basic/catalog_test`           | 46    | The `.po` reader and locale selection |
+| `test/Driver/driver_test`           | 94    | The driver and the command line       |
+| `test/Driver/codegen_test`          | 276   | What the generated code does when run |
+| `test/Driver/ep_test`               | 210   | Extended Pascal, end to end           |
+| `test/Driver/module_test`           | 167   | Modules and separate compilation      |
+| `test/CodeGen/codegen_switches_test`| 15    | Positional compiler-switch state      |
 | `test/Conformance/conformance_test` | 377   | The Pascal-P5 ISO 7185 suite          |
 | `test/Acceptance/acceptance_test`   | 1     | The Pascal Acceptance Test            |
 
-The first three are unit tests over one phase each.  `driver_test` is the
-end-to-end suite: it compiles a program, links it, runs it, and checks what it
-printed and what it exited with, which is the only way to test code generation
-and the runtime.
+The first four are unit tests over one phase each.  The four in `test/Driver`
+are the end-to-end suites: each compiles a program, links it, runs it, and
+checks what it printed and what it exited with, which is the only way to test
+code generation and the runtime.  They share `test/Driver/DriverHarness.h`,
+which is also where a case that needs several named files goes through
+`CaseDir` — a directory of its own, cleaned up with the case, and the working
+directory the program runs in, so that a relative name in a source means a file
+this case wrote.
 
 ### The Pascal-P5 conformance suite
 
@@ -228,8 +325,8 @@ and pass when plang rejects them for the right reason; 58 are programs that
 conform, and pass when plang accepts them.  They exercise the scanner, the
 parser and semantic analysis — a rejection test is answered before any code is
 generated — so a result here is a statement about conformance in that sense and
-not about the correctness of the code produced.  That is what `driver_test` and
-the acceptance test are for.
+not about the correctness of the code produced.  That is what the end-to-end
+suites and the acceptance test are for.
 
 ### The acceptance test
 
@@ -261,7 +358,7 @@ it found none.
 To run one binary directly, with the usual GoogleTest filters:
 
 ```bash
-./build/test/Driver/driver_test --gtest_filter='SubrangeCompare.*'
+./build/test/Driver/codegen_test --gtest_filter='CodegenSets.*'
 ```
 
 ### Sanitizers

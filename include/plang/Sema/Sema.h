@@ -431,7 +431,8 @@ private:
     /// arguments.  Built-ins bypass the ordinary signature check, so without
     /// this an `abs()` reaches codegen and is indexed out of bounds there.
     /// Returns false when a diagnostic was emitted.
-    [[nodiscard]] bool checkBuiltinArity(const std::string& LowerName,
+    [[nodiscard]] bool checkBuiltinArity(BuiltinID ID,
+                                         const std::string& LowerName,
                                          SourceLocation Loc, size_t NumArgs);
     /// Diagnoses use of a required word that only Extended Pascal has while
     /// reading standard Pascal.  Returns false when a diagnostic was emitted.

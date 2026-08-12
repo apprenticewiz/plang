@@ -10,6 +10,26 @@
 
 namespace plang {
 
+// These two walks are dyn_cast chains, not switches, so nothing about them is
+// exhaustive and a kind left out is not a missing case but a subtree the walk
+// never enters.  That is worse here than it would be in a printer: the
+// §6.8.3.9 for-loop analysis and the definite-assignment walk both ride on
+// these, so a statement kind missing from walkStmts does not lose a line of
+// output, it silently stops reporting a class of error inside it.
+//
+// See NumExprKinds and NumStmtKinds in AstBase.h.
+// Complete as written: of the twelve statement kinds, the nine that contain a
+// statement appear in walkStmts and the nine that hang an expression off
+// themselves appear in forEachStmtExpr; of the sixteen expression kinds, six
+// are leaves and the other ten appear in walkExprs.
+static_assert(NumStmtKinds == 12,
+              "a new statement kind that contains statements needs a branch in "
+              "walkStmts, and one that hangs an expression off itself needs a "
+              "branch in forEachStmtExpr");
+static_assert(NumExprKinds == 16,
+              "a new expression kind that owns a child expression needs a "
+              "branch in walkExprs");
+
 /// Pre-order walk of all statement nodes in the tree rooted at S.
 /// Calls F(S) first, then recurses into all sub-statements.
 /// Does not cross procedure/function body boundaries.

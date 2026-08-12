@@ -232,7 +232,7 @@ std::unique_ptr<TypeNode> Parser::parseTypeExpr() {
 /// which may carry a sign; EP §6.4.2.4 widens it to a general constant
 /// expression, and parseSimpleExpr already accepts a leading sign there.
 std::unique_ptr<ExprNode> Parser::parseSubrangeBound() {
-    if (Opts.extendedPascal()) return parseSimpleExpr();
+    if (Opts.has(LangOptions::Feature::SubrangeBoundExprs)) return parseSimpleExpr();
 
     const Token Loc = Current;
     if (check(TokenKind::Plus)) { advance(); return parseFactor(); }

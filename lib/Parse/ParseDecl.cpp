@@ -51,7 +51,7 @@ std::unique_ptr<BlockNode> Parser::parseBlock() {
     auto Node = std::make_unique<BlockNode>();
     Node->Loc  = Current;
 
-    if (Opts.extendedPascal()) {
+    if (Opts.has(LangOptions::Feature::FreeDeclarationOrder)) {
         // EP §6.2.1: declaration sections may appear in any order and be repeated.
         bool More = true;
         while (More) {
@@ -120,7 +120,8 @@ ConstDef Parser::parseConstDef() {
     ConstDef Def;
     Def.Name  = expect(TokenKind::Identifier).Lexeme;
     expect(TokenKind::Equal);
-    Def.Value = Opts.extendedPascal() ? parseExpression() : parseSimpleExpr();
+    Def.Value = Opts.has(LangOptions::Feature::ConstantExpressions) ? parseExpression()
+                                                          : parseSimpleExpr();
     expect(TokenKind::Semicolon);
     return Def;
 }

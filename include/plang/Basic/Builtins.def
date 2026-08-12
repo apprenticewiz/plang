@@ -1,0 +1,124 @@
+//===- Builtins.def - The one list of required procedures and functions -*- C++ -*-===//
+//
+//   BUILTIN(Id, Spelling, Kind, Dialects, MinArgs, MaxArgs, Result)
+//
+//     Id        The BuiltinID enumerator.
+//     Spelling  The name in the source, lower case.  Pascal is case
+//               insensitive, and the symbol table keys on the folded name.
+//     Kind      Proc or Func.
+//     Dialects  Which dialects require it, as D_* bits from LangOptions.h.
+//     MinArgs   Fewest arguments accepted.
+//     MaxArgs   Most accepted; -1 for no upper bound, and also for the ones
+//               whose shape is checked where they are lowered rather than here.
+//     Result    What a Func returns, as an R_* tag; R_None for a Proc.
+//
+// This was three lists.  Sema::registerBuiltins declared the names, a static
+// table in SemaExpr checked their arity, and codegen dispatched on the spelling
+// -- so adding one meant editing three places that had no way to notice each
+// other.  The Turbo Pascal dialect adds about eighty more names, which is what
+// made three lists worth folding into one.
+//
+// A name is DECLARED IN EVERY DIALECT, and Dialects says which ones may use it.
+// Declaring it everywhere is what lets a program compiled as ISO 7185 be told
+// that `card` is an Extended Pascal extension rather than merely undefined;
+// registerBuiltins already said that was the intent, but only about ten names
+// were declared that way and the other nineteen -- cmplx, position, binding and
+// the rest of the Extended Pascal block -- came back as "undefined function".
+// That split was not deliberate, and it is gone.
+//
+//===----------------------------------------------------------------------===//
+
+#ifndef BUILTIN
+#define BUILTIN(Id, Spelling, Kind, Dialects, MinArgs, MaxArgs, Result)
+#endif
+
+// The required procedures of ISO 7185 §6.6.5.  Their arguments are variadic
+// (write), or are checked where they are lowered, so they carry no arity here.
+#define ISO (LangOptions::D_ISO7185 | LangOptions::D_ISO10206)
+#define EP  (LangOptions::D_ISO10206)
+
+BUILTIN(Write,     "write",     Proc, ISO, 0, -1, R_None)
+BUILTIN(Writeln,   "writeln",   Proc, ISO, 0, -1, R_None)
+BUILTIN(Read,      "read",      Proc, ISO, 0, -1, R_None)
+BUILTIN(Readln,    "readln",    Proc, ISO, 0, -1, R_None)
+BUILTIN(New,       "new",       Proc, ISO, 1, -1, R_None)
+BUILTIN(Dispose,   "dispose",   Proc, ISO, 1, -1, R_None)
+BUILTIN(Page,      "page",      Proc, ISO, 0, -1, R_None)
+BUILTIN(Reset,     "reset",     Proc, ISO, 1, -1, R_None)
+BUILTIN(Rewrite,   "rewrite",   Proc, ISO, 1, -1, R_None)
+BUILTIN(Get,       "get",       Proc, ISO, 1, -1, R_None)
+BUILTIN(Put,       "put",       Proc, ISO, 1, -1, R_None)
+BUILTIN(Close,     "close",     Proc, ISO, 1, -1, R_None)
+BUILTIN(Pack,      "pack",      Proc, ISO, 3,  3, R_None)
+BUILTIN(Unpack,    "unpack",    Proc, ISO, 3,  3, R_None)
+
+// The required functions of ISO 7185 §6.6.6.
+BUILTIN(Sqrt,      "sqrt",      Func, ISO, 1,  1, R_Real)
+BUILTIN(Sin,       "sin",       Func, ISO, 1,  1, R_Real)
+BUILTIN(Cos,       "cos",       Func, ISO, 1,  1, R_Real)
+BUILTIN(Exp,       "exp",       Func, ISO, 1,  1, R_Real)
+BUILTIN(Ln,        "ln",        Func, ISO, 1,  1, R_Real)
+BUILTIN(Arctan,    "arctan",    Func, ISO, 1,  1, R_Real)
+BUILTIN(Trunc,     "trunc",     Func, ISO, 1,  1, R_Int)
+BUILTIN(Round,     "round",     Func, ISO, 1,  1, R_Int)
+BUILTIN(Ord,       "ord",       Func, ISO, 1,  1, R_Int)
+// abs and sqr take the type of their argument; R_Int is the placeholder the
+// symbol carries, and the real result is worked out in checkCallExpr.
+BUILTIN(Abs,       "abs",       Func, ISO, 1,  1, R_Int)
+BUILTIN(Sqr,       "sqr",       Func, ISO, 1,  1, R_Int)
+// EP §6.7.6.5 adds the second argument; ISO 7185 takes only the first, and the
+// extra one is refused in checkCallExpr rather than by the arity here.
+BUILTIN(Succ,      "succ",      Func, ISO, 1,  2, R_Int)
+BUILTIN(Pred,      "pred",      Func, ISO, 1,  2, R_Int)
+BUILTIN(Chr,       "chr",       Func, ISO, 1,  1, R_Char)
+BUILTIN(Odd,       "odd",       Func, ISO, 1,  1, R_Bool)
+BUILTIN(Eof,       "eof",       Func, ISO, 0,  1, R_Bool)
+BUILTIN(Eoln,      "eoln",      Func, ISO, 0,  1, R_Bool)
+
+// ISO 10206 §6.7.5.7
+BUILTIN(Halt,      "halt",      Proc, EP,  0,  1, R_None)
+// EP §6.7.6.3
+BUILTIN(Card,      "card",      Func, EP,  1,  1, R_Int)
+// EP §6.7.6.7: strings
+BUILTIN(Length,    "length",    Func, EP,  1,  1, R_Int)
+BUILTIN(Index,     "index",     Func, EP,  2,  2, R_Int)
+BUILTIN(Substr,    "substr",    Func, EP,  2,  3, R_Str)
+BUILTIN(Trim,      "trim",      Func, EP,  1,  1, R_Str)
+// EP §6.7.6.7: string comparison, which differs from the relational operators
+BUILTIN(StrEQ,     "eq",        Func, EP,  2,  2, R_Bool)
+BUILTIN(StrNE,     "ne",        Func, EP,  2,  2, R_Bool)
+BUILTIN(StrLT,     "lt",        Func, EP,  2,  2, R_Bool)
+BUILTIN(StrGT,     "gt",        Func, EP,  2,  2, R_Bool)
+BUILTIN(StrLE,     "le",        Func, EP,  2,  2, R_Bool)
+BUILTIN(StrGE,     "ge",        Func, EP,  2,  2, R_Bool)
+// EP §6.7.5.5
+BUILTIN(Readstr,   "readstr",   Proc, EP,  2, -1, R_None)
+BUILTIN(Writestr,  "writestr",  Proc, EP,  2, -1, R_None)
+// EP §6.7.6.3 / §6.7.6.2: complex
+BUILTIN(Cmplx,     "cmplx",     Func, EP,  2,  2, R_Complex)
+BUILTIN(Polar,     "polar",     Func, EP,  2,  2, R_Complex)
+BUILTIN(Re,        "re",        Func, EP,  1,  1, R_Real)
+BUILTIN(Im,        "im",        Func, EP,  1,  1, R_Real)
+BUILTIN(Arg,       "arg",       Func, EP,  1,  1, R_Real)
+// EP §6.7.5.2: direct-access files
+BUILTIN(Extend,    "extend",    Proc, EP,  1, -1, R_None)
+BUILTIN(Update,    "update",    Proc, EP,  1, -1, R_None)
+BUILTIN(SeekRead,  "seekread",  Proc, EP,  2,  2, R_None)
+BUILTIN(SeekWrite, "seekwrite", Proc, EP,  2,  2, R_None)
+BUILTIN(SeekUpdate,"seekupdate",Proc, EP,  2,  2, R_None)
+// EP §6.7.6.6 / §6.7.6.5
+BUILTIN(Position,     "position",     Func, EP, 1, 1, R_Int)
+BUILTIN(LastPosition, "lastposition", Func, EP, 1, 1, R_Int)
+BUILTIN(Empty,        "empty",        Func, EP, 1, 1, R_Bool)
+// EP §6.7.5.8 / §6.7.6.9: date and time
+BUILTIN(GetTimeStamp, "gettimestamp", Proc, EP, 1, 1, R_None)
+BUILTIN(Date,         "date",         Func, EP, 1, 1, R_Str)
+BUILTIN(Time,         "time",         Func, EP, 1, 1, R_Str)
+// EP §6.7.5.6 / §6.7.6.8: binding
+BUILTIN(Bind,         "bind",         Proc, EP, 2, 2, R_None)
+BUILTIN(Unbind,       "unbind",       Proc, EP, 1, 1, R_None)
+BUILTIN(Binding,      "binding",      Func, EP, 1, 1, R_BindingType)
+
+#undef EP
+#undef ISO
+#undef BUILTIN

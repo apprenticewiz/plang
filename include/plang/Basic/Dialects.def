@@ -1,0 +1,32 @@
+//===- Dialects.def - The one list of Pascal dialects -----------*- C++ -*-===//
+//
+//   DIALECT(Id, Spelling, Implemented)
+//
+//     Id           The Standard enumerator, and the D_Id bit.
+//     Spelling     What -std= takes.
+//     Implemented  Whether plang can actually compile it yet.
+//
+// The driver and the front end both validate -std=, and both used to hold
+// their own copy of this list -- Driver.cpp had two arrays and Frontend.cpp had
+// a boolean function and two hand-written sentences naming the dialects.  Four
+// copies of one fact, in two processes that must agree, and the one option in
+// plang not driven from a list.  They had already drifted: the front end told
+// you the "known" dialects in a different order from the driver, and called
+// them something else.
+//
+// The order fixes the Standard enumerator values.  Nothing serialises them, so
+// it may change, but there is no reason to.
+//
+//===----------------------------------------------------------------------===//
+
+#ifndef DIALECT
+#define DIALECT(Id, Spelling, Implemented)
+#endif
+
+DIALECT(ISO7185,  "iso7185",  true)   // ISO 7185 Standard Pascal, level 1
+DIALECT(ISO10206, "iso10206", true)   // ISO 10206 Extended Pascal
+DIALECT(FPC,      "fpc",      false)  // Free Pascal extensions
+DIALECT(Delphi,   "delphi",   false)  // Delphi / Object Pascal
+DIALECT(Turbo,    "turbo",    false)  // Turbo Pascal extensions
+
+#undef DIALECT

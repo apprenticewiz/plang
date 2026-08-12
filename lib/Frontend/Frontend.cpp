@@ -89,11 +89,6 @@ void usagePC1() {
         "{}", opts::helpText(opts::Consumer::Frontend));
 }
 
-bool isKnownDialect(const std::string &D) {
-    return D == "iso7185" || D == "iso10206" ||
-           D == "fpc"     || D == "delphi"   || D == "turbo";
-}
-
 // ---------------------------------------------------------------------------
 // PMI writer — serialize a module's exported declarations to Pascal text
 // ---------------------------------------------------------------------------
@@ -688,17 +683,15 @@ int frontendPC1Main(int Argc, char *Argv[]) {
             // warn about an option the driver itself just passed on.
         } else if (Arg.starts_with("-std=")) {
             Std = Arg.substr(5);
-            if (!isKnownDialect(Std)) {
+            if (!LangOptions::parseDialect(Std)) {
                 std::cerr << "plang -pc1: unknown Pascal dialect '" << Std
-                          << "'; known: iso7185, iso10206, fpc, delphi, turbo\n";
+                          << "'; known: " << LangOptions::knownDialects() << "\n";
                 return 1;
             }
-            static constexpr std::string_view Implemented[] = {"iso7185", "iso10206"};
-            bool IsImpl = false;
-            for (auto D : Implemented) if (Std == D) { IsImpl = true; break; }
-            if (!IsImpl) {
+            if (!LangOptions::isImplementedDialect(Std)) {
                 std::cerr << "plang -pc1: dialect '" << Std
-                          << "' is not yet implemented; implemented dialects: iso7185, iso10206\n";
+                          << "' is not yet implemented; implemented dialects: "
+                          << LangOptions::implementedDialects() << "\n";
                 return 1;
             }
         } else if (Arg == "-w") {
@@ -778,8 +771,11 @@ int frontendPC1Main(int Argc, char *Argv[]) {
     }
 
     LangOptions Opts;
-    if      (Std == "iso10206") Opts.Std = LangOptions::Standard::ISO10206;
-    else                        Opts.Std = LangOptions::Standard::ISO7185;
+    // Every dialect, not just Extended Pascal.  This tested one name and made
+    // everything else ISO 7185, so -std=turbo would have compiled as ISO 7185
+    // and said nothing -- harmless only for as long as the check above rejects
+    // turbo before this is reached, which is exactly what Tier 1 removes.
+    if (const auto D = LangOptions::parseDialect(Std)) Opts.Std = *D;
     Opts.RangeChecks       = RangeChecks;
     Opts.NilChecks         = NilChecks;
     Opts.OptLevel          = OptLevel;

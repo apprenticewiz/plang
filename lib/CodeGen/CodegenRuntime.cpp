@@ -267,15 +267,16 @@ void Codegen::Impl::emitNilCheck(llvm::Value* ptr) {
 }
 
 void Codegen::Impl::emitRangeCheck(llvm::Value* val, int64_t lo, int64_t hi,
-                                   bool isIndex) {
-    if (!rangeChecks) return;
+                                   bool isIndex, SourceLocation Loc) {
+    if (!rangeChecksAt(Loc)) return;
     emitRangeCheckDyn(val, llvm::ConstantInt::get(i64Ty, lo, true),
-                      llvm::ConstantInt::get(i64Ty, hi, true), isIndex);
+                      llvm::ConstantInt::get(i64Ty, hi, true), isIndex, Loc);
 }
 
 void Codegen::Impl::emitRangeCheckDyn(llvm::Value* val, llvm::Value* lo,
-                                      llvm::Value* hi, bool isIndex) {
-    if (!rangeChecks) return;
+                                      llvm::Value* hi, bool isIndex,
+                                      SourceLocation Loc) {
+    if (!rangeChecksAt(Loc)) return;
     auto* v      = toI64(val);
     auto* loV    = toI64(lo);
     auto* hiV    = toI64(hi);

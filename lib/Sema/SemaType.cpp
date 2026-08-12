@@ -561,6 +561,14 @@ std::shared_ptr<Type> Sema::resolveUndiscriminatedSchema(Symbol& Sym,
 // Set base-type range checking
 // ---------------------------------------------------------------------------
 
+// See NumSemaTypeKinds in Sema/Type.h.  A new *ordinal* kind falls into the
+// default below and is treated as not being a set base type at all, so the
+// width check does not run for it -- which is the silent mask-truncation this
+// function exists to report.  A new non-ordinal kind belongs in the default
+// and needs nothing; only the count moves.
+static_assert(NumSemaTypeKinds == 21,
+              "a new ordinal type kind needs a case in checkSetBaseRange");
+
 /// A set stores one bit per ordinal of its base type, so the base type's
 /// ordinals must span fewer than PlangMaxSetElements values, counted from the
 /// window's own origin (see setBaseOffset).  Reporting this is what keeps

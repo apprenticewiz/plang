@@ -2,6 +2,7 @@
 // NOT installed; used only by the CodeGen translation units.
 #pragma once
 
+#include "plang/Basic/LangOptions.h"
 #include "plang/Basic/PascalFileLayout.h"
 #include "plang/CodeGen/Codegen.h"
 #include "plang/Sema/Type.h"
@@ -498,14 +499,39 @@ struct Codegen::Impl {
     /// hold on the edge from the setjmp.  See closeLabelScope.
     void pinLocalsToMemory(llvm::Function* f);
 
-    /// Mirrors LangOptions::RangeChecks; see emitRangeCheck.
-    bool rangeChecks = true;
+    /// Whether range checking is on where \p Loc is.
+    ///
+    /// Not a flag on this object, because Turbo's `{$R+}` is positional: the
+    /// same compilation checks one loop and not the next.  With no switch
+    /// table -- which is every ISO 7185 and Extended Pascal compilation, since
+    /// neither has directives -- this is the command-line default and nothing
+    /// is searched, so the code emitted is what it was before there was a
+    /// table.  See Basic/SwitchTable.h.
+    [[nodiscard]] bool rangeChecksAt(SourceLocation Loc) const {
+        return langOpts.switchOn(Switch::RangeChecks, Loc);
+    }
 
     /// Mirrors LangOptions::NilChecks; see emitNilCheck.
     bool nilChecks = true;
 
     /// Mirrors LangOptions::OptLevel; see optimize.
     unsigned optLevel = 0;
+
+    /// The language options this module is being generated under.
+    ///
+    /// Codegen took three scalars out of LangOptions and kept none of the rest,
+    /// so it could not tell one dialect from another -- which was survivable
+    /// only because every dialect difference so far is settled in the front
+    /// end: of the thirty-four sites that ask, twenty-one are in Parse, nine in
+    /// Sema, three in Lex and none here.
+    ///
+    /// Turbo is not like that.  Short-circuit `and`/`or`, the write field
+    /// widths, the numbered run-time errors, one-byte enumerations and the
+    /// whole parallel runtime are decisions made while generating code, and
+    /// none of them can be made by a phase that does not know which language it
+    /// is compiling.  The three scalars above stay as they are: they are read
+    /// on hot paths and predate this.
+    LangOptions langOpts;
 
     // ====================================================================
     // Initialize / reset for a new module
@@ -959,10 +985,11 @@ struct Codegen::Impl {
     /// ISO §6.5.4: p^ where p is nil.  No-op unless range checking is enabled.
     void emitNilCheck(llvm::Value* ptr);
     /// No-op unless range checking is enabled; isIndex picks the wording.
-    void emitRangeCheck(llvm::Value* val, int64_t lo, int64_t hi, bool isIndex);
+    void emitRangeCheck(llvm::Value* val, int64_t lo, int64_t hi, bool isIndex,
+                        SourceLocation Loc);
     /// emitRangeCheck for bounds that are only known at run time.
     void emitRangeCheckDyn(llvm::Value* val, llvm::Value* lo, llvm::Value* hi,
-                           bool isIndex);
+                           bool isIndex, SourceLocation Loc);
 
     // ====================================================================
     // EP §6.4.7: undiscriminated schema types (CodegenSchema.cpp)

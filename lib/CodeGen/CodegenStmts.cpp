@@ -293,7 +293,7 @@ void Codegen::Impl::emitAssign(const AssignStmt& s) {
     if (const auto& tt = s.Target->ResolvedType;
         tt && tt->Kind == TypeKind::Subrange && tt->SubLo != tt->SubHi
         && rhs->getType()->isIntegerTy())
-        emitRangeCheck(rhs, tt->SubLo, tt->SubHi, /*isIndex=*/false);
+        emitRangeCheck(rhs, tt->SubLo, tt->SubHi, /*isIndex=*/false, s.Loc);
 
     // What the destination holds, not what the source produced: an array
     // element and a record field are just as much a real as a bare variable
@@ -589,7 +589,7 @@ void Codegen::Impl::emitCallStmt(const CallStmt& s) {
     // different arguments — which it then emitted a call to with none of them.
     // Sema resolved the name in the scope it was written in and is the only
     // thing that knows which won.
-    if (!s.ResolvedBuiltin) {
+    if (s.ResolvedBuiltin == BuiltinID::None) {
         emitUserProcCall(s);
         return;
     }
@@ -919,7 +919,7 @@ void Codegen::Impl::emitPackUnpack(const CallStmt& s, bool isPack) {
     auto* last = builder.CreateSub(
         aHi, llvm::ConstantInt::get(i64Ty, static_cast<uint64_t>(count - 1)),
         "pack.last");
-    emitRangeCheckDyn(idx, aLo, last, /*isIndex=*/true);
+    emitRangeCheckDyn(idx, aLo, last, /*isIndex=*/true, iExpr.Loc);
 
     auto* off = builder.CreateSub(idx, aLo, "pack.off");
     auto* aElem = builder.CreateGEP(elemTy, aPtr, {off}, "pack.a");

@@ -179,7 +179,7 @@ void Codegen::Impl::optimize() {
 }
 
 Codegen::Codegen(const LangOptions& Opts) : PImpl(std::make_unique<Impl>()) {
-    PImpl->rangeChecks = Opts.RangeChecks;
+    PImpl->langOpts    = Opts;
     PImpl->nilChecks   = Opts.NilChecks;
     PImpl->optLevel    = Opts.OptLevel;
 }
