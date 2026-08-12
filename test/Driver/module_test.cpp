@@ -2837,3 +2837,49 @@ TEST(Regression, AFileOfCharThroughATypeNameStaysText) {
     // Trailing space: the line marker closing the line the writes left open.
     EXPECT_EQ(R.Stdout, "hi \n");
 }
+
+// ---------------------------------------------------------------------------
+// EP §6.11: a constant means the same thing on both sides of an interface file
+//
+// The .pmi writer re-derives a constant's text, and the text was not always
+// enough to say what the value had been.  Both of these are width taken from
+// one side of a boundary, the same shape as the codegen defects 0.1.4 fixed.
+// ---------------------------------------------------------------------------
+
+TEST(InterfaceConstants, ARealCrossesWithoutLosingDigits) {
+    // std::to_string gives six decimals, which is not a double: the module
+    // computed with 3.14159265358979 and its importer with 3.141593, and a
+    // constant below 1e-6 arrived as exactly zero.
+    auto R = compileTwoFiles(
+        "module M interface;\n"
+        "export M = (Pi, Tiny);\n"
+        "const Pi = 3.14159265358979;\n"
+        "      Tiny = 0.000000001;\n"
+        "end;\n"
+        "end.\n",
+        "program p(output);\n"
+        "import M;\n"
+        "begin writeln(Pi:20:14); writeln(Tiny:22:12) end.\n",
+        "-std=iso10206");
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "    3.14159265358979\n        0.000000001000\n");
+}
+
+TEST(InterfaceConstants, AnApostropheInAStringSurvivesTheCrossing) {
+    // ISO §6.1.7 writes an apostrophe twice.  The value went out as it stood,
+    // so 'it''s' was recorded as 'it's' -- which the importer reads as `it`
+    // followed by nonsense, and where the quote count stays even, reads
+    // silently as a different string.
+    auto R = compileTwoFiles(
+        "module M interface;\n"
+        "export M = (Q);\n"
+        "const Q = 'it''s';\n"
+        "end;\n"
+        "end.\n",
+        "program p(output);\n"
+        "import M;\n"
+        "begin writeln(Q) end.\n",
+        "-std=iso10206");
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "it's\n");
+}

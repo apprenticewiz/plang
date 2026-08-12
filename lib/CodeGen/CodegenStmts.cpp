@@ -300,7 +300,20 @@ void Codegen::Impl::emitAssign(const AssignStmt& s) {
     // is, and taking the source's type here stores the integer bit pattern.
     llvm::Type* dstTy = nullptr;
     if (auto* id = llvm::dyn_cast<IdentExpr>(s.Target.get()))
-        if (auto* ve = findVar(id->Name)) dstTy = ve->type;
+        if (auto* ve = findVar(id->Name)) {
+            dstTy = ve->type;
+            if (getenv("PLANG_PROBE16") && s.Target->ResolvedType) {
+                llvm::Type* semaTy = llvmTypeOfSemaType(*s.Target->ResolvedType);
+                if (semaTy && (semaTy != dstTy
+                               || getenv("PLANG_PROBE16")[0] == '2')) {
+                    std::string a, b;
+                    llvm::raw_string_ostream(a) << *dstTy;
+                    llvm::raw_string_ostream(b) << *semaTy;
+                    llvm::errs() << "PROBE16 name=" << id->Name
+                                 << " byName=" << a << " bySema=" << b << "\n";
+                }
+            }
+        }
     if (!dstTy && s.Target->ResolvedType)
         dstTy = llvmTypeOfSemaType(*s.Target->ResolvedType);
     if (!dstTy) dstTy = rhs->getType();
