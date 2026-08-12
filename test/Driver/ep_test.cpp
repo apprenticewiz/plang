@@ -3040,3 +3040,23 @@ TEST(ConformantRelay, RelayingAConformantArrayKeepsEveryDimensionsBounds) {
     const std::string One = "1..2 3..7\n13 14 15 16 17 \n23 24 25 26 27 \n";
     EXPECT_EQ(R.Stdout, One + One);
 }
+
+TEST(ConformantRelay, WithOverASchemaBodyBindsEveryVariantFieldToo) {
+    // A schema body may have a variant part like any other record, and emitWith
+    // has a second positional walk for it.  Fixing the record path alone left
+    // this one binding the first variant field to the blob and never binding
+    // the rest -- `with b do two := 22` referred to a pasg_two nothing defined,
+    // and the link failed.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type box(n: integer) = record kind: integer;\n"
+        "       case tag: integer of 1: (one: integer; two: integer); 2: (r: real)\n"
+        "     end;\n"
+        "var b: box(4);\n"
+        "begin b.kind := 9; b.tag := 1;\n"
+        "  with b do begin one := 11; two := 22 end;\n"
+        "  writeln(b.one, ' ', b.two)\n"
+        "end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "11 22\n");
+}
