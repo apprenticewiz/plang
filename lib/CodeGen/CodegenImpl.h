@@ -656,6 +656,8 @@ struct Codegen::Impl {
     /// Used by schema instance handling where the AST TypeNode is parameterized.
     /// The integer type an ordinal denoter lowers to; see the definition.
     [[nodiscard]] llvm::Type* ordinalTyOf(const TypeNode& node);
+    /// Whether llvmTypeOfSemaType has a lowering for \p T; see the definition.
+    static bool canLowerSemaType(const Type& T);
     llvm::Type* llvmTypeOfSemaType(const Type& T);
     llvm::Type* llvmTypeOfSemaTypeImpl(const Type& T);
     /// Checks Sema's byteSizeOf against the layout; see the definition.

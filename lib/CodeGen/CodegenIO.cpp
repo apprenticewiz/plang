@@ -301,8 +301,17 @@ void Codegen::Impl::emitReadArg(const ExprNode& arg, llvm::Value* fp) {
         return;
     }
 
+    // What is being read into, from Sema, not from a name lookup.  Only an
+    // identifier had a type here, so `read(a[i])`, `read(r.f)` and `read(p^)`
+    // fell back to i64 -- which picked the *integer* reader for a char
+    // variable, and then stored eight bytes into one.  Reading into a
+    // component of an array of char clobbered the whole array and four bytes
+    // past the end of it.  ISO 7185, no dialect flag needed.
     llvm::Type* ty = i64Ty;
-    if (auto* id = llvm::dyn_cast<IdentExpr>(&arg))
+    if (const auto& rt = arg.ResolvedType; rt && !rt->isError()
+            && canLowerSemaType(*rt))
+        ty = llvmTypeOfSemaType(*rt);
+    else if (auto* id = llvm::dyn_cast<IdentExpr>(&arg))
         if (auto* ve = findVar(id->Name)) ty = ve->type;
 
     if (fp) {
@@ -341,8 +350,16 @@ void Codegen::Impl::emitBuiltinRead(const std::vector<std::unique_ptr<ExprNode>>
             // ISO §6.9.1: read(f,v) is v := f^, so a component's worth is read
             // however wide the variable is, and only then converted.
             llvm::Type* compTy = getFileElemType(*args[0]);
+            // Likewise from Sema.  Here the identifier-only lookup decided
+            // whether the component was read into a temporary at all, while the
+            // byte count came from the file's component type regardless: a
+            // `file of 'a'..'z'` read into an element of an `array of char`
+            // wrote a whole eight-byte component into one byte.
             llvm::Type* dstTy  = nullptr;
-            if (auto* id = llvm::dyn_cast<IdentExpr>(args[i].get()))
+            if (const auto& rt = args[i]->ResolvedType; rt && !rt->isError()
+                    && canLowerSemaType(*rt))
+                dstTy = llvmTypeOfSemaType(*rt);
+            else if (auto* id = llvm::dyn_cast<IdentExpr>(args[i].get()))
                 if (auto* ve = findVar(id->Name)) dstTy = ve->type;
             if (!compTy) compTy = dstTy ? dstTy : i64Ty;
             const bool convert = dstTy && dstTy != compTy

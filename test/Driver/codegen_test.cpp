@@ -3970,3 +3970,87 @@ TEST(TextOnlyProcedures, AFileOfCharIsAText) {
         "end.\n");
     ASSERT_EQ(R.ExitCode, 0) << "compile/run failed:\n" << R.Stderr;
 }
+
+// ---------------------------------------------------------------------------
+// ISO §6.9.1: read(v) reads into v, and only into v
+//
+// The reader was chosen, and the width to store, from a lookup of the
+// argument's *name*.  Only an identifier has one, so `read(a[i])`,
+// `read(r.f)` and `read(p^)` fell through to a default of i64: reading into a
+// char component picked the integer reader and stored eight bytes into one.
+//
+// Nothing in the suite caught it.  The 377 conformance cases and the
+// acceptance test read into named variables, and the IR of all 181 modules
+// they produce is unchanged by the fix -- which is exactly how it survived
+// from before 0.1.3.
+// ---------------------------------------------------------------------------
+
+TEST(ReadTarget, ReadingIntoAnArrayElementTouchesOnlyThatElement) {
+    auto R = compileAndRun(
+        "program p(input, output);\n"
+        "var s: array[1..4] of char; i: integer;\n"
+        "begin\n"
+        "  for i := 1 to 4 do s[i] := 'Z';\n"
+        "  read(s[1]);\n"
+        "  for i := 1 to 4 do write(s[i]);\n"
+        "  writeln\n"
+        "end.\n", "", "5\n");
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    // Eight bytes went in here, so the whole array and four bytes past its end
+    // were overwritten and this printed "5" followed by three NULs.
+    EXPECT_EQ(R.Stdout, "5ZZZ\n");
+}
+
+TEST(ReadTarget, ReadingIntoARecordFieldTouchesOnlyThatField) {
+    auto R = compileAndRun(
+        "program p(input, output);\n"
+        "type r = record a, b, c, d: char end;\n"
+        "var v: r;\n"
+        "begin\n"
+        "  v.a := 'Z'; v.b := 'Z'; v.c := 'Z'; v.d := 'Z';\n"
+        "  read(v.a);\n"
+        "  writeln(v.a, v.b, v.c, v.d)\n"
+        "end.\n", "", "5\n");
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "5ZZZ\n");
+}
+
+TEST(ReadTarget, ReadingThroughAPointerReadsTheRightWidth) {
+    auto R = compileAndRun(
+        "program p(input, output);\n"
+        "var pc: ^char;\n"
+        "begin new(pc); pc^ := 'Z'; read(pc^); writeln(pc^) end.\n", "", "5\n");
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "5\n");
+}
+
+TEST(ReadTarget, ANamedVariableIsStillReadCorrectly) {
+    // The path that always worked, so that fixing the others cannot break it.
+    auto R = compileAndRun(
+        "program p(input, output);\n"
+        "var c: char; i: integer;\n"
+        "begin read(c); readln; read(i); writeln(c); writeln(i) end.\n",
+        "", "5\n42\n");
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "5\n42\n");
+}
+
+TEST(ReadTarget, ATypedFileComponentIsNotWiderThanWhatItIsReadInto) {
+    // A subrange of char is stored as a full ordinal, so `file of 'a'..'z'` has
+    // an eight-byte component while an `array of char` has one-byte elements.
+    // The byte count came from the component whether or not a temporary was
+    // used, so the whole component went into the element.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type letter = 'a'..'z';\n"
+        "var f: file of letter; s: array[1..4] of char; i: integer;\n"
+        "begin\n"
+        "  for i := 1 to 4 do s[i] := 'Z';\n"
+        "  rewrite(f, 'rt.bin'); write(f, 'q'); close(f);\n"
+        "  reset(f, 'rt.bin'); read(f, s[1]); close(f);\n"
+        "  for i := 1 to 4 do write(s[i]);\n"
+        "  writeln\n"
+        "end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "qZZZ\n");
+}
