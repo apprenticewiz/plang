@@ -1147,11 +1147,25 @@ llvm::Value* Codegen::Impl::emitIndexGEP(const IndexExpr& e) {
                 Low = stn->ResolvedBody->SchemaBody->IndexType->SubLo;
         } else if (auto* ntn = llvm::dyn_cast_or_null<NamedTypeNode>(declVe->typeNode)) {
             // Named type alias (e.g. var r: Row where Row = array[1..5] of ...).
-            // Look through typeAliases to find the underlying ArrayTypeNode.
-            auto it = typeAliases.find(toLower(ntn->Name));
-            if (it != typeAliases.end())
-                if (auto* atn2 = llvm::dyn_cast<ArrayTypeNode>(it->second))
-                    Low = arrayIndexLow(*atn2);
+            // Through the WHOLE chain of names, which is what denoterOf is for.
+            // One hop left `type row = array[5..10] of integer; rowalias = row;`
+            // with Low at zero while the array's *type* had been resolved
+            // through every hop, so the index was never adjusted and the range
+            // check ran against 0..n-1: a legal x[6] aborted, and with the
+            // checks off the writes landed past the end of the array.
+            if (auto* atn2 = llvm::dyn_cast_or_null<ArrayTypeNode>(denoterOf(ntn)))
+                Low = arrayIndexLow(*atn2);
+        }
+        // Whatever the declaration turned out to be, if it did not yield a
+        // bound then Sema's type still has one.  This used to be reachable only
+        // when there was no declaration at all, so *having* a VarEntry
+        // suppressed the answer rather than improving on it.
+        if (Low == 0 && e.Array->ResolvedType) {
+            const Type* T = e.Array->ResolvedType.get();
+            if (T->Kind == TypeKind::SchemaInstance && T->SchemaBody)
+                T = T->SchemaBody.get();
+            if (T->Kind == TypeKind::Array && T->IndexType)
+                Low = T->IndexType->SubLo;
         }
     } else if (e.Array->ResolvedType) {
         // Nested indexing A[1][2], or anything else with no declaration to
@@ -1283,6 +1297,19 @@ llvm::StructType* Codegen::Impl::resolveRecordStructType(const FieldExpr& e) {
     // The pointer typeNode may be PointerTypeNode directly, or a NamedTypeNode
     // that is a type alias resolving to a PointerTypeNode (e.g. recptr = ^rec).
     if (auto* deref = llvm::dyn_cast<DerefExpr>(e.Record.get())) {
+        // The pointee's record, from Sema.  Resolving the domain type by NAME
+        // reads whichever declaration of that name is innermost at codegen
+        // time, not the one the pointer was declared against: a nested
+        // procedure declaring its own `rec` re-aimed every `p^.f` in its body
+        // at the inner layout.  The field *index* still came from the right
+        // record, so it was a GEP to an offset in a struct that had nothing to
+        // do with the pointer -- `p^.b` read 1585267068834414592 for 22, with
+        // no diagnostic.
+        if (e.Record->ResolvedType
+                && e.Record->ResolvedType->Kind == TypeKind::Record)
+            if (auto* st = llvm::dyn_cast_or_null<llvm::StructType>(
+                    llvmTypeOfSemaType(*e.Record->ResolvedType)))
+                return st;
         if (auto* innerID = llvm::dyn_cast<IdentExpr>(deref->Pointer.get())) {
             if (auto* ve = findVar(innerID->Name)) {
                 // Direct: var p: ^Rec

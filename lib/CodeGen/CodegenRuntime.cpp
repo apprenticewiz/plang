@@ -538,6 +538,18 @@ llvm::Value* Codegen::Impl::emitCallArg(const ExprNode& arg,
     // hand over is read from there.
     if (paramTy && paramTy->isArrayTy() && v && v->getType() == ptrTy)
         v = builder.CreateLoad(paramTy, v, "arr.arg");
+    // §6.6.3.2 makes a value parameter a variable of its own that the actual is
+    // *assigned* to, so §6.4.6's assignment compatibility applies and an
+    // integer actual for a real formal widens.  Every other destination in the
+    // compiler coerces -- emitAssign, emitFor, the constant initialisers -- and
+    // this one did not, so `procedure scale(x: real)` called as `scale(3)`
+    // emitted `call void @pas_scale(i64 3)` against a `void (double)` and the
+    // module failed verification.  A program could not use a real parameter
+    // without writing every actual as a real.
+    if (paramTy && v && v->getType() != paramTy
+            && paramTy->isSingleValueType() && v->getType()->isSingleValueType()
+            && !paramTy->isPointerTy() && !v->getType()->isPointerTy())
+        v = coerceToType(v, paramTy);
     return v;
 }
 

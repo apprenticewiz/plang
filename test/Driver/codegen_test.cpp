@@ -4054,3 +4054,116 @@ TEST(ReadTarget, ATypedFileComponentIsNotWiderThanWhatItIsReadInto) {
     ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
     EXPECT_EQ(R.Stdout, "qZZZ\n");
 }
+
+// ---------------------------------------------------------------------------
+// A type recovered by name is not the type
+//
+// Four defects with one shape between them: codegen worked out what something
+// was by looking a NAME up in a table it maintains itself, where Sema already
+// had the answer.  The tables are per-procedure and one hop deep, so a second
+// alias, a shadowing declaration or a variant part gave the wrong type
+// silently.  All four are plain ISO 7185 and all four predate 0.1.3.
+// ---------------------------------------------------------------------------
+
+TEST(TypeByName, AnArrayReachedThroughTwoAliasesKeepsItsLowerBound) {
+    // The array's *type* was resolved through the whole chain of names while
+    // the lower bound was read with a single hop, so the bound stayed 0: the
+    // index was never adjusted and the check ran against 0..n-1.  A legal x[6]
+    // aborted, and with the checks off the writes landed past the array.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type row = array[5..10] of integer;\n"
+        "     rowalias = row;\n"
+        "var guard1: integer; x: rowalias; guard2: integer; i: integer;\n"
+        "begin\n"
+        "  guard1 := 111; guard2 := 222;\n"
+        "  for i := 5 to 10 do x[i] := i;\n"
+        "  writeln(x[5], ' ', x[10], ' ', guard1, ' ', guard2)\n"
+        "end.\n");
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "5 10 111 222\n");
+}
+
+TEST(TypeByName, AnArrayThroughTwoAliasesIsUncorruptedWithoutChecks) {
+    // The same program with the bounds checks off, which is where it stopped
+    // being a diagnostic and became a write into the next variable.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type row = array[5..10] of integer;\n"
+        "     rowalias = row;\n"
+        "var guard1: integer; x: rowalias; guard2: integer; i: integer;\n"
+        "begin\n"
+        "  guard1 := 111; guard2 := 222;\n"
+        "  for i := 5 to 10 do x[i] := i;\n"
+        "  writeln(guard1, ' ', guard2)\n"
+        "end.\n", "-fno-range-checks");
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "111 222\n");
+}
+
+TEST(TypeByName, APointerKeepsItsOwnRecordWhenTheNameIsShadowed) {
+    // The domain type was resolved by name through a table codegen re-points
+    // per procedure, so a nested procedure declaring its own `rec` re-aimed
+    // every p^.f in its body at the inner layout -- with the field index still
+    // taken from the right record, so it read an unrelated offset.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type rec = record a: integer; b: integer end;\n"
+        "var ptr: ^rec;\n"
+        "procedure q;\n"
+        "type rec = record x: char; y: char; z: integer end;\n"
+        "var l: rec;\n"
+        "begin l.x := 'a'; writeln(ptr^.b) end;\n"
+        "begin new(ptr); ptr^.a := 11; ptr^.b := 22; writeln(ptr^.b); q end.\n");
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "22\n22\n");
+}
+
+TEST(TypeByName, WithBindsAVariantFieldToItsOwnStorage) {
+    // §6.4.3.3 lets a variant field be selected by name like any other, so
+    // Sema's field list is flattened while the struct holds one blob for all
+    // the alternatives.  Pairing them positionally bound the first variant
+    // field to the blob: `with r do c := 4` stored an integer bit pattern into
+    // a real and printed 1.97626258336499e-323.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type num = record kind: integer;\n"
+        "       case tag: integer of 1: (c: real); 2: (e: integer) end;\n"
+        "var r: num;\n"
+        "begin r.kind := 1; r.tag := 1; with r do c := 4; writeln(r.c:5:1) end.\n");
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "  4.0\n");
+}
+
+TEST(TypeByName, WithBindsEveryVariantFieldNotJustTheFirst) {
+    // The later ones ran off the end of the struct and were never bound, so
+    // `with r do b := 22` referred to a `pasg_b` nothing defined and the link
+    // failed -- or found some module's exported variable of that name.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type num = record kind: integer;\n"
+        "       case tag: integer of 1: (a: integer; b: integer); 2: (e: real) end;\n"
+        "var r: num;\n"
+        "begin r.kind := 1; r.tag := 1;\n"
+        "  with r do begin a := 11; b := 22 end;\n"
+        "  with r do writeln(a, ' ', b)\n"
+        "end.\n");
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "11 22\n");
+}
+
+TEST(ValueParameter, AnIntegerActualWidensForARealFormal) {
+    // §6.6.3.2 makes a value parameter a variable the actual is *assigned* to,
+    // so §6.4.6 applies and an integer widens.  Nothing coerced it, so
+    // `scale(3)` emitted `call void @pas_scale(i64 3)` against a `void (double)`
+    // and the module failed verification: a program could not use a real
+    // parameter without writing every actual as a real.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "var n: integer;\n"
+        "procedure scale(x: real); begin writeln(x:6:2) end;\n"
+        "function half(x: real): real; begin half := x / 2 end;\n"
+        "begin n := 3; scale(3); scale(n); writeln(half(7):6:2) end.\n");
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "  3.00\n  3.00\n  3.50\n");
+}
