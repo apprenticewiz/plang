@@ -3154,3 +3154,25 @@ TEST(ConformantArray, AVarParameterStillReachesTheCallersArray) {
     ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
     EXPECT_EQ(R.Stdout, "99 99 99 99 99 \n");
 }
+
+TEST(ConformantArray, ASubscriptPastTheConformantDimensionsIndexesTheElement) {
+    // The whole subscript chain was folded into the flat index as if every
+    // subscript were a conformant dimension.  With `array[lo..hi: integer] of
+    // row` and `row = array[1..3] of integer`, a[1][2] came out two whole rows
+    // along -- which for a two-row actual is the variable after the array.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type row = array[1..3] of integer;\n"
+        "     mat = array[1..2] of row;\n"
+        "var m: mat; after: integer; i, j: integer;\n"
+        "procedure poke(var a: array[lo..hi: integer] of row);\n"
+        "begin a[1][2] := 999 end;\n"
+        "begin\n"
+        "  after := 42;\n"
+        "  for i := 1 to 2 do for j := 1 to 3 do m[i][j] := i * 10 + j;\n"
+        "  poke(m);\n"
+        "  writeln(m[1][1], ' ', m[1][2], ' ', m[1][3], ' ', after)\n"
+        "end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "11 999 13 42\n");
+}

@@ -1022,9 +1022,13 @@ llvm::Value* Codegen::Impl::emitConformantElemPtr(const IndexExpr& e) {
     // Walk down to the name being subscripted, collecting the subscripts on
     // the way so that they come back outermost first.
     std::vector<const ExprNode*> subs{e.Index.get()};
+    // The array being subscripted at each level, so that a subscript past the
+    // conformant dimensions can be given the bounds of the type it indexes.
+    std::vector<const ExprNode*> arrs{e.Array.get()};
     const ExprNode* base = e.Array.get();
     while (auto* inner = llvm::dyn_cast<IndexExpr>(base)) {
         subs.push_back(inner->Index.get());
+        arrs.push_back(inner->Array.get());
         base = inner->Array.get();
     }
     auto* id = llvm::dyn_cast<IdentExpr>(base);
@@ -1032,6 +1036,7 @@ llvm::Value* Codegen::Impl::emitConformantElemPtr(const IndexExpr& e) {
     const VarEntry* ve = findVar(id->Name);
     if (!ve || !ve->isConformantArray) return nullptr;
     std::reverse(subs.begin(), subs.end());
+    std::reverse(arrs.begin(), arrs.end());
 
     // The bounds are ordinary integer variables in this activation, put there
     // by the prologue from the hidden arguments.
@@ -1066,8 +1071,15 @@ llvm::Value* Codegen::Impl::emitConformantElemPtr(const IndexExpr& e) {
     // row-major layout reads: each one scales what came before it by the width
     // of its own dimension.
     llvm::Value* flat = llvm::ConstantInt::get(i64Ty, 0);
-    const size_t dims = ve->conformantDims.empty() ? 1 : ve->conformantDims.size();
-    for (size_t d = 0; d < subs.size(); ++d) {
+    const size_t dims  = ve->conformantDims.empty() ? 1 : ve->conformantDims.size();
+    // Only the CONFORMANT dimensions fold into the flat index.  A subscript
+    // past them indexes the element type, which has static bounds of its own,
+    // and folding it in here treated it as another conformant dimension: with
+    // `a: array[lo..hi: integer] of row` and `row = array[1..3] of integer`,
+    // `a[1][2]` came out two whole rows along, which for a two-row actual is
+    // the variable after the array.
+    const size_t nflat = std::min(subs.size(), dims);
+    for (size_t d = 0; d < nflat; ++d) {
         auto* idx = toI64(emitExpr(*subs[d]));
         if (d < ve->conformantDims.size())
             if (auto* lo = loOf(d))
@@ -1077,14 +1089,33 @@ llvm::Value* Codegen::Impl::emitConformantElemPtr(const IndexExpr& e) {
                 flat = builder.CreateMul(flat, ext, "conf.row");
         flat = builder.CreateAdd(flat, idx, "conf.off");
     }
-    // A subscript short of the last dimension names a row rather than an
-    // element, and a row is as wide as the dimensions still to come.
-    for (size_t d = subs.size(); d < dims; ++d)
+    // A subscript short of the last conformant dimension names a row rather
+    // than an element, and a row is as wide as the dimensions still to come.
+    for (size_t d = nflat; d < dims; ++d)
         if (auto* ext = extentOf(d))
             flat = builder.CreateMul(flat, ext, "conf.row");
 
     llvm::Type* elemTy = ve->conformantElemTy ? ve->conformantElemTy : i64Ty;
-    return builder.CreateGEP(elemTy, ve->ptr, {flat}, "elem.ptr");
+    llvm::Value* p = builder.CreateGEP(elemTy, ve->ptr, {flat}, "elem.ptr");
+
+    // The rest index the element type the ordinary way.
+    auto* zero = llvm::ConstantInt::get(i64Ty, 0);
+    for (size_t d = nflat; d < subs.size(); ++d) {
+        const Type* at = (d < arrs.size() && arrs[d]) ? arrs[d]->ResolvedType.get()
+                                                      : nullptr;
+        auto* idx = toI64(emitExpr(*subs[d]));
+        if (at && at->Kind == TypeKind::Array) {
+            if (at->IndexType && at->IndexType->SubLo != 0)
+                idx = builder.CreateSub(
+                    idx, llvm::ConstantInt::get(i64Ty, at->IndexType->SubLo),
+                    "idx.adj");
+            p = builder.CreateGEP(llvmTypeOfSemaType(*at), p, {zero, idx},
+                                  "elem.ptr");
+        } else {
+            p = builder.CreateGEP(i64Ty, p, {idx}, "elem.ptr");
+        }
+    }
+    return p;
 }
 
 llvm::Value* Codegen::Impl::emitIndexGEP(const IndexExpr& e) {
@@ -1181,11 +1212,17 @@ llvm::Value* Codegen::Impl::emitIndexGEP(const IndexExpr& e) {
             if (auto* atn2 = llvm::dyn_cast_or_null<ArrayTypeNode>(denoterOf(ntn)))
                 Low = arrayIndexLow(*atn2);
         }
-        // Whatever the declaration turned out to be, if it did not yield a
-        // bound then Sema's type still has one.  This used to be reachable only
-        // when there was no declaration at all, so *having* a VarEntry
-        // suppressed the answer rather than improving on it.
-        if (Low == 0 && e.Array->ResolvedType) {
+        // Sema's answer wins wherever it has one.  The routes above read the
+        // declaration through typeAliases, which is rebuilt per procedure and
+        // answers by SPELLING, so a nested procedure declaring its own `t`
+        // handed an outer `a: array[0..4] of integer` the inner t's bound of
+        // ten: a[0] wrote ten elements before the array and a[4] six before
+        // it, silently, with the range check passing because it was checked
+        // against 10..14 as well.
+        //
+        // Making Sema a fallback for a zero bound was not enough -- a WRONG
+        // NON-ZERO bound never reached it.
+        if (e.Array->ResolvedType) {
             const Type* T = e.Array->ResolvedType.get();
             if (T->Kind == TypeKind::SchemaInstance && T->SchemaBody)
                 T = T->SchemaBody.get();

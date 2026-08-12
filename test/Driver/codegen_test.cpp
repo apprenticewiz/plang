@@ -4308,3 +4308,24 @@ TEST(ReadTarget, ATypedFileStillReadsAWholeComponent) {
     ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
     EXPECT_EQ(R.Stdout, "1 2\n");
 }
+
+TEST(TypeByName, AnArrayKeepsItsBoundWhenAnInnerScopeRedeclaresTheTypeName) {
+    // The bound was read from the declaration through a table rebuilt per
+    // procedure and answered by spelling, so a nested procedure declaring its
+    // own `t` handed an outer `a: array[0..4]` the inner t's bound of ten:
+    // a[0] wrote ten elements before the array, and the range check passed
+    // because it was checked against 10..14 too.  Making Sema a fallback for a
+    // ZERO bound did not reach this -- the wrong bound was ten.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type t = array[0..4] of integer;\n"
+        "var a: t; guard: integer; i: integer;\n"
+        "procedure q;\n"
+        "type t = array[10..14] of integer;\n"
+        "var l: t;\n"
+        "begin l[10] := 1; a[0] := 42; a[4] := 44 end;\n"
+        "begin guard := 7; for i := 0 to 4 do a[i] := 0; q;\n"
+        "  writeln(a[0], ' ', a[4], ' ', guard) end.\n");
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "42 44 7\n");
+}
