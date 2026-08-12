@@ -627,6 +627,8 @@ struct Codegen::Impl {
     llvm::Type* llvmTypeOfNode(const TypeNode& node);
     /// Convert a semantic Type (from Sema) directly to an LLVM type.
     /// Used by schema instance handling where the AST TypeNode is parameterised.
+    /// Whether llvmTypeOfSemaType has a lowering for \p T; see the definition.
+    static bool canLowerSemaType(const Type& T);
     llvm::Type* llvmTypeOfSemaType(const Type& T);
 
     // ====================================================================

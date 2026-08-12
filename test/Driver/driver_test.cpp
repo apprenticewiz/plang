@@ -11073,3 +11073,292 @@ TEST(ColorDiagnostics, TurningItOffIsAccepted) {
     std::string Out = runPlang("-fno-color-diagnostics nosuchfile.pas");
     EXPECT_EQ(Out, "plang: error: no such file or directory: 'nosuchfile.pas'\n");
 }
+
+// ---------------------------------------------------------------------------
+// ISO §6.9.1: read(v) reads into v, and only into v
+//
+// The reader was chosen, and the width to store, from a lookup of the
+// argument's *name*.  Only an identifier has one, so `read(a[i])`,
+// `read(r.f)` and `read(p^)` fell through to a default of i64: reading into a
+// char component picked the integer reader and stored eight bytes into one.
+//
+// Nothing in the suite caught it.  The 377 conformance cases and the
+// acceptance test read into named variables, which is the one shape that
+// worked.
+// ---------------------------------------------------------------------------
+
+TEST(ReadTarget, ReadingIntoAnArrayElementTouchesOnlyThatElement) {
+    auto R = compileAndRun(
+        "program p(input, output);\n"
+        "var s: array[1..4] of char; i: integer;\n"
+        "begin\n"
+        "  for i := 1 to 4 do s[i] := 'Z';\n"
+        "  read(s[1]);\n"
+        "  for i := 1 to 4 do write(s[i]);\n"
+        "  writeln\n"
+        "end.\n", "", "5\n");
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    // Eight bytes went in here, so the whole array and four bytes past its end
+    // were overwritten and this printed "5" followed by three NULs.
+    EXPECT_EQ(R.Stdout, "5ZZZ\n");
+}
+
+TEST(ReadTarget, ReadingIntoARecordFieldTouchesOnlyThatField) {
+    auto R = compileAndRun(
+        "program p(input, output);\n"
+        "type r = record a, b, c, d: char end;\n"
+        "var v: r;\n"
+        "begin\n"
+        "  v.a := 'Z'; v.b := 'Z'; v.c := 'Z'; v.d := 'Z';\n"
+        "  read(v.a);\n"
+        "  writeln(v.a, v.b, v.c, v.d)\n"
+        "end.\n", "", "5\n");
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "5ZZZ\n");
+}
+
+TEST(ReadTarget, ReadingThroughAPointerReadsTheRightWidth) {
+    auto R = compileAndRun(
+        "program p(input, output);\n"
+        "var pc: ^char;\n"
+        "begin new(pc); pc^ := 'Z'; read(pc^); writeln(pc^) end.\n", "", "5\n");
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "5\n");
+}
+
+TEST(ReadTarget, ANamedVariableIsStillReadCorrectly) {
+    // The path that always worked, so that fixing the others cannot break it.
+    auto R = compileAndRun(
+        "program p(input, output);\n"
+        "var c: char; i: integer;\n"
+        "begin read(c); readln; read(i); writeln(c); writeln(i) end.\n",
+        "", "5\n42\n");
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "5\n42\n");
+}
+
+TEST(ReadTarget, ATypedFileComponentIsNotWiderThanWhatItIsReadInto) {
+    // A subrange of char is stored as a full ordinal, so `file of 'a'..'z'` has
+    // an eight-byte component while an `array of char` has one-byte elements.
+    // The byte count came from the component whether or not a temporary was
+    // used, so the whole component went into the element.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type letter = 'a'..'z';\n"
+        "var f: file of letter; s: array[1..4] of char; i: integer;\n"
+        "begin\n"
+        "  for i := 1 to 4 do s[i] := 'Z';\n"
+        "  rewrite(f, 'rt.bin'); write(f, 'q'); close(f);\n"
+        "  reset(f, 'rt.bin'); read(f, s[1]); close(f);\n"
+        "  for i := 1 to 4 do write(s[i]);\n"
+        "  writeln\n"
+        "end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "qZZZ\n");
+}
+
+// ---------------------------------------------------------------------------
+// A type recovered by name is not the type
+//
+// Four defects with one shape between them: codegen worked out what something
+// was by looking a NAME up in a table it maintains itself, where Sema already
+// had the answer.  The tables are per-procedure and one hop deep, so a second
+// alias, a shadowing declaration or a variant part gave the wrong type
+// silently.  All four are plain ISO 7185 and all four predate 0.1.3.
+// ---------------------------------------------------------------------------
+
+TEST(TypeByName, AnArrayReachedThroughTwoAliasesKeepsItsLowerBound) {
+    // The array's *type* was resolved through the whole chain of names while
+    // the lower bound was read with a single hop, so the bound stayed 0: the
+    // index was never adjusted and the check ran against 0..n-1.  A legal x[6]
+    // aborted, and with the checks off the writes landed past the array.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type row = array[5..10] of integer;\n"
+        "     rowalias = row;\n"
+        "var guard1: integer; x: rowalias; guard2: integer; i: integer;\n"
+        "begin\n"
+        "  guard1 := 111; guard2 := 222;\n"
+        "  for i := 5 to 10 do x[i] := i;\n"
+        "  writeln(x[5], ' ', x[10], ' ', guard1, ' ', guard2)\n"
+        "end.\n");
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "5 10 111 222\n");
+}
+
+TEST(TypeByName, AnArrayThroughTwoAliasesIsUncorruptedWithoutChecks) {
+    // The same program with the bounds checks off, which is where it stopped
+    // being a diagnostic and became a write into the next variable.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type row = array[5..10] of integer;\n"
+        "     rowalias = row;\n"
+        "var guard1: integer; x: rowalias; guard2: integer; i: integer;\n"
+        "begin\n"
+        "  guard1 := 111; guard2 := 222;\n"
+        "  for i := 5 to 10 do x[i] := i;\n"
+        "  writeln(guard1, ' ', guard2)\n"
+        "end.\n", "-fno-range-checks");
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "111 222\n");
+}
+
+TEST(TypeByName, APointerKeepsItsOwnRecordWhenTheNameIsShadowed) {
+    // The domain type was resolved by name through a table codegen re-points
+    // per procedure, so a nested procedure declaring its own `rec` re-aimed
+    // every p^.f in its body at the inner layout -- with the field index still
+    // taken from the right record, so it read an unrelated offset.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type rec = record a: integer; b: integer end;\n"
+        "var ptr: ^rec;\n"
+        "procedure q;\n"
+        "type rec = record x: char; y: char; z: integer end;\n"
+        "var l: rec;\n"
+        "begin l.x := 'a'; writeln(ptr^.b) end;\n"
+        "begin new(ptr); ptr^.a := 11; ptr^.b := 22; writeln(ptr^.b); q end.\n");
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "22\n22\n");
+}
+
+TEST(TypeByName, WithBindsAVariantFieldToItsOwnStorage) {
+    // §6.4.3.3 lets a variant field be selected by name like any other, so
+    // Sema's field list is flattened while the struct holds one blob for all
+    // the alternatives.  Pairing them positionally bound the first variant
+    // field to the blob: `with r do c := 4` stored an integer bit pattern into
+    // a real and printed 1.97626258336499e-323.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type num = record kind: integer;\n"
+        "       case tag: integer of 1: (c: real); 2: (e: integer) end;\n"
+        "var r: num;\n"
+        "begin r.kind := 1; r.tag := 1; with r do c := 4; writeln(r.c:5:1) end.\n");
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "  4.0\n");
+}
+
+TEST(TypeByName, WithBindsEveryVariantFieldNotJustTheFirst) {
+    // The later ones ran off the end of the struct and were never bound, so
+    // `with r do b := 22` referred to a `pasg_b` nothing defined and the link
+    // failed -- or found some module's exported variable of that name.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type num = record kind: integer;\n"
+        "       case tag: integer of 1: (a: integer; b: integer); 2: (e: real) end;\n"
+        "var r: num;\n"
+        "begin r.kind := 1; r.tag := 1;\n"
+        "  with r do begin a := 11; b := 22 end;\n"
+        "  with r do writeln(a, ' ', b)\n"
+        "end.\n");
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "11 22\n");
+}
+
+TEST(ValueParameter, AnIntegerActualWidensForARealFormal) {
+    // §6.6.3.2 makes a value parameter a variable the actual is *assigned* to,
+    // so §6.4.6 applies and an integer widens.  Nothing coerced it, so
+    // `scale(3)` emitted `call void @pas_scale(i64 3)` against a `void (double)`
+    // and the module failed verification: a program could not use a real
+    // parameter without writing every actual as a real.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "var n: integer;\n"
+        "procedure scale(x: real); begin writeln(x:6:2) end;\n"
+        "function half(x: real): real; begin half := x / 2 end;\n"
+        "begin n := 3; scale(3); scale(n); writeln(half(7):6:2) end.\n");
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "  3.00\n  3.00\n  3.50\n");
+}
+
+// ---------------------------------------------------------------------------
+// Two more where codegen recovered something it already knew
+//
+// EP §6.5.6's substring took the source's capacity by scanning for a variable
+// at the same address, and §6.6.3.7.2's conformant relay took the bounds from a
+// type that has none.  Both predate 0.1.3.
+// ---------------------------------------------------------------------------
+
+TEST(SubstringCapacity, ASubstringOfAFieldOrAnElementKeepsItsCapacity) {
+    // The capacity was hunted for by scanning every scope for a variable whose
+    // address matched, defaulting to 255.  A field or an element is a GEP that
+    // matches nothing, so the substring was silently cut to 255 characters.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type rec = record s: string(300) end;\n"
+        "var r: rec; a: array[1..2] of string(300); n: string(300); k: integer;\n"
+        "begin\n"
+        "  n := '';\n"
+        "  for k := 1 to 300 do n := n + 'x';\n"
+        "  a[1] := n; r.s := n;\n"
+        "  writeln(length(n[1..300]), ' ', length(a[1][1..300]), ' ',\n"
+        "          length(r.s[1..300]))\n"
+        "end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "300 300 300\n");
+}
+
+TEST(SubstringCapacity, ACapacityIsNotTakenFromTheFieldNextToIt) {
+    // The scan was unsound even when it matched: a record whose first field is
+    // a string has the record's own address, so it found the RECORD and read a
+    // capacity off whatever the second element happened to be.  Here that is
+    // `array[1..5] of char`, and a ten-character substring came back five long.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type thief = record s: string(20); t: array[1..5] of char end;\n"
+        "var th: thief;\n"
+        "begin th.s := 'abcdefghij'; writeln(th.s[1..10]) end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "abcdefghij\n");
+}
+
+TEST(ConformantRelay, RelayingAConformantArrayKeepsEveryDimensionsBounds) {
+    // ISO §6.6.3.7.2 permits passing a conformant parameter on to another
+    // conformant formal, and it is the ordinary way to factor code over one.
+    // Only the outermost dimension's bounds were passed on; the rest came from
+    // a ConformantArray type, which has no static bounds, so they arrived 0..0
+    // and the callee indexed the flat block with the wrong row width.
+    const char* Body =
+        "program p(output);\n"
+        "type mat = array[1..2, 3..7] of integer;\n"
+        "var m: mat; i, j: integer;\n"
+        "procedure show(var a: array[u..w: integer; lo..hi: integer] of integer);\n"
+        "var r, c: integer;\n"
+        "begin\n"
+        "  writeln(u, '..', w, ' ', lo, '..', hi);\n"
+        "  for r := u to w do begin\n"
+        "    for c := lo to hi do write(a[r, c], ' ');\n"
+        "    writeln\n"
+        "  end\n"
+        "end;\n"
+        "procedure relay(var a: array[u..w: integer; lo..hi: integer] of integer);\n"
+        "begin show(a) end;\n"
+        "begin\n"
+        "  for i := 1 to 2 do for j := 3 to 7 do m[i, j] := i * 10 + j;\n"
+        "  show(m); relay(m)\n"
+        "end.\n";
+    auto R = compileAndRun(Body, kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    // Relayed must be identical to direct, which is the whole point.
+    const std::string One = "1..2 3..7\n13 14 15 16 17 \n23 24 25 26 27 \n";
+    EXPECT_EQ(R.Stdout, One + One);
+}
+
+TEST(ConformantRelay, WithOverASchemaBodyBindsEveryVariantFieldToo) {
+    // A schema body may have a variant part like any other record, and emitWith
+    // has a second positional walk for it.  Fixing the record path alone left
+    // this one binding the first variant field to the blob and never binding
+    // the rest -- `with b do two := 22` referred to a pasg_two nothing defined,
+    // and the link failed.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type box(n: integer) = record kind: integer;\n"
+        "       case tag: integer of 1: (one: integer; two: integer); 2: (r: real)\n"
+        "     end;\n"
+        "var b: box(4);\n"
+        "begin b.kind := 9; b.tag := 1;\n"
+        "  with b do begin one := 11; two := 22 end;\n"
+        "  writeln(b.one, ' ', b.two)\n"
+        "end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "11 22\n");
+}

@@ -382,7 +382,7 @@ llvm::Type* Codegen::Impl::llvmTypeOfNodeViaSema(const TypeNode& node,
 /// Whether llvmTypeOfSemaType has a lowering for \p T.  An undiscriminated
 /// schema has none — its extent is not known until it is passed or allocated —
 /// and neither has the error type.
-static bool canLowerSemaType(const Type& T) {
+bool Codegen::Impl::canLowerSemaType(const Type& T) {
     switch (T.Kind) {
     case TypeKind::Integer:  case TypeKind::Subrange: case TypeKind::Enum:
     case TypeKind::Set:      case TypeKind::Real:     case TypeKind::Complex:

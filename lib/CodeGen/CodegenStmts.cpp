@@ -962,14 +962,39 @@ void Codegen::Impl::emitWith(const WithStmt& s) {
                 if (!st)
                     st = llvm::dyn_cast<llvm::StructType>(llvmTypeOfSemaType(*body));
                 if (st) {
-                    auto*    zero   = llvm::ConstantInt::get(i32Ty, 0);
+                    // Through the layout, exactly as the record case below
+                    // does: Sema's field list is flattened and the struct has
+                    // one blob for all the variants, so pairing them by
+                    // position binds the first variant field to the blob and
+                    // never binds the rest.  A schema body may have a variant
+                    // part like any other record, and this is that same walk.
+                    auto* zero = llvm::ConstantInt::get(i32Ty, 0);
+                    const RecordLayout* L = layoutOfRecord(*body);
                     unsigned ElemIdx = 0;
                     for (const auto& F : body->RecordFields) {
-                        if (ElemIdx >= st->getNumElements()) break;
-                        auto* fidx   = llvm::ConstantInt::get(i32Ty, ElemIdx);
-                        auto* fldPtr = builder.CreateGEP(st, recPtr, {zero, fidx},
-                                                         "with." + F.Name);
-                        defVar(F.Name, fldPtr, st->getElementType(ElemIdx));
+                        llvm::Value* fldPtr = nullptr;
+                        llvm::Type*  fldTy  = nullptr;
+                        if (L) {
+                            const auto It = L->Fields.find(toLower(F.Name));
+                            if (It == L->Fields.end()) continue;
+                            const auto& P = It->second;
+                            fldPtr = builder.CreateGEP(
+                                st, recPtr,
+                                {zero, llvm::ConstantInt::get(i32Ty, P.Index)},
+                                "with." + F.Name);
+                            if (P.InVariant && P.Offset != 0)
+                                fldPtr = builder.CreateConstGEP1_64(
+                                    i8Ty, fldPtr, P.Offset, "with." + F.Name);
+                            fldTy = P.Ty;
+                        } else {
+                            if (ElemIdx >= st->getNumElements()) break;
+                            fldPtr = builder.CreateGEP(
+                                st, recPtr,
+                                {zero, llvm::ConstantInt::get(i32Ty, ElemIdx)},
+                                "with." + F.Name);
+                            fldTy = st->getElementType(ElemIdx);
+                        }
+                        defVar(F.Name, fldPtr, fldTy);
                         ++ElemIdx;
                     }
                 }
@@ -994,15 +1019,48 @@ void Codegen::Impl::emitWith(const WithStmt& s) {
                      llvmTypeOfSemaType(*rec->ResolvedType));
         if (!st) codegenICE("cannot resolve the struct type for a 'with' record");
 
-        // Expose each field as a named variable pointing into the record struct.
-        auto*    zero   = llvm::ConstantInt::get(i32Ty, 0);
-        unsigned ElemIdx = 0;
+        // Expose each field as a named variable pointing into the record
+        // struct, through the SAME layout that r.f goes through.
+        //
+        // This used to pair Sema's field list positionally with the struct's
+        // elements, and the two are not the same list.  §6.4.3.3 lets a variant
+        // field be selected by name like any other, so Sema's list is flattened
+        // -- fixed fields, the tag, then every alternative's fields -- while the
+        // struct holds the fixed fields, the tag, and ONE blob shared by all the
+        // alternatives.  So the first variant field was bound to the blob and
+        // every later one ran off the end of the struct and was not bound at
+        // all: `with r do c := 4` stored an integer bit pattern into a real, and
+        // `with r do b := 22` referred to a `pasg_b` that no one defined and
+        // failed at link time.
+        auto* zero = llvm::ConstantInt::get(i32Ty, 0);
+        const RecordLayout* L = layoutOfRecord(*rec->ResolvedType);
         for (const auto& F : rec->ResolvedType->RecordFields) {
-            if (ElemIdx >= st->getNumElements()) break;
-            auto* fidx   = llvm::ConstantInt::get(i32Ty, ElemIdx);
-            auto* fldPtr = builder.CreateGEP(st, recPtr, {zero, fidx}, "with." + F.Name);
-            defVar(F.Name, fldPtr, st->getElementType(ElemIdx));
-            ++ElemIdx;
+            llvm::Value* fldPtr = nullptr;
+            llvm::Type*  fldTy  = nullptr;
+            if (L) {
+                const auto It = L->Fields.find(toLower(F.Name));
+                if (It == L->Fields.end()) continue;
+                const auto& P = It->second;
+                fldPtr = builder.CreateGEP(
+                    st, recPtr, {zero, llvm::ConstantInt::get(i32Ty, P.Index)},
+                    "with." + F.Name);
+                if (P.InVariant && P.Offset != 0)
+                    fldPtr = builder.CreateConstGEP1_64(i8Ty, fldPtr, P.Offset,
+                                                        "with." + F.Name);
+                fldTy = P.Ty;
+            } else {
+                // A record with no declaration to lay out -- one that came in
+                // through an interface file.  Positional is all there is, and
+                // it is right for a record with no variant part.
+                const unsigned Idx =
+                    static_cast<unsigned>(&F - rec->ResolvedType->RecordFields.data());
+                if (Idx >= st->getNumElements()) break;
+                fldPtr = builder.CreateGEP(st, recPtr,
+                             {zero, llvm::ConstantInt::get(i32Ty, Idx)},
+                             "with." + F.Name);
+                fldTy = st->getElementType(Idx);
+            }
+            defVar(F.Name, fldPtr, fldTy);
         }
     }
     emitStmt(s.Body.get());

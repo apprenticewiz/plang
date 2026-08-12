@@ -6,6 +6,97 @@ version numbers follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 
 ---
 
+## [0.1.4] - 2026-08-12
+
+Eight code-generation defects, none of them new: every one was present in
+0.1.0.  Three corrupt memory, one is an internal compiler error on ordinary
+Pascal, and the rest silently produce wrong values.  Nothing about the language
+plang accepts has changed, and the code generated for every program in the
+conformance suite and the acceptance test is byte-for-byte what 0.1.3
+generated.
+
+They share a cause.  Code generation worked out what something *was* by looking
+up a name, by matching an address, or by taking a width from one side of a
+boundary — where semantic analysis already had the answer.  The tables it
+consults are rebuilt per procedure and followed one hop deep, so a second type
+alias, a shadowing declaration, a variant part, or an operand that is not a
+plain identifier gave the wrong answer without saying so.
+
+**This is not the whole of that class.**  The audit that found these eight has
+confirmed seven more and has sixteen candidates it has not yet examined.  They
+are being fixed for 0.1.5.  A release that fixes what is known to be broken is
+worth more than one that waits for a search to finish.
+
+### Fixed
+
+- **`read` into anything but a plain variable overran it.**  ISO §6.9.1's
+  `read(v)` chose both the reader and the number of bytes to store from a
+  lookup of the argument's *name*, so `read(a[i])`, `read(r.f)` and `read(p^)`
+  fell through to a default of `i64` — which picked the *integer* reader for a
+  `char` target and stored eight bytes into one.  Reading into an element of an
+  `array[1..4] of char` overwrote the array and four bytes past the end of it.
+  Driven by the program's input.
+
+- **An array reached through two type aliases lost its lower bound.**  The
+  bound was read with a single alias hop while the array's type was resolved
+  through the whole chain, so `type row = array[5..10] of integer; rowalias =
+  row;` left it at zero.  A legal `x[6]` aborted with "array index 6 out of
+  bounds 0..5"; with `-fno-range-checks` the writes landed past the end of the
+  array and overwrote the next variable.
+
+- **A pointer lost its record when the type name was shadowed.**  `p^.field`
+  resolved the domain type by name in a table rebuilt per procedure, so a
+  nested procedure declaring its own type of that name re-aimed every `p^.f` in
+  its body at the inner layout — with the field *index* still taken from the
+  right record, so it read an unrelated offset.  `p^.b` gave
+  1585267068834414592 for 22.
+
+- **`with` bound variant fields to the wrong storage, or to nothing.**
+  §6.4.3.3 lets a variant field be selected by name like any other, so the
+  semantic field list is flattened while the record's storage holds one block
+  shared by all the alternatives.  Pairing them by position bound the first
+  variant field to that block — `with r do c := 4` stored an integer bit
+  pattern into a `real` and printed 1.97626258336499e-323 — and never bound the
+  later ones at all, so `with r do b := 22` referred to a symbol nothing
+  defined and the link failed.  Both the record and the schema-body forms.
+
+- **An integer actual did not widen for a `real` value parameter.**  §6.6.3.2
+  makes a value parameter a variable the actual is *assigned* to, so §6.4.6
+  applies.  Nothing coerced it, so `procedure scale(x: real)` called as
+  `scale(3)` emitted a call that failed verification and the compiler died with
+  an internal error.  A program could not use a `real` parameter without
+  writing every actual as a real.
+
+- **A substring took its capacity from whatever was at that address.**  The
+  rvalue `s[i..j]` hunted for the source's capacity by scanning for a variable
+  at the same address, defaulting to 255, so a substring of a field or an
+  element was silently cut to 255 characters.  The scan was not sound when it
+  matched either: a record whose first field is a string has the record's own
+  address, so in `record s: string(20); t: array[1..5] of char end`,
+  `th.s[1..10]` came back five characters long — its capacity taken from the
+  field beside it.
+
+- **A relayed conformant array lost every dimension but the first.**  §6.6.3.7.2
+  permits passing a conformant parameter on to another conformant formal, and
+  it is the ordinary way to factor code over one.  Only the outermost
+  dimension's bounds were passed on; the rest came from a type that has no
+  static bounds and arrived as 0..0, so the callee indexed the block with the
+  wrong row width.
+
+### Why the test suite did not catch any of this
+
+The 377-case ISO 7185 conformance suite and the 3000-line acceptance test use
+one type alias, no shadowing, no `with` over a variant part, named variables
+for input, and no integer actual for a real formal.  Every one of the 181 LLVM
+modules they produce is byte-identical before and after all eight fixes: the
+corpus cannot see this class of defect at all.  It is strong on what the
+standards say and blind to what the compiler assumes about itself.
+
+Fifteen tests were added for the shapes it does not reach.  Each fix was
+checked by reverting it and confirming that exactly its own tests fail.
+
+---
+
 ## [0.1.3] - 2026-08-11
 
 Four bug fixes, all in code generation, and none of them new: every one was
