@@ -1419,3 +1419,28 @@ TEST(Builtins, ArityComesFromTheCatalogue) {
                       epOpts())
                     .hasError("'substr' expects 2 or 3 argument(s), got 1"));
 }
+
+TEST(ForStatement, TheControlVariableMayBeDeclaredOutsideAWith) {
+    // ISO §6.8.3.9 asks whether the control variable is declared in the BLOCK
+    // containing the for-statement.  A with-statement opens a scope of its own
+    // that is not a block, and the check asked only the innermost scope -- so
+    // this was refused about an `i` declared exactly where the standard
+    // requires.  fpc -Miso accepts it.
+    EXPECT_TRUE(check(
+        "program p(output);\n"
+        "type rec = record a, b: integer end;\n"
+        "var r: rec; i, s: integer;\n"
+        "begin s := 0; with r do for i := 1 to 3 do s := s + a + b end.\n").Ok);
+}
+
+TEST(ForStatement, AControlVariableFromAnEnclosingBlockIsStillRefused) {
+    // The other direction: a global driven by a for-statement inside a
+    // procedure is what §6.8.3.9 forbids, and looking out past the block would
+    // have stopped catching it.
+    EXPECT_TRUE(check(
+        "program p(output);\n"
+        "var i: integer;\n"
+        "procedure q; begin for i := 1 to 3 do end;\n"
+        "begin q end.\n")
+        .hasError("must be declared in the immediately enclosing block"));
+}

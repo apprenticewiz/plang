@@ -301,8 +301,12 @@ void Sema::checkFor(const ForStmt& S) {
         if (!Sym->Ty->isOrdinal())
             error(S.Loc, diag::err_for_var_not_ordinal, {S.Var, Sym->Ty->Name});
 
-        // ISO §6.8.3.9: the control variable must be local to the block containing the for.
-        if (!Symtab.lookupCurrent(S.Var))
+        // ISO §6.8.3.9: the control variable must be local to the block
+        // containing the for-statement.  A with-statement and a `for ... in`
+        // open a scope that is not a block, so asking only the innermost one
+        // rejected `with r do for i := 1 to 3 do ...` about an `i` that is
+        // declared exactly where the standard requires.
+        if (!Symtab.lookupInEnclosingBlock(S.Var))
             error(S.Loc, diag::err_for_var_not_local, {S.Var});
     }
     auto From  = checkExpr(*S.From);
@@ -714,7 +718,7 @@ int Sema::pushWithScope(const WithStmt& S) {
 
         // EP §6.4.7: schema instance — expose discriminants and body record fields.
         if (T->Kind == TypeKind::SchemaInstance) {
-            Symtab.pushScope();
+            Symtab.pushScope(/*IsBlock=*/false);
             ++Count;
             // Expose discriminants as integer constants in both the symbol table
             // and ActiveSchemaBindings_ (for constBound inside the with body).
@@ -743,7 +747,7 @@ int Sema::pushWithScope(const WithStmt& S) {
             error(Rec->Loc, diag::err_with_non_record, {T->Name});
             continue;
         }
-        Symtab.pushScope();
+        Symtab.pushScope(/*IsBlock=*/false);
         ++Count;
         for (const auto& F : T->RecordFields) {
             Symbol FS;
@@ -907,7 +911,7 @@ void Sema::checkForIn(const ForInStmt& S) {
     auto ElemTy = (SetTy->Kind == TypeKind::Set && SetTy->ElemType)
                   ? SetTy->ElemType : TyInt;
 
-    Symtab.pushScope();
+    Symtab.pushScope(/*IsBlock=*/false);
     Symbol LoopSym;
     LoopSym.Kind  = SymbolKind::Var;
     LoopSym.Name  = S.Var;

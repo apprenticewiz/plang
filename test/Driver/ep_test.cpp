@@ -3200,3 +3200,22 @@ TEST(ConformantRelay, RelayingFromInsideAWithUsesTheArraysOwnBounds) {
     const std::string One = "1..5: 11 22 33 44 55\n";
     EXPECT_EQ(R.Stdout, One + One);
 }
+
+TEST(StringArgument, AStringReachedAsAFieldOrElementIsPassedByAddress) {
+    // EP §6.4.3.3: a string(n) is carried by its address, and every caller
+    // that takes one expects a pointer to the { length, bytes } struct.  That
+    // contract held for an identifier and nothing else, so a string reached as
+    // a field, an element or a dereference was loaded by VALUE and the call
+    // failed IR verification.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type rec = record s: string(20); n: integer end;\n"
+        "var r: rec; a: array[1..3] of string(20); q: ^rec;\n"
+        "procedure show(t: string(25)); begin write('[', t, ']') end;\n"
+        "begin\n"
+        "  r.s := 'hello'; a[1] := 'world'; new(q); q^.s := 'deref';\n"
+        "  show(r.s); show(a[1]); show(q^.s); writeln\n"
+        "end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "[hello][world][deref]\n");
+}

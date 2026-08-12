@@ -8,7 +8,20 @@ using namespace plang;
 
 std::string SymbolTable::lower(const std::string& S) { return toLower(S); }
 
-void SymbolTable::pushScope() { Scopes.emplace_back(); }
+void SymbolTable::pushScope(bool IsBlock) {
+    Scopes.emplace_back();
+    Scopes.back().IsBlock = IsBlock;
+}
+
+const Symbol* SymbolTable::lookupInEnclosingBlock(const std::string& Name) const {
+    const std::string K = lower(Name);
+    for (auto It = Scopes.rbegin(); It != Scopes.rend(); ++It) {
+        const auto F = It->Symbols.find(K);
+        if (F != It->Symbols.end()) return &F->second;
+        if (It->IsBlock) break;   // searched out to the block; no further
+    }
+    return nullptr;
+}
 void SymbolTable::popScope()  { if (!Scopes.empty()) Scopes.pop_back(); }
 
 bool SymbolTable::define(Symbol Sym) {

@@ -105,6 +105,18 @@ llvm::Value* Codegen::Impl::emitExpr(const ExprNode& e) {
     if (auto* n = llvm::dyn_cast<BinaryExpr>(&e))  return emitBinary(*n);
     if (auto* n = llvm::dyn_cast<UnaryExpr>(&e))   return emitUnary(*n);
     if (auto* n = llvm::dyn_cast<CallExpr>(&e))    return emitCallExpr(*n);
+    // EP §6.4.3.3: a string(n) is carried by its ADDRESS -- every caller that
+    // takes one expects a pointer to the { length, bytes } struct, which is
+    // what the IdentExpr branch above hands back.  That contract held for an
+    // identifier and nothing else, so a string reached as a field, an element
+    // or a dereference was loaded by VALUE here instead: passing r.s to a
+    // `string(25)` parameter loaded a { i64, [20 x i8] } and failed IR
+    // verification, and every other caller of the contract had the same hole.
+    if (exprIsVarStr(e)
+            && (llvm::isa<IndexExpr>(&e) || llvm::isa<FieldExpr>(&e)
+                || llvm::isa<DerefExpr>(&e)))
+        if (auto* p = emitLValue(e)) return p;
+
     if (auto* n = llvm::dyn_cast<IndexExpr>(&e))   return emitIndexLoad(*n);
     if (auto* n = llvm::dyn_cast<FieldExpr>(&e))   return emitFieldLoad(*n);
     if (auto* n = llvm::dyn_cast<DerefExpr>(&e))   return emitDerefLoad(*n);
