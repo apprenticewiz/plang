@@ -115,6 +115,34 @@ version numbers follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 
 ### Fixed
 
+- **`read` into anything but a plain variable overran it.**  ISO §6.9.1's
+  `read(v)` chose both the reader and the number of bytes to store from a
+  lookup of the argument's *name*.  Only an identifier has one, so
+  `read(a[i])`, `read(r.f)` and `read(p^)` fell through to a default of
+  `i64` — which picked the *integer* reader for a `char` component and then
+  stored eight bytes into one.
+
+  ```pascal
+  var s: array[1..4] of char;
+  begin s[1] := 'Z'; s[2] := 'Z'; s[3] := 'Z'; s[4] := 'Z';
+        read(s[1])                      { input: 5 }
+  ```
+
+  left `s` as `5` followed by three NULs and wrote four bytes past the end of
+  the array.  A `file of 'a'..'z'` read into an element of an `array of char`
+  did the same on the binary path, where the byte count came from the file's
+  component type whether or not a temporary was used.
+
+  Plain ISO 7185, no dialect flag, reachable from program input, and present
+  since before 0.1.3.  Nothing in the suite caught it: the 377 conformance
+  cases and the acceptance test read into named variables, and the IR of all
+  181 modules they produce is byte-for-byte unchanged by the fix.  It was found
+  while mapping the runtime boundary for Turbo Pascal, where a 16-bit `Integer`
+  makes the same mismatch the normal case rather than the exception.
+
+  The destination type now comes from Sema, which has one for every expression
+  shape, rather than from a name that only identifiers have.
+
 - **A second compilation in one process crashed.**  The file record was cached
   in a function-local `static`, so it outlived the `LLVMContext` that owned it
   and the next `Codegen` took a type belonging to a destroyed context — a

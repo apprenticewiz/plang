@@ -62,7 +62,13 @@ void Codegen::Impl::init(const std::string& progName) {
     // one of the names again means its own — which is what requiredConsts
     // records, so that a lookup can tell the two apart.
     requiredConsts.clear();
-    consts["maxint"]  = llvm::ConstantInt::get(i64Ty, INT64_MAX, /*isSigned=*/true);
+    // The largest value the dialect's integer holds.  Sema knows this too,
+    // from the same LangOptions; the two agreeing is what keeps `to maxint`
+    // terminating rather than wrapping.
+    consts["maxint"]  = llvm::ConstantInt::get(
+        llvm::Type::getIntNTy(ctx, langOpts.defaultIntWidth()),
+        static_cast<uint64_t>(~0ULL >> (64 - langOpts.defaultIntWidth() + 1)),
+        /*isSigned=*/true);
     consts["pi"]      = llvm::ConstantFP::get(dblTy, std::numbers::pi);
     // EP §6.4.2.2
     consts["maxchar"] = llvm::ConstantInt::get(i8Ty,  255, /*isSigned=*/false);
@@ -171,7 +177,10 @@ llvm::StructType* Codegen::Impl::strStructType(int64_t cap) {
 
 llvm::Type* Codegen::Impl::llvmTypeOfName(const std::string& name) {
     std::string lo = toLower(name);
-    if (lo == "integer")  return i64Ty;
+    // As wide as the dialect makes it; see Type::Width.  Answering i64
+    // regardless is what made the two readings of `integer` disagree under
+    // -std=turbo, where Sema had already resolved it to sixteen bits.
+    if (lo == "integer")  return llvm::Type::getIntNTy(ctx, langOpts.defaultIntWidth());
     if (lo == "real")     return dblTy;
     if (lo == "complex")  return complexTy(); // EP §6.4.2.2: { double, double }
     if (lo == "boolean")  return i1Ty;
@@ -407,7 +416,7 @@ static_assert(NumSemaTypeKinds == 21,
 /// Whether llvmTypeOfSemaType has a lowering for \p T.  An undiscriminated
 /// schema has none — its extent is not known until it is passed or allocated —
 /// and neither has the error type.
-static bool canLowerSemaType(const Type& T) {
+bool Codegen::Impl::canLowerSemaType(const Type& T) {
     switch (T.Kind) {
     case TypeKind::Integer:  case TypeKind::Subrange: case TypeKind::Enum:
     case TypeKind::Set:      case TypeKind::Real:     case TypeKind::Complex:

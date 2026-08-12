@@ -23,6 +23,7 @@
 
 #include <gtest/gtest.h>
 
+#include <cstdint>
 #include <sstream>
 #include <string>
 
@@ -350,4 +351,33 @@ TEST(CodegenReuse, ThirdAndFourthCompilationsAreStillFine) {
     const char* Src = "program p(output);\nvar f: text;\nbegin rewrite(f) end.\n";
     for (int I = 0; I < 4; ++I)
         EXPECT_FALSE(irFor(Src).empty()) << "compilation " << I;
+}
+
+TEST(Storage, MaxintIsTheLargestValueTheDialectsIntegerHolds) {
+    // Sema and codegen each know maxint, from the same LangOptions.  They have
+    // to agree or `for i := 1 to maxint` wraps instead of terminating, and they
+    // did not: codegen had INT64_MAX written into it and Sema had the same
+    // constant a second time.
+    const auto maxintOf = [](LangOptions::Standard Std) -> int64_t {
+        LangOptions O;
+        O.Std = Std;
+        return static_cast<int64_t>(~0ULL >> (64 - O.defaultIntWidth() + 1));
+    };
+    EXPECT_EQ(maxintOf(LangOptions::Standard::ISO7185),  INT64_MAX);
+    EXPECT_EQ(maxintOf(LangOptions::Standard::ISO10206), INT64_MAX);
+    EXPECT_EQ(maxintOf(LangOptions::Standard::Turbo),    32767);
+}
+
+TEST(Storage, ASubrangeSaysWhetherItsValuesCanBeNegative) {
+    // IsSigned defaults to true, and a subrange over a char, a boolean or an
+    // enumeration has values that are ordinal numbers and never negative.  A
+    // widening rule that read the default would sign-extend them.
+    TypeContext C;
+    EXPECT_FALSE(C.getSubrange(C.getChar(), 'a', 'z')->IsSigned);
+    EXPECT_FALSE(C.getSubrange(C.getBoolean(), 0, 1)->IsSigned);
+    // Over an integer it is the host's answer, which is what lets a Turbo
+    // `0..255` of Byte widen without a sign.
+    EXPECT_TRUE(C.getSubrange(C.getInteger(), -10, 10)->IsSigned);
+    EXPECT_FALSE(C.getSubrange(C.getInt(8, /*Signed=*/false), 0, 255)->IsSigned);
+    EXPECT_TRUE(C.getSubrange(C.getInt(16, /*Signed=*/true), -5, 5)->IsSigned);
 }

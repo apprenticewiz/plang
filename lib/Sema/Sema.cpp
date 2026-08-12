@@ -151,7 +151,13 @@ void Sema::registerBuiltins() {
         Maxint.Kind = SymbolKind::Const;
         Maxint.Name = "maxint";
         Maxint.Ty = TyInt;
-        Maxint.ConstOrdinal    = std::numeric_limits<int64_t>::max();
+        // The largest value the dialect's integer holds.  ISO §6.4.2.2 leaves
+        // the range implementation-defined and plang's is 64 bits wide; Turbo's
+        // Integer is 16, so its maxint is 32767 -- and that is not a free
+        // choice, because a program that overflows at 32767 on a real Turbo and
+        // not here is not compiling as Turbo Pascal.
+        Maxint.ConstOrdinal    = static_cast<int64_t>(
+            (~0ULL >> (64 - Opts.defaultIntWidth() + 1)));
         Maxint.HasConstOrdinal = true;
         (void)Symtab.define(std::move(Maxint));
     }

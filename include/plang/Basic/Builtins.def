@@ -36,47 +36,54 @@
 // (write), or are checked where they are lowered, so they carry no arity here.
 #define ISO (LangOptions::D_ISO7185 | LangOptions::D_ISO10206)
 #define EP  (LangOptions::D_ISO10206)
+#define TP  (LangOptions::D_Turbo)
+// Most of the required procedures and functions of ISO 7185 are Turbo's too;
+// ALL is the ones every dialect has.  The five that are not -- page, get, put,
+// pack and unpack -- belong to the ISO file model, which Turbo replaces with
+// Assign and Seek rather than extends.  Naming them ISO here is what gets a
+// Turbo program using `get` told what it is rather than that it is undefined.
+#define ALL (ISO | TP)
 
-BUILTIN(Write,     "write",     Proc, ISO, 0, -1, R_None)
-BUILTIN(Writeln,   "writeln",   Proc, ISO, 0, -1, R_None)
-BUILTIN(Read,      "read",      Proc, ISO, 0, -1, R_None)
-BUILTIN(Readln,    "readln",    Proc, ISO, 0, -1, R_None)
-BUILTIN(New,       "new",       Proc, ISO, 1, -1, R_None)
-BUILTIN(Dispose,   "dispose",   Proc, ISO, 1, -1, R_None)
+BUILTIN(Write,     "write",     Proc, ALL, 0, -1, R_None)
+BUILTIN(Writeln,   "writeln",   Proc, ALL, 0, -1, R_None)
+BUILTIN(Read,      "read",      Proc, ALL, 0, -1, R_None)
+BUILTIN(Readln,    "readln",    Proc, ALL, 0, -1, R_None)
+BUILTIN(New,       "new",       Proc, ALL, 1, -1, R_None)
+BUILTIN(Dispose,   "dispose",   Proc, ALL, 1, -1, R_None)
 BUILTIN(Page,      "page",      Proc, ISO, 0, -1, R_None)
-BUILTIN(Reset,     "reset",     Proc, ISO, 1, -1, R_None)
-BUILTIN(Rewrite,   "rewrite",   Proc, ISO, 1, -1, R_None)
+BUILTIN(Reset,     "reset",     Proc, ALL, 1, -1, R_None)
+BUILTIN(Rewrite,   "rewrite",   Proc, ALL, 1, -1, R_None)
 BUILTIN(Get,       "get",       Proc, ISO, 1, -1, R_None)
 BUILTIN(Put,       "put",       Proc, ISO, 1, -1, R_None)
-BUILTIN(Close,     "close",     Proc, ISO, 1, -1, R_None)
+BUILTIN(Close,     "close",     Proc, ALL, 1, -1, R_None)
 BUILTIN(Pack,      "pack",      Proc, ISO, 3,  3, R_None)
 BUILTIN(Unpack,    "unpack",    Proc, ISO, 3,  3, R_None)
 
 // The required functions of ISO 7185 §6.6.6.
-BUILTIN(Sqrt,      "sqrt",      Func, ISO, 1,  1, R_Real)
-BUILTIN(Sin,       "sin",       Func, ISO, 1,  1, R_Real)
-BUILTIN(Cos,       "cos",       Func, ISO, 1,  1, R_Real)
-BUILTIN(Exp,       "exp",       Func, ISO, 1,  1, R_Real)
-BUILTIN(Ln,        "ln",        Func, ISO, 1,  1, R_Real)
-BUILTIN(Arctan,    "arctan",    Func, ISO, 1,  1, R_Real)
-BUILTIN(Trunc,     "trunc",     Func, ISO, 1,  1, R_Int)
-BUILTIN(Round,     "round",     Func, ISO, 1,  1, R_Int)
-BUILTIN(Ord,       "ord",       Func, ISO, 1,  1, R_Int)
+BUILTIN(Sqrt,      "sqrt",      Func, ALL, 1,  1, R_Real)
+BUILTIN(Sin,       "sin",       Func, ALL, 1,  1, R_Real)
+BUILTIN(Cos,       "cos",       Func, ALL, 1,  1, R_Real)
+BUILTIN(Exp,       "exp",       Func, ALL, 1,  1, R_Real)
+BUILTIN(Ln,        "ln",        Func, ALL, 1,  1, R_Real)
+BUILTIN(Arctan,    "arctan",    Func, ALL, 1,  1, R_Real)
+BUILTIN(Trunc,     "trunc",     Func, ALL, 1,  1, R_Int)
+BUILTIN(Round,     "round",     Func, ALL, 1,  1, R_Int)
+BUILTIN(Ord,       "ord",       Func, ALL, 1,  1, R_Int)
 // abs and sqr take the type of their argument; R_Int is the placeholder the
 // symbol carries, and the real result is worked out in checkCallExpr.
-BUILTIN(Abs,       "abs",       Func, ISO, 1,  1, R_Int)
-BUILTIN(Sqr,       "sqr",       Func, ISO, 1,  1, R_Int)
+BUILTIN(Abs,       "abs",       Func, ALL, 1,  1, R_Int)
+BUILTIN(Sqr,       "sqr",       Func, ALL, 1,  1, R_Int)
 // EP §6.7.6.5 adds the second argument; ISO 7185 takes only the first, and the
 // extra one is refused in checkCallExpr rather than by the arity here.
-BUILTIN(Succ,      "succ",      Func, ISO, 1,  2, R_Int)
-BUILTIN(Pred,      "pred",      Func, ISO, 1,  2, R_Int)
-BUILTIN(Chr,       "chr",       Func, ISO, 1,  1, R_Char)
-BUILTIN(Odd,       "odd",       Func, ISO, 1,  1, R_Bool)
-BUILTIN(Eof,       "eof",       Func, ISO, 0,  1, R_Bool)
-BUILTIN(Eoln,      "eoln",      Func, ISO, 0,  1, R_Bool)
+BUILTIN(Succ,      "succ",      Func, ALL, 1,  2, R_Int)
+BUILTIN(Pred,      "pred",      Func, ALL, 1,  2, R_Int)
+BUILTIN(Chr,       "chr",       Func, ALL, 1,  1, R_Char)
+BUILTIN(Odd,       "odd",       Func, ALL, 1,  1, R_Bool)
+BUILTIN(Eof,       "eof",       Func, ALL, 0,  1, R_Bool)
+BUILTIN(Eoln,      "eoln",      Func, ALL, 0,  1, R_Bool)
 
 // ISO 10206 §6.7.5.7
-BUILTIN(Halt,      "halt",      Proc, EP,  0,  1, R_None)
+BUILTIN(Halt,      "halt",      Proc, EP | TP, 0, 1, R_None)
 // EP §6.7.6.3
 BUILTIN(Card,      "card",      Func, EP,  1,  1, R_Int)
 // EP §6.7.6.7: strings
@@ -119,6 +126,8 @@ BUILTIN(Bind,         "bind",         Proc, EP, 2, 2, R_None)
 BUILTIN(Unbind,       "unbind",       Proc, EP, 1, 1, R_None)
 BUILTIN(Binding,      "binding",      Func, EP, 1, 1, R_BindingType)
 
+#undef ALL
+#undef TP
 #undef EP
 #undef ISO
 #undef BUILTIN
