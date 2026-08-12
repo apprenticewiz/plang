@@ -2967,3 +2967,96 @@ TEST(EP4Restricted, IsNotStandardPascal) {
         "begin end.\n");
     EXPECT_NE(R.ExitCode, 0);
 }
+
+// ---------------------------------------------------------------------------
+// Two more where codegen recovered something it already knew
+//
+// EP §6.5.6's substring took the source's capacity by scanning for a variable
+// at the same address, and §6.6.3.7.2's conformant relay took the bounds from a
+// type that has none.  Both predate 0.1.3.
+// ---------------------------------------------------------------------------
+
+TEST(SubstringCapacity, ASubstringOfAFieldOrAnElementKeepsItsCapacity) {
+    // The capacity was hunted for by scanning every scope for a variable whose
+    // address matched, defaulting to 255.  A field or an element is a GEP that
+    // matches nothing, so the substring was silently cut to 255 characters.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type rec = record s: string(300) end;\n"
+        "var r: rec; a: array[1..2] of string(300); n: string(300); k: integer;\n"
+        "begin\n"
+        "  n := '';\n"
+        "  for k := 1 to 300 do n := n + 'x';\n"
+        "  a[1] := n; r.s := n;\n"
+        "  writeln(length(n[1..300]), ' ', length(a[1][1..300]), ' ',\n"
+        "          length(r.s[1..300]))\n"
+        "end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "300 300 300\n");
+}
+
+TEST(SubstringCapacity, ACapacityIsNotTakenFromTheFieldNextToIt) {
+    // The scan was unsound even when it matched: a record whose first field is
+    // a string has the record's own address, so it found the RECORD and read a
+    // capacity off whatever the second element happened to be.  Here that is
+    // `array[1..5] of char`, and a ten-character substring came back five long.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type thief = record s: string(20); t: array[1..5] of char end;\n"
+        "var th: thief;\n"
+        "begin th.s := 'abcdefghij'; writeln(th.s[1..10]) end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "abcdefghij\n");
+}
+
+TEST(ConformantRelay, RelayingAConformantArrayKeepsEveryDimensionsBounds) {
+    // ISO §6.6.3.7.2 permits passing a conformant parameter on to another
+    // conformant formal, and it is the ordinary way to factor code over one.
+    // Only the outermost dimension's bounds were passed on; the rest came from
+    // a ConformantArray type, which has no static bounds, so they arrived 0..0
+    // and the callee indexed the flat block with the wrong row width.
+    const char* Body =
+        "program p(output);\n"
+        "type mat = array[1..2, 3..7] of integer;\n"
+        "var m: mat; i, j: integer;\n"
+        "procedure show(var a: array[u..w: integer; lo..hi: integer] of integer);\n"
+        "var r, c: integer;\n"
+        "begin\n"
+        "  writeln(u, '..', w, ' ', lo, '..', hi);\n"
+        "  for r := u to w do begin\n"
+        "    for c := lo to hi do write(a[r, c], ' ');\n"
+        "    writeln\n"
+        "  end\n"
+        "end;\n"
+        "procedure relay(var a: array[u..w: integer; lo..hi: integer] of integer);\n"
+        "begin show(a) end;\n"
+        "begin\n"
+        "  for i := 1 to 2 do for j := 3 to 7 do m[i, j] := i * 10 + j;\n"
+        "  show(m); relay(m)\n"
+        "end.\n";
+    auto R = compileAndRun(Body, kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    // Relayed must be identical to direct, which is the whole point.
+    const std::string One = "1..2 3..7\n13 14 15 16 17 \n23 24 25 26 27 \n";
+    EXPECT_EQ(R.Stdout, One + One);
+}
+
+TEST(ConformantRelay, WithOverASchemaBodyBindsEveryVariantFieldToo) {
+    // A schema body may have a variant part like any other record, and emitWith
+    // has a second positional walk for it.  Fixing the record path alone left
+    // this one binding the first variant field to the blob and never binding
+    // the rest -- `with b do two := 22` referred to a pasg_two nothing defined,
+    // and the link failed.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type box(n: integer) = record kind: integer;\n"
+        "       case tag: integer of 1: (one: integer; two: integer); 2: (r: real)\n"
+        "     end;\n"
+        "var b: box(4);\n"
+        "begin b.kind := 9; b.tag := 1;\n"
+        "  with b do begin one := 11; two := 22 end;\n"
+        "  writeln(b.one, ' ', b.two)\n"
+        "end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "11 22\n");
+}
