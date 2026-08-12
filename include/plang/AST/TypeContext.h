@@ -2,7 +2,9 @@
 
 #include "plang/Sema/Type.h"
 
+#include <cstdint>
 #include <map>
+#include <utility>
 #include <memory>
 #include <set>
 #include <string>
@@ -33,8 +35,17 @@ namespace plang {
 /// declaration is exactly the right representation for them.
 class TypeContext {
 public:
-    TypeContext() {
-        TyInt_  = Type::makeInteger();
+    /// \p DefaultIntWidth is what an unqualified `integer` is.  It is 64 for
+    /// ISO 7185 and Extended Pascal, which have one integer type; Turbo has
+    /// six at four widths and its `Integer` is 16 bits.
+    explicit TypeContext(unsigned DefaultIntWidth = 64) {
+        // Through the cache, not beside it.  Sema binds TyInt as a *reference*
+        // to the member this returns, and `identical` is a pointer comparison,
+        // so an `integer` minted here and an `integer` handed out by getInt
+        // would be two objects that fail every identity check against each
+        // other -- silently, since neither is wrong on its own.
+        DefaultIntWidth_ = DefaultIntWidth;
+        TyInt_  = getInt(DefaultIntWidth, /*Signed=*/true);
         TyReal_ = Type::makeReal();
         TyCplx_ = Type::makeComplex();
         TyBool_ = Type::makeBoolean();
@@ -86,6 +97,22 @@ public:
     const std::shared_ptr<Type>& getError()   const { return TyErr_;  }
     const std::shared_ptr<Type>& getText()    const { return TyText_; }
 
+    /// The canonical integer type of a given width and signedness.
+    ///
+    /// Interned like the structural types and for the same reason: `Word` and
+    /// `Word` have to be one type, or assigning one to the other fails an
+    /// identity check that has nothing to say about why.
+    std::shared_ptr<Type> getInt(unsigned Bits, bool Signed) {
+        auto& Slot = IntCache_[{Bits, Signed}];
+        if (!Slot) {
+            auto T      = Type::makeInteger();
+            T->Width    = Bits;
+            T->IsSigned = Signed;
+            Slot = std::move(T);
+        }
+        return Slot;
+    }
+
     // ---- Structural types — return canonical instances ---------------------
 
     /// How an ordinal type reads in a diagnostic.
@@ -109,6 +136,22 @@ public:
             T->Name    = std::to_string(lo) + ".." + std::to_string(hi);
             if (base && base->Kind != TypeKind::Integer && !base->Name.empty())
                 T->Name = base->Name + " " + T->Name;
+            // As wide as its host type where the host is an integer, which is
+            // where narrowing means anything: a subrange of Byte is a byte.
+            //
+            // Over a char or a boolean it is a full ordinal instead, which is
+            // what plang has always stored one as -- `packed array['a'..'z']`
+            // holds i64 components today even though a char is an i8.  That is
+            // inconsistent, and narrowing it is a change to how ISO 7185 and
+            // Extended Pascal lay memory out, so it does not belong in the
+            // change that merely makes width a property types carry.  Turbo,
+            // where a char subrange really is one byte, is when to revisit it.
+            if (base && base->Kind == TypeKind::Integer) {
+                T->Width    = base->Width;
+                T->IsSigned = base->IsSigned;
+            } else {
+                T->Width = DefaultIntWidth_;
+            }
             T->SubBase = std::move(base);
             T->SubLo   = lo;
             T->SubHi   = hi;
@@ -245,6 +288,13 @@ private:
     // Scalar singletons
     std::shared_ptr<Type> TyInt_, TyReal_, TyCplx_, TyBool_, TyChar_,
                           TyStr_, TyNil_, TyErr_, TyText_;
+
+    /// What an unqualified `integer` is, and what an ordinal that is not
+    /// narrowed by its host is stored as.
+    unsigned DefaultIntWidth_{64};
+
+    // Integer types, by width and signedness.
+    std::map<std::pair<unsigned, bool>, std::shared_ptr<Type>> IntCache_;
 
     // Structural type caches (key → canonical instance)
     std::map<std::string, std::shared_ptr<Type>> SubrangeCache_;
