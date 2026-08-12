@@ -68,6 +68,19 @@ void Codegen::Impl::pushConformantArgs(std::vector<llvm::Value*>& args,
     for (size_t di = 0; di < dims; ++di) {
         bool fromConformant = false;
         if (ave) {
+            // By address where we have one.  The names are what the programmer
+            // wrote in the parameter list, and any scope opened since can
+            // answer them: relaying from inside `with r do`, where r has fields
+            // spelled like the bounds, passed the record's fields as the
+            // array's bounds and the callee walked a hundred elements off the
+            // end of a five-element array.  The subscript side already carries
+            // these addresses; the relay side did not.
+            llvm::Value* loSlot = nullptr;
+            llvm::Value* hiSlot = nullptr;
+            if (di < ave->conformantDimPtrs.size()) {
+                loSlot = ave->conformantDimPtrs[di].first;
+                hiSlot = ave->conformantDimPtrs[di].second;
+            }
             std::string loNm, hiNm;
             if (di < ave->conformantDims.size()) {
                 loNm = ave->conformantDims[di].first;
@@ -76,15 +89,16 @@ void Codegen::Impl::pushConformantArgs(std::vector<llvm::Value*>& args,
                 loNm = ave->conformantLoName;
                 hiNm = ave->conformantHiName;
             }
-            if (!loNm.empty()) {
-                auto* loVe = findVar(loNm);
-                auto* hiVe = findVar(hiNm);
-                args.push_back(loVe
-                    ? (llvm::Value*)builder.CreateLoad(i64Ty, loVe->ptr, "pass.lo")
-                    : (llvm::Value*)llvm::ConstantInt::get(i64Ty, 0));
-                args.push_back(hiVe
-                    ? (llvm::Value*)builder.CreateLoad(i64Ty, hiVe->ptr, "pass.hi")
-                    : (llvm::Value*)llvm::ConstantInt::get(i64Ty, 0));
+            const auto boundOf = [&](llvm::Value* slot,
+                                     const std::string& nm) -> llvm::Value* {
+                if (slot) return builder.CreateLoad(i64Ty, slot, "pass.bound");
+                if (const auto* bv = findVar(nm))
+                    return builder.CreateLoad(i64Ty, bv->ptr, "pass.bound");
+                return llvm::ConstantInt::get(i64Ty, 0);
+            };
+            if (loSlot || !loNm.empty()) {
+                args.push_back(boundOf(loSlot, loNm));
+                args.push_back(boundOf(hiSlot, hiNm));
                 fromConformant = true;
             }
         }
@@ -198,26 +212,29 @@ llvm::Value* Codegen::Impl::buildStaticLinkFrame(const std::string& mangledName)
     auto* frameAlloca = createEntryAlloca(frameTy, "frame");
     auto* zero        = llvm::ConstantInt::get(i32Ty, 0);
 
-    // Where the CALLEE is declared decides which activation's variable each
-    // slot must hold -- that is what a static link means.  A direct child of
-    // this activation sees this activation's locals.  A sibling, or anything
-    // declared further out, sees the enclosing activation, which this one
-    // reaches through its own static link.
+    // Each slot is for a particular VARIABLE, and a name does not name one:
+    // two nesting levels may declare the same one.  The depth recorded beside
+    // the name does, being fixed by the nesting and the same number in every
+    // activation.
     //
-    // Resolving the name at the call site got that wrong whenever the caller
-    // had a local of the same name: with `b` and `c` both nested in `a`, and
-    // `c` declaring its own `n`, `c` calling `b` handed `b` the address of
-    // c's n.  b's increment landed in c's private local and a's n never moved.
-    const std::string_view sep(PlangScopeSep);
-    const auto cut = mangledName.rfind(sep);
-    const bool calleeIsChild =
-        cut != std::string::npos
-        && mangledName.substr(0, cut + sep.size()) == namePrefix;
+    // Resolving by name alone was wrong twice over.  With `b` and `c` both
+    // nested in `a` and `c` declaring its own `n`, `c` calling `b` handed b the
+    // address of c's n.  And where the callee's frame had two slots spelled
+    // alike, both were filled with the innermost binding, so the outer variable
+    // never travelled at all: three levels deep, a procedure reading its
+    // grandparent's `n` saw its parent's.
+    //
+    // A depth this activation has no binding for is one declared HERE, and
+    // findVar answers it.
+    const auto DIt = funcOuterVarDepths_.find(mangledName);
+    const std::vector<size_t>* varDepths =
+        DIt != funcOuterVarDepths_.end() ? &DIt->second : nullptr;
 
     for (size_t fi = 0; fi < varNames.size(); ++fi) {
         const VarEntry* ve = nullptr;
-        if (!calleeIsChild) {
-            const auto it = outerVarBindings.find(toLower(varNames[fi]));
+        if (varDepths && fi < varDepths->size()) {
+            const auto it = outerVarBindings.find(
+                {(*varDepths)[fi], toLower(varNames[fi])});
             if (it != outerVarBindings.end()) ve = &it->second;
         }
         if (!ve) ve = findVar(varNames[fi]);

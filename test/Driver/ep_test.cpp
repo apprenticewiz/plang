@@ -3176,3 +3176,27 @@ TEST(ConformantArray, ASubscriptPastTheConformantDimensionsIndexesTheElement) {
     ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
     EXPECT_EQ(R.Stdout, "11 999 13 42\n");
 }
+
+TEST(ConformantRelay, RelayingFromInsideAWithUsesTheArraysOwnBounds) {
+    // The relay resolved the bound identifiers by name, so relaying from inside
+    // `with r do`, where r has fields spelled like the bounds, passed the
+    // record's fields as the array's bounds: the callee walked a hundred
+    // elements off the end of a five-element array.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type rec = record lo1, hi1: integer end;\n"
+        "var a: array[1..5] of integer; r: rec; i: integer;\n"
+        "procedure show(var b: array[l..h: integer] of integer);\n"
+        "var k: integer;\n"
+        "begin write(l, '..', h, ':'); for k := l to h do write(' ', b[k]);\n"
+        "  writeln end;\n"
+        "procedure relay(var b: array[lo1..hi1: integer] of integer);\n"
+        "begin show(b); with r do show(b) end;\n"
+        "begin\n"
+        "  for i := 1 to 5 do a[i] := i * 11;\n"
+        "  r.lo1 := 100; r.hi1 := 200; relay(a)\n"
+        "end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    const std::string One = "1..5: 11 22 33 44 55\n";
+    EXPECT_EQ(R.Stdout, One + One);
+}

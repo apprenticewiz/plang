@@ -326,8 +326,17 @@ struct Codegen::Impl {
     /// binding outright -- so after `procedure c; var n: integer`, the address
     /// of the enclosing `n` was gone.  Building a frame for a sibling then
     /// found c's own n and the callee wrote into the wrong activation.
-    std::unordered_map<std::string, VarEntry>        outerVarBindings;
+    std::map<std::pair<size_t, std::string>, VarEntry> outerVarBindings;
     std::map<std::string, std::vector<std::string>>  funcOuterVarNames_;
+    /// The scope DEPTH each captured variable was found at, beside its name.
+    ///
+    /// A name is not an identity.  Two variables at different nesting levels
+    /// may share one, and then a frame has two slots spelled alike -- and
+    /// filling them by name gave both the innermost binding, so the outer
+    /// variable was dropped and the callee read the wrong one.  The depth is
+    /// fixed by nesting and is the same number in every activation, so it says
+    /// WHICH variable a slot is for.
+    std::map<std::string, std::vector<size_t>>       funcOuterVarDepths_;
     std::set<std::string>                            nestedFunctions_;
 
     // EP §6.7.3.7: conformant array parameter metadata.

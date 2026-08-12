@@ -1,3 +1,4 @@
+#include <set>
 #include "CodegenImpl.h"
 using namespace plang;
 
@@ -258,13 +259,17 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
     // If nested, collect all outer-scope variables that this procedure may access.
     // We collect ALL visible outer variables (conservative; avoids escape analysis).
     std::vector<std::pair<std::string, VarEntry>> outerVars;
+    std::vector<size_t>                           outerVarDepths;
     if (isNested) {
-        // Walk the scope stack (all scopes except the innermost, which belongs to
-        // nested procs not yet emitted) to gather outer variables.
-        for (auto it = scopes.rbegin(); it != scopes.rend(); ++it) {
-            for (const auto& [nm, ve] : *it)
+        // Walk the scope stack innermost-out, keeping each variable's DEPTH.
+        // Two levels may declare the same name, and then the frame has two
+        // slots spelled alike; without the depth there is nothing to tell them
+        // apart at the call site, and both were filled with the innermost.
+        for (size_t di = scopes.size(); di-- > 0;)
+            for (const auto& [nm, ve] : scopes[di]) {
                 outerVars.push_back({nm, ve});
-        }
+                outerVarDepths.push_back(di);
+            }
     }
 
     // Build LLVM parameter types.
@@ -467,7 +472,8 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
         names.reserve(outerVars.size());
         for (const auto& [nm, ve] : outerVars)
             names.push_back(nm);
-        funcOuterVarNames_[mangledName] = std::move(names);
+        funcOuterVarNames_[mangledName]  = std::move(names);
+        funcOuterVarDepths_[mangledName] = outerVarDepths;
     }
 
     // Parameter metadata a call site needs in order to pass the hidden
@@ -535,6 +541,13 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
         auto* frameTy = llvm::StructType::get(ctx, ptrFields);
 
         auto* zero = llvm::ConstantInt::get(i32Ty, 0);
+        // outerVars is innermost-first, so the FIRST occurrence of a name is
+        // the one that name denotes here.  Every slot is still loaded and
+        // recorded -- the outer ones have to travel on to a callee that
+        // captured them -- but only the innermost takes the name, or a
+        // grandparent's variable would answer to it and the body would read
+        // straight past its parent's.
+        std::set<std::string> Named;
         for (size_t fi = 0; fi < outerVars.size(); ++fi) {
             const auto& [nm, ve] = outerVars[fi];
             auto* fidx    = llvm::ConstantInt::get(i32Ty, (unsigned)fi);
@@ -542,20 +555,27 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
             auto* ptrSlot = builder.CreateGEP(frameTy, staticLinkArg,
                                               {zero, fidx}, "frame.slot." + nm);
             auto* outerPtr = builder.CreateLoad(ptrTy, ptrSlot, "outer." + nm);
-            // Register it as the variable's alloca so reads/writes go through.
-            defVar(nm, outerPtr, ve.type, ve.typeNode);
-            // ISO §6.6.3.1: an outer procedural parameter is still one here.
-            // Only the address travels, which is why the pair was spilled to a
-            // cell; what it means has to be carried across separately.
-            if (ve.isProcParam) {
-                auto& nve       = scopes.back()[toLower(nm)];
-                nve.isProcParam = true;
-                nve.procType    = ve.procType;
+
+            VarEntry Bound = ve;
+            Bound.ptr = outerPtr;
+            if (Named.insert(toLower(nm)).second) {
+                // Register it as the variable's alloca so reads/writes go through.
+                defVar(nm, outerPtr, ve.type, ve.typeNode);
+                // ISO §6.6.3.1: an outer procedural parameter is still one here.
+                // Only the address travels, which is why the pair was spilled to
+                // a cell; what it means has to be carried across separately.
+                if (ve.isProcParam) {
+                    auto& nve       = scopes.back()[toLower(nm)];
+                    nve.isProcParam = true;
+                    nve.procType    = ve.procType;
+                }
+                Bound = scopes.back()[toLower(nm)];
             }
             outerVarNames.push_back(nm);
-            // Kept apart from the scope, which a local of the same
-            // name will overwrite.
-            outerVarBindings[toLower(nm)] = scopes.back()[toLower(nm)];
+            // Kept apart from the scope, which a local of the same name will
+            // overwrite, and keyed by depth so that two levels sharing a name
+            // stay two variables.
+            outerVarBindings[{outerVarDepths[fi], toLower(nm)}] = Bound;
         }
     }
 

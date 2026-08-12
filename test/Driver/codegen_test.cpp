@@ -4352,3 +4352,43 @@ TEST(TypeByName, AnAliasToARecordSurvivesAShadowingDeclaration) {
     ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
     EXPECT_EQ(R.Stdout, "z 1 2 3\n");
 }
+
+TEST(NestedProcedure, AGrandparentsVariableIsNotConfusedWithAParentsOfTheSameName) {
+    // A frame slot is for a particular VARIABLE, and a name does not name one:
+    // two nesting levels may declare the same one.  Filling the slots by name
+    // gave both the innermost binding, so the outer variable never travelled --
+    // `d`, which captures b's n, was handed e's n and read 100 for 42.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "procedure b;\n"
+        "var n: integer;\n"
+        "  procedure d; begin writeln(n) end;\n"
+        "  procedure e;\n"
+        "  var n: integer;\n"
+        "    procedure f; begin d end;\n"
+        "  begin n := 100; f end;\n"
+        "begin n := 42; e end;\n"
+        "begin b end.\n");
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "42\n");
+}
+
+TEST(NestedProcedure, ABodyReadsTheNearestEnclosingVariableOfThatName) {
+    // The other half.  Every captured slot is loaded, because an outer one may
+    // have to travel on to a callee that captured it -- but only the innermost
+    // takes the NAME here, or a grandparent's variable answers to it and the
+    // body reads straight past its parent's.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "procedure a;\n"
+        "var n: integer;\n"
+        "  procedure c;\n"
+        "  var n: integer;\n"
+        "    procedure d; begin n := n + 100 end;\n"
+        "  begin n := 500; d; writeln(n) end;\n"
+        "begin n := 10; c; writeln(n) end;\n"
+        "begin a end.\n");
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    // d must bump c's n, not a's.
+    EXPECT_EQ(R.Stdout, "600\n10\n");
+}
