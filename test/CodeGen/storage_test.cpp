@@ -23,6 +23,7 @@
 
 #include <gtest/gtest.h>
 
+#include <cstdint>
 #include <sstream>
 #include <string>
 
@@ -350,4 +351,19 @@ TEST(CodegenReuse, ThirdAndFourthCompilationsAreStillFine) {
     const char* Src = "program p(output);\nvar f: text;\nbegin rewrite(f) end.\n";
     for (int I = 0; I < 4; ++I)
         EXPECT_FALSE(irFor(Src).empty()) << "compilation " << I;
+}
+
+TEST(Storage, MaxintIsTheLargestValueTheDialectsIntegerHolds) {
+    // Sema and codegen each know maxint, from the same LangOptions.  They have
+    // to agree or `for i := 1 to maxint` wraps instead of terminating, and they
+    // did not: codegen had INT64_MAX written into it and Sema had the same
+    // constant a second time.
+    const auto maxintOf = [](LangOptions::Standard Std) -> int64_t {
+        LangOptions O;
+        O.Std = Std;
+        return static_cast<int64_t>(~0ULL >> (64 - O.defaultIntWidth() + 1));
+    };
+    EXPECT_EQ(maxintOf(LangOptions::Standard::ISO7185),  INT64_MAX);
+    EXPECT_EQ(maxintOf(LangOptions::Standard::ISO10206), INT64_MAX);
+    EXPECT_EQ(maxintOf(LangOptions::Standard::Turbo),    32767);
 }
