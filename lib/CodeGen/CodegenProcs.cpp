@@ -230,7 +230,9 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
     auto  savedPrefix     = namePrefix;
     auto  savedIP         = builder.saveIP();
     auto* savedStaticLink = curStaticLink;
+    auto  savedFuncDepth  = curFuncScopeDepth;
     auto  savedOuterVars  = outerVarNames;
+    auto  savedOuterBinds = outerVarBindings;
     // ISO §6.2.2.3: a type or constant declared in this block is invisible
     // outside it.  Both maps are flat, so an inner declaration would otherwise
     // outlive its block and be picked up by whatever the enclosing block
@@ -489,6 +491,7 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
         namePrefix    = savedPrefix;
         curStaticLink = savedStaticLink;
         outerVarNames = savedOuterVars;
+        outerVarBindings = savedOuterBinds;
         labelBlocks   = std::move(savedLabels);
         builder.restoreIP(savedIP);
         return;
@@ -514,12 +517,18 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
     builder.SetInsertPoint(entry);
 
     pushScope();
+    // Everything pushed from here on is inside the body -- a with-statement,
+    // in practice.  The function's own scope is NOT included: it holds the
+    // result cell under the function's name, put there so a nested function
+    // can assign it, and finding that would defeat the test.
+    curFuncScopeDepth = scopes.size();
 
     // If nested, expose outer variables via the static link.
     // The frame struct is { ptr, ptr, ... } — one ptr per outer variable,
     // each pointing to the outer alloca so reads and writes go through.
     curStaticLink = staticLinkArg;
     outerVarNames.clear();
+    outerVarBindings.clear();
     if (staticLinkArg && !outerVars.empty()) {
         // Frame is { ptr, ptr, ... } — one slot per outer var.
         std::vector<llvm::Type*> ptrFields(outerVars.size(), ptrTy);
@@ -544,6 +553,9 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
                 nve.procType    = ve.procType;
             }
             outerVarNames.push_back(nm);
+            // Kept apart from the scope, which a local of the same
+            // name will overwrite.
+            outerVarBindings[toLower(nm)] = scopes.back()[toLower(nm)];
         }
     }
 
@@ -630,7 +642,11 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
                 std::string firstLo = dims[0].first;
                 std::string firstHi = dims[0].second;
 
-                // Allocas for each dimension's lo and hi bounds.
+                // Allocas for each dimension's lo and hi bounds.  Their
+                // addresses are kept as well as their names: a subscript must
+                // reach this activation's bound, and the name can be answered
+                // by any scope that opens later.
+                std::vector<std::pair<llvm::Value*, llvm::Value*>> dimPtrs;
                 for (const auto& [loNm, hiNm] : dims) {
                     llvm::Value* loArg = &*it; ++it;
                     llvm::Value* hiArg = &*it; ++it;
@@ -642,6 +658,8 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
                     auto* hiA = createEntryAlloca(i64Ty, hiNm + ".addr");
                     builder.CreateStore(hiArg, hiA);
                     defVar(hiNm, hiA, i64Ty);
+
+                    dimPtrs.emplace_back(loA, hiA);
                 }
 
                 // Register the array itself as a conformant VarEntry.
@@ -655,6 +673,7 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
                     ve.conformantHiName  = firstHi;
                     ve.conformantElemTy  = elemTy;
                     ve.conformantDims.assign(dims.begin(), dims.end());
+                    ve.conformantDimPtrs = std::move(dimPtrs);
                 }
 
                 // Advance flatIdx past: 1 (array ptr) + 2*D (lo/hi pairs).
@@ -708,7 +727,9 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
     curFuncName   = savedFuncName;
     namePrefix    = savedPrefix;
     curStaticLink = savedStaticLink;
+    curFuncScopeDepth = savedFuncDepth;
     outerVarNames = savedOuterVars;
+    outerVarBindings = savedOuterBinds;
     typeAliases   = std::move(savedTypeAliases);
     consts        = std::move(savedConsts);
     requiredConsts = std::move(savedRequired);

@@ -198,8 +198,29 @@ llvm::Value* Codegen::Impl::buildStaticLinkFrame(const std::string& mangledName)
     auto* frameAlloca = createEntryAlloca(frameTy, "frame");
     auto* zero        = llvm::ConstantInt::get(i32Ty, 0);
 
+    // Where the CALLEE is declared decides which activation's variable each
+    // slot must hold -- that is what a static link means.  A direct child of
+    // this activation sees this activation's locals.  A sibling, or anything
+    // declared further out, sees the enclosing activation, which this one
+    // reaches through its own static link.
+    //
+    // Resolving the name at the call site got that wrong whenever the caller
+    // had a local of the same name: with `b` and `c` both nested in `a`, and
+    // `c` declaring its own `n`, `c` calling `b` handed `b` the address of
+    // c's n.  b's increment landed in c's private local and a's n never moved.
+    const std::string_view sep(PlangScopeSep);
+    const auto cut = mangledName.rfind(sep);
+    const bool calleeIsChild =
+        cut != std::string::npos
+        && mangledName.substr(0, cut + sep.size()) == namePrefix;
+
     for (size_t fi = 0; fi < varNames.size(); ++fi) {
-        auto* ve = findVar(varNames[fi]);
+        const VarEntry* ve = nullptr;
+        if (!calleeIsChild) {
+            const auto it = outerVarBindings.find(toLower(varNames[fi]));
+            if (it != outerVarBindings.end()) ve = &it->second;
+        }
+        if (!ve) ve = findVar(varNames[fi]);
         if (!ve)
             codegenICE("captured variable '" + varNames[fi]
                        + "' is not visible at the call site of '"

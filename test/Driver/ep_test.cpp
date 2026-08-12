@@ -3060,3 +3060,41 @@ TEST(ConformantRelay, WithOverASchemaBodyBindsEveryVariantFieldToo) {
     ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
     EXPECT_EQ(R.Stdout, "11 22\n");
 }
+
+TEST(ConformantRelay, ASubscriptUsesTheArraysBoundsNotAShadowingField) {
+    // The bounds were recovered by re-resolving the bound-identifier SPELLING
+    // at each subscript, so a record with fields named like the bounds made
+    // every subscript inside `with r do` adjust by the record's fields and
+    // read outside the block.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type rec = record lo, hi: integer end;\n"
+        "var a: array[5..9] of integer; r: rec; i: integer;\n"
+        "procedure show(x: array[lo..hi: integer] of integer);\n"
+        "begin\n"
+        "  writeln(x[5], ' ', x[9]);\n"
+        "  with r do writeln(x[5], ' ', x[9])\n"
+        "end;\n"
+        "begin\n"
+        "  for i := 5 to 9 do a[i] := i * 10;\n"
+        "  r.lo := 0; r.hi := 0; show(a)\n"
+        "end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "50 90\n50 90\n");
+}
+
+TEST(InitialState, NewAppliesItThroughAFieldOrAnElementToo) {
+    // EP §6.6: the variable new creates begins in the state its type says.
+    // The domain type was only found for an identifier argument, so
+    // `new(h.p)` and `new(a[1])` applied no initial state at all.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type node = record x: integer value 7 end;\n"
+        "     pn = ^node;\n"
+        "     holder = record p: pn end;\n"
+        "var h: holder; q: pn; a: array[1..2] of pn;\n"
+        "begin new(q); new(h.p); new(a[1]);\n"
+        "  writeln(q^.x, ' ', h.p^.x, ' ', a[1]^.x) end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "7 7 7\n");
+}

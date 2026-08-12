@@ -144,6 +144,16 @@ struct Codegen::Impl {
         /// width is only known from the inner bounds, so indexing needs all of
         /// them and not just the outermost pair.
         std::vector<std::pair<std::string, std::string>> conformantDims{};
+        /// The bound variables themselves, in the same order.
+        ///
+        /// The names above are what the programmer wrote in the parameter
+        /// list, and re-resolving them wherever a subscript appears is what
+        /// let an inner scope answer instead: a record with fields spelled
+        /// `lo` and `hi` made `x[5]` inside `with r do` adjust by r.lo rather
+        /// than by the array's own bound, and read out of the block.  The
+        /// bound belongs to this activation and its address is known when the
+        /// prologue creates it, so it is kept rather than looked up again.
+        std::vector<std::pair<llvm::Value*, llvm::Value*>> conformantDimPtrs{};
         // EP §6.4.7: set for an undiscriminated schema formal parameter.  The
         // discriminants arrive as extra arguments, so they are plain Values
         // that stay live for the whole activation.
@@ -309,6 +319,14 @@ struct Codegen::Impl {
     //   arity heuristic which conflates frame params with arity mismatches.
     llvm::Value*                                     curStaticLink{nullptr};
     std::vector<std::string>                         outerVarNames;
+    /// The outer variables this activation reaches through its own static
+    /// link, by name, as they were when the prologue exposed them.
+    ///
+    /// They are also defVar'd, but a local of the same name replaces that
+    /// binding outright -- so after `procedure c; var n: integer`, the address
+    /// of the enclosing `n` was gone.  Building a frame for a sibling then
+    /// found c's own n and the callee wrote into the wrong activation.
+    std::unordered_map<std::string, VarEntry>        outerVarBindings;
     std::map<std::string, std::vector<std::string>>  funcOuterVarNames_;
     std::set<std::string>                            nestedFunctions_;
 
@@ -555,6 +573,26 @@ struct Codegen::Impl {
     void defVar(const std::string& name, llvm::Value* ptr, llvm::Type* type,
                 const TypeNode* typeNode = nullptr);
     const VarEntry* findVar(const std::string& name) const;
+
+    /// Whether \p name is bound by a scope opened INSIDE the current function
+    /// body -- which in practice means a with-statement.
+    ///
+    /// ISO §6.8.3.10 makes a with-statement's field designators an inner
+    /// scope, so inside `with r do`, a field spelled like the enclosing
+    /// function denotes the FIELD.  The function-result pseudo-variable is
+    /// checked before the variable table, so it used to win: `with r do count
+    /// := 99` stored into the result and left r.count alone.  Simply asking
+    /// the variable table first would be wrong the other way -- inside
+    /// function `count`, a *global* count is shadowed by the result -- so what
+    /// matters is whether the binding is newer than the function's own scope.
+    [[nodiscard]] bool boundInsideFunction(const std::string& name) const {
+        for (size_t i = scopes.size(); i-- > curFuncScopeDepth;)
+            if (scopes[i].count(toLower(name))) return true;
+        return false;
+    }
+
+    /// How many scopes were open when the current function body began.
+    size_t curFuncScopeDepth{0};
 
     /// Bring a variable this unit imports into scope, and answer with it.
     /// \p semaTy describes it well enough to declare it when the module that

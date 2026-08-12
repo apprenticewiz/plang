@@ -4167,3 +4167,101 @@ TEST(ValueParameter, AnIntegerActualWidensForARealFormal) {
     ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
     EXPECT_EQ(R.Stdout, "  3.00\n  3.00\n  3.50\n");
 }
+
+// ---------------------------------------------------------------------------
+// A name is not an identity, part two
+//
+// Six more of the shape 0.1.4 fixed seven of.  Found by re-sweeping after
+// those, which is the argument for re-sweeping: three of these are the same
+// defect on a path the earlier fix did not cover.
+// ---------------------------------------------------------------------------
+
+TEST(TypeByName, AFieldOfAnArrayElementKeepsItsRecordWhenTheNameIsShadowed) {
+    // resolveRecordStructType's last case looked the Sema type's NAME up in a
+    // table rebuilt per procedure.  The p^.field branch was fixed; this is the
+    // path it did not cover -- a field of an array element, of a nested field,
+    // or of a function result.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type rec = record a, b, c: integer end;\n"
+        "var arr: array[1..2] of rec;\n"
+        "procedure q;\n"
+        "type rec = record x, y, z: char end;\n"
+        "var l: rec;\n"
+        "begin l.x := 'a'; writeln(arr[1].a, ' ', arr[1].b, ' ', arr[1].c) end;\n"
+        "begin arr[1].a := 11; arr[1].b := 22; arr[1].c := 33;\n"
+        "  writeln(arr[1].a, ' ', arr[1].b, ' ', arr[1].c); q end.\n");
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "11 22 33\n11 22 33\n");
+}
+
+TEST(TypeByName, AWholeRecordReadThroughAPointerIsNotTheShadowingOne) {
+    // emitDerefLoad picked the load type by the same name lookup, so p^ as a
+    // whole value was loaded as the inner record: a { i8 } read from a
+    // three-integer record and stored back over it left 11 0 0.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type rec = record a, b, c: integer end;\n"
+        "var src: ^rec; dst: rec;\n"
+        "procedure q;\n"
+        "type rec = record z: char end;\n"
+        "var l: rec;\n"
+        "begin l.z := 'q'; dst := src^ end;\n"
+        "begin new(src); src^.a := 11; src^.b := 22; src^.c := 33;\n"
+        "  q; writeln(dst.a, ' ', dst.b, ' ', dst.c) end.\n");
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "11 22 33\n");
+}
+
+TEST(TypeByName, AWithBoundFieldDoesNotBecomeTheEnclosingFunctionsResult) {
+    // ISO §6.8.3.10 makes a with-statement's field designators an inner scope,
+    // so a field spelled like the enclosing function denotes the FIELD.  The
+    // function-result pseudo-variable was checked before the variable table
+    // and won, so the store went to the result and left the field alone.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type rec = record count: integer end;\n"
+        "var r: rec; k: integer;\n"
+        "function count: integer;\n"
+        "begin count := 1; with r do count := 99 end;\n"
+        "begin r.count := 0; k := count;\n"
+        "  writeln(k, ' ', r.count) end.\n");
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "1 99\n");
+}
+
+TEST(TypeByName, AGlobalOfTheFunctionsOwnNameIsStillShadowedByTheResult) {
+    // The other side of that.  Inside function `total`, the identifier denotes
+    // the result even though a global of that name exists -- so the fix cannot
+    // simply consult the variable table first.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "var total: integer;\n"
+        "function f: integer;\n"
+        "begin f := 7 end;\n"
+        "begin total := 3; writeln(f, ' ', total) end.\n");
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "7 3\n");
+}
+
+TEST(NestedProcedure, ASiblingCallReachesTheEnclosingActivationsVariable) {
+    // The static-link frame resolved each captured variable by NAME in the
+    // CALLER's scope.  With `b` and `c` both nested in `a`, and `c` declaring
+    // its own `n`, `c` calling `b` handed `b` the address of c's n: b's
+    // increment landed in c's private local and a's n never moved.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "procedure a;\n"
+        "var n: integer;\n"
+        "  procedure b; begin n := n + 1 end;\n"
+        "  procedure c;\n"
+        "  var n: integer;\n"
+        "    procedure d; begin n := n + 100 end;\n"
+        "  begin n := 500; b; d; writeln('c ', n) end;\n"
+        "  procedure e; begin b end;\n"
+        "begin n := 10; b; c; e; writeln('a ', n) end;\n"
+        "begin a end.\n");
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    // c's own d must still reach c's n; b must always reach a's n.
+    EXPECT_EQ(R.Stdout, "c 600\na 13\n");
+}

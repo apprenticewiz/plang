@@ -749,6 +749,15 @@ void Codegen::Impl::emitCallStmt(const CallStmt& s) {
                     pt && pt->Kind == TypeKind::Pointer && pt->PointeeType)
                 Bytes = (int64_t)mod->getDataLayout().getTypeAllocSize(
                     llvmTypeOfSemaType(*pt->PointeeType));
+        // The domain type, for the initial state below.  Only the identifier
+        // route set it, so `new(h.p)` and `new(a[1])` applied no initial state
+        // at all: the size already fell back to Sema's type and this did not.
+        // A record is what carries field `value` clauses, and Sema's type
+        // knows the declaration it came from.
+        if (!domain)
+            if (const auto& pt = s.Args[0]->ResolvedType;
+                    pt && pt->Kind == TypeKind::Pointer && pt->PointeeType)
+                domain = pt->PointeeType->RecordDecl;
         if (Bytes == 0)
             codegenICE("new() cannot determine the size of what '"
                        + std::string(s.Args[0]->ResolvedType

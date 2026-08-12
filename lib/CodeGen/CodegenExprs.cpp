@@ -53,7 +53,8 @@ llvm::Value* Codegen::Impl::emitExpr(const ExprNode& e) {
             }
         }
         // Function result pseudo-variable (Pascal: assign to function name).
-        if (curRetAlloca && toLower(n->Name) == toLower(curFuncName))
+        if (curRetAlloca && toLower(n->Name) == toLower(curFuncName)
+                && !boundInsideFunction(n->Name))
             return builder.CreateLoad(curRetType, curRetAlloca, "retval");
         // Variable table.
         auto* ve = findVar(n->Name);
@@ -169,7 +170,8 @@ llvm::Value* Codegen::Impl::emitExpr(const ExprNode& e) {
 // Returns the POINTER to the storage for an lvalue expression.
 llvm::Value* Codegen::Impl::emitLValue(const ExprNode& e) {
     if (auto* n = llvm::dyn_cast<IdentExpr>(&e)) {
-        if (curRetAlloca && toLower(n->Name) == toLower(curFuncName))
+        if (curRetAlloca && toLower(n->Name) == toLower(curFuncName)
+                && !boundInsideFunction(n->Name))
             return curRetAlloca;
         auto* ve = findVar(n->Name);
         if (ve) return ve->ptr;
@@ -1033,14 +1035,28 @@ llvm::Value* Codegen::Impl::emitConformantElemPtr(const IndexExpr& e) {
 
     // The bounds are ordinary integer variables in this activation, put there
     // by the prologue from the hidden arguments.
-    auto boundOf = [&](const std::string& name) -> llvm::Value* {
-        auto* bv = findVar(name);
+    // By address, not by name.  The names are what the programmer wrote in the
+    // parameter list, and any scope opened since can answer them: a record with
+    // fields spelled `lo` and `hi` made every subscript inside `with r do`
+    // adjust by the record's fields instead of the array's bounds and read
+    // outside the block.
+    auto boundAt = [&](llvm::Value* slot, const std::string& name) -> llvm::Value* {
+        if (slot) return builder.CreateLoad(i64Ty, slot, "conf.bound");
+        auto* bv = findVar(name);   // an interface-file conformant, with no prologue here
         return bv ? builder.CreateLoad(i64Ty, bv->ptr, "conf.bound") : nullptr;
+    };
+    auto loOf = [&](size_t d) -> llvm::Value* {
+        if (d >= ve->conformantDims.size()) return nullptr;
+        return boundAt(d < ve->conformantDimPtrs.size()
+                           ? ve->conformantDimPtrs[d].first : nullptr,
+                       ve->conformantDims[d].first);
     };
     auto extentOf = [&](size_t d) -> llvm::Value* {
         if (d >= ve->conformantDims.size()) return nullptr;
-        auto* lo = boundOf(ve->conformantDims[d].first);
-        auto* hi = boundOf(ve->conformantDims[d].second);
+        auto* lo = loOf(d);
+        auto* hi = boundAt(d < ve->conformantDimPtrs.size()
+                               ? ve->conformantDimPtrs[d].second : nullptr,
+                           ve->conformantDims[d].second);
         if (!lo || !hi) return nullptr;
         return builder.CreateAdd(builder.CreateSub(hi, lo, "conf.span"),
                                  llvm::ConstantInt::get(i64Ty, 1), "conf.ext");
@@ -1054,7 +1070,7 @@ llvm::Value* Codegen::Impl::emitConformantElemPtr(const IndexExpr& e) {
     for (size_t d = 0; d < subs.size(); ++d) {
         auto* idx = toI64(emitExpr(*subs[d]));
         if (d < ve->conformantDims.size())
-            if (auto* lo = boundOf(ve->conformantDims[d].first))
+            if (auto* lo = loOf(d))
                 idx = builder.CreateSub(idx, lo, "idx.adj.conf");
         if (d > 0)
             if (auto* ext = extentOf(d))
@@ -1336,19 +1352,23 @@ llvm::StructType* Codegen::Impl::resolveRecordStructType(const FieldExpr& e) {
         }
     }
 
-    // Case 3: Sema-annotated record type → look up via typeAliases.
+    // Case 3: from the Sema type, which knows the declaration it came from.
+    //
+    // This used to look the type's NAME up in typeAliases first, and that table
+    // is rebuilt per procedure and holds the innermost declaration of a
+    // spelling -- so a nested procedure declaring its own type of that name
+    // re-aimed the access at the inner layout.  The p^.field branch above was
+    // fixed for that; this is the path it does not cover, which is a field of
+    // an array element, of a nested field, or of a function result.
+    //
+    // llvmTypeOfSemaType reaches the struct through Type::RecordDecl, so two
+    // accesses to one declaration still share one struct -- which is what the
+    // name lookup was for -- and no other declaration can be reached by
+    // spelling the name again.
     if (e.Record->ResolvedType
-            && e.Record->ResolvedType->Kind == TypeKind::Record) {
-        auto it = typeAliases.find(toLower(e.Record->ResolvedType->Name));
-        if (it != typeAliases.end())
-            if (auto* rtn = llvm::dyn_cast<RecordTypeNode>(it->second))
-                return structTypeFor(*rtn);
-        // Case 4: records reached through an index or a call have no variable
-        // entry and may be anonymous, so build the struct from the Sema type.
-        // The layout matches, which is all a GEP needs.
+            && e.Record->ResolvedType->Kind == TypeKind::Record)
         return llvm::dyn_cast<llvm::StructType>(
                    llvmTypeOfSemaType(*e.Record->ResolvedType));
-    }
     return nullptr;
 }
 
@@ -1461,21 +1481,13 @@ llvm::Value* Codegen::Impl::emitDerefLoad(const DerefExpr& e) {
     // expression.  A record written through a name has a struct already built
     // from its declaration, and reusing it keeps p^.f and q.f agreeing on
     // field order; everything else follows from the type alone.
+    // The same name lookup was here for a whole-record p^, and it was the same
+    // mistake: inside a procedure that declares its own type of the pointee's
+    // name, p^ was loaded as the inner record.  `t^ = 11 0 0` where the record
+    // holds 11 22 33, because a { i8 } was loaded from a three-integer record
+    // and stored back over it.
     llvm::Type* loadTy = i64Ty;
-    if (e.ResolvedType) {
-        if (e.ResolvedType->Kind == TypeKind::Record) {
-            auto it = typeAliases.find(toLower(e.ResolvedType->Name));
-            if (it != typeAliases.end())
-                if (auto* rtn = llvm::dyn_cast<RecordTypeNode>(it->second))
-                    loadTy = structTypeFor(*rtn);
-                else
-                    loadTy = llvmTypeOfSemaType(*e.ResolvedType);
-            else
-                loadTy = llvmTypeOfSemaType(*e.ResolvedType);
-        } else {
-            loadTy = llvmTypeOfSemaType(*e.ResolvedType);
-        }
-    }
+    if (e.ResolvedType) loadTy = llvmTypeOfSemaType(*e.ResolvedType);
     return builder.CreateLoad(loadTy, ptrVal, "deref");
 }
 
