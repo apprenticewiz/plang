@@ -113,6 +113,29 @@ version numbers follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 
 ### Changed
 
+- **A missing semantic type kind stops the build.**  `NumTypeKinds` counts the
+  fourteen *type denoters* the parser produces, and four walks state the count
+  they were written against so that adding one breaks the build at each of
+  them.  What the denoters resolve to — `TypeKind` in `Sema/Type.h`, twenty-one
+  kinds — had no such count, and the switches over it end in a `default:` and
+  have to: most of them are asking a question only a few kinds answer.
+
+  Four of those defaults are wrong rather than conservative, and now say so.  A
+  scalar kind the definite-assignment walk has not been taught is silently not
+  tracked, so using a variable of it before it is given a value stops being
+  reported.  A structured kind the file check has not been taught lets a file
+  be passed by value, against ISO §6.6.3.3.  A kind codegen has not been taught
+  is reported as not lowerable, for no stated reason.  An ordinal kind the set
+  check has not been taught skips the width check, which is the silent
+  mask-truncation that check exists to prevent.
+
+  The two walks in `Basic/SemaUtil.h` are counted now too.  They are `dyn_cast`
+  chains rather than switches, so a kind left out is not a missing case but a
+  subtree the walk never enters — and the §6.8.3.9 for-loop analysis and the
+  definite-assignment walk both ride on them, so an omission there is a class
+  of error that stops being reported rather than a line of output that goes
+  missing.  Both are complete as written; that is what the counts pin.
+
 - **The end-to-end suite is four binaries and a shared harness.**
   `driver_test.cpp` had reached eleven thousand lines and 742 cases, compiled
   as one translation unit however many cores `ctest` was given, and held the

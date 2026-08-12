@@ -379,6 +379,14 @@ llvm::Type* Codegen::Impl::llvmTypeOfNodeViaSema(const TypeNode& node,
     codegenICE(what + " and Sema left it unresolved");
 }
 
+// See NumSemaTypeKinds in Sema/Type.h.  A kind this file has not been taught
+// falls into the default of canLowerSemaType, which reports it as not
+// lowerable, and a variable of it is then refused for a reason that names
+// nothing -- or reaches llvmTypeOfSemaType and is lowered as an i64.
+static_assert(NumSemaTypeKinds == 21,
+              "a new semantic type kind needs a case in canLowerSemaType and "
+              "in llvmTypeOfSemaType");
+
 /// Whether llvmTypeOfSemaType has a lowering for \p T.  An undiscriminated
 /// schema has none — its extent is not known until it is passed or allocated —
 /// and neither has the error type.

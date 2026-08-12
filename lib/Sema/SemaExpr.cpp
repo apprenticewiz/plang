@@ -930,6 +930,12 @@ std::shared_ptr<Type> Sema::checkStructuredValue(const StructuredValueExpr& E) {
 // Call argument checking
 // ---------------------------------------------------------------------------
 
+// See NumSemaTypeKinds in Sema/Type.h.  A new structured kind that can hold a
+// component defaults to "contains no file", and ISO §6.6.3.3's rule that a
+// file may not be passed by value stops being enforced through it.
+static_assert(NumSemaTypeKinds == 21,
+              "a new structured type kind needs a case in typeContainsFile");
+
 bool Sema::typeContainsFile(const Type& T) {
     switch (T.Kind) {
     case TypeKind::File:   return true;

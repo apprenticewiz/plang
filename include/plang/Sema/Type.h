@@ -58,7 +58,28 @@ enum class TypeKind {
                      // and `^vec`.  Same fields as SchemaInstance, but the
                      // discriminant values arrive at run time, so SchemaDiscs
                      // carries only names and types.  See SchemaFixedLayout.
+
+    Last = Schema,
 };
+
+/// How many semantic type kinds there are.
+///
+/// The same tripwire NumTypeKinds gives the AST walks, for the same reason and
+/// against a different enumeration -- NumTypeKinds counts the fourteen *type
+/// denoters* the parser produces, and this counts what they resolve to.
+///
+/// Several switches over TypeKind end in a `default:`, and have to: a set base
+/// type is checked for four kinds and every other kind is simply not a set
+/// base, which is not a list anyone should have to extend.  But a default is
+/// also what makes a new kind quiet, and some of these defaults are wrong
+/// rather than conservative -- a scalar the definite-assignment walk does not
+/// know is one is silently not tracked, and a structured type the file check
+/// does not know about lets a file be passed by value.
+///
+/// So a site that would be wrong states the count it was written against.
+/// Adding a kind moves this and stops the build at each of them, with a
+/// message saying what to go and teach.
+inline constexpr int NumSemaTypeKinds = static_cast<int>(TypeKind::Last) + 1;
 
 /// A semantic type produced by resolving an AST TypeNode.
 /// This is a flat struct with a kind tag and optional fields — enough to drive

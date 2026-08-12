@@ -57,6 +57,13 @@ const IdentExpr* rootVariable(const ExprNode* E) {
     return nullptr;
 }
 
+// See NumSemaTypeKinds in Sema/Type.h.  A new scalar kind defaults to "not a
+// simple value", which does not report anything: it silently drops that type
+// out of the definite-assignment walk, so a variable of it used before it is
+// given a value is no longer diagnosed.
+static_assert(NumSemaTypeKinds == 21,
+              "a new scalar type kind needs a case in isSimpleValue");
+
 /// Whether a value of this type is one the walk can follow.  A structured
 /// variable is given its value a component at a time, so "has it been
 /// assigned" has no single answer for one, and a file is opened rather than
