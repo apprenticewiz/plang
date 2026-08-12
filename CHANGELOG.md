@@ -113,6 +113,26 @@ version numbers follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 
 ### Changed
 
+- **The end-to-end suite is four binaries and a shared harness.**
+  `driver_test.cpp` had reached eleven thousand lines and 742 cases, compiled
+  as one translation unit however many cores `ctest` was given, and held the
+  harness the next suite would need inside it — leaving that suite a choice
+  between adding to the file and copying out of it.  It is now
+  `DriverHarness.h` and four files split by what a case is about: the driver
+  and the command line, what the generated code does when it runs, Extended
+  Pascal, and modules.  Every one of the 742 cases came across; the test-name
+  set was compared before and after.
+
+  A case that needs several *named* files now gets a `CaseDir`: a directory of
+  its own, removed with the case, and the working directory the program runs
+  in.  Programs ran in whatever directory `ctest` was started from before, so
+  a case that wrote `r.txt` wrote it into the build tree and left it there —
+  three such files were sitting in `build/test/Driver` when this was written.
+
+  `kEP11`, `kEP12` and `kEP13` were three names for `-std=iso10206`, each
+  introduced beside a tier and used well away from it.  Splitting the file is
+  what surfaced that; there is one now.
+
 - **The required procedures and functions are one list.**
   `Basic/Builtins.def` holds each name once, with the dialects that require it,
   its arity and its result type.  Registration in `Sema.cpp` and the arity

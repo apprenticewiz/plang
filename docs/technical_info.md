@@ -262,21 +262,29 @@ and the two cannot disagree.
 
 ## The test suite
 
-1511 tests, in six binaries:
+1601 tests, in nine binaries:
 
 | Binary                              | Tests | What it covers                        |
 |-------------------------------------|-------|---------------------------------------|
 | `test/Lex/scanner_test`             | 139   | Tokens, literals, keywords, EP gating |
 | `test/Parse/parser_test`            | 130   | Declarations, statements, expressions |
-| `test/Sema/sema_test`               | 148   | Name resolution and type checking     |
-| `test/Driver/driver_test`           | 716   | Compile, link, run, compare output    |
+| `test/Sema/sema_test`               | 161   | Name resolution and type checking     |
+| `test/Basic/catalog_test`           | 46    | The `.po` reader and locale selection |
+| `test/Driver/driver_test`           | 94    | The driver and the command line       |
+| `test/Driver/codegen_test`          | 276   | What the generated code does when run |
+| `test/Driver/ep_test`               | 210   | Extended Pascal, end to end           |
+| `test/Driver/module_test`           | 167   | Modules and separate compilation      |
 | `test/Conformance/conformance_test` | 377   | The Pascal-P5 ISO 7185 suite          |
 | `test/Acceptance/acceptance_test`   | 1     | The Pascal Acceptance Test            |
 
-The first three are unit tests over one phase each.  `driver_test` is the
-end-to-end suite: it compiles a program, links it, runs it, and checks what it
-printed and what it exited with, which is the only way to test code generation
-and the runtime.
+The first four are unit tests over one phase each.  The four in `test/Driver`
+are the end-to-end suites: each compiles a program, links it, runs it, and
+checks what it printed and what it exited with, which is the only way to test
+code generation and the runtime.  They share `test/Driver/DriverHarness.h`,
+which is also where a case that needs several named files goes through
+`CaseDir` — a directory of its own, cleaned up with the case, and the working
+directory the program runs in, so that a relative name in a source means a file
+this case wrote.
 
 ### The Pascal-P5 conformance suite
 
@@ -286,8 +294,8 @@ and pass when plang rejects them for the right reason; 58 are programs that
 conform, and pass when plang accepts them.  They exercise the scanner, the
 parser and semantic analysis — a rejection test is answered before any code is
 generated — so a result here is a statement about conformance in that sense and
-not about the correctness of the code produced.  That is what `driver_test` and
-the acceptance test are for.
+not about the correctness of the code produced.  That is what the end-to-end
+suites and the acceptance test are for.
 
 ### The acceptance test
 
@@ -319,7 +327,7 @@ it found none.
 To run one binary directly, with the usual GoogleTest filters:
 
 ```bash
-./build/test/Driver/driver_test --gtest_filter='SubrangeCompare.*'
+./build/test/Driver/codegen_test --gtest_filter='CodegenSets.*'
 ```
 
 ### Sanitizers
