@@ -3098,3 +3098,18 @@ TEST(InitialState, NewAppliesItThroughAFieldOrAnElementToo) {
     ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
     EXPECT_EQ(R.Stdout, "7 7 7\n");
 }
+
+TEST(ForIn, TheControlVariableIsTheDeclaredOne) {
+    // EP §6.9.3.9.3 makes the control variable a variable-access, so the
+    // declared variable takes each value.  The loop bound the name to a fresh
+    // alloca instead, so the body had one variable and everything else had
+    // another: a procedure called from the body read the declared variable,
+    // which the loop never wrote, and saw it unset on every iteration.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "var c: char; s: set of char;\n"
+        "procedure show; begin write(c) end;\n"
+        "begin s := ['q','z']; for c in s do show; writeln end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "qz\n");
+}

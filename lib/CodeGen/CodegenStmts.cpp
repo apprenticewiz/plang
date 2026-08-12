@@ -438,11 +438,24 @@ void Codegen::Impl::emitForIn(const ForInStmt& s) {
     if (!elemTy->isIntegerTy())
         codegenICE("'for ... in' over a set with a non-ordinal element type");
 
-    auto* loopVar  = createEntryAlloca(elemTy, s.Var + ".addr");
+    // EP §6.9.3.9.3: the control variable is a variable-access, so the
+    // DECLARED variable takes each value.  A fresh alloca bound under the same
+    // name gave the loop body one variable and everything else another -- a
+    // procedure called from the body read the declared variable, which the
+    // loop never wrote, and saw it unset both times round.
+    llvm::Value* loopVar = nullptr;
+    if (const auto* ve = findVar(s.Var); ve && ve->ptr && ve->type == elemTy)
+        loopVar = ve->ptr;
     auto* bitAlloca = createEntryAlloca(i64Ty, "forin.bit");
     builder.CreateStore(llvm::ConstantInt::get(i64Ty, 0), bitAlloca);
 
-    defVar(s.Var, loopVar, elemTy);
+    if (!loopVar) {
+        // No declaration to write into, or one of a shape this loop cannot
+        // store through: keep the old behaviour rather than store somewhere
+        // the program did not ask for.
+        loopVar = createEntryAlloca(elemTy, s.Var + ".addr");
+        defVar(s.Var, loopVar, elemTy);
+    }
 
     auto* condBB = llvm::BasicBlock::Create(ctx, "forin.cond", curFunc);
     auto* testBB = llvm::BasicBlock::Create(ctx, "forin.test", curFunc);
