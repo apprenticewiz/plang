@@ -624,13 +624,13 @@ struct Codegen::Impl {
     /// Place the alternatives of \p vp into \p elems and \p L.  The tag becomes
     /// an ordinary element — it is there whichever variant is active — and the
     /// alternatives share the one element appended after it.
-    void layoutVariantPart(const VariantPart& vp, RecordLayout& L,
+    void layoutVariantPart(const VariantPart& vp, RecordLayout& L, bool packed,
                            std::vector<llvm::Type*>& elems);
 
     /// Place one alternative's fields from byte \p base of the variant element
     /// at \p blobIdx, recursing into a nested variant.  Returns the offset one
     /// past the last of them, and widens \p align to what they need.
-    uint64_t layoutVariantCase(const VariantCase& vc, RecordLayout& L,
+    uint64_t layoutVariantCase(const VariantCase& vc, RecordLayout& L, bool packed,
                                unsigned blobIdx, uint64_t base, uint64_t& align);
 
     /// A type of at least \p size bytes and alignment \p align, to stand for
@@ -700,8 +700,14 @@ struct Codegen::Impl {
     /// the compiler rather than leaving generated code reading a field at an
     /// offset nothing wrote it to.
     llvm::StructType* fileStructType() {
-        static llvm::StructType* FST = nullptr;
-        if (FST) return FST;
+        // Cached on this Codegen and not in a static.  A static outlives the
+        // LLVMContext that owns the type, so a second compilation in one
+        // process -- which the binary never does and anything embedding the
+        // front end does immediately -- got a type belonging to a context that
+        // had been destroyed, and took a segmentation fault building a null
+        // value of it.
+        if (fileStructTy_) return fileStructTy_;
+        llvm::StructType*& FST = fileStructTy_;
 
         FST = llvm::StructType::get(
             ctx, {
@@ -779,6 +785,9 @@ struct Codegen::Impl {
         return complexTy_;
     }
     llvm::StructType* complexTy_{nullptr};
+    /// The PascalFile struct, built and checked once per compilation; see
+    /// fileStructType.
+    llvm::StructType* fileStructTy_{nullptr};
 
     /// EP §6.4.3.4: { i8, i64, i64, i64, i8, i64, i64, i64 }
     /// DateValid, year, month, day, TimeValid, hour, minute, second.

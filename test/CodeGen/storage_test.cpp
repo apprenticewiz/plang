@@ -234,3 +234,120 @@ TEST(Storage, ARecordOfMixedWidthsIsPaddedFieldByField) {
         "var v: r;\n"
         "begin v.b := 3; writeln(v.b) end.\n").empty());
 }
+
+// ---------------------------------------------------------------------------
+// packed
+//
+// ISO §6.4.3.1 leaves what `packed` does to the implementation, and plang used
+// to do nothing with it — SemaType resolved it away as a storage hint and
+// codegen never built a packed struct.  It packs now, in every dialect: Turbo
+// needs it for {$PACKRECORDS 1} and for a record image a real Turbo program can
+// read, and a `packed` that packs nothing is a word the language has that means
+// nothing.
+// ---------------------------------------------------------------------------
+
+TEST(Packed, APackedRecordIsBuiltAsAPackedStruct) {
+    const std::string IR = irFor(
+        "program p(output);\n"
+        "type k = packed record a: char; b: integer; c: char end;\n"
+        "var v: k;\n"
+        "begin v.b := 1; writeln(v.b) end.\n");
+    ASSERT_FALSE(IR.empty());
+    // <{ }> is LLVM's spelling of a struct with no padding in it.
+    EXPECT_NE(IR.find("<{ i8, i64, i8 }>"), std::string::npos) << IR;
+}
+
+TEST(Packed, AnUnpackedRecordIsStillPadded) {
+    // The other half: packing one record must not pack every record.
+    const std::string IR = irFor(
+        "program p(output);\n"
+        "type u = record a: char; b: integer; c: char end;\n"
+        "var v: u;\n"
+        "begin v.b := 1; writeln(v.b) end.\n");
+    ASSERT_FALSE(IR.empty());
+    EXPECT_NE(IR.find("{ i8, i64, i8 }"), std::string::npos) << IR;
+    EXPECT_EQ(IR.find("<{ i8, i64, i8 }>"), std::string::npos) << IR;
+}
+
+TEST(Packed, TwoRecordsThatDifferOnlyInPackingAreTwoLayouts) {
+    // The struct-type cache keys on the field types, so without packing in the
+    // key these two would share one struct — and whichever was built second
+    // would take the first's offsets.
+    const std::string IR = irFor(
+        "program p(output);\n"
+        "type u =        record a: char; b: integer end;\n"
+        "     k = packed record a: char; b: integer end;\n"
+        "var vu: u; vk: k;\n"
+        "begin vu.b := 1; vk.b := 2; writeln(vu.b + vk.b) end.\n");
+    ASSERT_FALSE(IR.empty());
+    EXPECT_NE(IR.find("<{ i8, i64 }>"), std::string::npos) << IR;
+    EXPECT_NE(IR.find(" { i8, i64 }"), std::string::npos) << IR;
+}
+
+TEST(Packed, SemaSizesAPackedRecordWithoutPaddingOrATail) {
+    // Compiles, so the size-agreement check found Sema and the layout saying
+    // the same thing about a record with no padding in it and none on the end.
+    EXPECT_FALSE(irFor(
+        "program p(output);\n"
+        "type k = packed record a: char; b: integer; c: boolean; d: real end;\n"
+        "var v: k;\n"
+        "begin v.b := 1; writeln(v.b) end.\n").empty());
+}
+
+TEST(Packed, APackedVariantSharesStorageWithoutPaddingEither) {
+    EXPECT_FALSE(irFor(
+        "program p(output);\n"
+        "type k = packed record\n"
+        "  a: char;\n"
+        "  case b: boolean of\n"
+        "    true:  (i: integer);\n"
+        "    false: (c: char; d: char)\n"
+        "end;\n"
+        "var v: k;\n"
+        "begin v.a := 'x'; writeln(v.a) end.\n").empty());
+}
+
+TEST(Packed, APackedRecordRoundTripsItsFields) {
+    // Offsets, not just sizes.  A packed layout that agreed on the total and
+    // put the fields in the wrong places would pass everything above.
+    const std::string IR = irFor(
+        "program p(output);\n"
+        "type k = packed record a: char; b: integer; c: char end;\n"
+        "var v: k;\n"
+        "begin v.a := 'x'; v.b := 42; v.c := 'y';\n"
+        "  writeln(v.a, v.b:3, v.c) end.\n");
+    EXPECT_FALSE(IR.empty());
+}
+
+// ---------------------------------------------------------------------------
+// Compiling more than once in one process
+//
+// Not about storage, but this is where it was found: the cases above were the
+// first thing to build two Codegen objects in one process, and the second one
+// segfaulted.  The front end is a shared library so that other things can read
+// Pascal — a language server, for one — and those compile repeatedly.  The
+// driver never does, which is why nothing had noticed.
+// ---------------------------------------------------------------------------
+
+TEST(CodegenReuse, ASecondCompilationDoesNotUseTheFirstsTypes) {
+    // The file record was cached in a function-local static, so it outlived the
+    // LLVMContext that owned it.  A second compilation of a program with a file
+    // parameter took the stale type and crashed building a null value of it —
+    // in llvm::Constant::getNullValue, nowhere near the cache.
+    const char* Src = "program p(output);\nbegin writeln(1) end.\n";
+    const std::string First = irFor(Src);
+    ASSERT_FALSE(First.empty());
+    const std::string Second = irFor(Src);
+    ASSERT_FALSE(Second.empty());
+    // And the same program compiles to the same thing, which a per-compilation
+    // cache gives for free and a shared one does not.
+    EXPECT_EQ(First, Second);
+}
+
+TEST(CodegenReuse, ThirdAndFourthCompilationsAreStillFine) {
+    // Once is a fluke; the cache is only reached the first time a file type is
+    // wanted, so the failure needed exactly two.
+    const char* Src = "program p(output);\nvar f: text;\nbegin rewrite(f) end.\n";
+    for (int I = 0; I < 4; ++I)
+        EXPECT_FALSE(irFor(Src).empty()) << "compilation " << I;
+}

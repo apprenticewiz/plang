@@ -197,13 +197,15 @@ llvm::Type* Codegen::Impl::variantBlobType(uint64_t size, uint64_t align) {
 }
 
 uint64_t Codegen::Impl::layoutVariantCase(const VariantCase& vc, RecordLayout& L,
-                                           unsigned blobIdx, uint64_t base,
-                                           uint64_t& align) {
+                                           bool packed, unsigned blobIdx,
+                                           uint64_t base, uint64_t& align) {
     const auto& dl = mod->getDataLayout();
     uint64_t at = base;
 
     auto place = [&](const std::string& name, llvm::Type* ft) {
-        const uint64_t fa = dl.getABITypeAlign(ft).value();
+        // ISO §6.4.3.1: a packed component is stored as economically as the
+        // implementation can manage, which here means no padding in front of it.
+        const uint64_t fa = packed ? 1 : dl.getABITypeAlign(ft).value();
         align = std::max(align, fa);
         at = (at + fa - 1) / fa * fa;
         // A name used in two alternatives keeps its first placement; Sema has
@@ -226,13 +228,15 @@ uint64_t Codegen::Impl::layoutVariantCase(const VariantCase& vc, RecordLayout& L
             place(nv.TagField, llvmTypeOfNode(*nv.TagType));
         uint64_t end = at;
         for (const auto& inner : nv.Cases)
-            end = std::max(end, layoutVariantCase(inner, L, blobIdx, at, align));
+            end = std::max(end, layoutVariantCase(inner, L, packed, blobIdx,
+                                                  at, align));
         at = end;
     }
     return at;
 }
 
 void Codegen::Impl::layoutVariantPart(const VariantPart& vp, RecordLayout& L,
+                                       bool packed,
                                        std::vector<llvm::Type*>& elems) {
     if (!vp.TagField.empty() && vp.TagType) {
         llvm::Type* tt = llvmTypeOfNode(*vp.TagType);
@@ -244,11 +248,11 @@ void Codegen::Impl::layoutVariantPart(const VariantPart& vp, RecordLayout& L,
     const auto blobIdx = static_cast<unsigned>(elems.size());
     uint64_t size = 0, align = 1;
     for (const auto& vc : vp.Cases)
-        size = std::max(size, layoutVariantCase(vc, L, blobIdx, 0, align));
+        size = std::max(size, layoutVariantCase(vc, L, packed, blobIdx, 0, align));
     // Every alternative may be empty — `case b: boolean of true: (); false: ()`
     // is a record with a tag and nothing else — and then there is nothing to
     // reserve and no field that would have referred to it.
-    if (size > 0) elems.push_back(variantBlobType(size, align));
+    if (size > 0) elems.push_back(variantBlobType(size, packed ? 1 : align));
 }
 
 Codegen::Impl::SchemaBindingScope::SchemaBindingScope(Impl& I, const Type& T)
@@ -288,6 +292,12 @@ Codegen::Impl::layoutOf(const RecordTypeNode& rt) {
 
     RecordLayout L;
     std::vector<llvm::Type*> elems;
+    // ISO §6.4.3.1 leaves what `packed` does to the implementation, and plang
+    // used to do nothing with it.  It packs now, in every dialect: Turbo needs
+    // it for {$PACKRECORDS 1} and for a record image a real Turbo program can
+    // read, and a `packed` that packs nothing is a word the language has that
+    // means nothing.
+    const bool packed = rt.Packed;
     for (const auto& fd : rt.Fields) {
         llvm::Type* ft = llvmTypeOf(fd.Type.get(), nullptr);
         for (const auto& nm : fd.Names) {
@@ -296,16 +306,19 @@ Codegen::Impl::layoutOf(const RecordTypeNode& rt) {
             elems.push_back(ft);
         }
     }
-    if (rt.Variant) layoutVariantPart(*rt.Variant, L, elems);
+    if (rt.Variant) layoutVariantPart(*rt.Variant, L, packed, elems);
 
     // Two records laid out the same way share one struct type.  The names are
     // not part of the key: they are what the layout is for, and the struct only
     // has to give a GEP the right shape.
-    std::string key;
+    // Packedness is part of the key.  Two records with the same field types
+    // and different packing are different layouts, and sharing one struct
+    // between them would give the packed one the padded one's offsets.
+    std::string key = packed ? "P:" : "U:";
     for (auto* t : elems) key += std::to_string(std::bit_cast<uintptr_t>(t)) + ",";
     auto it = structTypes.find(key);
     L.Ty = (it != structTypes.end()) ? it->second
-                                     : llvm::StructType::get(ctx, elems);
+                                     : llvm::StructType::get(ctx, elems, packed);
     structTypes[key] = L.Ty;
     return recordLayouts.emplace(key0, std::move(L)).first->second;
 }

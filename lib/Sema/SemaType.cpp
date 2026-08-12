@@ -719,14 +719,14 @@ uint64_t variantBlobBytes(uint64_t Size, uint64_t Align) {
 /// to.  Mirrors Codegen::Impl::layoutVariantCase: the alternatives of one
 /// variant all start at the same place, and a nested variant starts after the
 /// fields of the alternative containing it.
-uint64_t Sema::layoutVariantCase(const VariantCase& VC, uint64_t Base,
-                                 uint64_t& Align, bool& Ok) {
+uint64_t Sema::layoutVariantCase(const VariantCase& VC, bool Packed,
+                                 uint64_t Base, uint64_t& Align, bool& Ok) {
     uint64_t At = Base;
     const auto place = [&](const Type* Ft) {
         if (!Ft) { Ok = false; return; }
         const auto Sz = byteSizeOf(*Ft);
         if (!Sz) { Ok = false; return; }
-        const uint64_t A = byteAlignOf(*Ft);
+        const uint64_t A = Packed ? 1 : byteAlignOf(*Ft);
         Align = std::max(Align, A);
         At    = roundUp(At, A) + *Sz;
     };
@@ -741,7 +741,7 @@ uint64_t Sema::layoutVariantCase(const VariantCase& VC, uint64_t Base,
             place(NV.TagType->ResolvedType.get());
         uint64_t End = At;
         for (const auto& Inner : NV.Cases)
-            End = std::max(End, layoutVariantCase(Inner, At, Align, Ok));
+            End = std::max(End, layoutVariantCase(Inner, Packed, At, Align, Ok));
         At = End;
     }
     return At;
@@ -766,6 +766,9 @@ uint64_t Sema::byteAlignOf(const Type& T) {
     case TypeKind::Array:       return T.ElemType ? byteAlignOf(*T.ElemType) : 1;
     case TypeKind::Record:
     case TypeKind::SchemaInstance: {
+        // A packed record is stored wherever it will fit; nothing inside it
+        // needs aligning, so neither does it.
+        if (T.Packed) return 1;
         uint64_t A = 1;
         for (const auto& F : T.RecordFields)
             if (F.Ty) A = std::max(A, byteAlignOf(*F.Ty));
@@ -825,13 +828,17 @@ std::optional<uint64_t> Sema::byteSizeOf(const Type& T) {
         if (!T.RecordDecl) return std::nullopt;
         const auto& RD = *T.RecordDecl;
 
+        // ISO §6.4.3.1: a packed record is stored as economically as the
+        // implementation can manage, which here means no padding between its
+        // fields and none on the end of it.
+        const bool Packed = RD.Packed;
         bool Ok = true;
         uint64_t Off = 0, Align = 1;
         const auto place = [&](const Type* Ft) {
             if (!Ft) { Ok = false; return; }
             const auto Sz = byteSizeOf(*Ft);
             if (!Sz) { Ok = false; return; }
-            const uint64_t A = byteAlignOf(*Ft);
+            const uint64_t A = Packed ? 1 : byteAlignOf(*Ft);
             Align = std::max(Align, A);
             Off   = roundUp(Off, A) + *Sz;
         };
@@ -846,13 +853,15 @@ std::optional<uint64_t> Sema::byteSizeOf(const Type& T) {
                 place(VP.TagType->ResolvedType.get());
             uint64_t Size = 0, BlobAlign = 1;
             for (const auto& VC : VP.Cases)
-                Size = std::max(Size, layoutVariantCase(VC, 0, BlobAlign, Ok));
+                Size = std::max(Size,
+                                layoutVariantCase(VC, Packed, 0, BlobAlign, Ok));
             // Every alternative may be empty, and then there is nothing to
             // reserve: `case b: boolean of true: (); false: ()` is a record
             // with a tag and no more.
             if (Size > 0) {
-                const uint64_t Blob = variantBlobBytes(Size, BlobAlign);
-                const uint64_t A    = std::min<uint64_t>(BlobAlign, 8);
+                const uint64_t Blob = variantBlobBytes(Size, Packed ? 1 : BlobAlign);
+                const uint64_t A    = Packed ? 1
+                                             : std::min<uint64_t>(BlobAlign, 8);
                 Align = std::max(Align, A);
                 Off   = roundUp(Off, A) + Blob;
             }

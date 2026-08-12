@@ -113,6 +113,47 @@ version numbers follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 
 ### Changed
 
+### Fixed
+
+- **A second compilation in one process crashed.**  The file record was cached
+  in a function-local `static`, so it outlived the `LLVMContext` that owned it
+  and the next `Codegen` took a type belonging to a destroyed context — a
+  segmentation fault in `llvm::Constant::getNullValue`, nowhere near the cache.
+  The driver compiles once per process and never met it; the front end is a
+  shared library precisely so that other things can read Pascal, and those
+  compile repeatedly.  Found by the first tests to build two `Codegen` objects.
+
+### Changed
+
+- **How wide a type is travels with the type.**  `Type` carries `Width` and
+  `IsSigned`, and `TypeContext::getInt(bits, signed)` interns integer types so
+  that two `Word`s are one type.  ISO 7185 and Extended Pascal stamp 64 on
+  everything and emit exactly the i64 they always did; Turbo has six integer
+  types at four widths, and the width is what `SizeOf` answers, what a variable
+  typecast's legality rule compares, and what a `file of T` image is made of.
+
+- **One `SizeOf`, checked against the layout.**  `Sema::byteSizeOf` works sizes
+  out without a DataLayout, because a Turbo `const BufSize = 4 *
+  SizeOf(Integer)` has to fold before there is one.  Codegen asserts it against
+  `DataLayout::getTypeAllocSize` for every type it lowers in every program it
+  compiles, so a disagreement is a compile-time ICE rather than a `GetMem`
+  buffer that is the wrong size.
+
+  Writing the check found three things: Sema's field list is flat, so summing
+  it counts storage a variant's alternatives share; a set aligns to sixteen,
+  not eight, because it lowers to an i256 — which showed up not on a set but as
+  eight missing bytes of tail padding in a record ending with one; and a schema
+  instance has no size to give, its denoters carrying whichever instantiation
+  was resolved last.
+
+- **`packed` packs.**  ISO §6.4.3.1 leaves what it does to the implementation
+  and plang used to do nothing with it.  A `packed record` is a packed struct
+  now, in every dialect.  This moves the layout of packed records — one program
+  in the acceptance test and three conformance cases use one — and changes the
+  image a `file of packed record` writes.  Turbo needs real packing for
+  `{$PACKRECORDS 1}`, and a `packed` that packs nothing is a word the language
+  has that means nothing.
+
 - **Compiler-switch state is positional.**  Turbo Pascal's `{$R+}` applies from
   where it is written to the end of the file, so one compilation can check one
   loop and not the next.  Nothing on `LangOptions` can say that, so the answer

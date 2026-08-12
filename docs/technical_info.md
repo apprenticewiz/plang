@@ -159,6 +159,44 @@ The dialect names themselves are in `Basic/Dialects.def`, which generates the
 the front end do — two processes that must agree, and which previously held
 four copies of the list between them.
 
+### The storage model
+
+How wide a type is travels with the type. `Type::Width` and `Type::IsSigned`
+are meaningful for Integer, Subrange, Enum and Boolean, and for Real the width
+is the float width. ISO 7185 and Extended Pascal have one integer type and
+stamp 64 on all of it, so `getIntNTy(ctx, Width)` is the i64 they have always
+emitted; Turbo has Byte, ShortInt, Word, Integer, LongInt and Comp at four
+widths, and the width is what `SizeOf` answers, what a variable typecast's
+legality rule compares, and what a `file of T` image is made of.
+`TypeContext::getInt(bits, signed)` interns them, so two `Word`s are one type
+and `identical` — a pointer comparison — says so.
+
+A subrange takes its host's width where the host is an integer. Over a char it
+is stored as a full ordinal, which is what plang has always done; narrowing
+that moves ISO 7185 and Extended Pascal layouts and waits for the dialect that
+needs it.
+
+**One size, checked against the other.** `Sema::byteSizeOf` answers without a
+DataLayout, because a Turbo `const BufSize = 4 * SizeOf(Integer)` has to fold
+before there is one. That is a second opinion about storage, and a second
+opinion is what goes wrong quietly — a `SizeOf` that disagrees with the layout
+sizes a `GetMem` or a `BlockRead` buffer wrong, and nothing says so until the
+memory past the end of it is read back. So codegen asserts it against
+`DataLayout::getTypeAllocSize` for every type it lowers, in every program it
+compiles, and a disagreement is an ICE rather than corruption. Writing that
+check is what found three things: that Sema's field list is flat and summing it
+counts storage a variant's alternatives share, that a set aligns to sixteen
+because it lowers to an i256, and that a schema instance has no size to give
+because its denoters carry whichever instantiation was resolved last.
+
+**`packed` packs.** ISO §6.4.3.1 leaves what it does to the implementation, and
+plang used to do nothing with it. A `packed record` is an LLVM packed struct
+now, in every dialect: Turbo needs it for `{$PACKRECORDS 1}` and for a record
+image a real Turbo program can read, and a `packed` that packs nothing is a
+word the language has that means nothing. Packedness is part of the
+struct-type cache key — without it two records differing only in packing share
+one struct, and the packed one gets the padded one's offsets.
+
 ### Positional compiler switches
 
 Turbo Pascal's `{$R+}` is textual: it applies from where it is written to the
@@ -292,7 +330,7 @@ and the two cannot disagree.
 
 ## The test suite
 
-1616 tests, in ten binaries:
+1639 tests, in eleven binaries:
 
 | Binary                              | Tests | What it covers                        |
 |-------------------------------------|-------|---------------------------------------|
@@ -305,6 +343,7 @@ and the two cannot disagree.
 | `test/Driver/ep_test`               | 210   | Extended Pascal, end to end           |
 | `test/Driver/module_test`           | 167   | Modules and separate compilation      |
 | `test/CodeGen/codegen_switches_test`| 15    | Positional compiler-switch state      |
+| `test/CodeGen/codegen_storage_test` | 23    | Type widths, layout, one SizeOf       |
 | `test/Conformance/conformance_test` | 377   | The Pascal-P5 ISO 7185 suite          |
 | `test/Acceptance/acceptance_test`   | 1     | The Pascal Acceptance Test            |
 
