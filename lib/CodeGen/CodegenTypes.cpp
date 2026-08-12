@@ -346,12 +346,16 @@ llvm::Type* Codegen::Impl::llvmTypeOfNode(const TypeNode& node) {
         return structTypeFor(*n);
 
     if (llvm::dyn_cast<PointerTypeNode>(&node))   return ptrTy;
-    if (llvm::dyn_cast<SubrangeTypeNode>(&node))  return i64Ty;
+    // A subrange and an enumeration are as wide as Sema resolved them to be.
+    // Answering i64 here regardless is what would make the two readings of a
+    // narrow type disagree, and the check at the end of llvmTypeOfNodeChecked
+    // would then fire on every one of them.
+    if (llvm::dyn_cast<SubrangeTypeNode>(&node))  return ordinalTyOf(node);
     if (auto* n = llvm::dyn_cast<StringTypeNode>(&node)) {
         int64_t cap = evalConstInt(*n->Capacity, 255, &consts);
         return strStructType(cap);
     }
-    if (llvm::dyn_cast<EnumTypeNode>(&node))      return i64Ty;
+    if (llvm::dyn_cast<EnumTypeNode>(&node))      return ordinalTyOf(node);
     if (llvm::dyn_cast<SetTypeNode>(&node))       return setTy();
     if (llvm::dyn_cast<FileTypeNode>(&node))      return fileStructType();
     if (auto* n = llvm::dyn_cast<PackedTypeNode>(&node))
@@ -448,12 +452,60 @@ llvm::Type* Codegen::Impl::llvmTypeOf(const TypeNode* denoter,
 // Semantic-type → LLVM type conversion (for schema body types)
 // ====================================================================
 
+/// The integer type an ordinal denoter lowers to, taken from what Sema
+/// resolved it to.  Falls back to the dialect's own integer width, for a
+/// denoter inside a schema body that no instantiation has annotated yet.
+llvm::Type* Codegen::Impl::ordinalTyOf(const TypeNode& node) {
+    const Type* T = node.ResolvedType.get();
+    return llvm::Type::getIntNTy(ctx, T ? T->Width : langOpts.defaultIntWidth());
+}
+
+/// Asserts that Sema's idea of how big \p T is matches the type just built for
+/// it.
+///
+/// Sema works the size out without a DataLayout, because a Turbo `const N =
+/// SizeOf(Integer)` has to fold before there is one.  Two ways of answering
+/// one question is the arrangement that goes wrong quietly: a SizeOf that
+/// disagrees with the layout sizes a GetMem or a BlockRead buffer wrong, and
+/// nothing reports it until the memory past the end of it is read back.
+///
+/// So they are checked against each other on every type codegen lowers, which
+/// is the widest net available -- every type in every compiled program, rather
+/// than the ones a test remembered to name.
+void Codegen::Impl::checkSizeAgreement(const Type& T, llvm::Type* Built) {
+    // Inside a schema body the two are meant to differ: the denoters carry
+    // the last instantiation's annotation while the storage being laid out is
+    // this one's.  The check above llvmTypeOfNodeChecked skips it for the same
+    // reason.
+    // SchemaBindings marks a record that *is* an instantiation: it resolves
+    // to a plain Record, but its field denoters still carry whichever
+    // instantiation was resolved last.
+    if (!schemaCtx.empty() || !T.SchemaBindings.empty()) return;
+    const auto FromSema = Sema::byteSizeOf(T);
+    if (!FromSema || !Built || !Built->isSized()) return;
+    const uint64_t FromLayout =
+        mod->getDataLayout().getTypeAllocSize(Built).getFixedValue();
+    if (*FromSema != FromLayout)
+        codegenICE("type '" + T.Name + "' is "
+                   + llvm::Twine(*FromSema) + " bytes to Sema and "
+                   + llvm::Twine(FromLayout) + " bytes as it was laid out");
+}
+
 llvm::Type* Codegen::Impl::llvmTypeOfSemaType(const Type& T) {
+    llvm::Type* Built = llvmTypeOfSemaTypeImpl(T);
+    checkSizeAgreement(T, Built);
+    return Built;
+}
+
+llvm::Type* Codegen::Impl::llvmTypeOfSemaTypeImpl(const Type& T) {
     switch (T.Kind) {
         case TypeKind::Integer:
         case TypeKind::Subrange:
         case TypeKind::Enum:
-            return i64Ty;
+            // The width travels with the type; see Type::Width.  ISO 7185 and
+            // Extended Pascal stamp 64 on all three, so this is the i64 they
+            // have always emitted.
+            return llvm::Type::getIntNTy(ctx, T.Width);
         case TypeKind::Set:
             return setTy();
         case TypeKind::Real:

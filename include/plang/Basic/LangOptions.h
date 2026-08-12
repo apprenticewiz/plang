@@ -177,6 +177,19 @@ struct LangOptions {
     /// True when the active dialect has \p F.
     constexpr bool has(Feature F) const { return inDialect(featureDialects(F)); }
 
+    /// How wide an unqualified `integer` is.
+    ///
+    /// ISO 7185 and Extended Pascal have one integer type, and plang has always
+    /// given it 64 bits: §6.4.2.2 leaves the range implementation-defined and
+    /// only requires maxint.  Turbo's `Integer` is 16 bits, and it is not a
+    /// free choice -- FPC's -Mtp does not load objpas, so `Integer` stays
+    /// `system.integer` = `smallint` and MaxInt is 32767.  A program that
+    /// overflows at 32767 on a real Turbo and not here is not compiling as
+    /// Turbo Pascal.
+    [[nodiscard]] constexpr unsigned defaultIntWidth() const {
+        return turbo() ? 16u : 64u;
+    }
+
     constexpr bool extendedPascal() const { return Std == Standard::ISO10206; }
     constexpr bool turbo()          const { return Std == Standard::Turbo;    }
 

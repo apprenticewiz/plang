@@ -5,6 +5,7 @@
 #include "plang/Basic/LangOptions.h"
 #include "plang/Basic/PascalFileLayout.h"
 #include "plang/CodeGen/Codegen.h"
+#include "plang/Sema/Sema.h"
 #include "plang/Sema/Type.h"
 
 #include <algorithm>
@@ -653,7 +654,12 @@ struct Codegen::Impl {
     llvm::Type* llvmTypeOfNode(const TypeNode& node);
     /// Convert a semantic Type (from Sema) directly to an LLVM type.
     /// Used by schema instance handling where the AST TypeNode is parameterized.
+    /// The integer type an ordinal denoter lowers to; see the definition.
+    [[nodiscard]] llvm::Type* ordinalTyOf(const TypeNode& node);
     llvm::Type* llvmTypeOfSemaType(const Type& T);
+    llvm::Type* llvmTypeOfSemaTypeImpl(const Type& T);
+    /// Checks Sema's byteSizeOf against the layout; see the definition.
+    void checkSizeAgreement(const Type& T, llvm::Type* Built);
 
     // ====================================================================
     // Alloca helpers

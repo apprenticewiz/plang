@@ -58,14 +58,45 @@ public:
     /// as long as this Sema does.
     [[nodiscard]] std::vector<const ModuleNode*> loadedInterfaces() const;
 
+    /// How many bytes a variable of \p T occupies, or nothing where only
+    /// codegen can say.
+    ///
+    /// Sema needs a number because Turbo writes `const BufSize = 4 *
+    /// SizeOf(Integer)` and a constant has to fold, and Sema has no
+    /// DataLayout to ask.  So this is a second opinion about storage, and a
+    /// second opinion is exactly what goes wrong quietly -- a SizeOf that
+    /// disagrees with the layout sizes a GetMem or a BlockRead buffer wrong,
+    /// and the corruption surfaces nowhere near here.
+    ///
+    /// What keeps the two together is that codegen asserts this against
+    /// `DataLayout::getTypeAllocSize` of the type it actually built, for every
+    /// type it lowers.  A disagreement is an ICE at compile time rather than a
+    /// buffer overrun at run time.  See checkSizeAgreement.
+    ///
+    /// Nothing is returned for a conformant array or an undiscriminated
+    /// schema, whose extent is not known until they are passed or allocated.
+    [[nodiscard]] static std::optional<uint64_t> byteSizeOf(const Type& T);
+
+    /// What \p T must be aligned to.  Natural alignment, which is what plang
+    /// already emits and what FPC uses by default; see byteSizeOf.
+    [[nodiscard]] static uint64_t byteAlignOf(const Type& T);
+
+private:
+    /// How far one alternative of a variant part reaches; see the definition.
+    static uint64_t layoutVariantCase(const VariantCase& VC, uint64_t Base,
+                                      uint64_t& Align, bool& Ok);
+public:
+
 private:
     // ---- state ----
     LangOptions              Opts;   // dialect and warning options (owned copy)
     SymbolTable              Symtab;
     DiagnosticsEngine&       Diags; // shared with Scanner and Parser
 
-    /// Canonical type store — owns built-in singletons and interns structural types.
-    TypeContext Ctx_;
+    /// Canonical type store — owns built-in singletons and interns structural
+    /// types.  Built from Opts, which is why Opts is declared above it: what an
+    /// unqualified `integer` is depends on the dialect.
+    TypeContext Ctx_{Opts.defaultIntWidth()};
 
     // Convenience aliases that forward to TypeContext singletons.
     // Kept for backward compat with existing Sema implementation code.

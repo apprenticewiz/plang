@@ -90,6 +90,21 @@ struct Type {
     /// Display name used in error messages.  For reading only: two types are
     /// never told apart by this, because anonymous ones share a description.
     std::string Name;
+    /// How many bits a value of this type occupies, and whether it is signed.
+    ///
+    /// Meaningful for Integer, Subrange, Enum and Boolean, and for Real it is
+    /// the float width.  Every other kind leaves it at the default and nothing
+    /// reads it.
+    ///
+    /// ISO 7185 and Extended Pascal have one integer type and stamp 64 on all
+    /// of it, so `getIntNTy(ctx, Width)` is the i64 those dialects already
+    /// emitted.  Turbo has Byte, ShortInt, Word, Integer, LongInt and Comp at
+    /// four different widths, and the width has to travel with the type: it is
+    /// what SizeOf answers, what a variable typecast's legality rule compares,
+    /// and what a `file of T` image is made of.
+    unsigned Width{64};
+    bool     IsSigned{true};
+
     /// Enum and Record only: written inline rather than declared, so it has no
     /// declared name to be identified by.  See isAnonymousNominal.
     bool        Anonymous{false};
@@ -263,8 +278,8 @@ struct Type {
     [[nodiscard]] static std::shared_ptr<Type> makeInteger()  { auto T = std::make_shared<Type>(); T->Kind = TypeKind::Integer;  T->Name = "integer"; return T; }
     [[nodiscard]] static std::shared_ptr<Type> makeReal()     { auto T = std::make_shared<Type>(); T->Kind = TypeKind::Real;     T->Name = "real";    return T; }
     [[nodiscard]] static std::shared_ptr<Type> makeComplex()  { auto T = std::make_shared<Type>(); T->Kind = TypeKind::Complex;  T->Name = "complex"; return T; }
-    [[nodiscard]] static std::shared_ptr<Type> makeBoolean()  { auto T = std::make_shared<Type>(); T->Kind = TypeKind::Boolean;  T->Name = "boolean"; return T; }
-    [[nodiscard]] static std::shared_ptr<Type> makeChar()     { auto T = std::make_shared<Type>(); T->Kind = TypeKind::Char;     T->Name = "char";    return T; }
+    [[nodiscard]] static std::shared_ptr<Type> makeBoolean()  { auto T = std::make_shared<Type>(); T->Kind = TypeKind::Boolean;  T->Name = "boolean"; T->Width = 8; return T; }
+    [[nodiscard]] static std::shared_ptr<Type> makeChar()     { auto T = std::make_shared<Type>(); T->Kind = TypeKind::Char;     T->Name = "char";    T->Width = 8; return T; }
     [[nodiscard]] static std::shared_ptr<Type> makeString()   { auto T = std::make_shared<Type>(); T->Kind = TypeKind::String;    T->Name = "string";  return T; }
     [[nodiscard]] static std::shared_ptr<Type> makeVarString(int64_t Cap) {
         auto T = std::make_shared<Type>();
