@@ -150,7 +150,18 @@ public:
                 T->Width    = base->Width;
                 T->IsSigned = base->IsSigned;
             } else {
-                T->Width = DefaultIntWidth_;
+                // Over a char, a boolean or an enumeration.  ISO §6.4.2.2
+                // numbers those from zero, so their values are never negative
+                // and the subrange's are not either -- `'a'..'z'` holds 97..122
+                // however its bounds are written.
+                //
+                // Saying so matters: IsSigned defaults to true, and a rule that
+                // widens by it would sign-extend a char subrange.  Nothing
+                // reads IsSigned yet; the widening rule the Turbo runtime
+                // boundary needs is the first thing that will, and it must not
+                // inherit a field that is wrong for a third of the ordinals.
+                T->Width    = DefaultIntWidth_;
+                T->IsSigned = false;
             }
             T->SubBase = std::move(base);
             T->SubLo   = lo;
