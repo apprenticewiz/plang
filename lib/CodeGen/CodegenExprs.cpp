@@ -125,14 +125,23 @@ llvm::Value* Codegen::Impl::emitExpr(const ExprNode& e) {
         // s[i..j] as an rvalue: produce a new string(cap) containing the substring.
         auto* strAddr = emitLValue(*n->Str);
         if (!strAddr) codegenICE("substring applied to a non-addressable operand");
-        int64_t cap = 255;
-        for (auto it = scopes.rbegin(); it != scopes.rend(); ++it)
-            for (auto& [nm, ve] : *it)
-                if (ve.ptr == strAddr)
-                    if (auto* st = llvm::dyn_cast<llvm::StructType>(ve.type))
-                        if (st->getNumElements() == 2)
-                            if (auto* arr = llvm::dyn_cast<llvm::ArrayType>(st->getElementType(1)))
-                                cap = (int64_t)arr->getNumElements();
+        // The capacity is a property of the operand's type, and Sema has it.
+        // This used to hunt for it by scanning every scope for a variable whose
+        // address was object-identical to the one just emitted, defaulting to
+        // 255 -- which is an identifier lookup by another route.  A field, an
+        // element or a dereference is a GEP that matches no entry, so its
+        // substring was silently truncated to 255 characters.
+        //
+        // The scan was not sound even when it did match.  A record whose first
+        // field is a string has the same address as the record, so the scan
+        // found the RECORD and read a capacity off whatever its second element
+        // happened to be: in `record s: string(20); t: array[1..5] of char end`,
+        // r.s[1..10] came back five characters long, its capacity taken from t.
+        //
+        // The assignment path a few lines away in CodegenStmts already asks
+        // exprStrCap.  Only the rvalue did this.
+        int64_t cap = exprStrCap(*n->Str);
+        if (cap <= 0) cap = PlangMaxStringCapacity;
         auto* resPtr = createEntryAlloca(strStructType(cap), "substr.res");
         auto* low    = toI64(emitExpr(*n->Low));
         auto* high   = toI64(emitExpr(*n->High));

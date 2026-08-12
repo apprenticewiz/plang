@@ -45,28 +45,47 @@ void Codegen::Impl::pushConformantArgs(std::vector<llvm::Value*>& args,
                                        const ExprNode& arg, size_t dims) {
     args.push_back(emitLValue(arg));
 
-    // Each dimension after the first reads its bounds from the actual's
-    // element type, walking inward as the loop goes.
+    // Each dimension reads its bounds from the actual's element type, walking
+    // inward as the loop goes.
     const plang::Type* dimTy = arg.ResolvedType.get();
+
+    // An actual that is itself a conformant parameter carries its bounds in
+    // variables rather than in its type -- for EVERY dimension, which is what
+    // conformantDims holds a name pair each for.
+    //
+    // Only the outermost was read, and only through the scalar
+    // conformantLoName/conformantHiName pair.  The inner ones fell to the
+    // element type, and a ConformantArray type has no static bounds, so they
+    // came out 0..0.  §6.6.3.7.2 permits relaying a conformant parameter to
+    // another conformant formal, and it is the ordinary way to factor code over
+    // one: relayed, a matrix declared 1..2 of 3..7 arrived as 1..2 of 0..0, and
+    // the callee indexed the flat block with the wrong row width.
+    const VarEntry* ave = nullptr;
+    if (auto* id = llvm::dyn_cast<IdentExpr>(&arg))
+        if (auto* v = findVar(id->Name); v && v->isConformantArray)
+            ave = v;
+
     for (size_t di = 0; di < dims; ++di) {
-        // An actual that is itself a conformant parameter carries its bounds
-        // in variables rather than in its type, and only for its outermost
-        // dimension — inner ones came from the element type either way.
         bool fromConformant = false;
-        if (di == 0) {
-            if (auto* id = llvm::dyn_cast<IdentExpr>(&arg)) {
-                auto* ave = findVar(id->Name);
-                if (ave && ave->isConformantArray) {
-                    auto* loVe = findVar(ave->conformantLoName);
-                    auto* hiVe = findVar(ave->conformantHiName);
-                    args.push_back(loVe
-                        ? (llvm::Value*)builder.CreateLoad(i64Ty, loVe->ptr, "pass.lo")
-                        : (llvm::Value*)llvm::ConstantInt::get(i64Ty, 0));
-                    args.push_back(hiVe
-                        ? (llvm::Value*)builder.CreateLoad(i64Ty, hiVe->ptr, "pass.hi")
-                        : (llvm::Value*)llvm::ConstantInt::get(i64Ty, 0));
-                    fromConformant = true;
-                }
+        if (ave) {
+            std::string loNm, hiNm;
+            if (di < ave->conformantDims.size()) {
+                loNm = ave->conformantDims[di].first;
+                hiNm = ave->conformantDims[di].second;
+            } else if (di == 0) {
+                loNm = ave->conformantLoName;
+                hiNm = ave->conformantHiName;
+            }
+            if (!loNm.empty()) {
+                auto* loVe = findVar(loNm);
+                auto* hiVe = findVar(hiNm);
+                args.push_back(loVe
+                    ? (llvm::Value*)builder.CreateLoad(i64Ty, loVe->ptr, "pass.lo")
+                    : (llvm::Value*)llvm::ConstantInt::get(i64Ty, 0));
+                args.push_back(hiVe
+                    ? (llvm::Value*)builder.CreateLoad(i64Ty, hiVe->ptr, "pass.hi")
+                    : (llvm::Value*)llvm::ConstantInt::get(i64Ty, 0));
+                fromConformant = true;
             }
         }
         if (!fromConformant) {
