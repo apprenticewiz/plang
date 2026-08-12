@@ -4265,3 +4265,46 @@ TEST(NestedProcedure, ASiblingCallReachesTheEnclosingActivationsVariable) {
     // c's own d must still reach c's n; b must always reach a's n.
     EXPECT_EQ(R.Stdout, "c 600\na 13\n");
 }
+
+TEST(ReadTarget, ASubrangeOfCharIsReadAsACharacter) {
+    // The reader was chosen from the LLVM type, and a subrange of char is held
+    // in a full ordinal -- so this called the INTEGER reader, tried to parse a
+    // number out of "xy", found none, and left both variables untouched.
+    // fpc -Miso reads x and y here.
+    auto R = compileAndRun(
+        "program p(input, output);\n"
+        "type letter = 'a'..'z';\n"
+        "var c1, c2: letter; n: integer;\n"
+        "begin read(c1, c2); readln(n); writeln(c1, c2, ' ', n) end.\n",
+        "", "xy\n7\n");
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "xy 7\n");
+}
+
+TEST(ReadTarget, ATypeTheStandardDoesNotReadIntoIsRefused) {
+    // ISO §6.9.2 reads into an integer, a real or a char variable.  Anything
+    // else was accepted and handed to whichever runtime reader its storage
+    // width selected: a boolean took the integer reader.
+    auto R = compileAndRun(
+        "program p(input, output);\n"
+        "var b: boolean;\n"
+        "begin read(b) end.\n", "", "1\n");
+    EXPECT_NE(R.ExitCode, 0);
+    EXPECT_NE(R.Stderr.find("cannot be read into"), std::string::npos) << R.Stderr;
+}
+
+TEST(ReadTarget, ATypedFileStillReadsAWholeComponent) {
+    // §6.9.1's read on a typed file reads a component of the file's own type,
+    // whatever that is -- so the textfile rule must not reach it.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type rec = record a, b: integer end;\n"
+        "var f: file of rec; r: rec;\n"
+        "begin\n"
+        "  rewrite(f, 'tf.bin'); r.a := 1; r.b := 2; write(f, r); close(f);\n"
+        "  reset(f, 'tf.bin'); r.a := 0; r.b := 0; read(f, r); close(f);\n"
+        "  writeln(r.a, ' ', r.b)\n"
+        "end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "1 2\n");
+}

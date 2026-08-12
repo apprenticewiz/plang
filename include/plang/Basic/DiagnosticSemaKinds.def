@@ -119,6 +119,14 @@ DIAG(err_readln_not_text, Error, "readln is only valid for text files, got 'file
 // ISO 7185 §6.6.5.2: The type read from a file must match the variable type.
 // ISO 7185 §6.6.5.2: The type read from a file must match the variable type.
 DIAG(err_read_type_mismatch, Error, "type mismatch in read: file element type is '%0', but variable has type '%1'")
+// ISO §6.9.2 defines read on a textfile for a variable of an integer, real or
+// char type, and Extended Pascal §6.9.2 adds a string type.  Anything else was
+// accepted and handed to whichever runtime reader its storage width happened to
+// select: a boolean took the integer reader, and a record took it through a
+// pointer to the whole record.
+DIAG(err_read_param_type, Error,
+     "'%0' cannot be read into; a read-parameter is an integer, real or char "
+     "variable")
 // ISO 7185 §6.9.1: write(f,e) on a file that is not a textfile is f^ := e,
 // so the value written must be assignable to a component.
 DIAG(err_write_type_mismatch, Error, "type mismatch in write: file element type is '%0', but value has type '%1'")

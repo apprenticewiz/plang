@@ -3113,3 +3113,44 @@ TEST(ForIn, TheControlVariableIsTheDeclaredOne) {
     ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
     EXPECT_EQ(R.Stdout, "qz\n");
 }
+
+TEST(ConformantArray, AValueParameterIsACopy) {
+    // ISO §6.6.3.3: a value parameter is a variable of its own that the actual
+    // is assigned to.  A conformant array passed by value was bound straight
+    // to the caller's storage, so the callee's writes reached the caller.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type vec = array[1..5] of integer;\n"
+        "var a: vec; i: integer;\n"
+        "procedure clobber(x: array[lo..hi: integer] of integer);\n"
+        "var j: integer;\n"
+        "begin for j := lo to hi do x[j] := 99 end;\n"
+        "begin\n"
+        "  for i := 1 to 5 do a[i] := i;\n"
+        "  clobber(a);\n"
+        "  for i := 1 to 5 do write(a[i], ' ');\n"
+        "  writeln\n"
+        "end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "1 2 3 4 5 \n");
+}
+
+TEST(ConformantArray, AVarParameterStillReachesTheCallersArray) {
+    // The other side: making the value form a copy must not make the var form
+    // one too, which is the whole difference between them.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type vec = array[1..5] of integer;\n"
+        "var a: vec; i: integer;\n"
+        "procedure clobber(var x: array[lo..hi: integer] of integer);\n"
+        "var j: integer;\n"
+        "begin for j := lo to hi do x[j] := 99 end;\n"
+        "begin\n"
+        "  for i := 1 to 5 do a[i] := i;\n"
+        "  clobber(a);\n"
+        "  for i := 1 to 5 do write(a[i], ' ');\n"
+        "  writeln\n"
+        "end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "99 99 99 99 99 \n");
+}

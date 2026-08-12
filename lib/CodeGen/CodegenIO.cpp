@@ -314,14 +314,37 @@ void Codegen::Impl::emitReadArg(const ExprNode& arg, llvm::Value* fp) {
     else if (auto* id = llvm::dyn_cast<IdentExpr>(&arg))
         if (auto* ve = findVar(id->Name)) ty = ve->type;
 
+    // WHICH reader, from what the type IS rather than from how wide it happens
+    // to be stored.  readFnSuffix answers from the LLVM type alone, and a
+    // subrange of char is held in a full ordinal -- so `read(c)` on a
+    // `'a'..'z'` variable called the INTEGER reader, tried to parse a number
+    // out of "xy", found none and left the variable untouched.
+    const plang::Type* base = arg.ResolvedType.get();
+    while (base && base->Kind == TypeKind::Subrange && base->SubBase)
+        base = base->SubBase.get();
+
+    std::string suffix  = readFnSuffix(ty);
+    llvm::Type* readTy  = ty;
+    if (base && base->Kind == TypeKind::Real)      { suffix = "_f64";  readTy = dblTy; }
+    else if (base && base->Kind == TypeKind::Char) { suffix = "_char"; readTy = i8Ty;  }
+
+    // The runtime stores through the pointer at the reader's own width, so a
+    // variable of a different width is read into a temporary and converted --
+    // the same shape read(a[i]) already needed.
+    const bool convert = readTy != ty;
+    llvm::Value* dest  = convert ? createEntryAlloca(readTy, "rd.tmp") : addr;
+
     if (fp) {
         builder.CreateCall(
-            getExternFnN("plang_read_file" + readFnSuffix(ty),
+            getExternFnN("plang_read_file" + suffix,
                          llvm::Type::getVoidTy(ctx), {ptrTy, ptrTy}),
-            {fp, addr});
+            {fp, dest});
     } else {
-        builder.CreateCall(getRuntimeFn("plang_read" + readFnSuffix(ty), ptrTy), {addr});
+        builder.CreateCall(getRuntimeFn("plang_read" + suffix, ptrTy), {dest});
     }
+    if (convert)
+        builder.CreateStore(
+            coerceToType(builder.CreateLoad(readTy, dest, "rd.val"), ty), addr);
 }
 
 /// Advances past the rest of the current line on fp (or stdin).

@@ -662,10 +662,46 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
                     dimPtrs.emplace_back(loA, hiA);
                 }
 
-                // Register the array itself as a conformant VarEntry.
-                // We use the raw incoming ptr (no extra alloca needed) because
-                // the actual data already lives in the caller's alloca.
-                defVar(nm, arrPtrArg, elemTy);
+                // ISO §6.6.3.3: a value parameter is a variable of its own that
+                // the actual is assigned to.  A conformant array passed by
+                // value was bound straight to the caller's storage, so
+                // assigning to the formal reached the actual: `clobber(a)`
+                // with `x: array[lo..hi: integer] of integer` left the caller's
+                // array full of the callee's writes.
+                //
+                // How much to copy is only known here, from the bounds that
+                // arrived beside the pointer, so the copy is a dynamic alloca
+                // rather than an entry one.  A var parameter is still bound
+                // straight through, which is what makes it one.
+                llvm::Value* dataPtr = arrPtrArg;
+                if (flatIdx < paramByRef.size() && !paramByRef[flatIdx]) {
+                    llvm::Value* count = llvm::ConstantInt::get(i64Ty, 1);
+                    for (const auto& [loA, hiA] : dimPtrs) {
+                        auto* lo  = builder.CreateLoad(i64Ty, loA, "cp.lo");
+                        auto* hi  = builder.CreateLoad(i64Ty, hiA, "cp.hi");
+                        auto* ext = builder.CreateAdd(
+                            builder.CreateSub(hi, lo, "cp.span"),
+                            llvm::ConstantInt::get(i64Ty, 1), "cp.ext");
+                        count = builder.CreateMul(count, ext, "cp.count");
+                    }
+                    // An empty conformant array is a legal shape to pass, and
+                    // a negative count would make the alloca enormous.
+                    auto* zero64 = llvm::ConstantInt::get(i64Ty, 0);
+                    count = builder.CreateSelect(
+                        builder.CreateICmpSGT(count, zero64, "cp.pos"),
+                        count, zero64, "cp.n");
+                    const uint64_t esz =
+                        mod->getDataLayout().getTypeAllocSize(elemTy).getFixedValue();
+                    const auto align = mod->getDataLayout().getABITypeAlign(elemTy);
+                    auto* copy = builder.CreateAlloca(elemTy, count, nm + ".copy");
+                    copy->setAlignment(align);
+                    builder.CreateMemCpy(
+                        copy, align, arrPtrArg, align,
+                        builder.CreateMul(count,
+                            llvm::ConstantInt::get(i64Ty, esz), "cp.bytes"));
+                    dataPtr = copy;
+                }
+                defVar(nm, dataPtr, elemTy);
                 {
                     auto& ve             = scopes.back()[toLower(nm)];
                     ve.isConformantArray = true;

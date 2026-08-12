@@ -468,6 +468,8 @@ private:
     /// Diagnoses use of a required word that only Extended Pascal has while
     /// reading standard Pascal.  Returns false when a diagnostic was emitted.
     [[nodiscard]] bool checkEPOnly(const Symbol& Sym, SourceLocation Loc);
+    /// Diagnoses a read-parameter of a type §6.9.2 does not read into.
+    void checkReadParamType(const Type& T, SourceLocation Loc);
     [[nodiscard]] std::shared_ptr<Type> checkSetLit  (const SetLiteralExpr& E);
     [[nodiscard]] std::shared_ptr<Type> checkStructuredValue(const StructuredValueExpr& E);
 
