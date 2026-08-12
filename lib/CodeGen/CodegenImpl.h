@@ -499,8 +499,17 @@ struct Codegen::Impl {
     /// hold on the edge from the setjmp.  See closeLabelScope.
     void pinLocalsToMemory(llvm::Function* f);
 
-    /// Mirrors LangOptions::RangeChecks; see emitRangeCheck.
-    bool rangeChecks = true;
+    /// Whether range checking is on where \p Loc is.
+    ///
+    /// Not a flag on this object, because Turbo's `{$R+}` is positional: the
+    /// same compilation checks one loop and not the next.  With no switch
+    /// table -- which is every ISO 7185 and Extended Pascal compilation, since
+    /// neither has directives -- this is the command-line default and nothing
+    /// is searched, so the code emitted is what it was before there was a
+    /// table.  See Basic/SwitchTable.h.
+    [[nodiscard]] bool rangeChecksAt(SourceLocation Loc) const {
+        return langOpts.switchOn(Switch::RangeChecks, Loc);
+    }
 
     /// Mirrors LangOptions::NilChecks; see emitNilCheck.
     bool nilChecks = true;
@@ -976,10 +985,11 @@ struct Codegen::Impl {
     /// ISO §6.5.4: p^ where p is nil.  No-op unless range checking is enabled.
     void emitNilCheck(llvm::Value* ptr);
     /// No-op unless range checking is enabled; isIndex picks the wording.
-    void emitRangeCheck(llvm::Value* val, int64_t lo, int64_t hi, bool isIndex);
+    void emitRangeCheck(llvm::Value* val, int64_t lo, int64_t hi, bool isIndex,
+                        SourceLocation Loc);
     /// emitRangeCheck for bounds that are only known at run time.
     void emitRangeCheckDyn(llvm::Value* val, llvm::Value* lo, llvm::Value* hi,
-                           bool isIndex);
+                           bool isIndex, SourceLocation Loc);
 
     // ====================================================================
     // EP §6.4.7: undiscriminated schema types (CodegenSchema.cpp)

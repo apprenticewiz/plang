@@ -1,0 +1,58 @@
+//===- CompilerSwitches.def - Turbo Pascal's positional switches -*- C++ -*-===//
+//
+//   SWITCH(Id, Letter, LongName, TurboDefault, Honored)
+//
+//     Id            The Switch enumerator, and the bit it owns in a
+//                   CompilerState.
+//     Letter        The single letter `{$R+}` spells it with, lower case.  The
+//                   scanner and `{$IFOPT}` both look it up by this.
+//     LongName      The word `{$RANGECHECKS ON}` spells it with, lower case.
+//     TurboDefault  What Turbo Pascal starts with.  plang's own default is
+//                   whatever LangOptions says, which for ISO 7185 and Extended
+//                   Pascal is not this: TP ships with range checking off, and
+//                   `-std=iso7185` ships with it on.
+//     Honored       Whether plang acts on it.  A switch that is merely
+//                   recorded still answers `{$IFOPT}`, which is the whole
+//                   reason to carry one plang does nothing with -- a program
+//                   that asks `{$IFOPT Q+}` and is told the opposite of what
+//                   it wrote takes the wrong branch.
+//
+// Turbo's switches are TEXTUAL and POSITIONAL.  `{$R+}` written inside a
+// procedure body is still in force in the main program that follows it, and a
+// program may turn checking off around one loop and on again after.  So this
+// cannot be a translation-unit flag, and that is the whole reason SwitchTable
+// exists: what a switch is set to is a question about a place in the source,
+// not about the compilation.
+//
+// Not every Turbo switch is here.  The ones about the real-mode DOS surface --
+// {$M} memory sizes, {$L} object linking, {$F} far calls -- describe a machine
+// this compiler does not target, and are refused by name rather than recorded
+// as though they meant something.
+//
+//===----------------------------------------------------------------------===//
+
+#ifndef SWITCH
+#define SWITCH(Id, Letter, LongName, TurboDefault, Honored)
+#endif
+
+// Acted on.
+SWITCH(RangeChecks,    'r', "rangechecks",    false, true)
+SWITCH(IOChecks,       'i', "iochecks",       true,  true)
+SWITCH(BoolEval,       'b', "booleval",       false, true)
+SWITCH(ExtendedSyntax, 'x', "extendedsyntax", true,  true)
+
+// Recorded so that {$IFOPT} answers correctly, and nothing more.
+//
+// Overflow checking is the interesting one: every ordinal lowers to an i64
+// here, so the 16- and 32-bit wraparound a Turbo program provokes is not
+// observable to check for.  FPC's own -Mtp on x86-64 has the same blind spot.
+SWITCH(OverflowChecks, 'q', "overflowchecks", false, false)
+SWITCH(VarStringChecks,'v', "varstringchecks",true,  false)
+SWITCH(TypedAddress,   't', "typedaddress",   false, false)
+SWITCH(OpenStrings,    'p', "openstrings",    false, false)
+SWITCH(StackChecks,    's', "stackchecks",    true,  false)
+SWITCH(Assertions,     'c', "assertions",     true,  false)
+SWITCH(WritableConst,  'j', "writeableconst", true,  false)
+SWITCH(GenerateGoto,   'w', "stackframes",    false, false)
+
+#undef SWITCH

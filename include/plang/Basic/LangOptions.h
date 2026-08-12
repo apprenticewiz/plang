@@ -1,5 +1,8 @@
 #pragma once
 
+#include "plang/Basic/SwitchTable.h"
+
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -35,9 +38,47 @@ struct LangOptions {
     /// dereference to become a bare segmentation fault.  The two were one flag
     /// until 0.1.2, which meant -fno-range-checks quietly took this with it.
     bool     NilChecks    = true;
+    /// What Turbo's `{$I}` starts at: whether an I/O operation is checked as
+    /// soon as it is done, rather than left for IOResult to report.
+    ///
+    /// There is no flag for it, because there is nothing yet for it to switch
+    /// off: ISO 7185 and Extended Pascal report an I/O failure by aborting, and
+    /// IOResult, which is the whole point of turning the check off, is Turbo's
+    /// and arrives with the file runtime.  A -fno-io-checks that changed
+    /// nothing would be a flag that appears to work.  It is here so that
+    /// `{$I-}` has a default to override.
+    bool     IOChecks     = true;
     /// -O0..-O3.  Selects the LLVM optimization pipeline run over the module
     /// before it is written out; 0 runs none.
     unsigned OptLevel     = 0;
+
+    // ---- Positional switch state ------------------------------------------
+
+    /// Where Turbo's `{$R+}`-style switches changed, in source order; null
+    /// when no directive was seen, which is always for ISO 7185 and Extended
+    /// Pascal.  Held by pointer because LangOptions is copied by value into the
+    /// scanner, the parser, Sema and codegen, and all four have to see the same
+    /// table -- the scanner fills it in while the others are already holding
+    /// their copy.
+    std::shared_ptr<const SwitchTable> Switches;
+
+    /// What a switch is when no directive has said otherwise.  Derived from
+    /// the command line, so that -fno-range-checks is the starting state a
+    /// `{$R+}` then overrides rather than something a directive cannot reach.
+    [[nodiscard]] CompilerState defaultSwitches() const {
+        CompilerState C = CompilerState::turboDefaults();
+        C.set(Switch::RangeChecks, RangeChecks);
+        C.set(Switch::IOChecks,    IOChecks);
+        return C;
+    }
+
+    /// Whether \p S is on at \p Loc.  With no table this is the command-line
+    /// default and nothing is searched, which is what keeps a dialect that has
+    /// no directives on exactly the path it was on before.
+    [[nodiscard]] bool switchOn(Switch S, SourceLocation Loc) const {
+        if (!Switches) return defaultSwitches().on(S);
+        return Switches->on(S, Loc, defaultSwitches());
+    }
 
     // ---- Which dialect, and what it can do --------------------------------
     //

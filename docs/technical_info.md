@@ -159,6 +159,36 @@ The dialect names themselves are in `Basic/Dialects.def`, which generates the
 the front end do — two processes that must agree, and which previously held
 four copies of the list between them.
 
+### Positional compiler switches
+
+Turbo Pascal's `{$R+}` is textual: it applies from where it is written to the
+end of the file, so one compilation can check one loop and not the next.  There
+is nowhere on `LangOptions` to say that — a flag there is a statement about the
+whole compilation — so the answer lives in a table of the places the state
+changed, `Basic/SwitchTable.h`, binary-searched by source location.  The
+switches themselves are one list, `Basic/CompilerSwitches.def`, which carries
+each one's letter, its long name, what Turbo starts it at, and whether plang
+acts on it or merely records it so `{$IFOPT}` can answer truthfully.
+
+The alternative designs were a field snapshotted onto every AST node, which
+costs bytes on every node and makes the AST printer and the interface writer
+learn about switches to stay correct, and a coarser map, which cannot answer
+`{$IFOPT}` at all.
+
+**A null table means the flag.**  ISO 7185 and Extended Pascal have no
+directives, so they build no table, so every query returns the command-line
+default and nothing is searched.  That is what keeps their generated code
+exactly what it was: the 181 modules the conformance corpus and the acceptance
+test produce, across `-std=iso7185`, `-std=iso10206` and `-fno-range-checks`,
+are byte-identical either side of the change that introduced this.
+
+The consumer today is range checking.  There are no directives yet to fill a
+table in — that is the Turbo Pascal front end — so the positional behavior is
+tested by building a table by hand and compiling through it in process, in
+`test/CodeGen/switches_test.cpp`.  Doing it by hand is also the only way to
+reach the case that matters most: a location *before* a change still gets the
+old state, which a scanner reading in source order cannot produce.
+
 The same `D_*` bits gate the builtins. A required procedure or function is
 declared *whatever the dialect*, and `Builtins.def` says which ones may use it;
 where the active dialect is not among them, the name resolves and is refused
@@ -262,7 +292,7 @@ and the two cannot disagree.
 
 ## The test suite
 
-1601 tests, in nine binaries:
+1616 tests, in ten binaries:
 
 | Binary                              | Tests | What it covers                        |
 |-------------------------------------|-------|---------------------------------------|
@@ -274,6 +304,7 @@ and the two cannot disagree.
 | `test/Driver/codegen_test`          | 276   | What the generated code does when run |
 | `test/Driver/ep_test`               | 210   | Extended Pascal, end to end           |
 | `test/Driver/module_test`           | 167   | Modules and separate compilation      |
+| `test/CodeGen/codegen_switches_test`| 15    | Positional compiler-switch state      |
 | `test/Conformance/conformance_test` | 377   | The Pascal-P5 ISO 7185 suite          |
 | `test/Acceptance/acceptance_test`   | 1     | The Pascal Acceptance Test            |
 

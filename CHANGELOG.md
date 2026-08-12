@@ -113,6 +113,25 @@ version numbers follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 
 ### Changed
 
+- **Compiler-switch state is positional.**  Turbo Pascal's `{$R+}` applies from
+  where it is written to the end of the file, so one compilation can check one
+  loop and not the next.  Nothing on `LangOptions` can say that, so the answer
+  is a table of the places the state changed — `Basic/SwitchTable.h`,
+  binary-searched by source location, with the switches themselves listed once
+  in `Basic/CompilerSwitches.def`.  Range checking is the first consumer:
+  `emitRangeCheck` asks where it is rather than reading a flag.
+
+  A null table means the flag, and ISO 7185 and Extended Pascal have no
+  directives to build one.  The 181 modules the conformance corpus and the
+  acceptance test produce, across `-std=iso7185`, `-std=iso10206` and
+  `-fno-range-checks`, are byte-identical either side of this.
+
+  No `-fio-checks`/`-fno-io-checks` yet, though the roadmap called for one:
+  ISO 7185 and Extended Pascal report an I/O failure by aborting, and
+  `IOResult` — the whole reason to turn the check off — arrives with the Turbo
+  file runtime.  The flag would have changed nothing and looked like it worked.
+  `{$I}` is in the list and has a default for `{$I-}` to override.
+
 - **A missing semantic type kind stops the build.**  `NumTypeKinds` counts the
   fourteen *type denoters* the parser produces, and four walks state the count
   they were written against so that adding one breaks the build at each of
