@@ -4329,3 +4329,26 @@ TEST(TypeByName, AnArrayKeepsItsBoundWhenAnInnerScopeRedeclaresTheTypeName) {
     ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
     EXPECT_EQ(R.Stdout, "42 44 7\n");
 }
+
+TEST(TypeByName, AnAliasToARecordSurvivesAShadowingDeclaration) {
+    // llvmTypeOfNode resolved a named type through a table rebuilt per
+    // procedure and answered by spelling, so a procedure declaring its own `t`
+    // re-aimed an outer variable declared through an alias to the outer `t`.
+    // The size-agreement check turned it into an internal compiler error --
+    // "type 't' takes 1 bytes as it is written and 24 bytes as Sema resolved
+    // it" -- on a program fpc -Miso compiles and runs.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type t = record a, b, c: integer end;\n"
+        "     outert = t;\n"
+        "     pt = ^t;\n"
+        "var g: pt;\n"
+        "procedure inner(q: pt);\n"
+        "type t = record ch: char end;\n"
+        "var local: t; r: outert;\n"
+        "begin local.ch := 'z'; r.a := 1; r.b := 2; r.c := 3;\n"
+        "  writeln(local.ch, ' ', r.a, ' ', r.b, ' ', r.c) end;\n"
+        "begin new(g); inner(g) end.\n");
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "z 1 2 3\n");
+}

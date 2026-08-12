@@ -348,6 +348,16 @@ llvm::Type* Codegen::Impl::llvmTypeOfNode(const TypeNode& node) {
         // cannot tell the two apart, so a resolved capacity wins over it.
         if (node.ResolvedType && node.ResolvedType->Kind == TypeKind::VarString)
             return strStructType(node.ResolvedType->StrCapacity);
+        // A record's struct is reached through Type::RecordDecl, a pointer to
+        // the declaration it came from, while llvmTypeOfName below goes through
+        // a table rebuilt per procedure and answered by SPELLING.  A procedure
+        // declaring its own type of this name re-aimed an outer variable's type
+        // at the inner record -- caught by the size-agreement check as "type
+        // 't' takes 1 bytes as it is written and 24 bytes as Sema resolved it",
+        // which is an internal error on a program fpc compiles and runs.
+        if (node.ResolvedType && node.ResolvedType->Kind == TypeKind::Record
+                && node.ResolvedType->RecordDecl)
+            return llvmTypeOfSemaType(*node.ResolvedType);
         if (auto* t = llvmTypeOfName(n->Name)) return t;
         return llvmTypeOfNodeViaSema(node, "unknown type name '" + n->Name + "'");
     }
