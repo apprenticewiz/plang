@@ -626,7 +626,7 @@ void Codegen::Impl::emitStrStore(llvm::Value* dst, llvm::Value* capDst,
     auto* rhs = emitExpr(src); // VarString → ptr; char → i8; other → ptr (cstr)
     if (!rhs) codegenICE("string assignment from an unlowerable expression");
     if (exprIsVarStr(src))
-        emitStrAssign(dst, capDst, rhs, i64c(exprStrCap(src)));
+        emitStrAssign(dst, capDst, rhs, exprStrCapV(src));
     else if (rhs->getType()->isIntegerTy(8))
         emitStrFromChar(dst, capDst, rhs);
     else

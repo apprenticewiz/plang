@@ -3099,3 +3099,36 @@ TEST(Schema, AnArrayOfRecordsInAVaryingBodyStridesAndAddressesCorrectly) {
     ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
     EXPECT_EQ(R.Stdout, "[xy]5 [xy]10 [xy]15 \n");
 }
+
+TEST(Schema, IOIntoARunTimeCapacityStringUsesTheRealCapacity) {
+    // The capacity bounds how much read and writestr may store, so folding the
+    // probe truncated both to a single character.  Only plain assignment asked
+    // for the run-time capacity; every other operation on the string still
+    // believed the probe.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type ps = ^string;\n"
+        "var q: ps; s: string(30);\n"
+        "begin\n"
+        "  new(q, 25);\n"
+        "  writestr(q^, 'built ', 42:1, ' here');\n"
+        "  writeln('[', q^, '] len=', length(q^):1);\n"
+        "  s := q^;\n"
+        "  writeln('copied [', s, ']');\n"
+        "  dispose(q)\n"
+        "end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "[built 42 here] len=13\ncopied [built 42 here]\n");
+}
+
+TEST(Schema, ReadIntoARunTimeCapacityStringDoesNotTruncate) {
+    auto R = compileAndRun(
+        "program p(input, output);\n"
+        "type ps = ^string;\n"
+        "var q: ps;\n"
+        "begin new(q, 25); readln(q^);\n"
+        "      writeln('[', q^, '] len=', length(q^):1) end.\n",
+        kEP, "hello there world\n");
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "[hello there world] len=17\n");
+}
