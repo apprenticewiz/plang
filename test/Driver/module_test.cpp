@@ -3342,3 +3342,52 @@ TEST(Schema, ASchemaArrayConformsAndPassesItsRealBounds) {
     ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
     EXPECT_EQ(R.Stdout, "lo=1 hi=5: 11 22 33 44 55\n");
 }
+
+TEST(Schema, AnElementAlignedOnlyByItsVariantStridesCorrectly) {
+    // An array element whose alignment comes only from inside a variant part.
+    //
+    // Written to cover the variant-part alignment fix, and it does NOT: reverting
+    // that fix leaves this passing.  rtVariantSize already aligns the blob to the
+    // variant's own alignment, so the record's total is a multiple of it and the
+    // trailing pad the fix adds is a no-op.  Kept because the shape -- an array
+    // of variant-bearing records in a varying body -- is otherwise uncovered,
+    // and labelled so nobody reads it as protecting that line.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type rec(n: integer) = array[1..n] of record\n"
+        "       c: char;\n"
+        "       case tag: boolean of true: (i: integer); false: (j: integer)\n"
+        "     end;\n"
+        "var q: ^rec; k: integer;\n"
+        "begin\n"
+        "  new(q, 3);\n"
+        "  for k := 1 to 3 do begin\n"
+        "    q^[k].c := chr(96+k); q^[k].tag := true; q^[k].i := k*100 end;\n"
+        "  for k := 1 to 3 do write(q^[k].c, q^[k].i:1, ' ');\n"
+        "  writeln; dispose(q)\n"
+        "end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "a100 b200 c300 \n");
+}
+
+TEST(Schema, ANestedVaryingStringReportsItsCapacityToAReader) {
+    // A substring of a string reached below the top level of a varying body.
+    //
+    // Also written to cover strCapFromPath, and also does not: the substring
+    // runtime bounds against the string's LENGTH rather than its capacity, so
+    // the source capacity does not change the answer here.  strCapFromPath is a
+    // refactor, not a behaviour fix -- what it was extracted for, walking the
+    // path once, is covered by AnAccessPathIsWalkedOncePerAssignment.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type t(n: integer) = record inner: record s: string(n) end end;\n"
+        "var q: ^t;\n"
+        "begin\n"
+        "  new(q, 20);\n"
+        "  q^.inner.s := 'hello world';\n"
+        "  writeln('[', q^.inner.s[1..5], ']');\n"
+        "  dispose(q)\n"
+        "end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "[hello]\n");
+}
