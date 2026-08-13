@@ -3056,3 +3056,46 @@ TEST(Schema, APointerToStringSurvivesASecondAssignment) {
     // A freshly allocated string is empty; reading 20 here is the header.
     EXPECT_EQ(R.Stdout, "birth=0\n[first]\n[a much longer second]\n");
 }
+
+TEST(Schema, ARunTimeLayoutReachesBelowTheTopLevel) {
+    // The run-time address was worked out for `p^`, then for `p^.f`, then for
+    // `p^.f[i]` -- each as its own branch, so a component one level deeper fell
+    // through to the probe struct and `q^.inner.k` was written into the middle
+    // of the string beside it.  Nothing caught it: Sema accepts the program and
+    // both size-agreement tripwires stand aside for a varying type.  The whole
+    // access path is resolved by one recursion now.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type t(n: integer) = record\n"
+        "       inner: record s: string(n); k: integer end;\n"
+        "       tail: integer\n"
+        "     end;\n"
+        "var q: ^t;\n"
+        "begin\n"
+        "  new(q, 20);\n"
+        "  q^.inner.s := 'hello'; q^.inner.k := 7; q^.tail := 9;\n"
+        "  writeln(q^.inner.k:1, ' ', q^.tail:1, ' [', q^.inner.s, ']');\n"
+        "  dispose(q)\n"
+        "end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "7 9 [hello]\n");
+}
+
+TEST(Schema, AnArrayOfRecordsInAVaryingBodyStridesAndAddressesCorrectly) {
+    // Two extents fixed by the same discriminant, one inside the other: the
+    // element stride is a run-time size, and the string capacity inside each
+    // element is a run-time capacity reached through the array index.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type t(n: integer) =\n"
+        "       record a: array[1..n] of record s: string(n); k: integer end end;\n"
+        "var q: ^t; i: integer;\n"
+        "begin\n"
+        "  new(q, 3);\n"
+        "  for i := 1 to 3 do begin q^.a[i].s := 'xy'; q^.a[i].k := i * 5 end;\n"
+        "  for i := 1 to 3 do write('[', q^.a[i].s, ']', q^.a[i].k:1, ' ');\n"
+        "  writeln; dispose(q)\n"
+        "end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "[xy]5 [xy]10 [xy]15 \n");
+}

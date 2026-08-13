@@ -1147,26 +1147,12 @@ llvm::Value* Codegen::Impl::emitIndexGEP(const IndexExpr& e) {
     // discriminants fix, so they are re-emitted here rather than read off the
     // type -- which holds the probe's, and would check `q^.d[2]` against 1..1.
     // The address of the field itself already comes from the run-time offset.
-    if (auto* fe = llvm::dyn_cast<FieldExpr>(e.Array.get());
-            fe && e.Array->ResolvedType && e.Array->ResolvedType->ExtentVaries) {
-        if (auto ref = schemaRefOf(*fe->Record)) {
-            if (const ArrayTypeNode* atn = varyingArrayFieldOf(*fe)) {
-                auto* base = emitLValue(*e.Array);
-                if (!base) codegenICE("a schema array field with no address");
-                bindSchemaDiscs(*ref);
-                auto* lo = toI64(emitExpr(*atn->Low));
-                auto* hi = toI64(emitExpr(*atn->High));
-                auto* stride = alignUpV(rtSizeOfTypeNode(atn->Element.get()),
-                                        rtAlignOfTypeNode(atn->Element.get()));
-                popScope();
-                auto* idx = toI64(emitExpr(*e.Index));
-                emitRangeCheckDyn(idx, lo, hi, /*isIndex=*/true, e.Loc);
-                idx = builder.CreateSub(idx, lo, "idx.adj.fld");
-                return builder.CreateGEP(i8Ty, base,
-                    {builder.CreateMul(idx, stride, "fld.off")}, "elem.ptr");
-            }
-        }
-    }
+    // An array whose extent a discriminant fixes, reached anywhere in a path:
+    // its bounds and its stride are recomputed, and both come from the same
+    // recursion so that `q^.d[i, j]` checks BOTH subscripts rather than only
+    // the innermost.
+    if (e.Array->ResolvedType && e.Array->ResolvedType->ExtentVaries)
+        if (auto path = schemaPathOf(e)) return path->addr;
     // EP §6.4.7: an undiscriminated schema recomputes its bounds from the
     // discriminants it carries, then indexes like a conformant array.
     if (auto ref = schemaRefOf(*e.Array)) {
@@ -1499,16 +1485,17 @@ llvm::Value* Codegen::Impl::emitFieldGEP(const FieldExpr& e) {
 
     // EP §6.4.7: a body whose extent a discriminant fixes has no one struct --
     // layoutOf specialises per discriminant tuple and there is no tuple until
-    // run time -- so the offset is worked out from the declaration instead.
+    // run time -- so the address is worked out from the declaration instead.
     // This has to come before resolveRecordStructType, because the struct it
     // would hand back is the probe's and is exactly what must not be indexed.
+    //
+    // Asked of the whole access PATH, not of this one field: `q^.inner.k` and
+    // `q^.a[i].s` reach a run-time-laid-out component through an operand that
+    // is itself not a p^, and matching on that shape is what let them fall
+    // through to the probe struct.
     if (const Type* RecTy = recordTypeOf(*e.Record);
-            RecTy && RecTy->ExtentVaries && RecTy->RecordDecl && sref) {
-        bindSchemaDiscs(*sref);
-        auto* off = rtFieldOffset(*RecTy->RecordDecl, e.Field);
-        popScope();
-        return builder.CreateGEP(i8Ty, recPtr, {off}, "field.ptr");
-    }
+            RecTy && RecTy->ExtentVaries && RecTy->RecordDecl)
+        if (auto path = schemaPathOf(e)) return path->addr;
 
     // Returning recPtr unchanged here would silently alias the whole record,
     // so both failures below are hard errors.

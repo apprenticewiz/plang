@@ -1005,6 +1005,19 @@ struct Codegen::Impl {
     llvm::Value* rtVariantFieldOffset(const VariantPart& vp, llvm::Value* off,
                                       bool packed, const std::string& field);
     uint64_t     rtVariantAlign(const VariantPart& vp);
+
+    /// A component of a run-time-laid-out object: the enclosing schema whose
+    /// header carries the discriminants, the component's address, and the
+    /// denoter its extents are written in.
+    struct SchemaPath {
+        SchemaRef       root;
+        llvm::Value*    addr{nullptr};
+        const TypeNode* decl{nullptr};
+    };
+    std::optional<SchemaPath> schemaPathOf(const ExprNode& e);
+    const TypeNode* fieldDenoterOf(const RecordTypeNode& rt, const std::string& field);
+    const TypeNode* variantFieldDenoterOf(const VariantPart& vp, const std::string& field);
+    static bool isRuntimeLaidOut(const ExprNode& e);
     llvm::Value* alignUpV(llvm::Value* v, uint64_t align);
     void bindSchemaDiscs(const SchemaRef& ref);
     const ArrayTypeNode* varyingArrayFieldOf(const FieldExpr& fe);

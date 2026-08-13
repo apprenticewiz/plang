@@ -304,45 +304,27 @@ llvm::Value* Codegen::Impl::exprStrCapV(const ExprNode& e) {
     if (!exprIsVarStr(e) || !e.ResolvedType->ExtentVaries)
         return i64c(exprStrCap(e));
 
-    // `q^` for a ^string: the schema's one discriminant IS the capacity.
-    if (auto ref = schemaRefOf(e);
-            ref && ref->semaTy && ref->semaTy->SchemaBody
-            && ref->semaTy->SchemaBody->Kind == TypeKind::VarString
-            && ref->discs.size() == 1)
-        return ref->discs[0];
+    // `q^` for a ^string: EP §6.4.3.3 makes the schema's one discriminant the
+    // capacity, and it has no written declaration to walk.
+    if (llvm::isa<DerefExpr>(&e))
+        if (auto ref = schemaRefOf(e);
+                ref && ref->semaTy && ref->semaTy->SchemaBody
+                && ref->semaTy->SchemaBody->Kind == TypeKind::VarString
+                && ref->discs.size() == 1)
+            return ref->discs[0];
 
-    // `p^.s` where s is `string(cap)` in a record body: the capacity is the
-    // expression the field was declared with, re-emitted against the
-    // discriminants this object carries.  Folding StrCapacity here would check
-    // against the probe's string(1).
-    if (auto* fe = llvm::dyn_cast<FieldExpr>(&e)) {
-        if (auto ref = schemaRefOf(*fe->Record)) {
-            // The same look-through recordTypeOf does; it is static to
-            // CodegenExprs.cpp, and the schema case is the only one reachable.
-            const Type* RecTy = fe->Record->ResolvedType.get();
-            if (RecTy && (RecTy->Kind == TypeKind::Schema
-                          || RecTy->Kind == TypeKind::SchemaInstance)
-                    && RecTy->SchemaBody)
-                RecTy = RecTy->SchemaBody.get();
-            if (RecTy && RecTy->Kind == TypeKind::Record && RecTy->RecordDecl) {
-                for (const auto& fd : RecTy->RecordDecl->Fields) {
-                    if (!std::ranges::any_of(fd.Names, [&](const std::string& n) {
-                            return eqCI(n, fe->Field); }))
-                        continue;
-                    const TypeNode* d = fd.Type.get();
-                    while (auto* pk = llvm::dyn_cast_or_null<PackedTypeNode>(d))
-                        d = pk->Inner.get();
-                    if (auto* st = llvm::dyn_cast_or_null<StringTypeNode>(d)) {
-                        bindSchemaDiscs(*ref);
-                        auto* cap = toI64(emitExpr(*st->Capacity));
-                        popScope();
-                        if (cap) return cap;
-                    }
-                    break;
-                }
-            }
+    // Anywhere else: the capacity is the expression the component was DECLARED
+    // with, re-emitted against the discriminants its object carries.  Asked of
+    // the PATH, so a string reached through a nested record or an array element
+    // answers as readily as a direct field -- recognising only the shapes `q^`
+    // and `p^.s` is what left every deeper one folding the probe's string(1).
+    if (auto path = schemaPathOf(e))
+        if (auto* st = llvm::dyn_cast_or_null<StringTypeNode>(path->decl)) {
+            bindSchemaDiscs(path->root);
+            auto* cap = toI64(emitExpr(*st->Capacity));
+            popScope();
+            if (cap) return cap;
         }
-    }
     return i64c(exprStrCap(e));
 }
 
@@ -551,4 +533,101 @@ const ArrayTypeNode* Codegen::Impl::varyingArrayFieldOf(const FieldExpr& fe) {
         return llvm::dyn_cast_or_null<ArrayTypeNode>(d);
     }
     return nullptr;
+}
+
+// ---------------------------------------------------------------------------
+// Resolving an access path into a run-time-laid-out object
+//
+// The special cases this replaces -- p^, then p^.f, then p^.f[i] -- were each
+// written as its own branch, so anything one level deeper fell off the end and
+// silently got the probe layout.  Matching on the SHAPE of an access is the
+// same mistake as matching on a name: `q^.inner.k` and `q^.a[i].s` are the same
+// question asked twice more.  This answers it once, by recursion.
+// ---------------------------------------------------------------------------
+
+namespace {
+const TypeNode* peel(const TypeNode* tn) {
+    while (auto* pk = llvm::dyn_cast_or_null<PackedTypeNode>(tn)) tn = pk->Inner.get();
+    return tn;
+}
+} // namespace
+
+std::optional<Codegen::Impl::SchemaPath>
+Codegen::Impl::schemaPathOf(const ExprNode& e) {
+    // Root: the object itself, whose header carries the discriminants.
+    if (llvm::isa<DerefExpr>(&e) || llvm::isa<IdentExpr>(&e)) {
+        auto ref = schemaRefOf(e);
+        if (!ref || !ref->semaTy) return std::nullopt;
+        const SchemaDef* def = findSchemaDef(ref->semaTy->SchemaName);
+        if (!def || !def->body) return std::nullopt;
+        return SchemaPath{*ref, ref->data, def->body};
+    }
+
+    if (auto* fe = llvm::dyn_cast<FieldExpr>(&e)) {
+        auto base = schemaPathOf(*fe->Record);
+        if (!base) return std::nullopt;
+        auto* rt = llvm::dyn_cast_or_null<RecordTypeNode>(peel(base->decl));
+        if (!rt) return std::nullopt;
+        bindSchemaDiscs(base->root);
+        auto* off = rtFieldOffset(*rt, fe->Field);
+        popScope();
+        const TypeNode* fieldDecl = fieldDenoterOf(*rt, fe->Field);
+        return SchemaPath{base->root,
+                          builder.CreateGEP(i8Ty, base->addr, {off}, "path.fld"),
+                          fieldDecl};
+    }
+
+    if (auto* ie = llvm::dyn_cast<IndexExpr>(&e)) {
+        auto base = schemaPathOf(*ie->Array);
+        if (!base) return std::nullopt;
+        auto* at = llvm::dyn_cast_or_null<ArrayTypeNode>(peel(base->decl));
+        if (!at) return std::nullopt;
+        bindSchemaDiscs(base->root);
+        auto* lo     = toI64(emitExpr(*at->Low));
+        auto* hi     = toI64(emitExpr(*at->High));
+        auto* stride = alignUpV(rtSizeOfTypeNode(at->Element.get()),
+                                rtAlignOfTypeNode(at->Element.get()));
+        popScope();
+        auto* idx = toI64(emitExpr(*ie->Index));
+        emitRangeCheckDyn(idx, lo, hi, /*isIndex=*/true, ie->Loc);
+        auto* off = builder.CreateMul(builder.CreateSub(idx, lo), stride,
+                                      "path.idx");
+        return SchemaPath{base->root,
+                          builder.CreateGEP(i8Ty, base->addr, {off}, "path.elem"),
+                          at->Element.get()};
+    }
+
+    return std::nullopt;
+}
+
+/// The declaration denoter of \p field, including one inside a variant part,
+/// which is where its extent expressions are written.
+const TypeNode* Codegen::Impl::fieldDenoterOf(const RecordTypeNode& rt,
+                                              const std::string& field) {
+    for (const auto& fd : rt.Fields)
+        if (std::ranges::any_of(fd.Names, [&](const std::string& n) {
+                return eqCI(n, field); }))
+            return fd.Type.get();
+    if (rt.Variant) return variantFieldDenoterOf(*rt.Variant, field);
+    return nullptr;
+}
+
+const TypeNode* Codegen::Impl::variantFieldDenoterOf(const VariantPart& vp,
+                                                     const std::string& field) {
+    if (!vp.TagField.empty() && eqCI(vp.TagField, field)) return vp.TagType.get();
+    for (const auto& vc : vp.Cases) {
+        for (const auto& fd : vc.Fields)
+            if (std::ranges::any_of(fd.Names, [&](const std::string& n) {
+                    return eqCI(n, field); }))
+                return fd.Type.get();
+        if (vc.NestedVariant)
+            if (auto* t = variantFieldDenoterOf(*vc.NestedVariant, field)) return t;
+    }
+    return nullptr;
+}
+
+/// Whether \p e names a component of a run-time-laid-out object, so that its
+/// address, extent and capacity all have to be computed rather than folded.
+bool Codegen::Impl::isRuntimeLaidOut(const ExprNode& e) {
+    return e.ResolvedType && e.ResolvedType->ExtentVaries;
 }
