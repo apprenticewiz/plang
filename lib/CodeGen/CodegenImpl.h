@@ -991,6 +991,17 @@ struct Codegen::Impl {
     /// probe's answer and would check `q^ := 'hi'` against a string(1).
     llvm::Value* exprStrCapV(const ExprNode& e);
 
+    /// EP §6.4.7 run-time layout, for a schema body whose extent a discriminant
+    /// fixes.  Call with the discriminants bound in the current scope (see
+    /// bindSchemaDiscs): the bound and capacity expressions are re-emitted
+    /// against them.  A subtree that reads no discriminant folds to a constant.
+    uint64_t     rtAlignOfTypeNode(const TypeNode* tn);
+    llvm::Value* rtSizeOfTypeNode(const TypeNode* tn);
+    llvm::Value* rtFieldOffset(const RecordTypeNode& rt, const std::string& field);
+    llvm::Value* alignUpV(llvm::Value* v, uint64_t align);
+    void bindSchemaDiscs(const SchemaRef& ref);
+    const ArrayTypeNode* varyingArrayFieldOf(const FieldExpr& fe);
+
     /// True if the expression is an ISO §6.4.3.2 string-type: a
     /// packed array[1..n] of char, which is n bytes with no length and no
     /// terminator, quite unlike either of the other two string shapes.

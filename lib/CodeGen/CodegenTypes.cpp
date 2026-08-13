@@ -475,8 +475,12 @@ llvm::Type* Codegen::Impl::llvmTypeOf(const TypeNode* denoter,
     // serves every instantiation and carries the annotation of whichever was
     // resolved last, while the syntax read under the discriminants in force is
     // this instance's own — so there the syntax is the only one asked.
+    // An extent a discriminant fixes makes both answers meaningless here: Sema
+    // holds the probe's and the syntax cannot fold the bound at all, so they
+    // differ by construction.  Neither is the storage -- CodegenSchema lays it
+    // out at run time -- so there is nothing for the two to agree about.
     if (schemaCtx.empty() && resolved && !resolved->isError()
-            && canLowerSemaType(*resolved)) {
+            && !resolved->ExtentVaries && canLowerSemaType(*resolved)) {
         auto* fromSema = llvmTypeOfSemaType(*resolved);
         const auto& dl  = mod->getDataLayout();
         if (fromSema != fromSyntax && fromSema->isSized() && fromSyntax->isSized()
@@ -522,7 +526,7 @@ void Codegen::Impl::checkSizeAgreement(const Type& T, llvm::Type* Built) {
     // SchemaBindings marks a record that *is* an instantiation: it resolves
     // to a plain Record, but its field denoters still carry whichever
     // instantiation was resolved last.
-    if (!schemaCtx.empty() || !T.SchemaBindings.empty()) return;
+    if (!schemaCtx.empty() || !T.SchemaBindings.empty() || T.ExtentVaries) return;
     const auto FromSema = Sema::byteSizeOf(T);
     if (!FromSema || !Built || !Built->isSized()) return;
     const uint64_t FromLayout =

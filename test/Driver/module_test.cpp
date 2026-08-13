@@ -1223,20 +1223,59 @@ TEST(Schema, DiscriminantNeedNotAffectTheLayout) {
     EXPECT_EQ(R.Stdout, "7 8\n5 15\n");
 }
 
-// A record body whose extent depends on the discriminants would be lowered
-// against the probe binding of 1, so plang refuses it rather than generating
-// wrong code.  EP allows it; the message has to say the limit is plang's.
-TEST(Schema, VaryingRecordBodyIsRejectedWithAReason) {
+// EP §6.4.4 allows a record-bodied schema as a pointer domain-type.  The body
+// is laid out at run time from the discriminants the object carries, because
+// there is no one struct for it -- layoutOf specialises per discriminant tuple
+// and there is no tuple until new() runs.
+TEST(Schema, AVaryingRecordBodyIsLaidOutAtRunTime) {
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type buf(n: integer) = record len: integer; d: array[1..n] of char end;\n"
+        "var q: ^buf; i: integer;\n"
+        "begin\n"
+        "  new(q, 5); q^.len := 5;\n"
+        "  for i := 1 to 5 do q^.d[i] := chr(ord('a') + i - 1);\n"
+        "  write(q^.len:1, ' ');\n"
+        "  for i := 1 to 5 do write(q^.d[i]);\n"
+        "  writeln; dispose(q)\n"
+        "end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "5 abcde\n");
+}
+
+TEST(Schema, AFieldAfterTheVaryingOneMovesWithIt) {
+    // The case that says the offsets are genuinely computed rather than taken
+    // from the probe: `n` sits AFTER a field whose size the discriminant fixes,
+    // so its offset differs between the two objects.  A probe layout would put
+    // both at 8 and the second write would land on top of the first's data.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type buf(cap: integer) = record s: string(cap); n: integer end;\n"
+        "     pb = ^buf;\n"
+        "var a, b: pb;\n"
+        "begin\n"
+        "  new(a, 4);  a^.s := 'abcd';          a^.n := 11;\n"
+        "  new(b, 40); b^.s := 'a much longer string'; b^.n := 22;\n"
+        "  writeln('[', a^.s, '] ', a^.n:1, ' len=', length(a^.s):1);\n"
+        "  writeln('[', b^.s, '] ', b^.n:1, ' len=', length(b^.s):1);\n"
+        "  dispose(a); dispose(b)\n"
+        "end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "[abcd] 11 len=4\n[a much longer string] 22 len=20\n");
+}
+
+TEST(Schema, AVariantPartInAVaryingBodyIsStillRefused) {
+    // The one shape with no run-time answer: a variant part shares storage
+    // between alternatives, and which one is live is not something the
+    // discriminants say.
     auto R = compileAndRun(
         "program p;\n"
-        "type buf(n: integer) = record len: integer; d: array[1..n] of char end;\n"
+        "type buf(n: integer) = record d: array[1..n] of char;\n"
+        "       case tag: boolean of true: (x: integer); false: (y: real) end;\n"
         "var q: ^buf;\n"
         "begin end.\n", kEP);
     EXPECT_NE(R.ExitCode, 0);
-    // Asserted on the intent, not on a phrase: the previous wording was pinned
-    // here by its "size varies" and that is the part that was wrong.
     EXPECT_NE(R.Stderr.find("plang does not implement"), std::string::npos) << R.Stderr;
-    EXPECT_NE(R.Stderr.find("buf(...)"), std::string::npos) << R.Stderr;
 }
 
 TEST(Schema, AFixedSizedBodyWithADiscriminantBoundIsRejectedTooAndNotAsASize) {

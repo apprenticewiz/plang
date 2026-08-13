@@ -628,11 +628,11 @@ std::shared_ptr<Type> Sema::resolveUndiscriminatedSchema(Symbol& Sym,
         error(N.Loc, diag::err_schema_body_not_representable, {N.Name});
         return TyErr;
     }
-    // The second is how far codegen's run-time layout has got.  Sema is ready
-    // for all of it; this gate narrows as CodegenSchema gains each piece, and
-    // it is a gate rather than a silent miscompile because Sema's byteSizeOf
-    // and codegen's DataLayout would otherwise disagree about the probe.
-    if (LayoutVaries && Body->Kind != TypeKind::Array) {
+    // The one shape the run-time layout still has no answer for: a variant
+    // part shares storage between alternatives, and which alternative is live
+    // is not a question the discriminants answer.
+    if (LayoutVaries && Body->Kind == TypeKind::Record && Body->RecordDecl
+            && Body->RecordDecl->Variant) {
         error(N.Loc, diag::err_schema_body_not_representable, {N.Name});
         return TyErr;
     }

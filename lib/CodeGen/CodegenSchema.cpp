@@ -17,6 +17,8 @@
 
 #include "CodegenImpl.h"
 
+#include <ranges>
+
 // ---------------------------------------------------------------------------
 // Schema definitions
 // ---------------------------------------------------------------------------
@@ -160,6 +162,20 @@ void Codegen::Impl::emitSchemaDiscMatch(const SchemaRef& dst,
 // Extents
 // ---------------------------------------------------------------------------
 
+void Codegen::Impl::bindSchemaDiscs(const SchemaRef& ref) {
+    // The body's bound and capacity expressions are written in terms of the
+    // formal discriminant names, so they are bound as ordinary variables and
+    // the expressions re-emitted.  The caller pops the scope.
+    pushScope();
+    const SchemaDef* def = findSchemaDef(ref.semaTy->SchemaName);
+    if (!def) return;
+    for (size_t i = 0; i < def->discNames.size() && i < ref.discs.size(); ++i) {
+        auto* slot = createEntryAlloca(i64Ty, "disc." + def->discNames[i]);
+        builder.CreateStore(ref.discs[i], slot);
+        defVar(def->discNames[i], slot, i64Ty);
+    }
+}
+
 std::pair<llvm::Value*, llvm::Value*>
 Codegen::Impl::schemaArrayBounds(const SchemaRef& ref) {
     const SchemaDef* def = findSchemaDef(ref.semaTy->SchemaName);
@@ -200,6 +216,31 @@ llvm::Value* Codegen::Impl::schemaBodySize(const plang::Type& schema,
     const plang::Type* body = schema.SchemaBody.get();
     if (!body || body->isError())
         codegenICE("schema '" + schema.SchemaName + "' has no resolved body");
+
+    // EP §6.4.3.3's string schema has no declaration to walk -- it is not
+    // written in the program -- and its one discriminant IS the capacity, so
+    // the size is the header plus that.  Reading the probe-lowered struct here
+    // asked for a string(1) and allocated 16 bytes for a `new(q, 20)`, which
+    // the first assignment then wrote past.
+    if (body->Kind == TypeKind::VarString && body->ExtentVaries
+            && discs.size() == 1)
+        return alignUpV(builder.CreateAdd(i64c(8), discs[0], "str.size"), 8);
+
+    // Any other body whose extent a discriminant fixes is measured by walking
+    // the declaration with the discriminants bound.  An ARRAY body is left to
+    // the path below: it already recovered its extent from the discriminants
+    // before any of this existed, and routing it through here changed nothing
+    // but which code computed the same number.
+    if (body->ExtentVaries && body->Kind != TypeKind::Array) {
+        if (const SchemaDef* def = findSchemaDef(schema.SchemaName);
+                def && def->body) {
+            SchemaRef ref{&schema, nullptr, discs};
+            bindSchemaDiscs(ref);
+            auto* sz = rtSizeOfTypeNode(def->body);
+            popScope();
+            return sz;
+        }
+    }
 
     // A fixed layout is sized straight from the body type.
     if (schema.SchemaFixedLayout || body->Kind != TypeKind::Array) {
@@ -260,11 +301,191 @@ void Codegen::Impl::emitNewSchema(const ExprNode& ptrArg,
 }
 
 llvm::Value* Codegen::Impl::exprStrCapV(const ExprNode& e) {
-    if (exprIsVarStr(e) && e.ResolvedType->ExtentVaries)
-        if (auto ref = schemaRefOf(e);
-                ref && ref->semaTy && ref->semaTy->SchemaBody
-                && ref->semaTy->SchemaBody->Kind == TypeKind::VarString
-                && ref->discs.size() == 1)
-            return ref->discs[0];
+    if (!exprIsVarStr(e) || !e.ResolvedType->ExtentVaries)
+        return i64c(exprStrCap(e));
+
+    // `q^` for a ^string: the schema's one discriminant IS the capacity.
+    if (auto ref = schemaRefOf(e);
+            ref && ref->semaTy && ref->semaTy->SchemaBody
+            && ref->semaTy->SchemaBody->Kind == TypeKind::VarString
+            && ref->discs.size() == 1)
+        return ref->discs[0];
+
+    // `p^.s` where s is `string(cap)` in a record body: the capacity is the
+    // expression the field was declared with, re-emitted against the
+    // discriminants this object carries.  Folding StrCapacity here would check
+    // against the probe's string(1).
+    if (auto* fe = llvm::dyn_cast<FieldExpr>(&e)) {
+        if (auto ref = schemaRefOf(*fe->Record)) {
+            // The same look-through recordTypeOf does; it is static to
+            // CodegenExprs.cpp, and the schema case is the only one reachable.
+            const Type* RecTy = fe->Record->ResolvedType.get();
+            if (RecTy && (RecTy->Kind == TypeKind::Schema
+                          || RecTy->Kind == TypeKind::SchemaInstance)
+                    && RecTy->SchemaBody)
+                RecTy = RecTy->SchemaBody.get();
+            if (RecTy && RecTy->Kind == TypeKind::Record && RecTy->RecordDecl) {
+                for (const auto& fd : RecTy->RecordDecl->Fields) {
+                    if (!std::ranges::any_of(fd.Names, [&](const std::string& n) {
+                            return eqCI(n, fe->Field); }))
+                        continue;
+                    const TypeNode* d = fd.Type.get();
+                    while (auto* pk = llvm::dyn_cast_or_null<PackedTypeNode>(d))
+                        d = pk->Inner.get();
+                    if (auto* st = llvm::dyn_cast_or_null<StringTypeNode>(d)) {
+                        bindSchemaDiscs(*ref);
+                        auto* cap = toI64(emitExpr(*st->Capacity));
+                        popScope();
+                        if (cap) return cap;
+                    }
+                    break;
+                }
+            }
+        }
+    }
     return i64c(exprStrCap(e));
+}
+
+// ---------------------------------------------------------------------------
+// Run-time layout
+//
+// EP §6.4.7: the body of a schema used without its discriminants cannot be one
+// LLVM struct, because layoutOf specialises a struct per discriminant tuple and
+// there is no tuple until run time.  So a body with a discriminant-fixed extent
+// is laid out here instead, by walking the declaration and accumulating.
+//
+// What makes that affordable is that ALIGNMENT is static even when size is not:
+// a string(cap) is i64-aligned for every cap, and an array is aligned as its
+// element.  So an offset is alignUp(running, staticAlign) with only the running
+// sum dynamic, and a subtree that reads no discriminant folds to a constant
+// straight from the DataLayout -- which is also what keeps the two paths
+// agreeing about the fixed fields.
+// ---------------------------------------------------------------------------
+
+namespace {
+/// The denoter under any `packed`, and whether one was there.
+const TypeNode* peelPacked(const TypeNode* tn, bool* wasPacked = nullptr) {
+    while (auto* pk = llvm::dyn_cast_or_null<PackedTypeNode>(tn)) {
+        if (wasPacked) *wasPacked = true;
+        tn = pk->Inner.get();
+    }
+    return tn;
+}
+/// Whether what \p tn denotes has an extent fixed by a discriminant.  Sema
+/// marks it; see Type::ExtentVaries.
+bool nodeExtentVaries(const TypeNode* tn) {
+    return tn && tn->ResolvedType && tn->ResolvedType->ExtentVaries;
+}
+} // namespace
+
+uint64_t Codegen::Impl::rtAlignOfTypeNode(const TypeNode* tn) {
+    bool packed = false;
+    const TypeNode* d = peelPacked(tn, &packed);
+    if (packed) return 1;
+    if (!nodeExtentVaries(d))
+        return mod->getDataLayout().getABITypeAlign(llvmTypeOfNode(*d)).value();
+    // A varying string is { i64 len, bytes } whatever the capacity is.
+    if (llvm::isa<StringTypeNode>(d)) return 8;
+    if (auto* at = llvm::dyn_cast<ArrayTypeNode>(d))
+        return rtAlignOfTypeNode(at->Element.get());
+    if (auto* rt = llvm::dyn_cast<RecordTypeNode>(d)) {
+        uint64_t a = 1;
+        for (const auto& fd : rt->Fields)
+            a = std::max(a, rtAlignOfTypeNode(fd.Type.get()));
+        return a;
+    }
+    return 8;
+}
+
+llvm::Value* Codegen::Impl::alignUpV(llvm::Value* v, uint64_t align) {
+    if (align <= 1) return v;
+    auto* mask = i64c(static_cast<int64_t>(align - 1));
+    auto* sum  = builder.CreateAdd(v, mask, "align.add");
+    return builder.CreateAnd(sum, builder.CreateNot(mask), "align.up");
+}
+
+llvm::Value* Codegen::Impl::rtSizeOfTypeNode(const TypeNode* tn) {
+    const TypeNode* d = peelPacked(tn);
+    // Nothing in it reads a discriminant, so the static answer is the answer --
+    // and using the DataLayout here is what keeps a fixed field at the offset
+    // an ordinary load of it expects.
+    if (!nodeExtentVaries(d))
+        return i64c(static_cast<int64_t>(
+            mod->getDataLayout().getTypeAllocSize(llvmTypeOfNode(*d))));
+
+    if (auto* st = llvm::dyn_cast<StringTypeNode>(d)) {
+        auto* cap = toI64(emitExpr(*st->Capacity));
+        if (!cap) codegenICE("a schema string capacity that cannot be evaluated");
+        return alignUpV(builder.CreateAdd(i64c(8), cap, "str.size"), 8);
+    }
+    if (auto* at = llvm::dyn_cast<ArrayTypeNode>(d)) {
+        auto* lo = toI64(emitExpr(*at->Low));
+        auto* hi = toI64(emitExpr(*at->High));
+        if (!lo || !hi) codegenICE("a schema array bound that cannot be evaluated");
+        auto* count = builder.CreateAdd(builder.CreateSub(hi, lo), i64c(1),
+                                        "arr.count");
+        count = builder.CreateSelect(
+            builder.CreateICmpSLT(count, i64c(1)), i64c(1), count, "arr.count.min");
+        auto* stride = alignUpV(rtSizeOfTypeNode(at->Element.get()),
+                                rtAlignOfTypeNode(at->Element.get()));
+        return builder.CreateMul(count, stride, "arr.size");
+    }
+    if (auto* rt = llvm::dyn_cast<RecordTypeNode>(d)) {
+        if (rt->Variant)
+            codegenICE("a schema record body with a variant part has no run-time layout");
+        llvm::Value* off = i64c(0);
+        for (const auto& fd : rt->Fields) {
+            const uint64_t a = rt->Packed ? 1 : rtAlignOfTypeNode(fd.Type.get());
+            for (size_t i = 0; i < fd.Names.size(); ++i) {
+                off = alignUpV(off, a);
+                off = builder.CreateAdd(off, rtSizeOfTypeNode(fd.Type.get()),
+                                        "rec.off");
+            }
+        }
+        // A record is padded to its own alignment, as a struct is, so that an
+        // array of them strides correctly.
+        return alignUpV(off, rt->Packed ? 1 : rtAlignOfTypeNode(d));
+    }
+    codegenICE("a schema body denoter with no run-time layout");
+    return nullptr;
+}
+
+llvm::Value* Codegen::Impl::rtFieldOffset(const RecordTypeNode& rt,
+                                          const std::string& field) {
+    if (rt.Variant)
+        codegenICE("a schema record body with a variant part has no run-time layout");
+    // The same walk as the size above, stopped at the field.  Same walk on
+    // purpose: an offset worked out one way and a size the other is how the
+    // last field ends up outside the allocation.
+    llvm::Value* off = i64c(0);
+    for (const auto& fd : rt.Fields) {
+        const uint64_t a = rt.Packed ? 1 : rtAlignOfTypeNode(fd.Type.get());
+        for (const auto& nm : fd.Names) {
+            off = alignUpV(off, a);
+            if (eqCI(nm, field)) return off;
+            off = builder.CreateAdd(off, rtSizeOfTypeNode(fd.Type.get()),
+                                    "rec.off");
+        }
+    }
+    codegenICE("record has no field named '" + field + "'");
+    return nullptr;
+}
+
+const ArrayTypeNode* Codegen::Impl::varyingArrayFieldOf(const FieldExpr& fe) {
+    const Type* RecTy = fe.Record->ResolvedType.get();
+    if (RecTy && (RecTy->Kind == TypeKind::Schema
+                  || RecTy->Kind == TypeKind::SchemaInstance) && RecTy->SchemaBody)
+        RecTy = RecTy->SchemaBody.get();
+    if (!RecTy || RecTy->Kind != TypeKind::Record || !RecTy->RecordDecl)
+        return nullptr;
+    for (const auto& fd : RecTy->RecordDecl->Fields) {
+        if (!std::ranges::any_of(fd.Names, [&](const std::string& n) {
+                return eqCI(n, fe.Field); }))
+            continue;
+        const TypeNode* d = fd.Type.get();
+        while (auto* pk = llvm::dyn_cast_or_null<PackedTypeNode>(d))
+            d = pk->Inner.get();
+        return llvm::dyn_cast_or_null<ArrayTypeNode>(d);
+    }
+    return nullptr;
 }

@@ -1131,6 +1131,30 @@ llvm::Value* Codegen::Impl::emitConformantElemPtr(const IndexExpr& e) {
 }
 
 llvm::Value* Codegen::Impl::emitIndexGEP(const IndexExpr& e) {
+    // EP §6.4.7: an array FIELD of a run-time-laid-out body has bounds the
+    // discriminants fix, so they are re-emitted here rather than read off the
+    // type -- which holds the probe's, and would check `q^.d[2]` against 1..1.
+    // The address of the field itself already comes from the run-time offset.
+    if (auto* fe = llvm::dyn_cast<FieldExpr>(e.Array.get());
+            fe && e.Array->ResolvedType && e.Array->ResolvedType->ExtentVaries) {
+        if (auto ref = schemaRefOf(*fe->Record)) {
+            if (const ArrayTypeNode* atn = varyingArrayFieldOf(*fe)) {
+                auto* base = emitLValue(*e.Array);
+                if (!base) codegenICE("a schema array field with no address");
+                bindSchemaDiscs(*ref);
+                auto* lo = toI64(emitExpr(*atn->Low));
+                auto* hi = toI64(emitExpr(*atn->High));
+                auto* stride = alignUpV(rtSizeOfTypeNode(atn->Element.get()),
+                                        rtAlignOfTypeNode(atn->Element.get()));
+                popScope();
+                auto* idx = toI64(emitExpr(*e.Index));
+                emitRangeCheckDyn(idx, lo, hi, /*isIndex=*/true, e.Loc);
+                idx = builder.CreateSub(idx, lo, "idx.adj.fld");
+                return builder.CreateGEP(i8Ty, base,
+                    {builder.CreateMul(idx, stride, "fld.off")}, "elem.ptr");
+            }
+        }
+    }
     // EP §6.4.7: an undiscriminated schema recomputes its bounds from the
     // discriminants it carries, then indexes like a conformant array.
     if (auto ref = schemaRefOf(*e.Array)) {
@@ -1452,12 +1476,27 @@ llvm::Value* Codegen::Impl::emitFieldGEP(const FieldExpr& e) {
     // EP §6.4.7: for p^ the body starts past the discriminant header, so the
     // record pointer has to come from the schematic view rather than emitLValue.
     llvm::Value* recPtr = nullptr;
+    std::optional<SchemaRef> sref;
     if (e.Record->ResolvedType
             && e.Record->ResolvedType->Kind == TypeKind::Schema) {
-        if (auto ref = schemaRefOf(*e.Record)) recPtr = ref->data;
+        sref = schemaRefOf(*e.Record);
+        if (sref) recPtr = sref->data;
     }
     if (!recPtr) recPtr = emitLValue(*e.Record);
     if (!recPtr) return nullptr;
+
+    // EP §6.4.7: a body whose extent a discriminant fixes has no one struct --
+    // layoutOf specialises per discriminant tuple and there is no tuple until
+    // run time -- so the offset is worked out from the declaration instead.
+    // This has to come before resolveRecordStructType, because the struct it
+    // would hand back is the probe's and is exactly what must not be indexed.
+    if (const Type* RecTy = recordTypeOf(*e.Record);
+            RecTy && RecTy->ExtentVaries && RecTy->RecordDecl && sref) {
+        bindSchemaDiscs(*sref);
+        auto* off = rtFieldOffset(*RecTy->RecordDecl, e.Field);
+        popScope();
+        return builder.CreateGEP(i8Ty, recPtr, {off}, "field.ptr");
+    }
 
     // Returning recPtr unchanged here would silently alias the whole record,
     // so both failures below are hard errors.
