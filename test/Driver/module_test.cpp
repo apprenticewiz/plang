@@ -3281,3 +3281,25 @@ TEST(Schema, AVaryingExtentInsideAVariantPartIsStillRunTimeLaidOut) {
     ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
     EXPECT_EQ(R.Stdout, "5 true [inside the variant] 999\n");
 }
+
+TEST(Schema, AnAccessPathIsWalkedOncePerAssignment) {
+    // A string whose capacity a discriminant fixes needs both an address and a
+    // capacity, and emitLValue and exprStrCapV each resolved the path from
+    // scratch -- so every subscript along the way was emitted twice and a
+    // side-effecting one ran twice.  ISO §6.8.2.2 evaluates the variable-access
+    // of an assignment once.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type t(n: integer) = record a: array[1..n] of record s: string(n) end end;\n"
+        "var q: ^t; calls: integer;\n"
+        "function next: integer;\n"
+        "begin calls := calls + 1; next := 1 end;\n"
+        "begin\n"
+        "  calls := 0; new(q, 8);\n"
+        "  q^.a[next].s := 'hi';\n"
+        "  writeln('next called ', calls:1, ' time(s); [', q^.a[1].s, ']');\n"
+        "  dispose(q)\n"
+        "end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "next called 1 time(s); [hi]\n");
+}

@@ -258,6 +258,18 @@ void Codegen::Impl::emitAssign(const AssignStmt& s) {
         return;
     }
 
+    // EP §6.4.7: a string whose capacity a discriminant fixes needs both an
+    // address and a capacity, and each of emitLValue and exprStrCapV resolves
+    // the access path from scratch -- so every subscript along the way was
+    // emitted twice, and a side-effecting one in `q^.a[next].s := v` ran twice.
+    // One walk, both answers.
+    if (exprIsVarStr(*s.Target) && s.Target->ResolvedType->ExtentVaries)
+        if (auto path = schemaPathOf(*s.Target))
+            if (auto* cap = strCapFromPath(*path)) {
+                emitStrStore(path->addr, cap, *s.Value);
+                return;
+            }
+
     auto* addr = emitLValue(*s.Target);
     if (!addr) codegenICE("assignment to a non-addressable target");
 

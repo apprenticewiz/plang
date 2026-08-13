@@ -364,13 +364,21 @@ llvm::Value* Codegen::Impl::exprStrCapV(const ExprNode& e) {
     // answers as readily as a direct field -- recognising only the shapes `q^`
     // and `p^.s` is what left every deeper one folding the probe's string(1).
     if (auto path = schemaPathOf(e))
-        if (auto* st = llvm::dyn_cast_or_null<StringTypeNode>(path->decl)) {
-            bindSchemaDiscs(path->root);
-            auto* cap = toI64(emitExpr(*st->Capacity));
-            popScope();
-            if (cap) return cap;
-        }
+        if (auto* cap = strCapFromPath(*path)) return cap;
     return i64c(exprStrCap(e));
+}
+
+/// The capacity of an already-resolved path, so a caller that has one need not
+/// resolve it again.  Resolving twice re-emits every subscript along the way,
+/// which for `q^.a[next].s := v` called `next` once for the address and once
+/// for the capacity.
+llvm::Value* Codegen::Impl::strCapFromPath(const SchemaPath& path) {
+    auto* st = llvm::dyn_cast_or_null<StringTypeNode>(path.decl);
+    if (!st) return nullptr;
+    bindSchemaDiscs(path.root);
+    auto* cap = toI64(emitExpr(*st->Capacity));
+    popScope();
+    return cap;
 }
 
 // ---------------------------------------------------------------------------

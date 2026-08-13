@@ -1042,6 +1042,7 @@ struct Codegen::Impl {
         const TypeNode* decl{nullptr};
     };
     std::optional<SchemaPath> schemaPathOf(const ExprNode& e);
+    llvm::Value* strCapFromPath(const SchemaPath& path);
     const TypeNode* fieldDenoterOf(const RecordTypeNode& rt, const std::string& field);
     const TypeNode* variantFieldDenoterOf(const VariantPart& vp, const std::string& field);
     static bool isRuntimeLaidOut(const ExprNode& e);
