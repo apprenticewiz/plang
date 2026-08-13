@@ -647,6 +647,11 @@ std::shared_ptr<Type> Sema::resolveUndiscriminatedSchema(Symbol& Sym,
     T->SchemaName        = N.Name;
     T->SchemaBody        = Body;
     T->SchemaFixedLayout = !LayoutVaries;
+    // The schema type itself says whether its body needs the run-time layout.
+    // Without this the flag stopped at the body, so `p^` for an array-bodied
+    // schema looked fixed and every consumer that tests the deref's type --
+    // the index stride among them -- took the probe path.
+    T->ExtentVaries      = Body->ExtentVaries;
     for (const auto& P : Sym.SchemaDeclParams)
         T->SchemaDiscs.push_back({.Name = P.Name, .Ty = P.Ty});
 

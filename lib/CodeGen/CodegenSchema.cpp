@@ -249,7 +249,14 @@ llvm::Value* Codegen::Impl::schemaBodySize(const plang::Type& schema,
     // the path below: it already recovered its extent from the discriminants
     // before any of this existed, and routing it through here changed nothing
     // but which code computed the same number.
-    if (body->ExtentVaries && body->Kind != TypeKind::Array) {
+    // An array body whose BOUNDS vary keeps the path below: it recovered its
+    // extent from the discriminants before any of this existed.  One whose
+    // ELEMENT varies does not -- that path takes the element size from the
+    // probe-lowered type, so `array[1..3] of string(n)` was allocated three
+    // string(1)s wide while every store was told the real capacity, which
+    // overlapped the elements and ran off the end of the block.
+    const bool elemVaries = body->ElemType && body->ElemType->ExtentVaries;
+    if (body->ExtentVaries && (body->Kind != TypeKind::Array || elemVaries)) {
         if (const SchemaDef* def = findSchemaDef(schema.SchemaName);
                 def && def->body) {
             SchemaRef ref{&schema, nullptr, discs};
