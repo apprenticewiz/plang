@@ -192,6 +192,19 @@ void plang_err_range(int64_t V, int64_t Lo, int64_t Hi) {
     std::exit(PlangRuntimeErrorStatus);
 }
 
+/// EP §6.7.5.3: new(p, d1..ds) takes the discriminants as expressions, so a
+/// value that cannot describe any member of the family is only detectable here.
+/// An extent of zero or less would size the allocation from nonsense, and every
+/// access to the object afterwards would be outside it.
+void plang_err_schema_extent(const char *Name, int64_t Got) {
+    std::fflush(stdout);
+    std::fprintf(stderr,
+                 "plang runtime: schema discriminant %s is %" PRId64
+                 ", which is not a usable extent\n",
+                 Name ? Name : "?", Got);
+    std::exit(PlangRuntimeErrorStatus);
+}
+
 /// EP §6.7.3.2: schematic values are only assignment-compatible when they were
 /// produced from the schema with the same discriminant tuple.
 void plang_err_schema_disc(const char *Name, int64_t Dst, int64_t Src) {

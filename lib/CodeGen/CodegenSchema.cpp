@@ -284,6 +284,26 @@ void Codegen::Impl::emitNewSchema(const ExprNode& ptrArg,
         discs.push_back(v);
     }
 
+    // EP §6.7.5.3 lets the discriminants be expressions, so nothing before now
+    // can tell that one is unusable.  An extent of zero or less sizes the
+    // allocation from nonsense and puts every later access outside it, and it
+    // was accepted silently.  Only a discriminant that actually fixes an extent
+    // is checked: one used as a range bound may legitimately be anything.
+    if (schema.SchemaBody && schema.SchemaBody->ExtentVaries)
+        for (size_t i = 0; i < s; ++i) {
+            auto* bad = builder.CreateICmpSLT(discs[i], i64c(1), "sch.extent.bad");
+            if (auto* c = llvm::dyn_cast<llvm::ConstantInt>(bad); c && c->isZero())
+                continue;   // a constant that is plainly fine costs nothing
+            auto* nm = internStrPtr(i < schema.SchemaDiscs.size()
+                                        ? schema.SchemaDiscs[i].Name : "?");
+            emitGuard(bad, "schema.extent", [&] {
+                builder.CreateCall(
+                    getExternFnN("plang_err_schema_extent",
+                                 llvm::Type::getVoidTy(ctx), {ptrTy, i64Ty}),
+                    {nm, discs[i]});
+            });
+        }
+
     const uint64_t hdrBytes = s * 8;
     auto* bytes = builder.CreateAdd(llvm::ConstantInt::get(i64Ty, hdrBytes),
                                     schemaBodySize(schema, discs), "sch.alloc");

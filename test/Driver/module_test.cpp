@@ -3158,3 +3158,33 @@ TEST(Schema, EveryStringOperationUsesTheRunTimeCapacity) {
               "len=11\nsub=[hello]\nsubstr=[world]\ncat=[hello world!]\n"
               "eq=true idx=7\nafter=[HELLO world]\n");
 }
+
+TEST(Schema, NewRejectsADiscriminantThatIsNotAUsableExtent) {
+    // EP §6.7.5.3 takes the discriminants as expressions, so nothing before
+    // run time can tell that one is unusable.  A zero or negative extent sized
+    // the allocation from nonsense and put every later access outside it, and
+    // was accepted without a word.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type ps = ^string;\n"
+        "var q: ps; n: integer;\n"
+        "begin n := -5; writeln('before'); new(q, n); writeln('after') end.\n",
+        kEP);
+    EXPECT_NE(R.ExitCode, 0);
+    EXPECT_EQ(R.Stdout, "before\n");
+    EXPECT_NE(R.Stderr.find("not a usable extent"), std::string::npos) << R.Stderr;
+}
+
+TEST(Schema, ADiscriminantThatFixesNoExtentIsNotRangeChecked) {
+    // The check is only for a discriminant that actually sizes something.  A
+    // fixed-layout body's discriminant may legitimately be any value, and
+    // refusing zero there would reject a program EP allows.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type tagged(id: integer) = record count: integer end;\n"
+        "var q: ^tagged;\n"
+        "begin new(q, 0); q^.count := 7; writeln(q^.count:1, ' ', q^.id:1) end.\n",
+        kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "7 0\n");
+}
