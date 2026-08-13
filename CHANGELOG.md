@@ -6,6 +6,8 @@ version numbers follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 
 ---
 
+## [Unreleased]
+
 ## [0.1.5] - 2026-08-12
 
 **Where 0.1.4 went.**  It was cut from the 0.1.3 lineage rather than from this
