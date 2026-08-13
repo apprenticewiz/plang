@@ -431,17 +431,10 @@ llvm::Value* Codegen::Impl::rtSizeOfTypeNode(const TypeNode* tn) {
         return builder.CreateMul(count, stride, "arr.size");
     }
     if (auto* rt = llvm::dyn_cast<RecordTypeNode>(d)) {
+        llvm::Value* off = rtWalkFields(rt->Fields, i64c(0), rt->Packed,
+                                        /*stopAt=*/nullptr, nullptr);
         if (rt->Variant)
-            codegenICE("a schema record body with a variant part has no run-time layout");
-        llvm::Value* off = i64c(0);
-        for (const auto& fd : rt->Fields) {
-            const uint64_t a = rt->Packed ? 1 : rtAlignOfTypeNode(fd.Type.get());
-            for (size_t i = 0; i < fd.Names.size(); ++i) {
-                off = alignUpV(off, a);
-                off = builder.CreateAdd(off, rtSizeOfTypeNode(fd.Type.get()),
-                                        "rec.off");
-            }
-        }
+            off = rtVariantSize(*rt->Variant, off, rt->Packed);
         // A record is padded to its own alignment, as a struct is, so that an
         // array of them strides correctly.
         return alignUpV(off, rt->Packed ? 1 : rtAlignOfTypeNode(d));
@@ -450,24 +443,94 @@ llvm::Value* Codegen::Impl::rtSizeOfTypeNode(const TypeNode* tn) {
     return nullptr;
 }
 
-llvm::Value* Codegen::Impl::rtFieldOffset(const RecordTypeNode& rt,
-                                          const std::string& field) {
-    if (rt.Variant)
-        codegenICE("a schema record body with a variant part has no run-time layout");
-    // The same walk as the size above, stopped at the field.  Same walk on
-    // purpose: an offset worked out one way and a size the other is how the
-    // last field ends up outside the allocation.
-    llvm::Value* off = i64c(0);
-    for (const auto& fd : rt.Fields) {
-        const uint64_t a = rt.Packed ? 1 : rtAlignOfTypeNode(fd.Type.get());
+/// Walk \p fields accumulating from \p off.  With \p stopAt set, returns the
+/// offset of that field and sets *found; otherwise returns the offset one past
+/// the last.  Size and offset come from ONE walk on purpose: worked out
+/// separately, they drift, and that is how a field ends up outside the
+/// allocation.
+llvm::Value* Codegen::Impl::rtWalkFields(const std::vector<FieldDecl>& fields,
+                                         llvm::Value* off, bool packed,
+                                         const std::string* stopAt, bool* found) {
+    for (const auto& fd : fields) {
+        const uint64_t a = packed ? 1 : rtAlignOfTypeNode(fd.Type.get());
         for (const auto& nm : fd.Names) {
             off = alignUpV(off, a);
-            if (eqCI(nm, field)) return off;
+            if (stopAt && eqCI(nm, *stopAt)) { if (found) *found = true; return off; }
             off = builder.CreateAdd(off, rtSizeOfTypeNode(fd.Type.get()),
                                     "rec.off");
         }
     }
+    return off;
+}
+
+/// §6.4.3.3: the alternatives of a variant part share one run of storage, so
+/// the part is as big as the largest of them -- a max taken at run time here,
+/// since an alternative's own size may depend on a discriminant.  The tag, if
+/// there is one, is an ordinary field ahead of that run.
+llvm::Value* Codegen::Impl::rtVariantSize(const VariantPart& vp,
+                                          llvm::Value* off, bool packed) {
+    if (vp.TagType) {
+        const uint64_t a = packed ? 1 : rtAlignOfTypeNode(vp.TagType.get());
+        off = alignUpV(off, a);
+        off = builder.CreateAdd(off, rtSizeOfTypeNode(vp.TagType.get()), "tag.off");
+    }
+    off = alignUpV(off, packed ? 1 : rtVariantAlign(vp));
+    llvm::Value* widest = i64c(0);
+    for (const auto& vc : vp.Cases) {
+        llvm::Value* sz = rtWalkFields(vc.Fields, i64c(0), packed, nullptr, nullptr);
+        if (vc.NestedVariant) sz = rtVariantSize(*vc.NestedVariant, sz, packed);
+        widest = builder.CreateSelect(builder.CreateICmpUGT(sz, widest),
+                                      sz, widest, "variant.max");
+    }
+    return builder.CreateAdd(off, widest, "variant.end");
+}
+
+uint64_t Codegen::Impl::rtVariantAlign(const VariantPart& vp) {
+    uint64_t a = 1;
+    for (const auto& vc : vp.Cases) {
+        for (const auto& fd : vc.Fields)
+            a = std::max(a, rtAlignOfTypeNode(fd.Type.get()));
+        if (vc.NestedVariant) a = std::max(a, rtVariantAlign(*vc.NestedVariant));
+    }
+    return a;
+}
+
+llvm::Value* Codegen::Impl::rtFieldOffset(const RecordTypeNode& rt,
+                                          const std::string& field) {
+    bool found = false;
+    llvm::Value* off = rtWalkFields(rt.Fields, i64c(0), rt.Packed, &field, &found);
+    if (found) return off;
+    if (rt.Variant) {
+        if (auto* v = rtVariantFieldOffset(*rt.Variant, off, rt.Packed, field))
+            return v;
+    }
     codegenICE("record has no field named '" + field + "'");
+    return nullptr;
+}
+
+/// The offset of \p field within a variant part, or null if it is not in one.
+/// Every alternative starts at the same place, which is what sharing storage
+/// means, so the alternative the field is in is the only one walked.
+llvm::Value* Codegen::Impl::rtVariantFieldOffset(const VariantPart& vp,
+                                                 llvm::Value* off, bool packed,
+                                                 const std::string& field) {
+    if (vp.TagType) {
+        const uint64_t a = packed ? 1 : rtAlignOfTypeNode(vp.TagType.get());
+        off = alignUpV(off, a);
+        if (!vp.TagField.empty() && eqCI(vp.TagField, field)) return off;
+        off = builder.CreateAdd(off, rtSizeOfTypeNode(vp.TagType.get()), "tag.off");
+    }
+    off = alignUpV(off, packed ? 1 : rtVariantAlign(vp));
+    for (const auto& vc : vp.Cases) {
+        bool found = false;
+        llvm::Value* v = rtWalkFields(vc.Fields, off, packed, &field, &found);
+        if (found) return v;
+        if (vc.NestedVariant) {
+            llvm::Value* end = rtWalkFields(vc.Fields, off, packed, nullptr, nullptr);
+            if (auto* n = rtVariantFieldOffset(*vc.NestedVariant, end, packed, field))
+                return n;
+        }
+    }
     return nullptr;
 }
 

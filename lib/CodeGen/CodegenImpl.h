@@ -998,6 +998,13 @@ struct Codegen::Impl {
     uint64_t     rtAlignOfTypeNode(const TypeNode* tn);
     llvm::Value* rtSizeOfTypeNode(const TypeNode* tn);
     llvm::Value* rtFieldOffset(const RecordTypeNode& rt, const std::string& field);
+    llvm::Value* rtWalkFields(const std::vector<FieldDecl>& fields,
+                              llvm::Value* off, bool packed,
+                              const std::string* stopAt, bool* found);
+    llvm::Value* rtVariantSize(const VariantPart& vp, llvm::Value* off, bool packed);
+    llvm::Value* rtVariantFieldOffset(const VariantPart& vp, llvm::Value* off,
+                                      bool packed, const std::string& field);
+    uint64_t     rtVariantAlign(const VariantPart& vp);
     llvm::Value* alignUpV(llvm::Value* v, uint64_t align);
     void bindSchemaDiscs(const SchemaRef& ref);
     const ArrayTypeNode* varyingArrayFieldOf(const FieldExpr& fe);

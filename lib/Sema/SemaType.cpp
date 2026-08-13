@@ -628,14 +628,9 @@ std::shared_ptr<Type> Sema::resolveUndiscriminatedSchema(Symbol& Sym,
         error(N.Loc, diag::err_schema_body_not_representable, {N.Name});
         return TyErr;
     }
-    // The one shape the run-time layout still has no answer for: a variant
-    // part shares storage between alternatives, and which alternative is live
-    // is not a question the discriminants answer.
-    if (LayoutVaries && Body->Kind == TypeKind::Record && Body->RecordDecl
-            && Body->RecordDecl->Variant) {
-        error(N.Loc, diag::err_schema_body_not_representable, {N.Name});
-        return TyErr;
-    }
+    // A variant part is laid out too: its alternatives share one run of
+    // storage, so the part is as wide as the widest of them -- a max taken at
+    // run time, since an alternative's own size may depend on a discriminant.
 
     auto T = std::make_shared<Type>();
     T->Kind              = TypeKind::Schema;

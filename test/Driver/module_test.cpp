@@ -1264,18 +1264,47 @@ TEST(Schema, AFieldAfterTheVaryingOneMovesWithIt) {
     EXPECT_EQ(R.Stdout, "[abcd] 11 len=4\n[a much longer string] 22 len=20\n");
 }
 
-TEST(Schema, AVariantPartInAVaryingBodyIsStillRefused) {
-    // The one shape with no run-time answer: a variant part shares storage
-    // between alternatives, and which one is live is not something the
-    // discriminants say.
+TEST(Schema, AVariantPartInAVaryingBodyIsLaidOutToo) {
+    // §6.4.3.3: the alternatives share one run of storage, so the part is as
+    // wide as the widest of them -- a max taken at run time, since an
+    // alternative's own size may itself depend on a discriminant.  The variant
+    // sits after a field whose size the discriminant fixes, so its offset is
+    // computed rather than taken from the probe.
     auto R = compileAndRun(
-        "program p;\n"
+        "program p(output);\n"
         "type buf(n: integer) = record d: array[1..n] of char;\n"
         "       case tag: boolean of true: (x: integer); false: (y: real) end;\n"
-        "var q: ^buf;\n"
-        "begin end.\n", kEP);
-    EXPECT_NE(R.ExitCode, 0);
-    EXPECT_NE(R.Stderr.find("plang does not implement"), std::string::npos) << R.Stderr;
+        "var q: ^buf; i: integer;\n"
+        "begin\n"
+        "  new(q, 6);\n"
+        "  for i := 1 to 6 do q^.d[i] := chr(ord('a') + i - 1);\n"
+        "  q^.tag := true; q^.x := 1234;\n"
+        "  write('d='); for i := 1 to 6 do write(q^.d[i]);\n"
+        "  writeln(' tag=', q^.tag, ' x=', q^.x:1);\n"
+        "  dispose(q)\n"
+        "end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "d=abcdef tag=true x=1234\n");
+}
+
+TEST(Schema, TheVariantPartIsAsWideAsItsWidestAlternative) {
+    // The max is what stops the smaller alternative's storage being all that is
+    // allocated: `y` is a real and `x` an integer, and writing y through a
+    // block sized for x would run past the end of the allocation.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type buf(n: integer) = record d: array[1..n] of char;\n"
+        "       case tag: boolean of true: (x: char); false: (y: real) end;\n"
+        "var q: ^buf; canary: integer;\n"
+        "begin\n"
+        "  canary := 4321;\n"
+        "  new(q, 3); q^.d[1] := 'z';\n"
+        "  q^.tag := false; q^.y := 2.5;\n"
+        "  writeln(q^.d[1], ' ', q^.y:3:1, ' ', canary:1);\n"
+        "  dispose(q)\n"
+        "end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "z 2.5 4321\n");
 }
 
 TEST(Schema, AFixedSizedBodyWithADiscriminantBoundIsRejectedTooAndNotAsASize) {
