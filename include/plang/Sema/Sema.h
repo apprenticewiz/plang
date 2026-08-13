@@ -212,6 +212,18 @@ private:
     /// that an actual of any capacity is accepted.
     int InPointerDomain_{0};
 
+    /// Holds a depth counter at zero for the extent of a scope, for a position
+    /// that is inside a pointer domain-type syntactically but is not one.
+    struct ClearSchemaScope {
+        explicit ClearSchemaScope(int& C) : C_(C), Saved_(C) { C = 0; }
+        ~ClearSchemaScope() { C_ = Saved_; }
+        ClearSchemaScope(const ClearSchemaScope&)            = delete;
+        ClearSchemaScope& operator=(const ClearSchemaScope&) = delete;
+    private:
+        int& C_;
+        int  Saved_;
+    };
+
     /// Scoped enable for undiscriminated schema-names as type-denoters.
     struct AllowSchemaScope {
         int& N;

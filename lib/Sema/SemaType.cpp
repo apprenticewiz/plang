@@ -163,6 +163,11 @@ std::shared_ptr<Type> Sema::resolveTypeImpl(const TypeNode& Node) {
         return resolveNamed(*N);
     }
     if (auto* N = llvm::dyn_cast<ArrayTypeNode>(&Node)) {
+        // EP §6.4.4 makes the pointer's IMMEDIATE domain-type the place a bare
+        // schema-name may stand; a component of it is an ordinary type
+        // position.  Without clearing this, `^array[1..3] of string` read its
+        // component as the capacity schema, which no new() supplies.
+        ClearSchemaScope NotDomain(InPointerDomain_);
         auto Elem = resolveType(*N->Element);
         // ISO §6.4.3.2: the index may be named by its type rather than written
         // as a range, in which case the extent is the whole of that type.
@@ -240,6 +245,7 @@ std::shared_ptr<Type> Sema::resolveTypeImpl(const TypeNode& Node) {
         return T;
     }
     if (auto* N = llvm::dyn_cast<RecordTypeNode>(&Node)) {
+        ClearSchemaScope NotDomain(InPointerDomain_);   // as for an array above
         auto T = std::make_shared<Type>();
         T->Kind       = TypeKind::Record;
         T->Anonymous  = true;   // until a declaration names it
@@ -330,6 +336,9 @@ std::shared_ptr<Type> Sema::resolveTypeImpl(const TypeNode& Node) {
         AllowSchemaScope Domain(InPointerDomain_);
         auto Base = resolveType(*N->Base);
         return Ctx_.getPointer(Base);
+        // NOTE: both guards are scoped to THIS denoter only -- see the reset in
+        // the structured denoters below, which is what stops `^array[1..3] of
+        // string` reading its component as the capacity schema.
     }
     if (auto* N = llvm::dyn_cast<StringTypeNode>(&Node)) {
         // EP §6.4.3.3: string(N) — variable-length string with capacity N.
