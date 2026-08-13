@@ -182,6 +182,12 @@ struct Codegen::Impl {
         /// the probe's string(1).  Last, and default-initialised, so that every
         /// existing aggregate initialisation of this struct is unaffected.
         llvm::Value*     strCapV{nullptr};
+        /// EP §6.4.7: a `with`-bound component of a run-time-laid-out object.
+        /// Binding it as a bare address loses the layout for anything reached
+        /// THROUGH it -- an array field indexed against the probe's bounds, a
+        /// nested record addressed by the probe struct -- so the denoter its
+        /// extents are written in is kept, and schemaPathOf resumes from here.
+        const TypeNode*  pathDecl{nullptr};
     };
     std::vector<std::unordered_map<std::string, VarEntry>> scopes;
 
@@ -998,6 +1004,8 @@ struct Codegen::Impl {
     /// probe's answer and would check `q^ := 'hi'` against a string(1).
     llvm::Value* exprStrCapV(const ExprNode& e);
     void setVarStrCap(const std::string& name, llvm::Value* cap);
+    void setVarSchemaPath(const std::string& name, const SchemaRef& root,
+                          const TypeNode* decl);
 
     /// The capacity to SIZE A TEMPORARY with, which has to be a constant.  A
     /// discriminant-fixed capacity is not one, and the probe's answer would cut

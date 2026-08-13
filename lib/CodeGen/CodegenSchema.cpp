@@ -592,6 +592,14 @@ const TypeNode* peel(const TypeNode* tn) {
 
 std::optional<Codegen::Impl::SchemaPath>
 Codegen::Impl::schemaPathOf(const ExprNode& e) {
+    // A `with`-bound component resumes the path it was bound from: it is an
+    // ordinary name by now, and without this anything reached through it --
+    // `with p^ do d[i]` -- would be indexed against the probe's bounds.
+    if (auto* id = llvm::dyn_cast<IdentExpr>(&e))
+        if (const auto* ve = findVar(id->Name); ve && ve->pathDecl && ve->schemaTy)
+            return SchemaPath{SchemaRef{ve->schemaTy, ve->ptr, ve->schemaDiscs},
+                              ve->ptr, ve->pathDecl};
+
     // Root: the object itself, whose header carries the discriminants.
     if (llvm::isa<DerefExpr>(&e) || llvm::isa<IdentExpr>(&e)) {
         auto ref = schemaRefOf(e);
@@ -674,5 +682,19 @@ void Codegen::Impl::setVarStrCap(const std::string& name, llvm::Value* cap) {
     for (auto it = scopes.rbegin(); it != scopes.rend(); ++it) {
         auto f = it->find(toLower(name));
         if (f != it->end()) { f->second.strCapV = cap; return; }
+    }
+}
+
+void Codegen::Impl::setVarSchemaPath(const std::string& name,
+                                     const SchemaRef& root,
+                                     const TypeNode* decl) {
+    for (auto it = scopes.rbegin(); it != scopes.rend(); ++it) {
+        auto f = it->find(toLower(name));
+        if (f != it->end()) {
+            f->second.schemaTy    = root.semaTy;
+            f->second.schemaDiscs = root.discs;
+            f->second.pathDecl    = decl;
+            return;
+        }
     }
 }

@@ -3228,3 +3228,32 @@ TEST(Schema, WithOverAnUndiscriminatedSchemaPointer) {
     ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
     EXPECT_EQ(R.Stdout, "[hi there] n=3\ninside [hi there] n=3 cap=10\n");
 }
+
+TEST(Schema, AWithBoundComponentKeepsItsRunTimeLayout) {
+    // `with p^ do` bound each field to a bare address, which loses the layout
+    // for anything reached THROUGH it: an array field was indexed against the
+    // probe's 1..1 and a nested record was addressed by the probe struct.  A
+    // bound name now resumes the path it was bound from -- the same recursion
+    // that resolves `q^.d[i]` written out in full.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type t(n: integer) = record\n"
+        "       d: array[1..n] of integer;\n"
+        "       inner: record s: string(n); k: integer end\n"
+        "     end;\n"
+        "var q: ^t; i: integer;\n"
+        "begin\n"
+        "  new(q, 5);\n"
+        "  with q^ do begin\n"
+        "    for i := 1 to 5 do d[i] := i * 3;\n"
+        "    inner.s := 'five!'; inner.k := 9\n"
+        "  end;\n"
+        "  with q^ do begin\n"
+        "    for i := 1 to 5 do write(d[i]:1, ' ');\n"
+        "    writeln('| [', inner.s, '] ', inner.k:1)\n"
+        "  end;\n"
+        "  dispose(q)\n"
+        "end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "3 6 9 12 15 | [five!] 9\n");
+}

@@ -986,6 +986,11 @@ void Codegen::Impl::emitWith(const WithStmt& s) {
                                                      "with.fld");
                         defVar(F.Name, fp,
                                F.Ty ? llvmTypeOfSemaType(*F.Ty) : i64Ty);
+                        // Keep the path, not just the address: an array field
+                        // bound here is still indexed, and a nested record is
+                        // still selected from.
+                        setVarSchemaPath(F.Name, path->root,
+                                         fieldDenoterOf(*rt, F.Name));
                         // A varying string field: record what its capacity
                         // really is, since the bound name loses the path.
                         if (F.Ty && F.Ty->Kind == TypeKind::VarString
