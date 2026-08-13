@@ -1014,8 +1014,8 @@ struct Codegen::Impl {
     /// fixes.  Call with the discriminants bound in the current scope (see
     /// bindSchemaDiscs): the bound and capacity expressions are re-emitted
     /// against them.  A subtree that reads no discriminant folds to a constant.
-    uint64_t     rtAlignOfTypeNode(const TypeNode* tn);
-    llvm::Value* rtSizeOfTypeNode(const TypeNode* tn);
+    uint64_t     rtAlignOfTypeNode(const TypeNode* tn, bool knownVarying = false);
+    llvm::Value* rtSizeOfTypeNode(const TypeNode* tn, bool knownVarying = false);
     llvm::Value* rtFieldOffset(const RecordTypeNode& rt, const std::string& field);
     llvm::Value* rtWalkFields(const std::vector<FieldDecl>& fields,
                               llvm::Value* off, bool packed,

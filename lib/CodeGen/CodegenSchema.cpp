@@ -261,7 +261,13 @@ llvm::Value* Codegen::Impl::schemaBodySize(const plang::Type& schema,
                 def && def->body) {
             SchemaRef ref{&schema, nullptr, discs};
             bindSchemaDiscs(ref);
-            auto* sz = rtSizeOfTypeNode(def->body);
+            // The BODY node carries no resolved type of its own:
+            // resolveUndiscriminatedSchema reaches it through resolveTypeImpl,
+            // and only resolveType records one.  Its CHILDREN are annotated,
+            // which is exactly why the element stride came out right while the
+            // size folded to the 255-capacity default.  Say it varies rather
+            // than asking the node.
+            auto* sz = rtSizeOfTypeNode(def->body, /*knownVarying=*/true);
             popScope();
             return sz;
         }
@@ -391,11 +397,11 @@ bool nodeExtentVaries(const TypeNode* tn) {
 }
 } // namespace
 
-uint64_t Codegen::Impl::rtAlignOfTypeNode(const TypeNode* tn) {
+uint64_t Codegen::Impl::rtAlignOfTypeNode(const TypeNode* tn, bool knownVarying) {
     bool packed = false;
     const TypeNode* d = peelPacked(tn, &packed);
     if (packed) return 1;
-    if (!nodeExtentVaries(d))
+    if (!knownVarying && !nodeExtentVaries(d))
         return mod->getDataLayout().getABITypeAlign(llvmTypeOfNode(*d)).value();
     // A varying string is { i64 len, bytes } whatever the capacity is.
     if (llvm::isa<StringTypeNode>(d)) return 8;
@@ -417,12 +423,13 @@ llvm::Value* Codegen::Impl::alignUpV(llvm::Value* v, uint64_t align) {
     return builder.CreateAnd(sum, builder.CreateNot(mask), "align.up");
 }
 
-llvm::Value* Codegen::Impl::rtSizeOfTypeNode(const TypeNode* tn) {
+llvm::Value* Codegen::Impl::rtSizeOfTypeNode(const TypeNode* tn,
+                                             bool knownVarying) {
     const TypeNode* d = peelPacked(tn);
     // Nothing in it reads a discriminant, so the static answer is the answer --
     // and using the DataLayout here is what keeps a fixed field at the offset
     // an ordinary load of it expects.
-    if (!nodeExtentVaries(d))
+    if (!knownVarying && !nodeExtentVaries(d))
         return i64c(static_cast<int64_t>(
             mod->getDataLayout().getTypeAllocSize(llvmTypeOfNode(*d))));
 
