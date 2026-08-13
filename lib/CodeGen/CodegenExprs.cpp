@@ -153,8 +153,17 @@ llvm::Value* Codegen::Impl::emitExpr(const ExprNode& e) {
         //
         // The assignment path a few lines away in CodegenStmts already asks
         // exprStrCap.  Only the rvalue did this.
-        int64_t cap = exprStrCap(*n->Str);
+        // Two different capacities, and conflating them cut a
+        // discriminant-sized string's substring to one character: the result
+        // TEMPORARY has to be sized by a constant, while what the runtime is
+        // told about the SOURCE is the capacity that source really has.
+        int64_t cap = exprStrCapStatic(*n->Str);
         if (cap <= 0) cap = PlangMaxStringCapacity;
+        // The source capacity falls back to the same widest-capacity answer
+        // when the operand is not typed as a string(n); exprStrCapV reports 0
+        // there, and telling the runtime the source holds nothing put every
+        // substring of one outside its own bounds.
+        auto* srcCap = exprIsVarStr(*n->Str) ? exprStrCapV(*n->Str) : i64c(cap);
         auto* resPtr = createEntryAlloca(strStructType(cap), "substr.res");
         auto* low    = toI64(emitExpr(*n->Low));
         auto* high   = toI64(emitExpr(*n->High));
@@ -164,8 +173,7 @@ llvm::Value* Codegen::Impl::emitExpr(const ExprNode& e) {
             llvm::ConstantInt::get(i64Ty, 1), "substr.len");
         auto* fn     = getStrFn("plang_str_substr",
             llvm::Type::getVoidTy(ctx), {ptrTy, i64Ty, ptrTy, i64Ty, i64Ty, i64Ty});
-        builder.CreateCall(fn, {resPtr, llvm::ConstantInt::get(i64Ty, cap),
-            strAddr, llvm::ConstantInt::get(i64Ty, cap), low, len});
+        builder.CreateCall(fn, {resPtr, i64c(cap), strAddr, srcCap, low, len});
         return resPtr;
     }
     if (auto* n = llvm::dyn_cast<WriteParam>(&e)) {
@@ -322,36 +330,45 @@ llvm::Value* Codegen::Impl::emitBinary(const BinaryExpr& e) {
         // EP §6.8.3.2 makes a char operand string-compatible, so either side of
         // the concatenation may be one.  The runtime concatenates onto a string,
         // so a char on the left has to become a one-character string first.
-        auto strOperand = [&](const ExprNode& x) -> std::pair<llvm::Value*, int64_t> {
-            if (exprIsVarStr(x)) return {emitStrAddr(x), exprStrCap(x)};
+        // The RESULT is a temporary and has to be sized by a constant, so a
+        // discriminant-fixed operand contributes the widest capacity plang has
+        // rather than the probe's one character.  What each operand is declared
+        // to hold is told to the runtime separately, as a value.
+        auto strOperand = [&](const ExprNode& x) -> std::pair<llvm::Value*, llvm::Value*> {
+            if (exprIsVarStr(x)) return {emitStrAddr(x), exprStrCapV(x)};
             auto* v   = emitExpr(x);
             auto* tmp = createEntryAlloca(strStructType(1), "str.chr");
             if (v && v->getType()->isIntegerTy(8)) emitStrFromChar(tmp, 1, v);
             else if (v)                            emitStrFromCStr(tmp, 1, v);
-            return {tmp, 1};
+            return {tmp, i64c(1)};
         };
         auto [lv, capL] = strOperand(*e.Left);
-        int64_t capR   = exprIsVarStr(*e.Right) ? exprStrCap(*e.Right) : 1;
-        int64_t capRes = capL + capR;
+        auto* capR = exprIsVarStr(*e.Right) ? exprStrCapV(*e.Right) : i64c(1);
+        // A non-string operand is one character, as it was before: returning
+        // zero for it sized the result temporary at 1 and cut 'x' + 'y' to "x".
+        auto staticCap = [&](const ExprNode& x) -> int64_t {
+            return exprIsVarStr(x) ? exprStrCapStatic(x) : 1;
+        };
+        // No clamp: a declared capacity may exceed PlangMaxStringCapacity --
+        // string(300) is legal and the corpus has one -- and capping the sum
+        // here cut `n := n + 'x'` to 255.  That constant is the answer for a
+        // capacity that is not known, not a ceiling on ones that are.
+        const int64_t capRes = staticCap(*e.Left) + staticCap(*e.Right);
         auto*   resPtr = createEntryAlloca(strStructType(capRes), "str.concat");
         auto*   rv     = exprIsVarStr(*e.Right) ? emitStrAddr(*e.Right)
                                                 : emitExpr(*e.Right);
         if (exprIsVarStr(*e.Right)) {
             auto* fn = getStrFn("plang_str_concat", llvm::Type::getVoidTy(ctx),
                 {ptrTy, i64Ty, ptrTy, i64Ty, ptrTy, i64Ty});
-            builder.CreateCall(fn, {resPtr, llvm::ConstantInt::get(i64Ty, capRes),
-                lv, llvm::ConstantInt::get(i64Ty, capL),
-                rv, llvm::ConstantInt::get(i64Ty, capR)});
+            builder.CreateCall(fn, {resPtr, i64c(capRes), lv, capL, rv, capR});
         } else if (rv && rv->getType()->isIntegerTy(8)) {
             auto* fn = getStrFn("plang_str_concat_char", llvm::Type::getVoidTy(ctx),
                 {ptrTy, i64Ty, ptrTy, i64Ty, i8Ty});
-            builder.CreateCall(fn, {resPtr, llvm::ConstantInt::get(i64Ty, capRes),
-                lv, llvm::ConstantInt::get(i64Ty, capL), rv});
+            builder.CreateCall(fn, {resPtr, i64c(capRes), lv, capL, rv});
         } else {
             auto* fn = getStrFn("plang_str_concat_cstr", llvm::Type::getVoidTy(ctx),
                 {ptrTy, i64Ty, ptrTy, i64Ty, ptrTy});
-            builder.CreateCall(fn, {resPtr, llvm::ConstantInt::get(i64Ty, capRes),
-                lv, llvm::ConstantInt::get(i64Ty, capL), rv});
+            builder.CreateCall(fn, {resPtr, i64c(capRes), lv, capL, rv});
         }
         return resPtr;
     }
@@ -372,11 +389,11 @@ llvm::Value* Codegen::Impl::emitBinary(const BinaryExpr& e) {
                 e.Op == TokenKind::LessThanOrEqual ? "plang_str_le" :
                 e.Op == TokenKind::GreaterThan     ? "plang_str_gt" : "plang_str_ge";
             // Convert each operand to a (ptr, cap) pair, wrapping literals in a temp.
-            auto toStrPtr = [&](const ExprNode& expr) -> std::pair<llvm::Value*, int64_t> {
+            auto toStrPtr = [&](const ExprNode& expr) -> std::pair<llvm::Value*, llvm::Value*> {
                 if (exprIsVarStr(expr))
-                    return {emitStrAddr(expr), exprStrCap(expr)};
+                    return {emitStrAddr(expr), exprStrCapV(expr)};
                 if (exprIsCharStr(expr))
-                    return {emitCharStrAsStr(expr), exprCharStrLen(expr)};
+                    return {emitCharStrAsStr(expr), i64c(exprCharStrLen(expr))};
                 // String literal or char — wrap in a temporary VarString.
                 int64_t cap = 1;
                 if (auto* sl = llvm::dyn_cast<StringLitExpr>(&expr))
@@ -387,14 +404,12 @@ llvm::Value* Codegen::Impl::emitBinary(const BinaryExpr& e) {
                     emitStrFromChar(tmp, cap, val);
                 else if (val)
                     emitStrFromCStr(tmp, cap, val);
-                return {tmp, cap};
+                return {tmp, i64c(cap)};
             };
             auto [la, capL] = toStrPtr(*e.Left);
             auto [ra, capR] = toStrPtr(*e.Right);
             auto* fn  = getStrFn(fnName, i8Ty, {ptrTy, i64Ty, ptrTy, i64Ty});
-            auto* raw = builder.CreateCall(fn, {la,
-                llvm::ConstantInt::get(i64Ty, capL), ra,
-                llvm::ConstantInt::get(i64Ty, capR)}, "str.cmp");
+            auto* raw = builder.CreateCall(fn, {la, capL, ra, capR}, "str.cmp");
             return ensureI1(raw);
         }
     }
@@ -858,26 +873,34 @@ llvm::Value* Codegen::Impl::emitCallExpr(const CallExpr& e) {
 
     // ---- EP string functions (§6.7.6.7) ----
     // Return (ptr, cap) for a string argument using Sema-annotated type.
-    auto getStrArgPtr = [&](int idx) -> std::pair<llvm::Value*, int64_t> {
-        if (e.Args.size() <= (size_t)idx) return {nullptr, 0};
+    auto getStrArgPtr = [&](int idx) -> std::pair<llvm::Value*, llvm::Value*> {
+        if (e.Args.size() <= (size_t)idx) return {nullptr, nullptr};
         const auto& arg = *e.Args[idx];
         if (exprIsVarStr(arg))
-            return {emitStrAddr(arg), exprStrCap(arg)};
+            return {emitStrAddr(arg), exprStrCapV(arg)};
         // String literal — create a temp VarString.
         if (auto* sl = llvm::dyn_cast<StringLitExpr>(&arg)) {
             int64_t cap = (int64_t)sl->Value.size();
             auto* tmp = createEntryAlloca(strStructType(cap), "str.arg");
             emitStrFromCStr(tmp, cap, internStrPtr(sl->Value));
-            return {tmp, cap};
+            return {tmp, i64c(cap)};
         }
-        return {nullptr, 0};
+        return {nullptr, nullptr};
+    };
+    // For sizing a temporary, which needs a constant; see exprStrCapStatic.
+    auto strArgCapStatic = [&](int idx) -> int64_t {
+        if (e.Args.size() <= (size_t)idx) return 0;
+        const auto& arg = *e.Args[idx];
+        if (exprIsVarStr(arg)) return exprStrCapStatic(arg);
+        if (auto* sl = llvm::dyn_cast<StringLitExpr>(&arg))
+            return (int64_t)sl->Value.size();
+        return 0;
     };
     if (lo == "length") {
         auto [ptr, cap] = getStrArgPtr(0);
         if (ptr) {
             auto* fn = getStrFn("plang_str_length", i64Ty, {ptrTy, i64Ty});
-            return builder.CreateCall(fn,
-                {ptr, llvm::ConstantInt::get(i64Ty, cap)}, "length");
+            return builder.CreateCall(fn, {ptr, cap}, "length");
         }
         // Fallback: strlen on a char*
         auto* s  = emitExpr(*e.Args[0]);
@@ -890,9 +913,7 @@ llvm::Value* Codegen::Impl::emitCallExpr(const CallExpr& e) {
         if (sp && pp) {
             auto* fn = getStrFn("plang_str_index", i64Ty,
                 {ptrTy, i64Ty, ptrTy, i64Ty});
-            return builder.CreateCall(fn,
-                {sp, llvm::ConstantInt::get(i64Ty, sc),
-                 pp, llvm::ConstantInt::get(i64Ty, pc)}, "index");
+            return builder.CreateCall(fn, {sp, sc, pp, pc}, "index");
         }
     }
     if (lo == "substr") {
@@ -906,24 +927,22 @@ llvm::Value* Codegen::Impl::emitCallExpr(const CallExpr& e) {
                 : builder.CreateAdd(
                       builder.CreateSub(strLoadLen(sp), i, "substr.rest"),
                       llvm::ConstantInt::get(i64Ty, 1), "substr.len");
-            auto* resPtr = createEntryAlloca(strStructType(sc), "substr.res");
+            const int64_t resCap = strArgCapStatic(0);
+            auto* resPtr = createEntryAlloca(strStructType(resCap), "substr.res");
             auto* fn     = getStrFn("plang_str_substr",
                 llvm::Type::getVoidTy(ctx), {ptrTy, i64Ty, ptrTy, i64Ty, i64Ty, i64Ty});
-            builder.CreateCall(fn,
-                {resPtr, llvm::ConstantInt::get(i64Ty, sc),
-                 sp,     llvm::ConstantInt::get(i64Ty, sc), i, n});
+            builder.CreateCall(fn, {resPtr, i64c(resCap), sp, sc, i, n});
             return resPtr;
         }
     }
     if (lo == "trim") {
         auto [sp, sc] = getStrArgPtr(0);
         if (sp) {
-            auto* resPtr = createEntryAlloca(strStructType(sc), "trim.res");
+            const int64_t resCap = strArgCapStatic(0);
+            auto* resPtr = createEntryAlloca(strStructType(resCap), "trim.res");
             auto* fn     = getStrFn("plang_str_trim",
                 llvm::Type::getVoidTy(ctx), {ptrTy, i64Ty, ptrTy, i64Ty});
-            builder.CreateCall(fn,
-                {resPtr, llvm::ConstantInt::get(i64Ty, sc),
-                 sp,     llvm::ConstantInt::get(i64Ty, sc)});
+            builder.CreateCall(fn, {resPtr, i64c(resCap), sp, sc});
             return resPtr;
         }
     }
@@ -939,9 +958,7 @@ llvm::Value* Codegen::Impl::emitCallExpr(const CallExpr& e) {
             auto [rp, rc] = getStrArgPtr(1);
             if (lp && rp) {
                 auto* fn  = getStrFn(it->second, i8Ty, {ptrTy, i64Ty, ptrTy, i64Ty});
-                auto* raw = builder.CreateCall(fn,
-                    {lp, llvm::ConstantInt::get(i64Ty, lc),
-                     rp, llvm::ConstantInt::get(i64Ty, rc)}, lo);
+                auto* raw = builder.CreateCall(fn, {lp, lc, rp, rc}, lo);
                 return ensureI1(raw);
             }
         }

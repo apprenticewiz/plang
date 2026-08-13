@@ -237,7 +237,10 @@ void Codegen::Impl::emitAssign(const AssignStmt& s) {
     if (auto* sub = llvm::dyn_cast<SubstringExpr>(s.Target.get())) {
         auto* dst = emitLValue(*sub->Str);
         if (!dst) codegenICE("assignment to a substring of a non-addressable string");
-        const int64_t cap = exprStrCap(*sub->Str);
+        // Sizing a temporary needs a constant; what the runtime is told about
+        // the destination is the capacity it really has.
+        const int64_t cap = exprStrCapStatic(*sub->Str);
+        auto* dstCap      = exprStrCapV(*sub->Str);
         auto* low  = toI64(emitExpr(*sub->Low));
         auto* high = toI64(emitExpr(*sub->High));
         auto* n    = builder.CreateAdd(
@@ -247,7 +250,7 @@ void Codegen::Impl::emitAssign(const AssignStmt& s) {
         // where a string belongs and then copied in.
         auto* src = createEntryAlloca(strStructType(cap), "substr.src");
         emitStrStore(src, cap, *s.Value);
-        auto* capV = llvm::ConstantInt::get(i64Ty, cap);
+        auto* capV = dstCap;
         builder.CreateCall(
             getStrFn("plang_str_substr_assign", llvm::Type::getVoidTy(ctx),
                      {ptrTy, i64Ty, i64Ty, i64Ty, ptrTy, i64Ty}),

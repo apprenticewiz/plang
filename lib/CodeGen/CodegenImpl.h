@@ -991,6 +991,17 @@ struct Codegen::Impl {
     /// probe's answer and would check `q^ := 'hi'` against a string(1).
     llvm::Value* exprStrCapV(const ExprNode& e);
 
+    /// The capacity to SIZE A TEMPORARY with, which has to be a constant.  A
+    /// discriminant-fixed capacity is not one, and the probe's answer would cut
+    /// the temporary to a single character, so such a string gets the widest
+    /// capacity plang has -- every real capacity fits in it.  Use exprStrCapV
+    /// wherever the capacity is a value the runtime is told, not a size.
+    static int64_t exprStrCapStatic(const ExprNode& e) {
+        if (!exprIsVarStr(e)) return 0;
+        return e.ResolvedType->ExtentVaries ? PlangMaxStringCapacity
+                                            : e.ResolvedType->StrCapacity;
+    }
+
     /// EP §6.4.7 run-time layout, for a schema body whose extent a discriminant
     /// fixes.  Call with the discriminants bound in the current scope (see
     /// bindSchemaDiscs): the bound and capacity expressions are re-emitted

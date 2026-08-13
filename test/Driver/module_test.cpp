@@ -3132,3 +3132,29 @@ TEST(Schema, ReadIntoARunTimeCapacityStringDoesNotTruncate) {
     ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
     EXPECT_EQ(R.Stdout, "[hello there world] len=17\n");
 }
+
+TEST(Schema, EveryStringOperationUsesTheRunTimeCapacity) {
+    // Only plain assignment asked for it; substring, substr, concatenation,
+    // comparison, index and substring-assignment all folded the probe's
+    // string(1), so each of them either truncated or refused a legal program.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type ps = ^string;\n"
+        "var q, r: ps;\n"
+        "begin\n"
+        "  new(q, 30); new(r, 30);\n"
+        "  q^ := 'hello world'; r^ := 'hello world';\n"
+        "  writeln('len=', length(q^):1);\n"
+        "  writeln('sub=[', q^[1..5], ']');\n"
+        "  writeln('substr=[', substr(q^, 7, 5), ']');\n"
+        "  writeln('cat=[', q^ + '!', ']');\n"
+        "  writeln('eq=', q^ = r^, ' idx=', index(q^, 'world'):1);\n"
+        "  q^[1..5] := 'HELLO';\n"
+        "  writeln('after=[', q^, ']');\n"
+        "  dispose(q); dispose(r)\n"
+        "end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout,
+              "len=11\nsub=[hello]\nsubstr=[world]\ncat=[hello world!]\n"
+              "eq=true idx=7\nafter=[HELLO world]\n");
+}
