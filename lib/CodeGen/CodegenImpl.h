@@ -129,6 +129,13 @@ struct Codegen::Impl {
     llvm::Type*        dblTy{nullptr};
     llvm::PointerType* ptrTy{nullptr};
 
+    /// A signed i64 constant.  Enough places now pass a capacity or an extent
+    /// that may be either a literal or a run-time value that spelling out
+    /// ConstantInt::get at each of them buries which is which.
+    llvm::Constant* i64c(int64_t v) const {
+        return llvm::ConstantInt::get(i64Ty, static_cast<uint64_t>(v), true);
+    }
+
     // ---- symbol table ----
     struct VarEntry {
         llvm::Value*     ptr;               // alloca or GlobalVariable (used as ptr)
@@ -1067,8 +1074,15 @@ struct Codegen::Impl {
                               std::initializer_list<llvm::Type*> argTys);
     llvm::Value* strLoadLen(llvm::Value* strPtr);
     llvm::Value* strDataPtr(llvm::Value* strPtr);
+    // EP §6.4.7: a capacity fixed by a schema discriminant is not a literal, so
+    // these take it as a value.  The int64_t overloads wrap a constant and are
+    // what every fixed-capacity caller still uses, so their IR is unchanged.
+    void emitStrAssign(llvm::Value* dst, llvm::Value* capDst,
+                       llvm::Value* src, llvm::Value* capSrc);
     void emitStrAssign(llvm::Value* dst, int64_t capDst,
-                       llvm::Value* src, int64_t capSrc);
+                       llvm::Value* src, int64_t capSrc) {
+        emitStrAssign(dst, i64c(capDst), src, i64c(capSrc));
+    }
     void emitReadArg(const ExprNode& arg, llvm::Value* fp);
     void emitSkipLine(llvm::Value* fp);
 
@@ -1121,13 +1135,22 @@ struct Codegen::Impl {
     /// EP §6.7.5.3: new(p, d1..ds) for a pointer whose domain is a schema.
     void emitNewSchema(const ExprNode& ptrArg, const plang::Type& schema,
                        std::span<const std::unique_ptr<ExprNode>> discArgs);
-    void emitStrFromCStr(llvm::Value* dst, int64_t cap, llvm::Value* cstr);
-    void emitStrFromChar(llvm::Value* dst, int64_t cap, llvm::Value* c);
+    void emitStrFromCStr(llvm::Value* dst, llvm::Value* cap, llvm::Value* cstr);
+    void emitStrFromCStr(llvm::Value* dst, int64_t cap, llvm::Value* cstr) {
+        emitStrFromCStr(dst, i64c(cap), cstr);
+    }
+    void emitStrFromChar(llvm::Value* dst, llvm::Value* cap, llvm::Value* c);
+    void emitStrFromChar(llvm::Value* dst, int64_t cap, llvm::Value* c) {
+        emitStrFromChar(dst, i64c(cap), c);
+    }
     /// Store \p src into the string variable at \p dst, whose capacity is
     /// \p capDst.  A string is a length and a buffer, so which runtime call
     /// this takes depends on what the source is; assignment and the 'value'
     /// initializer both come through here.
-    void emitStrStore(llvm::Value* dst, int64_t capDst, const ExprNode& src);
+    void emitStrStore(llvm::Value* dst, llvm::Value* capDst, const ExprNode& src);
+    void emitStrStore(llvm::Value* dst, int64_t capDst, const ExprNode& src) {
+        emitStrStore(dst, i64c(capDst), src);
+    }
 
     /// The address of the { length, bytes } struct a string expression denotes,
     /// which is what every string runtime entry point takes.  Whether that is
