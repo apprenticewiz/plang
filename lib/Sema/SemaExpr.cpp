@@ -1166,8 +1166,19 @@ void Sema::checkCallArgs(const Symbol& Sym, SourceLocation CallLoc,
         // ISO §6.6.3.8: a conformant array parameter takes any array that
         // conforms to its schema, whatever bounds that array was declared with.
         if (Param.Ty && Param.Ty->Kind == TypeKind::ConformantArray) {
-            if (!isConformable(*Param.Ty, *At)) {
-                if (At->Kind != TypeKind::Array && At->Kind != TypeKind::ConformantArray) {
+            // EP §6.4.7: a schema whose body is an array IS an array for this
+            // purpose -- `p^` for a `^vec` conforms to the same formals a
+            // declared array does, and refusing it made the one way to write a
+            // procedure over an undiscriminated schema unavailable.
+            const Type* Actual = At.get();
+            if ((Actual->Kind == TypeKind::Schema
+                 || Actual->Kind == TypeKind::SchemaInstance)
+                    && Actual->SchemaBody
+                    && Actual->SchemaBody->Kind == TypeKind::Array)
+                Actual = Actual->SchemaBody.get();
+            if (!isConformable(*Param.Ty, *Actual)) {
+                if (Actual->Kind != TypeKind::Array
+                        && Actual->Kind != TypeKind::ConformantArray) {
                     error(ArgNode.Loc, diag::err_conformant_actual_not_array,
                           {Param.Name, At->Name});
                 } else {

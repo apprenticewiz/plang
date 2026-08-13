@@ -17,6 +17,8 @@
 
 #include "CodegenImpl.h"
 
+#include <optional>
+
 using namespace plang;
 
 void Codegen::Impl::storeProcPair(llvm::Value* cell, llvm::Value* fn,
@@ -65,8 +67,39 @@ void Codegen::Impl::pushConformantArgs(std::vector<llvm::Value*>& args,
         if (auto* v = findVar(id->Name); v && v->isConformantArray)
             ave = v;
 
+    // EP §6.4.7: an actual whose extent a discriminant fixes has no static
+    // bounds either, and its recorded ones are the probe's.  The denoter its
+    // bounds are written in is walked alongside the type so each dimension can
+    // re-emit them against the discriminants the object carries.
+    const TypeNode* pathDecl = nullptr;
+    std::optional<SchemaPath> argPath;
+    if (arg.ResolvedType && arg.ResolvedType->ExtentVaries) {
+        argPath = schemaPathOf(arg);
+        if (argPath) pathDecl = argPath->decl;
+    }
+
     for (size_t di = 0; di < dims; ++di) {
         bool fromConformant = false;
+        if (argPath && pathDecl) {
+            const TypeNode* d = pathDecl;
+            while (auto* pk = llvm::dyn_cast_or_null<PackedTypeNode>(d))
+                d = pk->Inner.get();
+            if (auto* at = llvm::dyn_cast_or_null<ArrayTypeNode>(d);
+                    at && at->Low && at->High) {
+                bindSchemaDiscs(argPath->root);
+                auto* lo = toI64(emitExpr(*at->Low));
+                auto* hi = toI64(emitExpr(*at->High));
+                popScope();
+                if (lo && hi) {
+                    args.push_back(lo);
+                    args.push_back(hi);
+                    fromConformant = true;
+                }
+                pathDecl = at->Element.get();
+            } else {
+                pathDecl = nullptr;
+            }
+        }
         if (ave) {
             // By address where we have one.  The names are what the programmer
             // wrote in the parameter list, and any scope opened since can

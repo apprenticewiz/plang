@@ -3303,3 +3303,30 @@ TEST(Schema, AnAccessPathIsWalkedOncePerAssignment) {
     ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
     EXPECT_EQ(R.Stdout, "next called 1 time(s); [hi]\n");
 }
+
+TEST(Schema, ASchemaArrayConformsAndPassesItsRealBounds) {
+    // Two halves.  Sema refused a schema-bodied array as a conformant actual at
+    // all, which made the one way to write a procedure over an undiscriminated
+    // schema unavailable; a schema whose body is an array IS an array here.
+    // And codegen then passed the bounds off the type, which for such an array
+    // are the probe's -- so the callee would have walked 1..1.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type vec(n: integer) = array[1..n] of integer;\n"
+        "var q: ^vec; i: integer;\n"
+        "procedure show(var x: array[lo..hi: integer] of integer);\n"
+        "var k: integer;\n"
+        "begin\n"
+        "  write('lo=', lo:1, ' hi=', hi:1, ':');\n"
+        "  for k := lo to hi do write(' ', x[k]:1);\n"
+        "  writeln\n"
+        "end;\n"
+        "begin\n"
+        "  new(q, 5);\n"
+        "  for i := 1 to 5 do q^[i] := i * 11;\n"
+        "  show(q^);\n"
+        "  dispose(q)\n"
+        "end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "lo=1 hi=5: 11 22 33 44 55\n");
+}
