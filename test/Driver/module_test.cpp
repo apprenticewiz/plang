@@ -3036,3 +3036,23 @@ TEST(Schema, AVariantRecordStillTakesItsTagsInNew) {
     ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
     EXPECT_EQ(R.Stdout, "r=5\n");
 }
+
+TEST(Schema, APointerToStringSurvivesASecondAssignment) {
+    // The body sits AFTER the discriminant header new() wrote, and two places
+    // answered "where is q^'s storage" -- emitLValue and schemaRefOf -- which
+    // differed by the header size.  So the length field and the capacity
+    // discriminant were the same eight bytes: `q^ := 'first'` stored 5 over the
+    // capacity 20, and the next assignment was checked against 5.  A single
+    // assignment hid it, because the capacity is loaded before the store that
+    // destroys it, and reads were self-consistent at the wrong address.
+    auto R = compileAndRun(
+        "program p(output); type ps = ^string; var q: ps;\n"
+        "begin new(q, 20);\n"
+        "      writeln('birth=', length(q^):1);\n"
+        "      q^ := 'first';  writeln('[', q^, ']');\n"
+        "      q^ := 'a much longer second'; writeln('[', q^, ']');\n"
+        "      dispose(q) end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    // A freshly allocated string is empty; reading 20 here is the header.
+    EXPECT_EQ(R.Stdout, "birth=0\n[first]\n[a much longer second]\n");
+}

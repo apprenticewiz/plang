@@ -215,6 +215,18 @@ llvm::Value* Codegen::Impl::emitLValue(const ExprNode& e) {
         // for by name.  Loading the file variable would hand back the handle
         // itself, which is what used to reach the store below.
         if (isFileVar(*n->Pointer)) return fileBufferPtr(*n->Pointer);
+        // EP §6.7.5.3: new(p, d..) writes the discriminants into a header in
+        // FRONT of the body, so what p holds is not the address of p^.  Two
+        // places answer "where is p^'s storage" -- this one and schemaRefOf --
+        // and they differed by the header size, so `q^ := 'first'` for a
+        // ^string wrote the length field over the capacity discriminant and
+        // the NEXT assignment was checked against the previous string's
+        // length.  Asked of the pointer, not of the dereference, because for a
+        // string body p^ reads as the string and no longer says "schema".
+        if (const auto& PT = n->Pointer->ResolvedType;
+                PT && PT->Kind == TypeKind::Pointer && PT->PointeeType
+                && PT->PointeeType->Kind == TypeKind::Schema)
+            if (auto ref = schemaRefOf(*n)) return ref->data;
         // p^ — load the pointer value; that IS the target address.
         auto* p = emitExpr(*n->Pointer);
         if (p && p->getType()->isPointerTy()) emitNilCheck(p);
