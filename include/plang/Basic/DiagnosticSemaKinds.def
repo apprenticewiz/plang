@@ -235,14 +235,28 @@ DIAG(err_schema_disc_type_mismatch, Error, "schema discriminant '%0' has wrong t
 DIAG(err_schema_undiscriminated, Error,
      "schema '%0' needs its discriminants here, as in '%0(...)'; a schema name "
      "stands alone only as a parameter type or as the domain of a pointer")
+// EP §6.4.4 and §6.7.3.7 both admit a bare schema-name here, so the limit is
+// plang's and the message says whose it is and what to write instead.  Not
+// "its size varies": `record k: 1..n end` is rejected too, and its storage is
+// the same whatever n is -- what varies there is the range k is checked against.
 DIAG(err_schema_body_not_representable, Error,
-     "schema '%0' cannot be used without discriminants: its size varies with "
-     "them and its body is not an array")
+     "plang does not implement schema '%0' without its discriminants: only an "
+     "array body recomputes its extent from them at run time, and any other "
+     "body needs their values to lay itself out and to range-check; Extended "
+     "Pascal allows this, so write them out, as in '%0(...)'")
 // TRANSLATORS: "discriminant(s)" is an English plural dodge.
 DIAG(err_schema_new_needs_discs, Error,
      "'new' for a pointer to schema '%0' needs %1 discriminant(s), got %2")
 DIAG(err_schema_new_disc_type, Error,
      "discriminant '%0' of schema '%1' needs an ordinal value")
+DIAG(err_new_extra_args, Error,
+     "'new' takes extra arguments only for a record with a variant part or a "
+     "schema, and '%0' is neither")
+// TRANSLATORS: %0 is always 'string'; it is passed so the quoting matches.
+DIAG(err_new_string_capacity, Error,
+     "plang does not implement '%0' as a schema, so 'new' cannot be given a "
+     "capacity for it; write the capacity in the pointer's domain type, as in "
+     "'^string(20)'")
 DIAG(err_schema_not_a_discriminant, Error, "schema '%0' has no discriminant '%1'")
 DIAG(err_schema_arg_not_schematic, Error,
      "argument for parameter '%0' must be a '%1', got '%2'")

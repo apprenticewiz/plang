@@ -376,6 +376,49 @@ version numbers follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html
   so the name fell through to the ordinary lookup and was read as a call with
   its arguments missing.  Both now ask the same question of the same place.
 
+- **A nil schema pointer took the process down instead of raising.**  Indexing
+  `p^` for an undiscriminated schema first reads the discriminants out of the
+  header `new` wrote in front of the body.  That is a dereference of `p` as much
+  as reaching the body is, and it was the one route to a `p^` that did not say
+  so, so a nil `p` read the header at address zero and died of a segmentation
+  fault.  A Pascal program could not report that, and `-fno-nil-checks` was not
+  what turned it off.
+
+- **`new` silently discarded arguments it had no reading for.**  §6.6.5.3 gives
+  the extra arguments exactly two: variant case-constants for a record with a
+  variant part, and — Extended Pascal §6.7.5.3 — discriminants for a schema.
+  A domain type that was neither had them checked as expressions and then
+  dropped, so `new(p, 8)` for a `^integer` allocated one integer and lost the 8
+  without a word.
+
+  The case that made this worth finding is `new(q, 20)` for a `^string`: it
+  allocated a pointer's worth, and `q^ := 'a string'` then wrote a pointer into
+  it and read back an empty string of length 1.  Extended Pascal §6.4.3.3 does
+  make `string` a schema with a capacity discriminant, so that program is legal
+  and plang does not implement it — it models the bare name as the unbounded
+  string.  That one says so, and says to write `^string(20)` instead.
+
+### Changed
+
+- **The message for an undiscriminated schema plang cannot lay out says whose
+  limit it is.**  It read "schema 'buf' cannot be used without discriminants:
+  its size varies with them and its body is not an array", which is wrong twice.
+  Extended Pascal §6.4.4 and §6.7.3.7 both admit a bare schema-name where it
+  fires, so the restriction is plang's and not the standard's; and the size does
+  not always vary — `record k: 1..n end` is rejected too, and its storage is the
+  same whatever `n` is.  What varies there is the range `k` is checked against.
+
+  The restriction itself stands, and is not a narrowing: the body is resolved
+  once against a probe binding of 1, and only an array body recovers, because
+  the bound expressions are re-emitted against the discriminants at run time.
+  Nothing else re-emits anything, so `string(cap)` would stay `string(1)` and
+  those probe extents would become the actual offsets, sizes and range checks.
+  Lifting it needs run-time field offsets, a run-time body size, per-field bound
+  recovery, a string representation carrying its capacity, and a Sema that marks
+  a discriminant-dependent extent unknown rather than folding it.  The comment
+  at the check now records that, so the next reader does not have to rediscover
+  which of the two it is.
+
 ## [0.1.3] - 2026-08-11
 
 Four bug fixes, all in code generation, and none of them new: every one was

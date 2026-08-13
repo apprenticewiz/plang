@@ -1223,8 +1223,9 @@ TEST(Schema, DiscriminantNeedNotAffectTheLayout) {
     EXPECT_EQ(R.Stdout, "7 8\n5 15\n");
 }
 
-// A record whose size varies with its discriminants would need run-time field
-// offsets; say so rather than lowering it wrongly.
+// A record body whose extent depends on the discriminants would be lowered
+// against the probe binding of 1, so plang refuses it rather than generating
+// wrong code.  EP allows it; the message has to say the limit is plang's.
 TEST(Schema, VaryingRecordBodyIsRejectedWithAReason) {
     auto R = compileAndRun(
         "program p;\n"
@@ -1232,7 +1233,38 @@ TEST(Schema, VaryingRecordBodyIsRejectedWithAReason) {
         "var q: ^buf;\n"
         "begin end.\n", kEP);
     EXPECT_NE(R.ExitCode, 0);
-    EXPECT_NE(R.Stderr.find("size varies"), std::string::npos) << R.Stderr;
+    // Asserted on the intent, not on a phrase: the previous wording was pinned
+    // here by its "size varies" and that is the part that was wrong.
+    EXPECT_NE(R.Stderr.find("plang does not implement"), std::string::npos) << R.Stderr;
+    EXPECT_NE(R.Stderr.find("buf(...)"), std::string::npos) << R.Stderr;
+}
+
+TEST(Schema, AFixedSizedBodyWithADiscriminantBoundIsRejectedTooAndNotAsASize) {
+    // `k: 1..n` makes the storage {i64, i64} whatever n is, so the old message's
+    // "its size varies with them" was not true of every case it fired on.  What
+    // the discriminant decides here is the range k is checked against, and
+    // folding it to the probe would range-check against 1..1.
+    auto R = compileAndRun(
+        "program p;\n"
+        "type box(n: integer) = record k: 1..n; m: integer end;\n"
+        "var q: ^box;\n"
+        "begin end.\n", kEP);
+    EXPECT_NE(R.ExitCode, 0);
+    EXPECT_NE(R.Stderr.find("plang does not implement"), std::string::npos) << R.Stderr;
+    EXPECT_EQ(R.Stderr.find("size varies"), std::string::npos) << R.Stderr;
+}
+
+TEST(Schema, AFixedRecordBodyIsStillAUsableDomainType) {
+    // The opposite direction: a record body that does not read a discriminant
+    // has a fixed layout and is accepted, so the check has not widened into
+    // refusing every record-bodied schema.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type buf(cap: integer) = record n: integer end;\n"
+        "var q: ^buf;\n"
+        "begin new(q, 4); q^.n := 3; writeln('n=', q^.n:1) end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "n=3\n");
 }
 
 TEST(Schema, NewReportsAMissingDiscriminant) {
@@ -2882,4 +2914,45 @@ TEST(InterfaceConstants, AnApostropheInAStringSurvivesTheCrossing) {
         "-std=iso10206");
     ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
     EXPECT_EQ(R.Stdout, "it's\n");
+}
+
+TEST(Schema, NewDoesNotSilentlyDiscardExtraArguments) {
+    // §6.6.5.3 gives `new`'s extra arguments two readings and only two: variant
+    // case-constants, or EP §6.7.5.3 discriminants.  A domain that is neither
+    // had them checked as expressions and then dropped on the floor, so this
+    // allocated one integer's worth and lost the 8 without a word.
+    auto R = compileAndRun(
+        "program p; var q: ^integer;\n"
+        "begin new(q, 8) end.\n", kEP);
+    EXPECT_NE(R.ExitCode, 0);
+    EXPECT_NE(R.Stderr.find("only for a record with a variant part"),
+              std::string::npos) << R.Stderr;
+}
+
+TEST(Schema, ACapacityForAPointerToStringSaysWhoseLimitItIs) {
+    // EP §6.4.3.3 does make `string` a schema with a capacity discriminant, so
+    // `new(q, 20)` for a `^string` is a legal program that plang does not
+    // implement -- it models the bare name as the unbounded string.  It used to
+    // compile and then misbehave: the 20 was dropped, a pointer's worth was
+    // allocated, and `q^ := 'a string'` wrote a pointer into it.
+    auto R = compileAndRun(
+        "program p(output); type ps = ^string; var q: ps;\n"
+        "begin new(q, 20); q^ := 'a string schema'; writeln(q^) end.\n", kEP);
+    EXPECT_NE(R.ExitCode, 0);
+    EXPECT_NE(R.Stderr.find("plang does not implement"), std::string::npos) << R.Stderr;
+    EXPECT_NE(R.Stderr.find("^string(20)"), std::string::npos) << R.Stderr;
+}
+
+TEST(Schema, AVariantRecordStillTakesItsTagsInNew) {
+    // The direction the check must not break: for a record with a variant part
+    // the extra arguments are case-constants and the call is ordinary Pascal.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type shape = (circ, rect);\n"
+        "     fig = record case k: shape of circ: (r: integer);\n"
+        "                                   rect: (w, h: integer) end;\n"
+        "var q: ^fig;\n"
+        "begin new(q, circ); q^.r := 5; writeln('r=', q^.r:1); dispose(q, circ) end.\n");
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "r=5\n");
 }

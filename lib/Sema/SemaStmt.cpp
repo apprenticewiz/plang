@@ -683,6 +683,25 @@ void Sema::checkCallStmt(const CallStmt& S) {
                       {Pointee->SchemaName,
                        std::to_string(Pointee->SchemaDiscs.size()),
                        std::to_string(S.Args.size() - 1)});
+            // §6.6.5.3 gives the extra arguments exactly two readings: variant
+            // case-constants for a record with a variant part, or EP §6.7.5.3
+            // discriminants for a schema.  A domain that is neither had them
+            // evaluated and then dropped, so `new(p, 20)` for a `^string` --
+            // where `string` is the unbounded string and not the schema --
+            // allocated the default and silently lost the 20.
+            if (!ToSchema && S.Args.size() > 1 && Pointee && !Pointee->isError()
+                    && !(Pointee->Kind == TypeKind::Record && Pointee->RecordDecl
+                         && Pointee->RecordDecl->Variant))
+                // EP §6.4.3.3 does make `string` a schema with a capacity
+                // discriminant, so `new(p, 20)` for a `^string` is legal there
+                // and only plang's modelling of the bare name as the unbounded
+                // string makes it not.  Say which it is rather than claiming
+                // the standard calls it neither.
+                error(S.Args[1]->Loc,
+                      Pointee->Kind == TypeKind::String
+                          ? diag::err_new_string_capacity
+                          : diag::err_new_extra_args,
+                      {Pointee->Name});
             return;
         }
 

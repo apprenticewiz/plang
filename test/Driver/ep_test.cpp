@@ -3355,3 +3355,22 @@ TEST(EP7Schema, ADiscriminatedRecordIsReachedByEveryRouteNotJustByItsOwnName) {
     ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
     EXPECT_EQ(R.Stdout, "7 70 de\n1 10 ab\n2 20 ab\n5 50 in 99\n");
 }
+
+TEST(EP7Schema, ANilSchemaPointerRaisesRatherThanCrashing) {
+    // Indexing p^ for an undiscriminated schema first reads the discriminants
+    // out of the header new() wrote in front of the body.  That is a
+    // dereference of p, and it was the one route to a p^ that did not say so:
+    // with p nil the header was read at address 0 and the process died of a
+    // segmentation fault instead of raising, so a Pascal program could not
+    // report it and -fno-nil-checks was not what turned it off.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type Vec(n: integer) = array[1..n] of integer;\n"
+        "     pv = ^Vec;\n"
+        "var q: pv;\n"
+        "begin q := nil; writeln('before'); q^[1] := 1; writeln('after') end.\n",
+        kEP);
+    EXPECT_NE(R.ExitCode, 0);
+    EXPECT_EQ(R.Stdout, "before\n");
+    EXPECT_NE(R.Stderr.find("nil"), std::string::npos) << R.Stderr;
+}
