@@ -6,7 +6,14 @@ version numbers follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 
 ---
 
-## [Unreleased]
+## [0.1.5] - 2026-08-12
+
+**Where 0.1.4 went.**  It was cut from the 0.1.3 lineage rather than from this
+one, so that its eight code-generation fixes could ship without the `packed`
+record-layout change below.  This release contains all eight, and their entries
+are folded into the list below rather than left in a section of their own —
+they are the same class of defect as the rest of it, and separating them by
+which release first carried them would only hide that.
 
 ### Added
 
@@ -139,6 +146,52 @@ version numbers follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html
   The destination type now comes from Sema, which has one for every expression
   shape, rather than from a name that only identifiers have.
 
+- **An array reached through two type aliases lost its lower bound.**  The
+  bound was read with a single alias hop while the array's type was resolved
+  through the whole chain, so `type row = array[5..10] of integer; rowalias =
+  row;` left it at zero.  A legal `x[6]` aborted with "array index 6 out of
+  bounds 0..5"; with `-fno-range-checks` the writes landed past the end of the
+  array and overwrote the next variable.
+
+- **A pointer lost its record when the type name was shadowed.**  `p^.field`
+  resolved the domain type by name in a table rebuilt per procedure, so a
+  nested procedure declaring its own type of that name re-aimed every `p^.f` in
+  its body at the inner layout — with the field *index* still taken from the
+  right record, so it read an unrelated offset.  `p^.b` gave
+  1585267068834414592 for 22.
+
+- **`with` bound variant fields to the wrong storage, or to nothing.**
+  §6.4.3.3 lets a variant field be selected by name like any other, so the
+  semantic field list is flattened while the record's storage holds one block
+  shared by all the alternatives.  Pairing them by position bound the first
+  variant field to that block — `with r do c := 4` stored an integer bit
+  pattern into a `real` and printed 1.97626258336499e-323 — and never bound the
+  later ones at all, so `with r do b := 22` referred to a symbol nothing
+  defined and the link failed.  Both the record and the schema-body forms.
+
+- **An integer actual did not widen for a `real` value parameter.**  §6.6.3.2
+  makes a value parameter a variable the actual is *assigned* to, so §6.4.6
+  applies.  Nothing coerced it, so `procedure scale(x: real)` called as
+  `scale(3)` emitted a call that failed verification and the compiler died with
+  an internal error.  A program could not use a `real` parameter without
+  writing every actual as a real.
+
+- **A substring took its capacity from whatever was at that address.**  The
+  rvalue `s[i..j]` hunted for the source's capacity by scanning for a variable
+  at the same address, defaulting to 255, so a substring of a field or an
+  element was silently cut to 255 characters.  The scan was not sound when it
+  matched either: a record whose first field is a string has the record's own
+  address, so in `record s: string(20); t: array[1..5] of char end`,
+  `th.s[1..10]` came back five characters long — its capacity taken from the
+  field beside it.
+
+- **A relayed conformant array lost every dimension but the first.**  §6.6.3.7.2
+  permits passing a conformant parameter on to another conformant formal, and
+  it is the ordinary way to factor code over one.  Only the outermost
+  dimension's bounds were passed on; the rest came from a type that has no
+  static bounds and arrived as 0..0, so the callee indexed the block with the
+  wrong row width.
+
 - **A second compilation in one process crashed.**  The file record was cached
   in a function-local `static`, so it outlived the `LLVMContext` that owned it
   and the next `Codegen` took a type belonging to a destroyed context — a
@@ -146,6 +199,95 @@ version numbers follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html
   The driver compiles once per process and never met it; the front end is a
   shared library precisely so that other things can read Pascal, and those
   compile repeatedly.  Found by the first tests to build two `Codegen` objects.
+
+- **A field of a discriminated schema record could only be reached through the
+  variable's own name.**  ISO 10206 §6.4.9 makes `small = buf(8)` an ordinary
+  fixed-size type: an array component, a field of another record, a pointer
+  domain.  Code generation resolved the struct behind a field access by asking
+  whether the Sema type kind was `Record`, and a discriminated schema is kinded
+  `SchemaInstance` with the record hung off `SchemaBody`, so the test failed and
+  the access was rejected outright:
+
+  ```pascal
+  type buf(cap: integer) = record n: integer; s: string(cap); m: integer end;
+       small = buf(4);
+  var d: small; v: array[1..2] of small;
+  begin d.n := 1;    { compiled }
+        v[1].n := 1  { LLVM ERROR: cannot resolve the record type of field 'n' }
+  ```
+
+  `d.n` worked because a directly-declared variable takes an earlier path that
+  reads the struct off the variable entry, which is what hid this: every other
+  route — an array element, a field of another record, a function result — ICEd.
+  The look-through was already written and already used by the two other
+  consumers of the same expression; this one site did not call it.
+
+- **A labelled statement could satisfy an enclosing block's label.**  §6.1.6
+  gives a label-declaration-part the labels of the statements of *that* block.
+  The placement check resolved the label with the ordinary enclosing-scope
+  lookup, which answers by spelling, so a `1:` written inside a nested procedure
+  was accepted against the program block's `label 1` — and the landing place was
+  then planted in the declaring block's function, where nothing branches to it
+  and the basic block ends without a terminator.  It surfaced as an LLVM
+  verifier failure rather than as a diagnostic.
+
+  The set of labels the current block declared was already kept, and the `goto`
+  side already consulted it — that is precisely what makes a non-local goto
+  recognisable as one.  Only the placement side never asked.  `goto` is
+  untouched: naming an enclosing block's label is legal, and it is the
+  statement that has to stay home, not the jump.
+
+- **A field bound by a `with` was accepted as a `for` control variable.**
+  §6.8.3.9 wants an entire-variable declared in the variable-declaration-part of
+  the block containing the for-statement.  The check looked out past the
+  with-statement's scope to find one — but returned the first name it found on
+  the way, which inside a `with` is the field.  `with rr do for i := 1 to 3` then
+  drove `rr.i`.  fpc `-Miso` calls it an illegal counter variable.
+
+  The rule is about what the name *denotes*, not about whether some declaration
+  of the spelling exists, so a field shadowing a variable that is declared in the
+  block is refused too: inside the `with`, that name is the field.
+
+- **A procedure could not assign the result of the function containing it.**
+  §6.8.2.2 asks that the function block *contain* the assignment, not that it be
+  it, so a procedure nested inside the function names the result as well:
+
+  ```pascal
+  function total(k: integer): integer;
+  var n: integer;
+    procedure setit;
+    begin n := n * 2; total := n + k end;   { rejected: 'total' requires an argument list }
+  begin n := k + 1; setit end;
+  ```
+
+  The check that accepts the assignment target knew this and searched the stack
+  of functions whose blocks are open.  The check that gives the identifier its
+  type asked only whether the innermost procedure happened to be that function,
+  so the name fell through to the ordinary lookup and was read as a call with
+  its arguments missing.  Both now ask the same question of the same place.
+
+- **A nil schema pointer took the process down instead of raising.**  Indexing
+  `p^` for an undiscriminated schema first reads the discriminants out of the
+  header `new` wrote in front of the body.  That is a dereference of `p` as much
+  as reaching the body is, and it was the one route to a `p^` that did not say
+  so, so a nil `p` read the header at address zero and died of a segmentation
+  fault.  A Pascal program could not report that, and `-fno-nil-checks` was not
+  what turned it off.
+
+- **`new` silently discarded arguments it had no reading for.**  §6.6.5.3 gives
+  the extra arguments exactly two: variant case-constants for a record with a
+  variant part, and — Extended Pascal §6.7.5.3 — discriminants for a schema.
+  A domain type that was neither had them checked as expressions and then
+  dropped, so `new(p, 8)` for a `^integer` allocated one integer and lost the 8
+  without a word.
+
+  The case that made this worth finding is `new(q, 20)` for a `^string`: it
+  allocated a pointer's worth, and `q^ := 'a string'` then wrote a pointer into
+  it and read back an empty string of length 1.  Extended Pascal §6.4.3.3 does
+  make `string` a schema with a capacity discriminant, so that program is legal
+  and plang does not implement it — it models the bare name as the unbounded
+  string.  That one says so, and says to write `^string(20)` instead.
+
 
 ### Changed
 
@@ -310,96 +452,6 @@ version numbers follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html
   `libplang-frontend.so.0.2.0-pre` would be no better an idea for being
   accepted, so the soname stays numeric.
 
-- **A field of a discriminated schema record could only be reached through the
-  variable's own name.**  ISO 10206 §6.4.9 makes `small = buf(8)` an ordinary
-  fixed-size type: an array component, a field of another record, a pointer
-  domain.  Code generation resolved the struct behind a field access by asking
-  whether the Sema type kind was `Record`, and a discriminated schema is kinded
-  `SchemaInstance` with the record hung off `SchemaBody`, so the test failed and
-  the access was rejected outright:
-
-  ```pascal
-  type buf(cap: integer) = record n: integer; s: string(cap); m: integer end;
-       small = buf(4);
-  var d: small; v: array[1..2] of small;
-  begin d.n := 1;    { compiled }
-        v[1].n := 1  { LLVM ERROR: cannot resolve the record type of field 'n' }
-  ```
-
-  `d.n` worked because a directly-declared variable takes an earlier path that
-  reads the struct off the variable entry, which is what hid this: every other
-  route — an array element, a field of another record, a function result — ICEd.
-  The look-through was already written and already used by the two other
-  consumers of the same expression; this one site did not call it.
-
-- **A labelled statement could satisfy an enclosing block's label.**  §6.1.6
-  gives a label-declaration-part the labels of the statements of *that* block.
-  The placement check resolved the label with the ordinary enclosing-scope
-  lookup, which answers by spelling, so a `1:` written inside a nested procedure
-  was accepted against the program block's `label 1` — and the landing place was
-  then planted in the declaring block's function, where nothing branches to it
-  and the basic block ends without a terminator.  It surfaced as an LLVM
-  verifier failure rather than as a diagnostic.
-
-  The set of labels the current block declared was already kept, and the `goto`
-  side already consulted it — that is precisely what makes a non-local goto
-  recognisable as one.  Only the placement side never asked.  `goto` is
-  untouched: naming an enclosing block's label is legal, and it is the
-  statement that has to stay home, not the jump.
-
-- **A field bound by a `with` was accepted as a `for` control variable.**
-  §6.8.3.9 wants an entire-variable declared in the variable-declaration-part of
-  the block containing the for-statement.  The check looked out past the
-  with-statement's scope to find one — but returned the first name it found on
-  the way, which inside a `with` is the field.  `with rr do for i := 1 to 3` then
-  drove `rr.i`.  fpc `-Miso` calls it an illegal counter variable.
-
-  The rule is about what the name *denotes*, not about whether some declaration
-  of the spelling exists, so a field shadowing a variable that is declared in the
-  block is refused too: inside the `with`, that name is the field.
-
-- **A procedure could not assign the result of the function containing it.**
-  §6.8.2.2 asks that the function block *contain* the assignment, not that it be
-  it, so a procedure nested inside the function names the result as well:
-
-  ```pascal
-  function total(k: integer): integer;
-  var n: integer;
-    procedure setit;
-    begin n := n * 2; total := n + k end;   { rejected: 'total' requires an argument list }
-  begin n := k + 1; setit end;
-  ```
-
-  The check that accepts the assignment target knew this and searched the stack
-  of functions whose blocks are open.  The check that gives the identifier its
-  type asked only whether the innermost procedure happened to be that function,
-  so the name fell through to the ordinary lookup and was read as a call with
-  its arguments missing.  Both now ask the same question of the same place.
-
-- **A nil schema pointer took the process down instead of raising.**  Indexing
-  `p^` for an undiscriminated schema first reads the discriminants out of the
-  header `new` wrote in front of the body.  That is a dereference of `p` as much
-  as reaching the body is, and it was the one route to a `p^` that did not say
-  so, so a nil `p` read the header at address zero and died of a segmentation
-  fault.  A Pascal program could not report that, and `-fno-nil-checks` was not
-  what turned it off.
-
-- **`new` silently discarded arguments it had no reading for.**  §6.6.5.3 gives
-  the extra arguments exactly two: variant case-constants for a record with a
-  variant part, and — Extended Pascal §6.7.5.3 — discriminants for a schema.
-  A domain type that was neither had them checked as expressions and then
-  dropped, so `new(p, 8)` for a `^integer` allocated one integer and lost the 8
-  without a word.
-
-  The case that made this worth finding is `new(q, 20)` for a `^string`: it
-  allocated a pointer's worth, and `q^ := 'a string'` then wrote a pointer into
-  it and read back an empty string of length 1.  Extended Pascal §6.4.3.3 does
-  make `string` a schema with a capacity discriminant, so that program is legal
-  and plang does not implement it — it models the bare name as the unbounded
-  string.  That one says so, and says to write `^string(20)` instead.
-
-### Changed
-
 - **The message for an undiscriminated schema plang cannot lay out says whose
   limit it is.**  It read "schema 'buf' cannot be used without discriminants:
   its size varies with them and its body is not an array", which is wrong twice.
@@ -418,6 +470,26 @@ version numbers follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html
   a discriminant-dependent extent unknown rather than folding it.  The comment
   at the check now records that, so the next reader does not have to rediscover
   which of the two it is.
+
+### Why the suite did not catch any of this
+
+The 377-case ISO 7185 conformance suite and the 3000-line acceptance test use
+one type alias, no shadowing, no `with` over a variant part, named variables for
+input, and no integer actual for a real formal.  Every one of the 181 LLVM
+modules they produce is byte-identical before and after nearly every fix in this
+release: the corpus cannot see this class of defect at all.  It is strong on
+what the standards say and blind to what the compiler assumes about itself.
+
+That is the finding of the release, more than any one of the thirty.  A test
+suite that says what a language means will not tell you when the compiler has
+quietly asked a different question — here, what a name refers to — and got a
+different answer.  The defects were found by reading for the class rather than
+by running anything, and three of the eight in 0.1.4 turned out to have
+untouched twins that the same reading found only on a second pass.
+
+Tests were added for the shapes the corpus does not reach, and each fix was
+checked by reverting it and confirming that exactly its own tests fail — which
+caught two cases where a test passed for a reason other than the fix.
 
 ## [0.1.3] - 2026-08-11
 
@@ -671,6 +743,8 @@ Initial release.  Full support for ISO 7185 Standard Pascal at Level 1 and
 ISO 10206 Extended Pascal.  Support for other Pascal dialects and extensions
 planned for future releases.
 
+[0.1.5]: https://github.com/apprenticewiz/plang/releases/tag/v0.1.5
+[0.1.4]: https://github.com/apprenticewiz/plang/releases/tag/v0.1.4
 [0.1.3]: https://github.com/apprenticewiz/plang/releases/tag/v0.1.3
 [0.1.2]: https://github.com/apprenticewiz/plang/releases/tag/v0.1.2
 [0.1.1]: https://github.com/apprenticewiz/plang/releases/tag/v0.1.1
