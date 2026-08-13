@@ -963,6 +963,46 @@ void Codegen::Impl::emitWith(const WithStmt& s) {
     for (const auto& rec : s.Records) {
         if (!rec->ResolvedType) continue;
 
+        // EP §6.4.7: an undiscriminated schema has no struct to GEP into, so
+        // each field is bound to the address the run-time layout gives it, and
+        // each discriminant to the value the object carries.
+        if (rec->ResolvedType->Kind == TypeKind::Schema
+                && rec->ResolvedType->SchemaBody
+                && rec->ResolvedType->SchemaBody->Kind == TypeKind::Record) {
+            if (auto path = schemaPathOf(*rec)) {
+                const auto& discs = rec->ResolvedType->SchemaDiscs;
+                for (size_t i = 0; i < discs.size() && i < path->root.discs.size(); ++i) {
+                    auto* slot = createEntryAlloca(i64Ty, "disc." + discs[i].Name);
+                    builder.CreateStore(path->root.discs[i], slot);
+                    defVar(discs[i].Name, slot, i64Ty);
+                }
+                if (auto* rt = llvm::dyn_cast_or_null<RecordTypeNode>(
+                        rec->ResolvedType->SchemaBody->RecordDecl)) {
+                    for (const auto& F : rec->ResolvedType->SchemaBody->RecordFields) {
+                        bindSchemaDiscs(path->root);
+                        auto* off = rtFieldOffset(*rt, F.Name);
+                        popScope();
+                        auto* fp = builder.CreateGEP(i8Ty, path->addr, {off},
+                                                     "with.fld");
+                        defVar(F.Name, fp,
+                               F.Ty ? llvmTypeOfSemaType(*F.Ty) : i64Ty);
+                        // A varying string field: record what its capacity
+                        // really is, since the bound name loses the path.
+                        if (F.Ty && F.Ty->Kind == TypeKind::VarString
+                                && F.Ty->ExtentVaries)
+                            if (auto* st = llvm::dyn_cast_or_null<StringTypeNode>(
+                                    fieldDenoterOf(*rt, F.Name))) {
+                                bindSchemaDiscs(path->root);
+                                auto* cap = toI64(emitExpr(*st->Capacity));
+                                popScope();
+                                setVarStrCap(F.Name, cap);
+                            }
+                    }
+                }
+                continue;
+            }
+        }
+
         // EP §6.4.7: schema instance — expose discriminants as constant vars
         // and body record fields as normal GEP-derived vars.
         if (rec->ResolvedType->Kind == TypeKind::SchemaInstance) {

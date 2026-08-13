@@ -175,6 +175,13 @@ struct Codegen::Impl {
         // to another activation is not something this one may name.
         bool                       isProcParam{false};
         const ProcedureTypeNode*   procType{nullptr};
+        /// EP §6.4.7: a `with`-bound field of a run-time-laid-out record has a
+        /// capacity its object carries, and once bound it is an ordinary name
+        /// with no path back to the object.  Recorded here so that
+        /// `with p^ do s := ...` checks against the real capacity rather than
+        /// the probe's string(1).  Last, and default-initialised, so that every
+        /// existing aggregate initialisation of this struct is unaffected.
+        llvm::Value*     strCapV{nullptr};
     };
     std::vector<std::unordered_map<std::string, VarEntry>> scopes;
 
@@ -990,6 +997,7 @@ struct Codegen::Impl {
     /// header new() wrote and is not known until run time; StrCapacity holds the
     /// probe's answer and would check `q^ := 'hi'` against a string(1).
     llvm::Value* exprStrCapV(const ExprNode& e);
+    void setVarStrCap(const std::string& name, llvm::Value* cap);
 
     /// The capacity to SIZE A TEMPORARY with, which has to be a constant.  A
     /// discriminant-fixed capacity is not one, and the probe's answer would cut

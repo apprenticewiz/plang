@@ -324,6 +324,12 @@ llvm::Value* Codegen::Impl::exprStrCapV(const ExprNode& e) {
     if (!exprIsVarStr(e) || !e.ResolvedType->ExtentVaries)
         return i64c(exprStrCap(e));
 
+    // A `with`-bound field carries the capacity recorded when it was bound;
+    // by then it is an ordinary name with no path back to its object.
+    if (auto* id = llvm::dyn_cast<IdentExpr>(&e))
+        if (const auto* ve = findVar(id->Name); ve && ve->strCapV)
+            return ve->strCapV;
+
     // `q^` for a ^string: EP §6.4.3.3 makes the schema's one discriminant the
     // capacity, and it has no written declaration to walk.
     if (llvm::isa<DerefExpr>(&e))
@@ -650,4 +656,11 @@ const TypeNode* Codegen::Impl::variantFieldDenoterOf(const VariantPart& vp,
 /// address, extent and capacity all have to be computed rather than folded.
 bool Codegen::Impl::isRuntimeLaidOut(const ExprNode& e) {
     return e.ResolvedType && e.ResolvedType->ExtentVaries;
+}
+
+void Codegen::Impl::setVarStrCap(const std::string& name, llvm::Value* cap) {
+    for (auto it = scopes.rbegin(); it != scopes.rend(); ++it) {
+        auto f = it->find(toLower(name));
+        if (f != it->end()) { f->second.strCapV = cap; return; }
+    }
 }

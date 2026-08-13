@@ -3188,3 +3188,26 @@ TEST(Schema, ADiscriminantThatFixesNoExtentIsNotRangeChecked) {
     ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
     EXPECT_EQ(R.Stdout, "7 0\n");
 }
+
+TEST(Schema, WithOverAnUndiscriminatedSchemaPointer) {
+    // `with p^ do` was refused outright for a record-bodied schema pointer.
+    // The fields are selectable by name like any record's; the difference is
+    // that there is no struct to GEP into, so each is bound to the address the
+    // run-time layout gives it, and the discriminants to the values the object
+    // carries.  A bound string field also has to remember its real capacity:
+    // once bound it is an ordinary name with no path back to its object, and
+    // it would otherwise be checked against the probe's string(1).
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type buf(cap: integer) = record s: string(cap); n: integer end;\n"
+        "var p: ^buf;\n"
+        "begin\n"
+        "  new(p, 10);\n"
+        "  with p^ do begin s := 'hi there'; n := 3 end;\n"
+        "  writeln('[', p^.s, '] n=', p^.n:1);\n"
+        "  with p^ do writeln('inside [', s, '] n=', n:1, ' cap=', cap:1);\n"
+        "  dispose(p)\n"
+        "end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "[hi there] n=3\ninside [hi there] n=3 cap=10\n");
+}

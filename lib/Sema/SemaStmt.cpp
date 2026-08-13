@@ -742,6 +742,32 @@ int Sema::pushWithScope(const WithStmt& S) {
         if (T->isError()) continue;
 
         // EP §6.4.7: schema instance — expose discriminants and body record fields.
+        // EP §6.4.7: an UNDISCRIMINATED schema -- `with p^ do` for a `^buf`.
+        // Its fields are selectable by name like any record's; the difference
+        // is that the discriminants are values carried by the object rather
+        // than constants, so they are exposed as integer variables and NOT put
+        // into ActiveSchemaBindings_, which exists for compile-time folding and
+        // has no answer here.
+        if (T->Kind == TypeKind::Schema && T->SchemaBody
+                && T->SchemaBody->Kind == TypeKind::Record) {
+            Symtab.pushScope(/*IsBlock=*/false);
+            ++Count;
+            for (const auto& D : T->SchemaDiscs) {
+                Symbol DS;
+                DS.Kind = SymbolKind::Var;
+                DS.Name = D.Name;
+                DS.Ty   = TyInt;
+                (void)Symtab.define(std::move(DS));
+            }
+            for (const auto& F : T->SchemaBody->RecordFields) {
+                Symbol FS;
+                FS.Kind = SymbolKind::Var;
+                FS.Name = F.Name;
+                FS.Ty   = F.Ty;
+                (void)Symtab.define(std::move(FS));
+            }
+            continue;
+        }
         if (T->Kind == TypeKind::SchemaInstance) {
             Symtab.pushScope(/*IsBlock=*/false);
             ++Count;
