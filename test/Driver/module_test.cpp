@@ -3441,3 +3441,49 @@ TEST(Schema, ADiscriminatedInstanceKeepsItsCompileTimeChecks) {
     EXPECT_NE(Bad.ExitCode, 0);
     EXPECT_NE(Bad.Stderr.find("does not fit a string(5)"), std::string::npos) << Bad.Stderr;
 }
+
+TEST(Schema, AStringIndexOnAPointerToStringIsNotASchemaArray) {
+    // `q^[1]` for a `^string` is a string component, §6.5.3.2 -- but the
+    // schema-array branch claimed any schema before the string case was
+    // reached, went looking for an array body on the string schema, and killed
+    // the compiler.  A record-bodied schema has no subscript at all and has to
+    // reach a diagnostic rather than the same crash.
+    auto R = compileAndRun(
+        "program p(output); type ps = ^string; var q: ps;\n"
+        "begin new(q, 8); q^ := 'abc'; writeln(q^[1]) end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "a\n");
+
+    auto Rec = compileAndRun(
+        "program p(output); type buf(n: integer) = record k: integer end;\n"
+        "var p2: ^buf;\n"
+        "begin new(p2, 3); writeln(p2^[1]) end.\n", kEP);
+    EXPECT_NE(Rec.ExitCode, 0);
+    EXPECT_EQ(Rec.Stderr.find("internal error"), std::string::npos) << Rec.Stderr;
+    EXPECT_NE(Rec.Stderr.find("non-array"), std::string::npos) << Rec.Stderr;
+}
+
+TEST(Schema, AVaryingStringIntoACharArrayChecksItsLength) {
+    // §6.4.3.2 wants the lengths equal.  Sema settles that when it knows the
+    // capacity and cannot when a discriminant fixes one, so it lets the
+    // assignment through -- and copying the array's length out of a shorter
+    // string read past the end of the allocation and dropped heap bytes into
+    // the array.  A read overrun, introduced by the compatibility rule that
+    // made this assignment legal in the first place.
+    auto Bad = compileAndRun(
+        "program p(output);\n"
+        "type ps = ^string;\n"
+        "var q: ps; a: packed array[1..40] of char;\n"
+        "begin new(q, 4); q^ := 'ab'; a := q^ end.\n", kEP);
+    EXPECT_NE(Bad.ExitCode, 0);
+    EXPECT_NE(Bad.Stderr.find("cannot fill"), std::string::npos) << Bad.Stderr;
+
+    auto Ok = compileAndRun(
+        "program p(output);\n"
+        "type ps = ^string;\n"
+        "var q: ps; a: packed array[1..4] of char; i: integer;\n"
+        "begin new(q, 4); q^ := 'abcd'; a := q^;\n"
+        "      write('['); for i := 1 to 4 do write(a[i]); writeln(']') end.\n", kEP);
+    ASSERT_EQ(Ok.ExitCode, 0) << Ok.Stderr;
+    EXPECT_EQ(Ok.Stdout, "[abcd]\n");
+}

@@ -597,6 +597,22 @@ void Codegen::Impl::emitCharStrStore(llvm::Value* dst, int64_t n,
     if (exprIsVarStr(src)) {
         auto* from = emitStrAddr(src);
         if (!from) codegenICE("a string value with no address");
+        // §6.4.3.2 requires the lengths to match, and Sema settles that when it
+        // knows the capacity.  It cannot when a discriminant fixes it, so it
+        // lets the assignment through -- and copying n bytes out of a string
+        // holding fewer read past the end of the allocation and dropped heap
+        // bytes into the array.  Checked here instead, against the length the
+        // string actually has.
+        if (src.ResolvedType->ExtentVaries) {
+            auto* len = strLoadLen(from);
+            auto* bad = builder.CreateICmpNE(len, i64c(n), "charstr.len.bad");
+            emitGuard(bad, "charstrlen", [&] {
+                builder.CreateCall(
+                    getExternFnN("plang_err_str_length",
+                                 llvm::Type::getVoidTy(ctx), {i64Ty, i64Ty}),
+                    {len, i64c(n)});
+            });
+        }
         builder.CreateMemCpy(dst, llvm::MaybeAlign(), strDataPtr(from),
                              llvm::MaybeAlign(),
                              llvm::ConstantInt::get(i64Ty, n));

@@ -1172,7 +1172,15 @@ llvm::Value* Codegen::Impl::emitIndexGEP(const IndexExpr& e) {
         if (auto path = schemaPathOf(e)) return path->addr;
     // EP §6.4.7: an undiscriminated schema recomputes its bounds from the
     // discriminants it carries, then indexes like a conformant array.
-    if (auto ref = schemaRefOf(*e.Array)) {
+    //
+    // Only when its body actually IS an array.  `q^[1]` for a `^string` is a
+    // string component, EP §6.5.3.2, and asking this branch for it went looking
+    // for an array body on the string schema and killed the compiler -- the
+    // string case below was never reached.  A record-bodied schema has no
+    // subscript at all and must fall through to be diagnosed, not crash.
+    if (auto ref = schemaRefOf(*e.Array);
+            ref && ref->semaTy && ref->semaTy->SchemaBody
+            && ref->semaTy->SchemaBody->Kind == TypeKind::Array) {
         auto [lo, hi] = schemaArrayBounds(*ref);
         auto* elemTy  = schemaStorageType(*ref);
         auto* idx     = toI64(emitExpr(*e.Index));
