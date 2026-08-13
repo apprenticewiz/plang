@@ -1307,19 +1307,31 @@ TEST(Schema, TheVariantPartIsAsWideAsItsWidestAlternative) {
     EXPECT_EQ(R.Stdout, "z 2.5 4321\n");
 }
 
-TEST(Schema, AFixedSizedBodyWithADiscriminantBoundIsRejectedTooAndNotAsASize) {
-    // `k: 1..n` makes the storage {i64, i64} whatever n is, so the old message's
-    // "its size varies with them" was not true of every case it fired on.  What
-    // the discriminant decides here is the range k is checked against, and
-    // folding it to the probe would range-check against 1..1.
+TEST(Schema, ADiscriminantMayFixARangeRatherThanAnExtent) {
+    // `record k: 1..n end` was refused, and the message blamed the size: the
+    // storage is the host ordinal's width whatever n is, and what the
+    // discriminant fixes is the RANGE k is checked against.  So there is
+    // nothing to lay out differently and everything to check differently.
+    // Sema cannot decide it -- the recorded bounds are the probe's -- so the
+    // check is emitted against the value the object carries, and the
+    // compile-time warning that folded against the probe stands aside.
     auto R = compileAndRun(
-        "program p;\n"
+        "program p(output);\n"
         "type box(n: integer) = record k: 1..n; m: integer end;\n"
         "var q: ^box;\n"
-        "begin end.\n", kEP);
+        "begin\n"
+        "  new(q, 100);\n"
+        "  q^.k := 50; q^.m := 7;\n"
+        "  writeln('k=', q^.k:1, ' m=', q^.m:1);\n"
+        "  q^.k := 200;\n"
+        "  writeln('not reached')\n"
+        "end.\n", kEP);
     EXPECT_NE(R.ExitCode, 0);
-    EXPECT_NE(R.Stderr.find("plang does not implement"), std::string::npos) << R.Stderr;
-    EXPECT_EQ(R.Stderr.find("size varies"), std::string::npos) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "k=50 m=7\n");
+    // The real bound, not the probe's 1..1, and no compile-time warning about
+    // a trap that does not happen.
+    EXPECT_NE(R.Stderr.find("1..100"), std::string::npos) << R.Stderr;
+    EXPECT_EQ(R.Stderr.find("outside the range"), std::string::npos) << R.Stderr;
 }
 
 TEST(Schema, AFixedRecordBodyIsStillAUsableDomainType) {

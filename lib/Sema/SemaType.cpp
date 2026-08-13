@@ -218,10 +218,26 @@ std::shared_ptr<Type> Sema::resolveTypeImpl(const TypeNode& Node) {
         auto Lo = checkExpr(*N->Low);
         auto Hi = checkExpr(*N->High);
         auto Base = (Lo->isOrdinal() ? Lo : (Hi->isOrdinal() ? Hi : TyInt));
+        const bool SavedUsed = SchemaBindingUsed_;
+        SchemaBindingUsed_   = false;
         auto Bounds = foldBounds(*N->Low, *N->High, *Base,
                                  diag::err_subrange_lower_bound_not_const,
                                  diag::err_subrange_upper_bound_not_const);
+        const bool Varies    = SchemaBindingUsed_;
+        SchemaBindingUsed_   = SavedUsed || SchemaBindingUsed_;
         if (!Bounds) return TyErr;
+        if (Varies) {
+            // `record k: 1..n end`: what the discriminant fixes here is the
+            // RANGE k is checked against, not any storage -- the subrange is as
+            // wide as its host ordinal whatever n is.  Marked all the same, so
+            // that nothing folds against the probe's bounds and the check is
+            // emitted against the value the object carries.  Not interned, for
+            // the same reason a varying string is not.
+            auto T = std::make_shared<Type>(*Ctx_.getSubrange(Base, Bounds->first,
+                                                              Bounds->second));
+            T->ExtentVaries = true;
+            return T;
+        }
         return Ctx_.getSubrange(Base, Bounds->first, Bounds->second);
     }
     if (auto* N = llvm::dyn_cast<EnumTypeNode>(&Node)) {
@@ -627,12 +643,19 @@ std::shared_ptr<Type> Sema::resolveUndiscriminatedSchema(Symbol& Sym,
     // those probe extents become the GEPs, the allocation sizes and the range
     // checks.  Accepting the rest would generate wrong code, not slow code.
     //
-    // Lifting it needs four things plang does not have: run-time field offsets
-    // and a run-time size in schemaBodySize, per-field bound recovery in
-    // CodegenSchema (schemaArrayBounds requires the whole body be an array), a
-    // string representation carrying its capacity at run time, and a Sema that
-    // marks a discriminant-dependent extent unknown rather than folding it to
-    // the probe.
+    // All four of the things that once made this impossible now exist:
+    // run-time field offsets, a run-time body size, per-field bound recovery,
+    // and a Sema that marks a discriminant-dependent extent rather than
+    // folding it to the probe.
+    // What is left to refuse: a body that varies without any extent, range or
+    // capacity of it saying so -- a discriminant read somewhere that fixes
+    // neither storage nor a check.  There is nothing to compute a layout from
+    // there, and nothing to check against either.
+    //
+    // `record k: 1..n end` used to be refused here and is not any more: the
+    // storage is the host ordinal's width whatever n is, and what the
+    // discriminant fixes is the RANGE k is checked against, which the run-time
+    // check now reads from the object.
     // Two different questions, and conflating them is what made the old message
     // wrong.  The first is whether the body says where its extents come from:
     // a discriminant used as an extent (`string(cap)`, `array[1..n]`) marks the

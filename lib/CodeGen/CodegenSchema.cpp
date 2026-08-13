@@ -420,6 +420,8 @@ uint64_t Codegen::Impl::rtAlignOfTypeNode(const TypeNode* tn, bool knownVarying)
     if (!knownVarying && !nodeExtentVaries(d))
         return mod->getDataLayout().getABITypeAlign(llvmTypeOfNode(*d)).value();
     // A varying string is { i64 len, bytes } whatever the capacity is.
+    if (llvm::isa<SubrangeTypeNode>(d))
+        return mod->getDataLayout().getABITypeAlign(llvmTypeOfNode(*d)).value();
     if (llvm::isa<StringTypeNode>(d)) return 8;
     if (auto* at = llvm::dyn_cast<ArrayTypeNode>(d))
         return rtAlignOfTypeNode(at->Element.get());
@@ -454,6 +456,11 @@ llvm::Value* Codegen::Impl::rtSizeOfTypeNode(const TypeNode* tn,
         return i64c(static_cast<int64_t>(
             mod->getDataLayout().getTypeAllocSize(llvmTypeOfNode(*d))));
 
+    // A subrange is as wide as its host ordinal whatever its bounds are, so a
+    // discriminant in them changes the CHECK and not the storage.
+    if (llvm::isa<SubrangeTypeNode>(d))
+        return i64c(static_cast<int64_t>(
+            mod->getDataLayout().getTypeAllocSize(llvmTypeOfNode(*d))));
     if (auto* st = llvm::dyn_cast<StringTypeNode>(d)) {
         auto* cap = toI64(emitExpr(*st->Capacity));
         if (!cap) codegenICE("a schema string capacity that cannot be evaluated");

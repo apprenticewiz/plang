@@ -306,9 +306,31 @@ void Codegen::Impl::emitAssign(const AssignStmt& s) {
 
     // ISO §6.4.2.4: the value assigned to a subrange must lie within it.
     if (const auto& tt = s.Target->ResolvedType;
-        tt && tt->Kind == TypeKind::Subrange && tt->SubLo != tt->SubHi
-        && rhs->getType()->isIntegerTy())
-        emitRangeCheck(rhs, tt->SubLo, tt->SubHi, /*isIndex=*/false, s.Loc);
+        tt && tt->Kind == TypeKind::Subrange && rhs->getType()->isIntegerTy()) {
+        // EP §6.4.7: `record k: 1..n end` -- the discriminant fixes the range k
+        // is checked against, not any storage.  The recorded bounds are the
+        // probe's, so the check is re-emitted from the declaration against the
+        // discriminants the object carries.
+        bool checked = false;
+        if (tt->ExtentVaries)
+            if (auto path = schemaPathOf(*s.Target)) {
+                const TypeNode* d = path->decl;
+                while (auto* pk = llvm::dyn_cast_or_null<PackedTypeNode>(d))
+                    d = pk->Inner.get();
+                if (auto* sr = llvm::dyn_cast_or_null<SubrangeTypeNode>(d)) {
+                    bindSchemaDiscs(path->root);
+                    auto* lo = toI64(emitExpr(*sr->Low));
+                    auto* hi = toI64(emitExpr(*sr->High));
+                    popScope();
+                    if (lo && hi) {
+                        emitRangeCheckDyn(rhs, lo, hi, /*isIndex=*/false, s.Loc);
+                        checked = true;
+                    }
+                }
+            }
+        if (!checked && tt->SubLo != tt->SubHi)
+            emitRangeCheck(rhs, tt->SubLo, tt->SubHi, /*isIndex=*/false, s.Loc);
+    }
 
     // What the destination holds, not what the source produced: an array
     // element and a record field are just as much a real as a bare variable

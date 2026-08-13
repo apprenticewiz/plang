@@ -242,6 +242,11 @@ void Sema::checkAssign(const AssignStmt& S) {
 // admits.
 void Sema::warnIfConstantOutOfRange(const Type& Dst, const ExprNode& Src) {
     if (Dst.Kind != TypeKind::Subrange) return;
+    // EP §6.4.7: bounds a discriminant fixes are not known here.  The recorded
+    // ones are the probe's, so this warned that every value but 1 was outside
+    // 1..1 -- certain of a trap that does not happen, on a program that is
+    // correct.  Codegen checks it against the value the object carries.
+    if (Dst.ExtentVaries) return;
     auto V = constBound(Src);
     if (!V) return;
     if (*V >= Dst.SubLo && *V <= Dst.SubHi) return;
