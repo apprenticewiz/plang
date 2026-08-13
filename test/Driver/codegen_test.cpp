@@ -4415,3 +4415,40 @@ TEST(NestedProcedure, ACallFromInsideAWithReachesTheEnclosingVariable) {
     ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
     EXPECT_EQ(R.Stdout, "7 900\n");
 }
+
+TEST(Shadowing, AVariableHidesAConstantOfTheSameName) {
+    // ISO §6.2.2.1: an identifier denotes its innermost enclosing definition.
+    // The constant table is flat and has no idea which is nearer, so it
+    // answered every read while the writes went to the variable: `size := 42`
+    // stored 42 and `writeln(size)` printed 10.  A required constant was
+    // already handled this way; every constant the program declares needed it.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "const size = 10;\n"
+        "procedure q;\n"
+        "var size: integer;\n"
+        "begin size := 42; writeln(size) end;\n"
+        "begin writeln(size); q; writeln(size) end.\n");
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    // And the constant is itself again once the scope that hid it ends.
+    EXPECT_EQ(R.Stdout, "10\n42\n10\n");
+}
+
+TEST(Shadowing, EveryKindOfBindingHidesAConstant) {
+    // A value parameter, a for-loop control variable and a with-bound field
+    // are all nearer definitions of the name.  fpc -Miso agrees on each.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "const size = 10; red = 7;\n"
+        "procedure byparam(size: integer); begin write(size, ' ') end;\n"
+        "procedure byenum; var red: integer; begin red := 3; write(red, ' ') end;\n"
+        "procedure byfor; var size: integer;\n"
+        "begin for size := 1 to 3 do write(size); write(' ') end;\n"
+        "procedure bywith;\n"
+        "type r = record size: integer end;\n"
+        "var rr: r;\n"
+        "begin rr.size := 99; with rr do write(size) end;\n"
+        "begin byparam(5); byenum; byfor; bywith; writeln end.\n");
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "5 3 123 99\n");
+}

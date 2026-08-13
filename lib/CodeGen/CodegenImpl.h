@@ -581,8 +581,26 @@ struct Codegen::Impl {
     // ====================================================================
     // Symbol table
     // ====================================================================
-    void pushScope() { scopes.emplace_back(); }
-    void popScope()  { if (!scopes.empty()) scopes.pop_back(); }
+    void pushScope() { scopes.emplace_back(); shadowedConsts.emplace_back(); }
+    void popScope()  {
+        // Put back any constant a variable in this scope was shadowing.
+        if (!shadowedConsts.empty() && shadowedConsts.size() == scopes.size()) {
+            for (auto& [K, V] : shadowedConsts.back()) consts[K] = V;
+            shadowedConsts.pop_back();
+        }
+        if (!scopes.empty()) scopes.pop_back();
+    }
+
+    /// Constants a variable declaration hid, one map per scope, put back when
+    /// the scope ends.
+    ///
+    /// ISO §6.2.2.1: an identifier denotes its innermost enclosing definition.
+    /// The constant table is flat and has no idea which is nearer, so reading a
+    /// name always answered from it: `const size = 10;` with a `var size:
+    /// integer` inside a procedure wrote 42 to the variable and read 10 back
+    /// from the constant.  A required constant was already handled this way;
+    /// every constant the program declares needed it too.
+    std::vector<std::map<std::string, llvm::Value*>> shadowedConsts;
     void defVar(const std::string& name, llvm::Value* ptr, llvm::Type* type,
                 const TypeNode* typeNode = nullptr);
     const VarEntry* findVar(const std::string& name) const;
