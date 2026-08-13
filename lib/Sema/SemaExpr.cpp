@@ -369,7 +369,13 @@ std::shared_ptr<Type> Sema::checkBinary(const BinaryExpr& E) {
                         && Lt->Kind == TypeKind::Char
                         && Rt->Kind == TypeKind::Char)) {
                 auto cap = [](const std::shared_ptr<Type>& T) -> int64_t {
-                    if (T->Kind == TypeKind::VarString) return T->StrCapacity;
+                    // A capacity fixed by a discriminant is the probe's here,
+                    // so it is treated the way an unbounded string is: the
+                    // result of a concatenation is a temporary, and the widest
+                    // one plang has is the honest bound for it.
+                    if (T->Kind == TypeKind::VarString)
+                        return T->ExtentVaries ? PlangMaxStringCapacity
+                                               : T->StrCapacity;
                     if (T->Kind == TypeKind::Char)      return 1;
                     return PlangMaxStringCapacity; // unbounded string
                 };
@@ -1426,7 +1432,11 @@ bool Sema::isAssignCompatible(const Type& Dst, const Type& Src,
     if (isCharStringType(Dst)) {
         if (Src.Kind == TypeKind::String) return true;
         if (Src.Kind == TypeKind::VarString)
-            return Src.StrCapacity == charStringLength(Dst);
+            // A discriminant-fixed capacity is not known here, so whether the
+            // lengths match is a run-time question rather than a reason to
+            // refuse the program.
+            return Src.ExtentVaries
+                || Src.StrCapacity == charStringLength(Dst);
     }
     // A string-type is a string value, so it goes where one is expected.
     if (Dst.Kind == TypeKind::VarString && isCharStringType(Src))

@@ -184,14 +184,29 @@ std::shared_ptr<Type> Sema::resolveTypeImpl(const TypeNode& Node) {
         auto Lo = checkExpr(*N->Low);
         auto Hi = checkExpr(*N->High);
         auto BaseOrd = (Lo->isOrdinal() ? Lo : (Hi->isOrdinal() ? Hi : TyInt));
+        // As for a string capacity above: whether THESE bounds read a
+        // discriminant, not whether anything in the enclosing body did.
+        const bool SavedUsed = SchemaBindingUsed_;
+        SchemaBindingUsed_   = false;
         auto Bounds = foldBounds(*N->Low, *N->High, *BaseOrd,
                                  diag::err_array_lower_bound_not_const,
                                  diag::err_array_upper_bound_not_const);
+        const bool Varies    = SchemaBindingUsed_;
+        SchemaBindingUsed_   = SavedUsed || SchemaBindingUsed_;
         if (!Bounds) return TyErr;
         // Route index subrange through TypeContext for canonical identity.
         // Include the actual bounds so array[1..3] ≠ array[1..100].
         auto Index = Ctx_.getSubrange(BaseOrd, Bounds->first, Bounds->second);
-        // Route array type through TypeContext for canonical identity.
+        if (Varies || (Elem && Elem->ExtentVaries)) {
+            // Not interned, for the reason the varying string is not: the
+            // bounds recorded here are the probe's and must not be folded
+            // against.  An element whose own extent varies carries up too --
+            // `array[1..4] of string(cap)` is fixed in count and varying in
+            // size, and the array is laid out at run time either way.
+            auto T          = Ctx_.makeArrayUncached(Index, Elem, N->Packed);
+            T->ExtentVaries = true;
+            return T;
+        }
         return Ctx_.getArray(Index, Elem, N->Packed);
     }
     if (auto* N = llvm::dyn_cast<SubrangeTypeNode>(&Node)) {
@@ -232,6 +247,11 @@ std::shared_ptr<Type> Sema::resolveTypeImpl(const TypeNode& Node) {
         T->RecordDecl = N;
         for (const auto& Fd : N->Fields) {
             auto Ft = resolveType(*Fd.Type);
+            // One field whose extent is fixed by a discriminant makes the whole
+            // record's layout a run-time question: the fields after it move, and
+            // so does its size.  The marker travels up so that the one test at
+            // the top of a lowering says which path the record takes.
+            if (Ft && Ft->ExtentVaries) T->ExtentVaries = true;
             for (const auto& Nm : Fd.Names) {
                 if (std::ranges::any_of(T->RecordFields,
                         [&](const Type::Field& F) { return eqCI(F.Name, Nm); }))
@@ -328,7 +348,14 @@ std::shared_ptr<Type> Sema::resolveTypeImpl(const TypeNode& Node) {
         // A capacity that will not fold used to become 255, which is not what
         // was written and hides the mistake behind a string that silently
         // holds the wrong amount.
-        const auto Cap = constBound(*N->Capacity);
+        // Whether THIS capacity read a discriminant, as opposed to whether
+        // anything in the enclosing body did: the flag is cleared around the
+        // one call so the answer belongs to this extent and no other.
+        const bool SavedUsed = SchemaBindingUsed_;
+        SchemaBindingUsed_   = false;
+        const auto Cap       = constBound(*N->Capacity);
+        const bool Varies    = SchemaBindingUsed_;
+        SchemaBindingUsed_   = SavedUsed || SchemaBindingUsed_;
         if (!Cap) {
             if (!CapTy->isError()) error(N->Loc, diag::err_string_cap_not_int);
             return TyErr;
@@ -337,6 +364,15 @@ std::shared_ptr<Type> Sema::resolveTypeImpl(const TypeNode& Node) {
             error(N->Loc, diag::err_string_cap_not_positive,
                   {std::to_string(*Cap)});
             return TyErr;
+        }
+        // A varying capacity is not interned: `string(cap)` under the probe
+        // would otherwise BE `string(1)`, and every fold against the shared
+        // type object would be reading the probe's answer as if it were the
+        // program's.
+        if (Varies) {
+            auto T = Type::makeVarString(*Cap);
+            T->ExtentVaries = true;
+            return T;
         }
         return Ctx_.getVarString(*Cap);
     }
@@ -553,6 +589,20 @@ std::shared_ptr<Type> Sema::resolveUndiscriminatedSchema(Symbol& Sym,
     // string representation carrying its capacity at run time, and a Sema that
     // marks a discriminant-dependent extent unknown rather than folding it to
     // the probe.
+    // Two different questions, and conflating them is what made the old message
+    // wrong.  The first is whether the body says where its extents come from:
+    // a discriminant used as an extent (`string(cap)`, `array[1..n]`) marks the
+    // type it sizes, and one used as anything else -- `record k: 1..n end`, where
+    // what it fixes is the range k is checked against -- marks nothing and
+    // leaves nothing to compute from.  That one can never be laid out.
+    if (LayoutVaries && Body->Kind != TypeKind::Array && !Body->ExtentVaries) {
+        error(N.Loc, diag::err_schema_body_not_representable, {N.Name});
+        return TyErr;
+    }
+    // The second is how far codegen's run-time layout has got.  Sema is ready
+    // for all of it; this gate narrows as CodegenSchema gains each piece, and
+    // it is a gate rather than a silent miscompile because Sema's byteSizeOf
+    // and codegen's DataLayout would otherwise disagree about the probe.
     if (LayoutVaries && Body->Kind != TypeKind::Array) {
         error(N.Loc, diag::err_schema_body_not_representable, {N.Name});
         return TyErr;

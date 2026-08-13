@@ -270,6 +270,12 @@ void Sema::checkStringCapacity(const Type& Dst, const ExprNode& Src) {
     }
 
     if (Dst.Kind != TypeKind::VarString) return;
+    // EP §6.4.7: a capacity fixed by a discriminant is not known here.  The
+    // recorded one is the probe's, so comparing against it would reject
+    // `p^.s := 'twelve chars'` for not fitting a string(1).  Whether it fits is
+    // a run-time question, and codegen asks it against the capacity the object
+    // carries.
+    if (Dst.ExtentVaries) return;
     if (Len > Dst.StrCapacity)
         error(Src.Loc, diag::err_string_too_long,
               {std::to_string(Len), std::to_string(Dst.StrCapacity)});

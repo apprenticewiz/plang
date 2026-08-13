@@ -178,22 +178,19 @@ public:
         std::string k = "arr:" + addrKey(idx) + ":" + addrKey(elem)
                       + ":" + (packed ? "P" : "U");
         auto& slot = ArrayCache_[k];
-        if (!slot) {
-            auto T      = std::make_shared<Type>();
-            T->Kind     = TypeKind::Array;
-            // Include index bounds in the display name so diagnostics say
-            // "array[1..3] of integer" rather than just "array of integer".
-            std::string idxName = idx->Name.empty() ? idx->SubBase ? idx->SubBase->Name
-                                                                    : "?"
-                                                    : idx->Name;
-            T->Name     = "array[" + std::to_string(idx->SubLo) + ".."
-                        + std::to_string(idx->SubHi) + "] of " + elem->Name;
-            T->ElemType = std::move(elem);
-            T->IndexType= std::move(idx);
-            T->Packed   = packed;
-            slot = std::move(T);
-        }
+        if (!slot) slot = buildArray(std::move(idx), std::move(elem), packed);
         return slot;
+    }
+
+    /// The same array type, deliberately NOT interned.  An array whose extent
+    /// is fixed by a schema discriminant was resolved against a probe binding,
+    /// so its recorded bounds are the probe's; sharing one object with the
+    /// array that genuinely has those bounds is what would let a fold read the
+    /// probe's answer as the program's.  See Type::ExtentVaries.
+    std::shared_ptr<Type> makeArrayUncached(std::shared_ptr<Type> idx,
+                                            std::shared_ptr<Type> elem,
+                                            bool packed) {
+        return buildArray(std::move(idx), std::move(elem), packed);
     }
 
     /// Canonical pointer type.
@@ -275,6 +272,23 @@ public:
     }
 
 private:
+    /// Shared by getArray and makeArrayUncached, so an interned array and a
+    /// varying one differ in nothing but whether they are shared.
+    static std::shared_ptr<Type> buildArray(std::shared_ptr<Type> idx,
+                                            std::shared_ptr<Type> elem,
+                                            bool packed) {
+        auto T   = std::make_shared<Type>();
+        T->Kind  = TypeKind::Array;
+        // Include index bounds in the display name so diagnostics say
+        // "array[1..3] of integer" rather than just "array of integer".
+        T->Name  = "array[" + std::to_string(idx->SubLo) + ".."
+                 + std::to_string(idx->SubHi) + "] of " + elem->Name;
+        T->ElemType  = std::move(elem);
+        T->IndexType = std::move(idx);
+        T->Packed    = packed;
+        return T;
+    }
+
     /// Every type reachable from \p T, so the destructor can reach the nominal
     /// types too: a record is not interned, and the only way to it is through
     /// whatever refers to it.

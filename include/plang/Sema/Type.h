@@ -117,6 +117,18 @@ struct Type {
     /// Capacity (N) of an EP string(N) type; 0 for unbounded String.
     int64_t StrCapacity{0};
 
+    /// EP §6.4.7: an extent of this type is fixed by a discriminant whose value
+    /// is not known until run time -- `string(cap)` or `array[1..n]` written in
+    /// the body of a schema that is used without its discriminants.
+    ///
+    /// The body of such a schema is resolved once against a probe binding, so
+    /// StrCapacity and the index bounds below hold the probe's answer and are
+    /// NOT the storage.  Nothing may fold against them: the object carries its
+    /// discriminants and the layout is worked out from those at run time.  A
+    /// type that reaches codegen with this set is laid out by CodegenSchema's
+    /// run-time path rather than by the specialising one.
+    bool ExtentVaries{false};
+
     // --- Subrange ---
     /// Underlying ordinal type for a subrange.
     std::shared_ptr<Type> SubBase;
