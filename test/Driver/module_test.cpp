@@ -3257,3 +3257,27 @@ TEST(Schema, AWithBoundComponentKeepsItsRunTimeLayout) {
     ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
     EXPECT_EQ(R.Stdout, "3 6 9 12 15 | [five!] 9\n");
 }
+
+TEST(Schema, AVaryingExtentInsideAVariantPartIsStillRunTimeLaidOut) {
+    // walkVariantFields adds a variant's fields to the record without carrying
+    // ExtentVaries up, so a schema whose ONLY varying extent sits in a variant
+    // looked fixed and was laid out against the probe.  rtAlignOfTypeNode also
+    // skipped the variant part, so the size walk padded to an alignment the
+    // align walk did not know about.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type buf(n: integer) = record\n"
+        "       k: integer;\n"
+        "       case tag: boolean of true: (s: string(n)); false: (x: integer)\n"
+        "     end;\n"
+        "var q: ^buf; canary: integer;\n"
+        "begin\n"
+        "  canary := 999;\n"
+        "  new(q, 20);\n"
+        "  q^.k := 5; q^.tag := true; q^.s := 'inside the variant';\n"
+        "  writeln(q^.k:1, ' ', q^.tag, ' [', q^.s, '] ', canary:1);\n"
+        "  dispose(q)\n"
+        "end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "5 true [inside the variant] 999\n");
+}

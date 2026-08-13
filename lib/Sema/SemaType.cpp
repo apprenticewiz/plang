@@ -269,6 +269,12 @@ std::shared_ptr<Type> Sema::resolveTypeImpl(const TypeNode& Node) {
         // Walk the variant part (and nested variants) adding all variant fields to
         // RecordFields so that field-access checking can find them (ISO §6.4.3.3).
         if (N->Variant) walkVariantFields(*N->Variant, *T);
+        // A varying extent inside a variant part moves the record's end just as
+        // one in a fixed field does, and walkVariantFields adds those fields
+        // without carrying the marker up -- so a schema whose only varying
+        // extent was in a variant looked fixed and was laid out by the probe.
+        for (const auto& F : T->RecordFields)
+            if (F.Ty && F.Ty->ExtentVaries) { T->ExtentVaries = true; break; }
         // Named after its fields so two inline records read differently in a
         // diagnostic; nameNominalType replaces this if a declaration names it.
         std::vector<std::string> FieldNames;

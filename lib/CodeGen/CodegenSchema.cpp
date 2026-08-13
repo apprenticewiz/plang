@@ -419,6 +419,11 @@ uint64_t Codegen::Impl::rtAlignOfTypeNode(const TypeNode* tn, bool knownVarying)
         uint64_t a = 1;
         for (const auto& fd : rt->Fields)
             a = std::max(a, rtAlignOfTypeNode(fd.Type.get()));
+        // The variant part counts too.  Omitting it under-aligned a record
+        // whose only strictly-aligned member is inside a variant -- the size
+        // walk pads to this alignment, so the two disagreed about where the
+        // record ends as well as about where it may start.
+        if (rt->Variant) a = std::max(a, rtVariantAlign(*rt->Variant));
         return a;
     }
     return 8;
@@ -514,7 +519,10 @@ llvm::Value* Codegen::Impl::rtVariantSize(const VariantPart& vp,
 }
 
 uint64_t Codegen::Impl::rtVariantAlign(const VariantPart& vp) {
-    uint64_t a = 1;
+    // The tag is a member of the part as much as any alternative's field is,
+    // and the size walk aligns to it, so leaving it out here made the two
+    // walks disagree for a variant whose tag is wider than its alternatives.
+    uint64_t a = vp.TagType ? rtAlignOfTypeNode(vp.TagType.get()) : 1;
     for (const auto& vc : vp.Cases) {
         for (const auto& fd : vc.Fields)
             a = std::max(a, rtAlignOfTypeNode(fd.Type.get()));
