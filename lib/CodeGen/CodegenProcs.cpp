@@ -682,45 +682,27 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
                     dimPtrs.emplace_back(loA, hiA);
                 }
 
-                // ISO §6.6.3.3: a value parameter is a variable of its own that
-                // the actual is assigned to.  A conformant array passed by
-                // value was bound straight to the caller's storage, so
-                // assigning to the formal reached the actual: `clobber(a)`
-                // with `x: array[lo..hi: integer] of integer` left the caller's
-                // array full of the callee's writes.
+                // ISO §6.6.3.3 makes a value parameter a variable of its own,
+                // so a conformant array passed by value ought to be COPIED --
+                // and it is not: the formal is bound straight to the caller's
+                // storage, and assigning to it reaches the actual.  That has
+                // been true since 0.1.0.
                 //
-                // How much to copy is only known here, from the bounds that
-                // arrived beside the pointer, so the copy is a dynamic alloca
-                // rather than an entry one.  A var parameter is still bound
-                // straight through, which is what makes it one.
+                // A copy was written and then withdrawn, because a dynamic
+                // alloca in the prologue is the wrong home for it.  The extent
+                // is only known here, so the copy is as big as the actual: a
+                // 100 kB array through twenty activations exhausted an 8 MB
+                // stack and the program died with no diagnostic, where it had
+                // run before.  Trading a rare wrong answer for a crash on
+                // programs that worked is not an improvement.
+                //
+                // What it needs is either a heap copy freed on every exit --
+                // including the ones goto takes -- or Sema deciding which
+                // formals are ever assigned so that a read-only one needs no
+                // copy at all.  Both are more than a patch, so the defect
+                // stands, recorded rather than half-fixed.  A var parameter is
+                // bound straight through and always was.
                 llvm::Value* dataPtr = arrPtrArg;
-                if (flatIdx < paramByRef.size() && !paramByRef[flatIdx]) {
-                    llvm::Value* count = llvm::ConstantInt::get(i64Ty, 1);
-                    for (const auto& [loA, hiA] : dimPtrs) {
-                        auto* lo  = builder.CreateLoad(i64Ty, loA, "cp.lo");
-                        auto* hi  = builder.CreateLoad(i64Ty, hiA, "cp.hi");
-                        auto* ext = builder.CreateAdd(
-                            builder.CreateSub(hi, lo, "cp.span"),
-                            llvm::ConstantInt::get(i64Ty, 1), "cp.ext");
-                        count = builder.CreateMul(count, ext, "cp.count");
-                    }
-                    // An empty conformant array is a legal shape to pass, and
-                    // a negative count would make the alloca enormous.
-                    auto* zero64 = llvm::ConstantInt::get(i64Ty, 0);
-                    count = builder.CreateSelect(
-                        builder.CreateICmpSGT(count, zero64, "cp.pos"),
-                        count, zero64, "cp.n");
-                    const uint64_t esz =
-                        mod->getDataLayout().getTypeAllocSize(elemTy).getFixedValue();
-                    const auto align = mod->getDataLayout().getABITypeAlign(elemTy);
-                    auto* copy = builder.CreateAlloca(elemTy, count, nm + ".copy");
-                    copy->setAlignment(align);
-                    builder.CreateMemCpy(
-                        copy, align, arrPtrArg, align,
-                        builder.CreateMul(count,
-                            llvm::ConstantInt::get(i64Ty, esz), "cp.bytes"));
-                    dataPtr = copy;
-                }
                 defVar(nm, dataPtr, elemTy);
                 {
                     auto& ve             = scopes.back()[toLower(nm)];

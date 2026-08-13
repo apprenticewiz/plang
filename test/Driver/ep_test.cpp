@@ -3114,26 +3114,12 @@ TEST(ForIn, TheControlVariableIsTheDeclaredOne) {
     EXPECT_EQ(R.Stdout, "qz\n");
 }
 
-TEST(ConformantArray, AValueParameterIsACopy) {
-    // ISO §6.6.3.3: a value parameter is a variable of its own that the actual
-    // is assigned to.  A conformant array passed by value was bound straight
-    // to the caller's storage, so the callee's writes reached the caller.
-    auto R = compileAndRun(
-        "program p(output);\n"
-        "type vec = array[1..5] of integer;\n"
-        "var a: vec; i: integer;\n"
-        "procedure clobber(x: array[lo..hi: integer] of integer);\n"
-        "var j: integer;\n"
-        "begin for j := lo to hi do x[j] := 99 end;\n"
-        "begin\n"
-        "  for i := 1 to 5 do a[i] := i;\n"
-        "  clobber(a);\n"
-        "  for i := 1 to 5 do write(a[i], ' ');\n"
-        "  writeln\n"
-        "end.\n", kEP);
-    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
-    EXPECT_EQ(R.Stdout, "1 2 3 4 5 \n");
-}
+// A value conformant array parameter is NOT copied -- §6.6.3.3 says it should
+// be, and plang has bound the formal to the caller's storage since 0.1.0.  A
+// copy was written and withdrawn: a dynamic alloca in the prologue is as big as
+// the actual, and a 100 kB array through twenty activations exhausted the stack
+// on programs that had run.  There is no test asserting the wrong behaviour,
+// only this note and the one below, which pins what does work.
 
 TEST(ConformantArray, AVarParameterStillReachesTheCallersArray) {
     // The other side: making the value form a copy must not make the var form
