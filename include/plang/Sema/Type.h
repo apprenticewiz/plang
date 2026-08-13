@@ -12,6 +12,7 @@
 namespace plang {
 
 struct RecordTypeNode;
+struct TypeNode;
 
 /// Number of distinct ordinals a set can hold.  A set is lowered to one bit
 /// per ordinal, so this is both the width of the set representation and the
@@ -220,6 +221,14 @@ struct Type {
     /// field types are accurate but its extent is only accurate when
     /// SchemaFixedLayout is set.
     std::shared_ptr<Type>   SchemaBody;
+    /// The declaration denoter the body was resolved from.  Codegen re-emits
+    /// the body's own bound and capacity expressions against the run-time
+    /// discriminants, and it used to find them by looking the SCHEMA NAME up in
+    /// a flat map keyed by bare name across the whole compilation -- so a
+    /// schema declared in a nested procedure, shadowing an outer one of the
+    /// same name, handed back the wrong body.  A type knows its own
+    /// declaration; the name does not identify it.
+    const TypeNode*         SchemaBodyNode{nullptr};
     /// Schema only: true when the body's storage layout does not depend on the
     /// discriminants, so SchemaBody describes the storage exactly.  When false
     /// the body is an array whose bounds are computed at run time.

@@ -652,6 +652,7 @@ std::shared_ptr<Type> Sema::resolveUndiscriminatedSchema(Symbol& Sym,
     // schema looked fixed and every consumer that tests the deref's type --
     // the index stride among them -- took the probe path.
     T->ExtentVaries      = Body->ExtentVaries;
+    T->SchemaBodyNode    = Sym.SchemaBodyNode;
     for (const auto& P : Sym.SchemaDeclParams)
         T->SchemaDiscs.push_back({.Name = P.Name, .Ty = P.Ty});
 

@@ -1174,6 +1174,7 @@ struct Codegen::Impl {
     /// re-emitted with run-time discriminants.
     void registerSchemaDefs(const BlockNode& block);
     const SchemaDef* findSchemaDef(const std::string& name) const;
+    const TypeNode* schemaBodyNodeOf(const plang::Type& T) const;
     /// The run-time view of `e`, or nullopt when `e` is not schematic.
     /// May emit loads, so call it once per use.
     std::optional<SchemaRef> schemaRefOf(const ExprNode& e);

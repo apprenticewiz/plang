@@ -162,6 +162,15 @@ void Codegen::Impl::emitSchemaDiscMatch(const SchemaRef& dst,
 // Extents
 // ---------------------------------------------------------------------------
 
+/// The body denoter of a schema, from the type itself rather than from its
+/// name.  The name-keyed map remains only for the discriminant NAMES, which a
+/// declaration carries and a synthetic schema does not.
+const TypeNode* Codegen::Impl::schemaBodyNodeOf(const plang::Type& T) const {
+    if (T.SchemaBodyNode) return T.SchemaBodyNode;
+    const SchemaDef* def = findSchemaDef(T.SchemaName);
+    return def ? def->body : nullptr;
+}
+
 void Codegen::Impl::bindSchemaDiscs(const SchemaRef& ref) {
     // The body's bound and capacity expressions are written in terms of the
     // formal discriminant names, so they are bound as ordinary variables and
@@ -257,8 +266,7 @@ llvm::Value* Codegen::Impl::schemaBodySize(const plang::Type& schema,
     // overlapped the elements and ran off the end of the block.
     const bool elemVaries = body->ElemType && body->ElemType->ExtentVaries;
     if (body->ExtentVaries && (body->Kind != TypeKind::Array || elemVaries)) {
-        if (const SchemaDef* def = findSchemaDef(schema.SchemaName);
-                def && def->body) {
+        if (const TypeNode* bodyNode = schemaBodyNodeOf(schema); bodyNode) {
             SchemaRef ref{&schema, nullptr, discs};
             bindSchemaDiscs(ref);
             // The BODY node carries no resolved type of its own:
@@ -267,7 +275,7 @@ llvm::Value* Codegen::Impl::schemaBodySize(const plang::Type& schema,
             // which is exactly why the element stride came out right while the
             // size folded to the 255-capacity default.  Say it varies rather
             // than asking the node.
-            auto* sz = rtSizeOfTypeNode(def->body, /*knownVarying=*/true);
+            auto* sz = rtSizeOfTypeNode(bodyNode, /*knownVarying=*/true);
             popScope();
             return sz;
         }
@@ -604,9 +612,9 @@ Codegen::Impl::schemaPathOf(const ExprNode& e) {
     if (llvm::isa<DerefExpr>(&e) || llvm::isa<IdentExpr>(&e)) {
         auto ref = schemaRefOf(e);
         if (!ref || !ref->semaTy) return std::nullopt;
-        const SchemaDef* def = findSchemaDef(ref->semaTy->SchemaName);
-        if (!def || !def->body) return std::nullopt;
-        return SchemaPath{*ref, ref->data, def->body};
+        const TypeNode* bodyNode = schemaBodyNodeOf(*ref->semaTy);
+        if (!bodyNode) return std::nullopt;
+        return SchemaPath{*ref, ref->data, bodyNode};
     }
 
     if (auto* fe = llvm::dyn_cast<FieldExpr>(&e)) {
