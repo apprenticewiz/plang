@@ -17,7 +17,12 @@ const Symbol* SymbolTable::lookupInEnclosingBlock(const std::string& Name) const
     const std::string K = lower(Name);
     for (auto It = Scopes.rbegin(); It != Scopes.rend(); ++It) {
         const auto F = It->Symbols.find(K);
-        if (F != It->Symbols.end()) return &F->second;
+        // The first scope holding the name is the one the name denotes.  A hit
+        // in a with-statement's scope is a field, not a declaration of the
+        // block, and no outer declaration can rescue it: inside the with, the
+        // name means the field.  Returning it here accepted a record field as
+        // a for-statement's control variable.
+        if (F != It->Symbols.end()) return It->IsBlock ? &F->second : nullptr;
         if (It->IsBlock) break;   // searched out to the block; no further
     }
     return nullptr;

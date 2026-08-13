@@ -166,10 +166,17 @@ std::shared_ptr<Type> Sema::checkExpr(const ExprNode& E) {
 std::shared_ptr<Type> Sema::checkIdent(const IdentExpr& E) {
     // Inside a function body, the function's own name (or named result variable,
     // EP §6.7.2) is the result pseudo-variable.
-    if (CurrentProc && CurrentProc->IsFunction && CurrentRetType) {
-        if (eqCI(E.Name, CurrentProc->Name)) return CurrentRetType;
-        if (!CurrentProc->ResultName.empty() &&
-            eqCI(E.Name, CurrentProc->ResultName)) return CurrentRetType;
+    // §6.8.2.2 says the function block must *contain* the assignment, not be
+    // it, so a procedure nested inside the function names the result too.
+    // Asking whether the innermost procedure happens to be that function got
+    // the answer from the wrong place: resultFrameFor searches the stack of
+    // functions whose blocks are open, innermost first, and already knows that
+    // a nearer declaration of the name denotes something else.  It is what
+    // isFunctionResultTarget uses to accept the assignment; this is the same
+    // question asked one step later, for the type.
+    if (!FuncStack.empty()) {
+        if (const FuncFrame* F = resultFrameFor(E.Name))
+            return F->RetType ? F->RetType : TyErr;
     }
 
     // EP §6.4.7: active schema discriminant bindings — treated as integer constants.

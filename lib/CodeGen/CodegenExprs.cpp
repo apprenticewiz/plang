@@ -1414,10 +1414,16 @@ llvm::StructType* Codegen::Impl::resolveRecordStructType(const FieldExpr& e) {
     // accesses to one declaration still share one struct -- which is what the
     // name lookup was for -- and no other declaration can be reached by
     // spelling the name again.
-    if (e.Record->ResolvedType
-            && e.Record->ResolvedType->Kind == TypeKind::Record)
-        return llvm::dyn_cast<llvm::StructType>(
-                   llvmTypeOfSemaType(*e.Record->ResolvedType));
+    // Asking for Kind == Record here is the same mistake one step further in:
+    // `small = buf(8)` names a schema applied to actual discriminants, which
+    // EP §6.4.9 makes an ordinary fixed-size type -- an array component, a
+    // field of another record, a pointer domain.  Sema kinds it SchemaInstance
+    // and hangs the record off SchemaBody, so the test failed and every such
+    // record reached as anything but a directly-declared variable ICEd.
+    // recordTypeOf is the look-through the field-index and layout lookups
+    // below already use, so all three agree on which record is selected from.
+    if (const Type* RecTy = recordTypeOf(*e.Record))
+        return llvm::dyn_cast<llvm::StructType>(llvmTypeOfSemaType(*RecTy));
     return nullptr;
 }
 

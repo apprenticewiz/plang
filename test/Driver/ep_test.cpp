@@ -3327,3 +3327,31 @@ TEST(ConformantArray, ANestedProcedureIndexesItsParentsConformantArrayCorrectly)
     // write to x[lo] lands in a[1].
     EXPECT_EQ(R.Stdout, "11 22 33 \n555 22 33 7777\n");
 }
+
+TEST(EP7Schema, ADiscriminatedRecordIsReachedByEveryRouteNotJustByItsOwnName) {
+    // §6.4.9: a schema applied to actual discriminants names an ordinary
+    // fixed-size type, usable as an array component, a field of another record
+    // or a function result like any other.  Codegen resolved the struct for a
+    // field access by asking whether the Sema kind was Record -- and a
+    // discriminated schema is kinded SchemaInstance, with the record hung off
+    // SchemaBody.  A directly-declared variable took an earlier path and worked,
+    // which is what hid this; every other route ICEd with "cannot resolve the
+    // record type of field".  The varying field sits between two fixed ones so
+    // that a shared or unspecialised struct would put `m` at the wrong offset.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type buf(cap: integer) = record n: integer; s: string(cap); m: integer end;\n"
+        "     small = buf(4);\n"
+        "     outer = record b: small; tag: integer end;\n"
+        "var d: small; v: array[1..2] of small; o: outer; i: integer;\n"
+        "begin\n"
+        "  d.n := 7; d.s := 'de'; d.m := 70;\n"
+        "  for i := 1 to 2 do begin v[i].n := i; v[i].s := 'ab'; v[i].m := i * 10 end;\n"
+        "  o.b.n := 5; o.b.s := 'in'; o.b.m := 50; o.tag := 99;\n"
+        "  writeln(d.n:1, ' ', d.m:1, ' ', d.s);\n"
+        "  for i := 1 to 2 do writeln(v[i].n:1, ' ', v[i].m:1, ' ', v[i].s);\n"
+        "  writeln(o.b.n:1, ' ', o.b.m:1, ' ', o.b.s, ' ', o.tag:1)\n"
+        "end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "7 70 de\n1 10 ab\n2 20 ab\n5 50 in 99\n");
+}

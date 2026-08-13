@@ -3534,6 +3534,64 @@ TEST(NonLocalGoto, AGotoOutOfAWithIsStillALocalOne) {
     EXPECT_EQ(R.Stdout, "yes\n");
 }
 
+TEST(NonLocalGoto, ALabelledStatementMustBeInTheBlockThatDeclaredTheLabel) {
+    // 6.1.6: a label-declaration-part declares the labels of the statements of
+    // THAT block.  The placement check resolved the label with the ordinary
+    // enclosing-scope lookup, which answers by spelling, so a `1:` written
+    // inside a nested procedure satisfied the program block's `label 1` -- and
+    // the landing block was then planted in main, where nothing jumps to it and
+    // the block ends with no terminator.  It failed as an LLVM verifier ICE.
+    // fpc -Miso: 'Label must be defined in the same scope as it is declared'.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "label 1;\n"
+        "procedure q;\n"
+        "begin\n"
+        "1: writeln('inner')\n"
+        "end;\n"
+        "begin q end.\n");
+    EXPECT_NE(R.ExitCode, 0) << "accepted:\n" << R.Stdout;
+    EXPECT_EQ(R.Stderr.find("internal error"), std::string::npos)
+        << "ICE rather than a diagnostic:\n" << R.Stderr;
+    EXPECT_NE(R.Stderr.find("enclosing block"), std::string::npos) << R.Stderr;
+}
+
+TEST(NestedProcedures, AProcedureMayAssignTheEnclosingFunctionsResult) {
+    // 6.8.2.2 says the function block must CONTAIN the assignment, not be it,
+    // so a procedure nested inside the function names the result too.  The
+    // assignment-target check knew this -- it searches the stack of open
+    // functions -- but the check that gives the identifier its type asked only
+    // whether the innermost procedure was that function, so the name fell
+    // through to the ordinary lookup and was refused as a call with no
+    // arguments.  fpc -Miso prints 'total(4) = 14'.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "function total(k: integer): integer;\n"
+        "var n: integer;\n"
+        "  procedure setit;\n"
+        "  begin n := n * 2; total := n + k end;\n"
+        "begin n := k + 1; setit end;\n"
+        "begin writeln('total(4) = ', total(4):1) end.\n");
+    ASSERT_EQ(R.ExitCode, 0) << "compile/run failed:\n" << R.Stderr;
+    EXPECT_EQ(R.Stdout, "total(4) = 14\n");
+}
+
+TEST(NestedProcedures, RecursionIsStillACallAndNotTheResult) {
+    // The guard on the fix above: reaching the enclosing function's result by
+    // name must not swallow an ordinary recursive call, nor the inner
+    // function's own result when a nested function shares the spelling.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "function fact(n: integer): integer;\n"
+        "begin if n <= 1 then fact := 1 else fact := n * fact(n - 1) end;\n"
+        "function g: integer;\n"
+        "  procedure h; begin g := 42 end;\n"
+        "begin g := 0; h end;\n"
+        "begin writeln(fact(5):1, ' ', g:1) end.\n");
+    ASSERT_EQ(R.ExitCode, 0) << "compile/run failed:\n" << R.Stderr;
+    EXPECT_EQ(R.Stdout, "120 42\n");
+}
+
 // ---------------------------------------------------------------------------
 // Defects the Pascal Acceptance Test found.
 // ---------------------------------------------------------------------------

@@ -798,6 +798,21 @@ void Sema::checkLabeled(const LabeledStmt& S) {
     Symbol* Sym = Symtab.lookup(S.Label);
     if (!Sym || Sym->Kind != SymbolKind::Label) {
         error(S.Loc, diag::err_label_not_declared, {S.Label});
+    } else if (!CurrentBlockLabels.contains(S.Label)) {
+        // §6.1.6: a label-declaration-part declares the labels of the
+        // statements of *that* block.  Symtab.lookup answers by spelling and
+        // reaches enclosing scopes, so without this an inner block's labelled
+        // statement satisfied an outer block's declaration -- and the landing
+        // place was then planted in the declaring block's function, where
+        // nothing ever jumps to it and the basic block has no terminator.
+        // checkGoto is deliberately untouched: naming an enclosing block's
+        // label is what a non-local goto is.  It is the statement that has to
+        // stay home, not the jump.
+        error(S.Loc, diag::err_label_wrong_block, {S.Label});
+        // Counted as placed and reached so the declaring block does not go on
+        // to report it as never defined and never jumped to: one mistake, one
+        // diagnostic.  Both flags are read only by the Phase 7.5 audit.
+        Sym->LabelPlaced = Sym->LabelReferenced = true;
     } else {
         Sym->LabelPlaced = true;
     }

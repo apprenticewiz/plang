@@ -151,6 +151,7 @@ DIAG(err_goto_undefined, Error, "undefined label '%0'")
 DIAG(err_goto_outer_block, Error, "goto '%0' leaves this block for a label that is not at the outermost level of the block declaring it")
 DIAG(err_goto_into_structured, Error, "goto '%0' jumps into a structured statement")
 DIAG(err_label_not_declared, Error, "label '%0' used as a statement but not declared in label section")
+DIAG(err_label_wrong_block, Error, "label '%0' is declared in an enclosing block, so the statement it labels must be in that block too")
 DIAG(err_case_selector_not_ordinal, Error, "case selector must be an ordinal type, got '%0'")
 DIAG(err_case_label_mismatch, Error, "case label type '%0' is not compatible with selector type '%1'")
 // The label is spelled the way the program wrote it — 'a', not 97 — so the
