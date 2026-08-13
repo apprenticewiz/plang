@@ -223,8 +223,26 @@ llvm::Value* Codegen::Impl::schemaBodySize(const plang::Type& schema,
     // asked for a string(1) and allocated 16 bytes for a `new(q, 20)`, which
     // the first assignment then wrote past.
     if (body->Kind == TypeKind::VarString && body->ExtentVaries
-            && discs.size() == 1)
+            && discs.size() == 1) {
+        // EP §6.7.5.3 lets a discriminant be an expression, so a capacity that
+        // describes no string is only detectable here.  Checked on the EXTENT
+        // rather than on the discriminants: ExtentVaries is one flag for the
+        // whole body and does not say WHICH discriminant sizes anything, so
+        // testing them all rejected `new(v, 0, 4)` for an `array[lo..hi]`,
+        // whose lower bound is legitimately zero.
+        auto* bad = builder.CreateICmpSLT(discs[0], i64c(0), "str.cap.bad");
+        if (auto* c = llvm::dyn_cast<llvm::ConstantInt>(bad); !c || !c->isZero()) {
+            auto* nm = internStrPtr(schema.SchemaDiscs.empty()
+                                        ? "capacity" : schema.SchemaDiscs[0].Name);
+            emitGuard(bad, "schema.extent", [&] {
+                builder.CreateCall(
+                    getExternFnN("plang_err_schema_extent",
+                                 llvm::Type::getVoidTy(ctx), {ptrTy, i64Ty}),
+                    {nm, discs[0]});
+            });
+        }
         return alignUpV(builder.CreateAdd(i64c(8), discs[0], "str.size"), 8);
+    }
 
     // Any other body whose extent a discriminant fixes is measured by walking
     // the declaration with the discriminants bound.  An ARRAY body is left to
@@ -283,26 +301,6 @@ void Codegen::Impl::emitNewSchema(const ExprNode& ptrArg,
                            + "' is not an integer value");
         discs.push_back(v);
     }
-
-    // EP §6.7.5.3 lets the discriminants be expressions, so nothing before now
-    // can tell that one is unusable.  An extent of zero or less sizes the
-    // allocation from nonsense and puts every later access outside it, and it
-    // was accepted silently.  Only a discriminant that actually fixes an extent
-    // is checked: one used as a range bound may legitimately be anything.
-    if (schema.SchemaBody && schema.SchemaBody->ExtentVaries)
-        for (size_t i = 0; i < s; ++i) {
-            auto* bad = builder.CreateICmpSLT(discs[i], i64c(1), "sch.extent.bad");
-            if (auto* c = llvm::dyn_cast<llvm::ConstantInt>(bad); c && c->isZero())
-                continue;   // a constant that is plainly fine costs nothing
-            auto* nm = internStrPtr(i < schema.SchemaDiscs.size()
-                                        ? schema.SchemaDiscs[i].Name : "?");
-            emitGuard(bad, "schema.extent", [&] {
-                builder.CreateCall(
-                    getExternFnN("plang_err_schema_extent",
-                                 llvm::Type::getVoidTy(ctx), {ptrTy, i64Ty}),
-                    {nm, discs[i]});
-            });
-        }
 
     const uint64_t hdrBytes = s * 8;
     auto* bytes = builder.CreateAdd(llvm::ConstantInt::get(i64Ty, hdrBytes),

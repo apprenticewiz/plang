@@ -3175,6 +3175,23 @@ TEST(Schema, NewRejectsADiscriminantThatIsNotAUsableExtent) {
     EXPECT_NE(R.Stderr.find("not a usable extent"), std::string::npos) << R.Stderr;
 }
 
+TEST(Schema, AnArrayLowerBoundOfZeroIsNotAnUnusableExtent) {
+    // The check belongs on the EXTENT, not on the discriminants: ExtentVaries
+    // is one flag for the whole body and does not say which discriminant sizes
+    // anything, so testing them all rejected a legal `array[lo..hi]` whose
+    // lower bound is zero.  The commit that added the check claimed it only
+    // looked at discriminants that size something; it did not.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type vec(lo, hi: integer) = array[lo..hi] of integer;\n"
+        "var v: ^vec; i: integer;\n"
+        "begin new(v, 0, 4);\n"
+        "      for i := 0 to 4 do v^[i] := i * i;\n"
+        "      writeln(v^[0]:1, ' ', v^[4]:1); dispose(v) end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "0 16\n");
+}
+
 TEST(Schema, ADiscriminantThatFixesNoExtentIsNotRangeChecked) {
     // The check is only for a discriminant that actually sizes something.  A
     // fixed-layout body's discriminant may legitimately be any value, and
