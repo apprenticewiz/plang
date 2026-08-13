@@ -3391,3 +3391,53 @@ TEST(Schema, ANestedVaryingStringReportsItsCapacityToAReader) {
     ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
     EXPECT_EQ(R.Stdout, "[hello]\n");
 }
+
+TEST(Schema, AWithBoundFixedFieldIsNotTreatedAsSchematic) {
+    // Binding a with-field recorded its path in VarEntry::schemaTy, which means
+    // "this NAME is a schematic object" -- true of `p^`, not of a field of it.
+    // So every bound name answered schemaRefOf, and indexing a field whose own
+    // layout is FIXED went looking for an array body on the enclosing record and
+    // killed the compiler outright on a legal program.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type t(n: integer) = record s: string(n); d: array[1..5] of integer end;\n"
+        "var q: ^t; i: integer;\n"
+        "begin\n"
+        "  new(q, 8);\n"
+        "  with q^ do begin\n"
+        "    s := 'eight ch';\n"
+        "    for i := 1 to 5 do d[i] := i;\n"
+        "    writeln(d[3]:1, ' ', s[1])\n"
+        "  end;\n"
+        "  dispose(q)\n"
+        "end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "3 e\n");
+}
+
+TEST(Schema, ADiscriminatedInstanceKeepsItsCompileTimeChecks) {
+    // ActiveSchemaBindings_ is filled by an ordinary instantiation `t(300)` as
+    // well as by the undiscriminated probe, so marking an extent as varying
+    // whenever a binding was read marked every DISCRIMINATED instance's fields
+    // too -- where the capacity is exactly known.  That silently disabled
+    // err_string_too_long and the subrange warning, and capped a string(300) at
+    // the 255 that stands in for a capacity plang does not know.  No
+    // undiscriminated schema is involved: it was a regression on plain EP.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type t(m: integer) = record s: string(m) end;\n"
+        "var v: t(300); i: integer;\n"
+        "begin v.s := 'x';\n"
+        "      for i := 1 to 280 do v.s := v.s + 'y';\n"
+        "      writeln(length(v.s):1) end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "281\n");   // 256 while the capacity was treated as unknown
+
+    auto Bad = compileAndRun(
+        "program p(output);\n"
+        "type t(m: integer) = record s: string(m) end;\n"
+        "var v: t(5);\n"
+        "begin v.s := 'far longer than five' end.\n", kEP);
+    EXPECT_NE(Bad.ExitCode, 0);
+    EXPECT_NE(Bad.Stderr.find("does not fit a string(5)"), std::string::npos) << Bad.Stderr;
+}

@@ -188,6 +188,14 @@ struct Codegen::Impl {
         /// nested record addressed by the probe struct -- so the denoter its
         /// extents are written in is kept, and schemaPathOf resumes from here.
         const TypeNode*  pathDecl{nullptr};
+        /// The schema the path above is rooted in.  Separate from schemaTy on
+        /// purpose: schemaTy means "this NAME is a schematic object", which a
+        /// with-bound FIELD is not.  Writing the root there made every bound
+        /// field answer schemaRefOf, so indexing a fixed array field went
+        /// looking for an array body on the enclosing RECORD and killed the
+        /// compiler on a legal program.
+        const plang::Type* pathRootTy{nullptr};
+        std::vector<llvm::Value*> pathDiscs;
     };
     std::vector<std::unordered_map<std::string, VarEntry>> scopes;
 

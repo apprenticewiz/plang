@@ -196,7 +196,7 @@ std::shared_ptr<Type> Sema::resolveTypeImpl(const TypeNode& Node) {
         auto Bounds = foldBounds(*N->Low, *N->High, *BaseOrd,
                                  diag::err_array_lower_bound_not_const,
                                  diag::err_array_upper_bound_not_const);
-        const bool Varies    = SchemaBindingUsed_;
+        const bool Varies    = SchemaBindingUsed_ && ProbeBindingsActive_;
         SchemaBindingUsed_   = SavedUsed || SchemaBindingUsed_;
         if (!Bounds) return TyErr;
         // Route index subrange through TypeContext for canonical identity.
@@ -223,7 +223,7 @@ std::shared_ptr<Type> Sema::resolveTypeImpl(const TypeNode& Node) {
         auto Bounds = foldBounds(*N->Low, *N->High, *Base,
                                  diag::err_subrange_lower_bound_not_const,
                                  diag::err_subrange_upper_bound_not_const);
-        const bool Varies    = SchemaBindingUsed_;
+        const bool Varies    = SchemaBindingUsed_ && ProbeBindingsActive_;
         SchemaBindingUsed_   = SavedUsed || SchemaBindingUsed_;
         if (!Bounds) return TyErr;
         if (Varies) {
@@ -386,7 +386,7 @@ std::shared_ptr<Type> Sema::resolveTypeImpl(const TypeNode& Node) {
         const bool SavedUsed = SchemaBindingUsed_;
         SchemaBindingUsed_   = false;
         const auto Cap       = constBound(*N->Capacity);
-        const bool Varies    = SchemaBindingUsed_;
+        const bool Varies    = SchemaBindingUsed_ && ProbeBindingsActive_;
         SchemaBindingUsed_   = SavedUsed || SchemaBindingUsed_;
         if (!Cap) {
             if (!CapTy->isError()) error(N->Loc, diag::err_string_cap_not_int);
@@ -622,12 +622,15 @@ std::shared_ptr<Type> Sema::resolveUndiscriminatedSchema(Symbol& Sym,
     auto       SavedBindings = ActiveSchemaBindings_;
     const bool SavedUsed     = SchemaBindingUsed_;
     SchemaBindingUsed_ = false;
+    const bool SavedProbe = ProbeBindingsActive_;
+    ProbeBindingsActive_  = true;
     for (const auto& P : Sym.SchemaDeclParams)
         ActiveSchemaBindings_[toLower(P.Name)] = 1;
     auto       Body         = resolveTypeImpl(*Sym.SchemaBodyNode);
     const bool LayoutVaries = SchemaBindingUsed_;
     ActiveSchemaBindings_ = std::move(SavedBindings);
     SchemaBindingUsed_    = SavedUsed;
+    ProbeBindingsActive_  = SavedProbe;
 
     if (!Body || Body->isError()) return TyErr;
 

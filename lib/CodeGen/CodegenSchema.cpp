@@ -627,8 +627,8 @@ Codegen::Impl::schemaPathOf(const ExprNode& e) {
     // ordinary name by now, and without this anything reached through it --
     // `with p^ do d[i]` -- would be indexed against the probe's bounds.
     if (auto* id = llvm::dyn_cast<IdentExpr>(&e))
-        if (const auto* ve = findVar(id->Name); ve && ve->pathDecl && ve->schemaTy)
-            return SchemaPath{SchemaRef{ve->schemaTy, ve->ptr, ve->schemaDiscs},
+        if (const auto* ve = findVar(id->Name); ve && ve->pathDecl && ve->pathRootTy)
+            return SchemaPath{SchemaRef{ve->pathRootTy, ve->ptr, ve->pathDiscs},
                               ve->ptr, ve->pathDecl};
 
     // Root: the object itself, whose header carries the discriminants.
@@ -722,9 +722,9 @@ void Codegen::Impl::setVarSchemaPath(const std::string& name,
     for (auto it = scopes.rbegin(); it != scopes.rend(); ++it) {
         auto f = it->find(toLower(name));
         if (f != it->end()) {
-            f->second.schemaTy    = root.semaTy;
-            f->second.schemaDiscs = root.discs;
-            f->second.pathDecl    = decl;
+            f->second.pathRootTy = root.semaTy;
+            f->second.pathDiscs  = root.discs;
+            f->second.pathDecl   = decl;
             return;
         }
     }

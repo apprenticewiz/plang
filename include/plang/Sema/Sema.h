@@ -211,6 +211,12 @@ private:
     /// type, where resolveParamType already gives it the largest capacity so
     /// that an actual of any capacity is accepted.
     int InPointerDomain_{0};
+    /// True only while a schema body is being resolved against the PROBE
+    /// binding, i.e. for a schema used without its discriminants.  An ordinary
+    /// discriminated instantiation `t(300)` fills ActiveSchemaBindings_ too, and
+    /// its values are exact -- marking those extents as varying threw away every
+    /// compile-time check on them and truncated a string(300) to 255.
+    bool ProbeBindingsActive_{false};
 
     /// Holds a depth counter at zero for the extent of a scope, for a position
     /// that is inside a pointer domain-type syntactically but is not one.
