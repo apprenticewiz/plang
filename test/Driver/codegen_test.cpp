@@ -3534,6 +3534,64 @@ TEST(NonLocalGoto, AGotoOutOfAWithIsStillALocalOne) {
     EXPECT_EQ(R.Stdout, "yes\n");
 }
 
+TEST(NonLocalGoto, ALabelledStatementMustBeInTheBlockThatDeclaredTheLabel) {
+    // 6.1.6: a label-declaration-part declares the labels of the statements of
+    // THAT block.  The placement check resolved the label with the ordinary
+    // enclosing-scope lookup, which answers by spelling, so a `1:` written
+    // inside a nested procedure satisfied the program block's `label 1` -- and
+    // the landing block was then planted in main, where nothing jumps to it and
+    // the block ends with no terminator.  It failed as an LLVM verifier ICE.
+    // fpc -Miso: 'Label must be defined in the same scope as it is declared'.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "label 1;\n"
+        "procedure q;\n"
+        "begin\n"
+        "1: writeln('inner')\n"
+        "end;\n"
+        "begin q end.\n");
+    EXPECT_NE(R.ExitCode, 0) << "accepted:\n" << R.Stdout;
+    EXPECT_EQ(R.Stderr.find("internal error"), std::string::npos)
+        << "ICE rather than a diagnostic:\n" << R.Stderr;
+    EXPECT_NE(R.Stderr.find("enclosing block"), std::string::npos) << R.Stderr;
+}
+
+TEST(NestedProcedures, AProcedureMayAssignTheEnclosingFunctionsResult) {
+    // 6.8.2.2 says the function block must CONTAIN the assignment, not be it,
+    // so a procedure nested inside the function names the result too.  The
+    // assignment-target check knew this -- it searches the stack of open
+    // functions -- but the check that gives the identifier its type asked only
+    // whether the innermost procedure was that function, so the name fell
+    // through to the ordinary lookup and was refused as a call with no
+    // arguments.  fpc -Miso prints 'total(4) = 14'.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "function total(k: integer): integer;\n"
+        "var n: integer;\n"
+        "  procedure setit;\n"
+        "  begin n := n * 2; total := n + k end;\n"
+        "begin n := k + 1; setit end;\n"
+        "begin writeln('total(4) = ', total(4):1) end.\n");
+    ASSERT_EQ(R.ExitCode, 0) << "compile/run failed:\n" << R.Stderr;
+    EXPECT_EQ(R.Stdout, "total(4) = 14\n");
+}
+
+TEST(NestedProcedures, RecursionIsStillACallAndNotTheResult) {
+    // The guard on the fix above: reaching the enclosing function's result by
+    // name must not swallow an ordinary recursive call, nor the inner
+    // function's own result when a nested function shares the spelling.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "function fact(n: integer): integer;\n"
+        "begin if n <= 1 then fact := 1 else fact := n * fact(n - 1) end;\n"
+        "function g: integer;\n"
+        "  procedure h; begin g := 42 end;\n"
+        "begin g := 0; h end;\n"
+        "begin writeln(fact(5):1, ' ', g:1) end.\n");
+    ASSERT_EQ(R.ExitCode, 0) << "compile/run failed:\n" << R.Stderr;
+    EXPECT_EQ(R.Stdout, "120 42\n");
+}
+
 // ---------------------------------------------------------------------------
 // Defects the Pascal Acceptance Test found.
 // ---------------------------------------------------------------------------
@@ -4166,4 +4224,289 @@ TEST(ValueParameter, AnIntegerActualWidensForARealFormal) {
         "begin n := 3; scale(3); scale(n); writeln(half(7):6:2) end.\n");
     ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
     EXPECT_EQ(R.Stdout, "  3.00\n  3.00\n  3.50\n");
+}
+
+// ---------------------------------------------------------------------------
+// A name is not an identity, part two
+//
+// Six more of the shape 0.1.4 fixed seven of.  Found by re-sweeping after
+// those, which is the argument for re-sweeping: three of these are the same
+// defect on a path the earlier fix did not cover.
+// ---------------------------------------------------------------------------
+
+TEST(TypeByName, AFieldOfAnArrayElementKeepsItsRecordWhenTheNameIsShadowed) {
+    // resolveRecordStructType's last case looked the Sema type's NAME up in a
+    // table rebuilt per procedure.  The p^.field branch was fixed; this is the
+    // path it did not cover -- a field of an array element, of a nested field,
+    // or of a function result.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type rec = record a, b, c: integer end;\n"
+        "var arr: array[1..2] of rec;\n"
+        "procedure q;\n"
+        "type rec = record x, y, z: char end;\n"
+        "var l: rec;\n"
+        "begin l.x := 'a'; writeln(arr[1].a, ' ', arr[1].b, ' ', arr[1].c) end;\n"
+        "begin arr[1].a := 11; arr[1].b := 22; arr[1].c := 33;\n"
+        "  writeln(arr[1].a, ' ', arr[1].b, ' ', arr[1].c); q end.\n");
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "11 22 33\n11 22 33\n");
+}
+
+TEST(TypeByName, AWholeRecordReadThroughAPointerIsNotTheShadowingOne) {
+    // emitDerefLoad picked the load type by the same name lookup, so p^ as a
+    // whole value was loaded as the inner record: a { i8 } read from a
+    // three-integer record and stored back over it left 11 0 0.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type rec = record a, b, c: integer end;\n"
+        "var src: ^rec; dst: rec;\n"
+        "procedure q;\n"
+        "type rec = record z: char end;\n"
+        "var l: rec;\n"
+        "begin l.z := 'q'; dst := src^ end;\n"
+        "begin new(src); src^.a := 11; src^.b := 22; src^.c := 33;\n"
+        "  q; writeln(dst.a, ' ', dst.b, ' ', dst.c) end.\n");
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "11 22 33\n");
+}
+
+TEST(TypeByName, AWithBoundFieldDoesNotBecomeTheEnclosingFunctionsResult) {
+    // ISO §6.8.3.10 makes a with-statement's field designators an inner scope,
+    // so a field spelled like the enclosing function denotes the FIELD.  The
+    // function-result pseudo-variable was checked before the variable table
+    // and won, so the store went to the result and left the field alone.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type rec = record count: integer end;\n"
+        "var r: rec; k: integer;\n"
+        "function count: integer;\n"
+        "begin count := 1; with r do count := 99 end;\n"
+        "begin r.count := 0; k := count;\n"
+        "  writeln(k, ' ', r.count) end.\n");
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "1 99\n");
+}
+
+TEST(TypeByName, AGlobalOfTheFunctionsOwnNameIsStillShadowedByTheResult) {
+    // The other side of that.  Inside function `total`, the identifier denotes
+    // the result even though a global of that name exists -- so the fix cannot
+    // simply consult the variable table first.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "var total: integer;\n"
+        "function f: integer;\n"
+        "begin f := 7 end;\n"
+        "begin total := 3; writeln(f, ' ', total) end.\n");
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "7 3\n");
+}
+
+TEST(NestedProcedure, ASiblingCallReachesTheEnclosingActivationsVariable) {
+    // The static-link frame resolved each captured variable by NAME in the
+    // CALLER's scope.  With `b` and `c` both nested in `a`, and `c` declaring
+    // its own `n`, `c` calling `b` handed `b` the address of c's n: b's
+    // increment landed in c's private local and a's n never moved.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "procedure a;\n"
+        "var n: integer;\n"
+        "  procedure b; begin n := n + 1 end;\n"
+        "  procedure c;\n"
+        "  var n: integer;\n"
+        "    procedure d; begin n := n + 100 end;\n"
+        "  begin n := 500; b; d; writeln('c ', n) end;\n"
+        "  procedure e; begin b end;\n"
+        "begin n := 10; b; c; e; writeln('a ', n) end;\n"
+        "begin a end.\n");
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    // c's own d must still reach c's n; b must always reach a's n.
+    EXPECT_EQ(R.Stdout, "c 600\na 13\n");
+}
+
+TEST(ReadTarget, ASubrangeOfCharIsReadAsACharacter) {
+    // The reader was chosen from the LLVM type, and a subrange of char is held
+    // in a full ordinal -- so this called the INTEGER reader, tried to parse a
+    // number out of "xy", found none, and left both variables untouched.
+    // fpc -Miso reads x and y here.
+    auto R = compileAndRun(
+        "program p(input, output);\n"
+        "type letter = 'a'..'z';\n"
+        "var c1, c2: letter; n: integer;\n"
+        "begin read(c1, c2); readln(n); writeln(c1, c2, ' ', n) end.\n",
+        "", "xy\n7\n");
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "xy 7\n");
+}
+
+TEST(ReadTarget, ATypeTheStandardDoesNotReadIntoIsRefused) {
+    // ISO §6.9.2 reads into an integer, a real or a char variable.  Anything
+    // else was accepted and handed to whichever runtime reader its storage
+    // width selected: a boolean took the integer reader.
+    auto R = compileAndRun(
+        "program p(input, output);\n"
+        "var b: boolean;\n"
+        "begin read(b) end.\n", "", "1\n");
+    EXPECT_NE(R.ExitCode, 0);
+    EXPECT_NE(R.Stderr.find("cannot be read into"), std::string::npos) << R.Stderr;
+}
+
+TEST(ReadTarget, ATypedFileStillReadsAWholeComponent) {
+    // §6.9.1's read on a typed file reads a component of the file's own type,
+    // whatever that is -- so the textfile rule must not reach it.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type rec = record a, b: integer end;\n"
+        "var f: file of rec; r: rec;\n"
+        "begin\n"
+        "  rewrite(f, 'tf.bin'); r.a := 1; r.b := 2; write(f, r); close(f);\n"
+        "  reset(f, 'tf.bin'); r.a := 0; r.b := 0; read(f, r); close(f);\n"
+        "  writeln(r.a, ' ', r.b)\n"
+        "end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "1 2\n");
+}
+
+TEST(TypeByName, AnArrayKeepsItsBoundWhenAnInnerScopeRedeclaresTheTypeName) {
+    // The bound was read from the declaration through a table rebuilt per
+    // procedure and answered by spelling, so a nested procedure declaring its
+    // own `t` handed an outer `a: array[0..4]` the inner t's bound of ten:
+    // a[0] wrote ten elements before the array, and the range check passed
+    // because it was checked against 10..14 too.  Making Sema a fallback for a
+    // ZERO bound did not reach this -- the wrong bound was ten.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type t = array[0..4] of integer;\n"
+        "var a: t; guard: integer; i: integer;\n"
+        "procedure q;\n"
+        "type t = array[10..14] of integer;\n"
+        "var l: t;\n"
+        "begin l[10] := 1; a[0] := 42; a[4] := 44 end;\n"
+        "begin guard := 7; for i := 0 to 4 do a[i] := 0; q;\n"
+        "  writeln(a[0], ' ', a[4], ' ', guard) end.\n");
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "42 44 7\n");
+}
+
+TEST(TypeByName, AnAliasToARecordSurvivesAShadowingDeclaration) {
+    // llvmTypeOfNode resolved a named type through a table rebuilt per
+    // procedure and answered by spelling, so a procedure declaring its own `t`
+    // re-aimed an outer variable declared through an alias to the outer `t`.
+    // The size-agreement check turned it into an internal compiler error --
+    // "type 't' takes 1 bytes as it is written and 24 bytes as Sema resolved
+    // it" -- on a program fpc -Miso compiles and runs.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type t = record a, b, c: integer end;\n"
+        "     outert = t;\n"
+        "     pt = ^t;\n"
+        "var g: pt;\n"
+        "procedure inner(q: pt);\n"
+        "type t = record ch: char end;\n"
+        "var local: t; r: outert;\n"
+        "begin local.ch := 'z'; r.a := 1; r.b := 2; r.c := 3;\n"
+        "  writeln(local.ch, ' ', r.a, ' ', r.b, ' ', r.c) end;\n"
+        "begin new(g); inner(g) end.\n");
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "z 1 2 3\n");
+}
+
+TEST(NestedProcedure, AGrandparentsVariableIsNotConfusedWithAParentsOfTheSameName) {
+    // A frame slot is for a particular VARIABLE, and a name does not name one:
+    // two nesting levels may declare the same one.  Filling the slots by name
+    // gave both the innermost binding, so the outer variable never travelled --
+    // `d`, which captures b's n, was handed e's n and read 100 for 42.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "procedure b;\n"
+        "var n: integer;\n"
+        "  procedure d; begin writeln(n) end;\n"
+        "  procedure e;\n"
+        "  var n: integer;\n"
+        "    procedure f; begin d end;\n"
+        "  begin n := 100; f end;\n"
+        "begin n := 42; e end;\n"
+        "begin b end.\n");
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "42\n");
+}
+
+TEST(NestedProcedure, ABodyReadsTheNearestEnclosingVariableOfThatName) {
+    // The other half.  Every captured slot is loaded, because an outer one may
+    // have to travel on to a callee that captured it -- but only the innermost
+    // takes the NAME here, or a grandparent's variable answers to it and the
+    // body reads straight past its parent's.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "procedure a;\n"
+        "var n: integer;\n"
+        "  procedure c;\n"
+        "  var n: integer;\n"
+        "    procedure d; begin n := n + 100 end;\n"
+        "  begin n := 500; d; writeln(n) end;\n"
+        "begin n := 10; c; writeln(n) end;\n"
+        "begin a end.\n");
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    // d must bump c's n, not a's.
+    EXPECT_EQ(R.Stdout, "600\n10\n");
+}
+
+TEST(NestedProcedure, ACallFromInsideAWithReachesTheEnclosingVariable) {
+    // A frame slot the caller itself declares was resolved with findVar, which
+    // starts at the innermost scope -- and a with-statement opens one.  Calling
+    // a nested procedure from inside `with r do`, where r has a field spelled
+    // like the captured variable, handed it the address of the FIELD, so the
+    // increments meant for the enclosing variable landed in the record.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type rec = record n: integer end;\n"
+        "var r: rec;\n"
+        "procedure outer;\n"
+        "var n: integer;\n"
+        "  procedure bump; begin n := n + 1 end;\n"
+        "begin\n"
+        "  n := 5; r.n := 900;\n"
+        "  with r do begin bump; bump end;\n"
+        "  writeln(n, ' ', r.n)\n"
+        "end;\n"
+        "begin outer end.\n");
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "7 900\n");
+}
+
+TEST(Shadowing, AVariableHidesAConstantOfTheSameName) {
+    // ISO §6.2.2.1: an identifier denotes its innermost enclosing definition.
+    // The constant table is flat and has no idea which is nearer, so it
+    // answered every read while the writes went to the variable: `size := 42`
+    // stored 42 and `writeln(size)` printed 10.  A required constant was
+    // already handled this way; every constant the program declares needed it.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "const size = 10;\n"
+        "procedure q;\n"
+        "var size: integer;\n"
+        "begin size := 42; writeln(size) end;\n"
+        "begin writeln(size); q; writeln(size) end.\n");
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    // And the constant is itself again once the scope that hid it ends.
+    EXPECT_EQ(R.Stdout, "10\n42\n10\n");
+}
+
+TEST(Shadowing, EveryKindOfBindingHidesAConstant) {
+    // A value parameter, a for-loop control variable and a with-bound field
+    // are all nearer definitions of the name.  fpc -Miso agrees on each.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "const size = 10; red = 7;\n"
+        "procedure byparam(size: integer); begin write(size, ' ') end;\n"
+        "procedure byenum; var red: integer; begin red := 3; write(red, ' ') end;\n"
+        "procedure byfor; var size: integer;\n"
+        "begin for size := 1 to 3 do write(size); write(' ') end;\n"
+        "procedure bywith;\n"
+        "type r = record size: integer end;\n"
+        "var rr: r;\n"
+        "begin rr.size := 99; with rr do write(size) end;\n"
+        "begin byparam(5); byenum; byfor; bywith; writeln end.\n");
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "5 3 123 99\n");
 }

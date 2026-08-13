@@ -301,8 +301,12 @@ void Sema::checkFor(const ForStmt& S) {
         if (!Sym->Ty->isOrdinal())
             error(S.Loc, diag::err_for_var_not_ordinal, {S.Var, Sym->Ty->Name});
 
-        // ISO §6.8.3.9: the control variable must be local to the block containing the for.
-        if (!Symtab.lookupCurrent(S.Var))
+        // ISO §6.8.3.9: the control variable must be local to the block
+        // containing the for-statement.  A with-statement and a `for ... in`
+        // open a scope that is not a block, so asking only the innermost one
+        // rejected `with r do for i := 1 to 3 do ...` about an `i` that is
+        // declared exactly where the standard requires.
+        if (!Symtab.lookupInEnclosingBlock(S.Var))
             error(S.Loc, diag::err_for_var_not_local, {S.Var});
     }
     auto From  = checkExpr(*S.From);
@@ -426,6 +430,29 @@ void Sema::checkRepeat(const RepeatStmt& S) {
         error(S.Cond->Loc, diag::err_repeat_not_boolean, {Cond->Name});
 }
 
+/// ISO §6.9.2: a read-parameter is a variable of an integer, real or char
+/// type; EP adds a string type.  Anything else used to be accepted and handed
+/// to whichever runtime reader its storage width selected.
+///
+/// A typed (non-text) file reads a whole component of its own type, whatever
+/// that is, so this only constrains what is read from a textfile -- which is
+/// every read whose first argument is not a typed file.
+void Sema::checkReadParamType(const Type& T, SourceLocation Loc) {
+    const Type* Base = &T;
+    while (Base->Kind == TypeKind::Subrange && Base->SubBase)
+        Base = Base->SubBase.get();
+    switch (Base->Kind) {
+    case TypeKind::Integer:
+    case TypeKind::Real:
+    case TypeKind::Char:
+    case TypeKind::String:
+    case TypeKind::VarString:
+        return;
+    default:
+        error(Loc, diag::err_read_param_type, {T.Name});
+    }
+}
+
 void Sema::checkCallStmt(const CallStmt& S) {
     Symbol* Sym = Symtab.lookup(S.Name);
     if (!Sym) {
@@ -537,12 +564,32 @@ void Sema::checkCallStmt(const CallStmt& S) {
         // EP §6.4.2.5: a restricted variable is none of the types §6.9.2 reads
         // into, and giving it a value read from a file would be building one
         // out of the representation the restriction hides.
-        if (Lo == "read" || Lo == "readln")
-            for (const auto& Arg : S.Args) {
-                auto T = checkExpr(*Arg);
-                if (T->isRestricted())
-                    error(Arg->Loc, diag::err_restricted_used, {T->Name});
+        if (Lo == "read" || Lo == "readln") {
+            // Every argument is checked once and its type kept: checking an
+            // expression twice reports anything wrong with it twice, and the
+            // first argument's type is not known until it has been checked.
+            std::vector<std::shared_ptr<Type>> Ts;
+            Ts.reserve(S.Args.size());
+            for (const auto& Arg : S.Args) Ts.push_back(checkExpr(*Arg));
+
+            // §6.9.2 reads into an integer, a real or a char variable, and EP
+            // adds a string -- but that is the rule for a TEXTFILE.  §6.9.1's
+            // read on a typed file reads a whole component, of whatever type
+            // that file has, and err_read_type_mismatch is what checks that.
+            // A file as the first argument names where to read from rather
+            // than what to read into.
+            const bool HasFile  = !Ts.empty() && Ts[0]->Kind == TypeKind::File;
+            const bool FromText = !HasFile || !Ts[0]->ElemType
+                                  || Ts[0]->ElemType->Kind == TypeKind::Char;
+
+            for (size_t I = 0; I < Ts.size(); ++I) {
+                const auto& T = *Ts[I];
+                if (T.isRestricted())
+                    error(S.Args[I]->Loc, diag::err_restricted_used, {T.Name});
+                else if (!(HasFile && I == 0) && FromText && !T.isError())
+                    checkReadParamType(T, S.Args[I]->Loc);
             }
+        }
 
         // §6.9.5 and §6.9.4: readln, writeln and page apply to a textfile, and
         // so does eoln (§6.6.6.5) — they are all about lines, and only a text
@@ -636,6 +683,25 @@ void Sema::checkCallStmt(const CallStmt& S) {
                       {Pointee->SchemaName,
                        std::to_string(Pointee->SchemaDiscs.size()),
                        std::to_string(S.Args.size() - 1)});
+            // §6.6.5.3 gives the extra arguments exactly two readings: variant
+            // case-constants for a record with a variant part, or EP §6.7.5.3
+            // discriminants for a schema.  A domain that is neither had them
+            // evaluated and then dropped, so `new(p, 20)` for a `^string` --
+            // where `string` is the unbounded string and not the schema --
+            // allocated the default and silently lost the 20.
+            if (!ToSchema && S.Args.size() > 1 && Pointee && !Pointee->isError()
+                    && !(Pointee->Kind == TypeKind::Record && Pointee->RecordDecl
+                         && Pointee->RecordDecl->Variant))
+                // EP §6.4.3.3 does make `string` a schema with a capacity
+                // discriminant, so `new(p, 20)` for a `^string` is legal there
+                // and only plang's modelling of the bare name as the unbounded
+                // string makes it not.  Say which it is rather than claiming
+                // the standard calls it neither.
+                error(S.Args[1]->Loc,
+                      Pointee->Kind == TypeKind::String
+                          ? diag::err_new_string_capacity
+                          : diag::err_new_extra_args,
+                      {Pointee->Name});
             return;
         }
 
@@ -671,7 +737,7 @@ int Sema::pushWithScope(const WithStmt& S) {
 
         // EP §6.4.7: schema instance — expose discriminants and body record fields.
         if (T->Kind == TypeKind::SchemaInstance) {
-            Symtab.pushScope();
+            Symtab.pushScope(/*IsBlock=*/false);
             ++Count;
             // Expose discriminants as integer constants in both the symbol table
             // and ActiveSchemaBindings_ (for constBound inside the with body).
@@ -700,7 +766,7 @@ int Sema::pushWithScope(const WithStmt& S) {
             error(Rec->Loc, diag::err_with_non_record, {T->Name});
             continue;
         }
-        Symtab.pushScope();
+        Symtab.pushScope(/*IsBlock=*/false);
         ++Count;
         for (const auto& F : T->RecordFields) {
             Symbol FS;
@@ -751,6 +817,21 @@ void Sema::checkLabeled(const LabeledStmt& S) {
     Symbol* Sym = Symtab.lookup(S.Label);
     if (!Sym || Sym->Kind != SymbolKind::Label) {
         error(S.Loc, diag::err_label_not_declared, {S.Label});
+    } else if (!CurrentBlockLabels.contains(S.Label)) {
+        // §6.1.6: a label-declaration-part declares the labels of the
+        // statements of *that* block.  Symtab.lookup answers by spelling and
+        // reaches enclosing scopes, so without this an inner block's labelled
+        // statement satisfied an outer block's declaration -- and the landing
+        // place was then planted in the declaring block's function, where
+        // nothing ever jumps to it and the basic block has no terminator.
+        // checkGoto is deliberately untouched: naming an enclosing block's
+        // label is what a non-local goto is.  It is the statement that has to
+        // stay home, not the jump.
+        error(S.Loc, diag::err_label_wrong_block, {S.Label});
+        // Counted as placed and reached so the declaring block does not go on
+        // to report it as never defined and never jumped to: one mistake, one
+        // diagnostic.  Both flags are read only by the Phase 7.5 audit.
+        Sym->LabelPlaced = Sym->LabelReferenced = true;
     } else {
         Sym->LabelPlaced = true;
     }
@@ -864,7 +945,7 @@ void Sema::checkForIn(const ForInStmt& S) {
     auto ElemTy = (SetTy->Kind == TypeKind::Set && SetTy->ElemType)
                   ? SetTy->ElemType : TyInt;
 
-    Symtab.pushScope();
+    Symtab.pushScope(/*IsBlock=*/false);
     Symbol LoopSym;
     LoopSym.Kind  = SymbolKind::Var;
     LoopSym.Name  = S.Var;

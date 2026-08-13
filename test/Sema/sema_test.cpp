@@ -1419,3 +1419,56 @@ TEST(Builtins, ArityComesFromTheCatalogue) {
                       epOpts())
                     .hasError("'substr' expects 2 or 3 argument(s), got 1"));
 }
+
+TEST(ForStatement, TheControlVariableMayBeDeclaredOutsideAWith) {
+    // ISO §6.8.3.9 asks whether the control variable is declared in the BLOCK
+    // containing the for-statement.  A with-statement opens a scope of its own
+    // that is not a block, and the check asked only the innermost scope -- so
+    // this was refused about an `i` declared exactly where the standard
+    // requires.  fpc -Miso accepts it.
+    EXPECT_TRUE(check(
+        "program p(output);\n"
+        "type rec = record a, b: integer end;\n"
+        "var r: rec; i, s: integer;\n"
+        "begin s := 0; with r do for i := 1 to 3 do s := s + a + b end.\n").Ok);
+}
+
+TEST(ForStatement, AWithBoundFieldIsNotAControlVariable) {
+    // The other half of the with case above, and the one looking past the
+    // with-scope opened up: §6.8.3.9 wants an entire-variable declared in the
+    // block, and a field bound by a with is neither.  The lookup returned the
+    // field it found in the with's own scope, so the loop drove `rr.i`.
+    // fpc -Miso: 'Illegal counter variable'.
+    EXPECT_TRUE(check(
+        "program p(output);\n"
+        "type rec = record i: integer end;\n"
+        "var rr: rec; s: integer;\n"
+        "begin s := 0; with rr do for i := 1 to 3 do s := s + i end.\n")
+        .hasError("must be declared in the immediately enclosing block"));
+}
+
+TEST(ForStatement, AFieldShadowingADeclaredVariableIsStillRefused) {
+    // The case that says the rule is about what the name DENOTES, not about
+    // whether some declaration of the spelling exists: `i` is declared in the
+    // block, but inside the with it names the field, so the loop would drive
+    // the field.  Accepting it because an outer declaration exists would be
+    // the same wrong answer arrived at from the other side.  fpc agrees.
+    EXPECT_TRUE(check(
+        "program p(output);\n"
+        "type rec = record i: integer end;\n"
+        "var rr: rec; i, s: integer;\n"
+        "begin s := 0; with rr do for i := 1 to 3 do s := s + 1 end.\n")
+        .hasError("must be declared in the immediately enclosing block"));
+}
+
+TEST(ForStatement, AControlVariableFromAnEnclosingBlockIsStillRefused) {
+    // The other direction: a global driven by a for-statement inside a
+    // procedure is what §6.8.3.9 forbids, and looking out past the block would
+    // have stopped catching it.
+    EXPECT_TRUE(check(
+        "program p(output);\n"
+        "var i: integer;\n"
+        "procedure q; begin for i := 1 to 3 do end;\n"
+        "begin q end.\n")
+        .hasError("must be declared in the immediately enclosing block"));
+}

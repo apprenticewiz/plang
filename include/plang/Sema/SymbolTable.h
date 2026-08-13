@@ -149,7 +149,12 @@ struct Symbol {
 class SymbolTable {
 public:
     /// Push a new (innermost) scope onto the scope stack.
-    void pushScope();
+    ///
+    /// \p IsBlock says whether this is a BLOCK in the sense of ISO §6.2 -- a
+    /// program, procedure, function or module body.  A with-statement and a
+    /// `for ... in` also open a scope, but they are not blocks, and a rule
+    /// about "the block containing this statement" has to see through them.
+    void pushScope(bool IsBlock = true);
     /// Pop the innermost scope from the scope stack.
     void popScope();
 
@@ -167,6 +172,18 @@ public:
     [[nodiscard]] Symbol*       lookupCurrent(const std::string& Name);
     [[nodiscard]] const Symbol* lookupCurrent(const std::string& Name) const;
 
+    /// Look up from the innermost scope out to and including the nearest
+    /// BLOCK, and no further.
+    ///
+    /// ISO §6.8.3.9 asks whether a for-statement's control variable is
+    /// declared in the block containing it.  lookupCurrent stood in for that,
+    /// and a with-statement opens a scope of its own: inside one, the
+    /// innermost scope holds the record's fields and nothing else, so a
+    /// conforming `with r do for i := 1 to 3 do ...` was rejected with "must
+    /// be declared in the immediately enclosing block" about a variable that
+    /// was.
+    [[nodiscard]] const Symbol* lookupInEnclosingBlock(const std::string& Name) const;
+
     /// Iterate every symbol in the current scope (used for post-body label audits).
     template<std::invocable<Symbol&> Fn>
     void forEachInCurrentScope(Fn&& F) {
@@ -180,6 +197,7 @@ private:
 
     struct Scope {
         std::unordered_map<std::string, Symbol> Symbols; // key is lowercase
+        bool IsBlock{true};                              // see pushScope
     };
     std::vector<Scope> Scopes;
 };

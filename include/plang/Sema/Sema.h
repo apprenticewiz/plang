@@ -277,6 +277,8 @@ private:
                     llvm::function_ref<void()> BeforePop = {});
     void checkProcSignature(const ProcDecl& Proc);
     void checkProcBody     (const ProcDecl& Proc);
+    /// Records which value parameters a body modifies; see ProcDecl::ModifiedParams.
+    void recordModifiedParams(const ProcDecl& Proc);
 
     // ---- type resolution ----
     // Converts an AST TypeNode to a semantic Type.
@@ -468,6 +470,8 @@ private:
     /// Diagnoses use of a required word that only Extended Pascal has while
     /// reading standard Pascal.  Returns false when a diagnostic was emitted.
     [[nodiscard]] bool checkEPOnly(const Symbol& Sym, SourceLocation Loc);
+    /// Diagnoses a read-parameter of a type §6.9.2 does not read into.
+    void checkReadParamType(const Type& T, SourceLocation Loc);
     [[nodiscard]] std::shared_ptr<Type> checkSetLit  (const SetLiteralExpr& E);
     [[nodiscard]] std::shared_ptr<Type> checkStructuredValue(const StructuredValueExpr& E);
 

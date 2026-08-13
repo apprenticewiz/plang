@@ -3060,3 +3060,317 @@ TEST(ConformantRelay, WithOverASchemaBodyBindsEveryVariantFieldToo) {
     ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
     EXPECT_EQ(R.Stdout, "11 22\n");
 }
+
+TEST(ConformantRelay, ASubscriptUsesTheArraysBoundsNotAShadowingField) {
+    // The bounds were recovered by re-resolving the bound-identifier SPELLING
+    // at each subscript, so a record with fields named like the bounds made
+    // every subscript inside `with r do` adjust by the record's fields and
+    // read outside the block.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type rec = record lo, hi: integer end;\n"
+        "var a: array[5..9] of integer; r: rec; i: integer;\n"
+        "procedure show(x: array[lo..hi: integer] of integer);\n"
+        "begin\n"
+        "  writeln(x[5], ' ', x[9]);\n"
+        "  with r do writeln(x[5], ' ', x[9])\n"
+        "end;\n"
+        "begin\n"
+        "  for i := 5 to 9 do a[i] := i * 10;\n"
+        "  r.lo := 0; r.hi := 0; show(a)\n"
+        "end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "50 90\n50 90\n");
+}
+
+TEST(InitialState, NewAppliesItThroughAFieldOrAnElementToo) {
+    // EP §6.6: the variable new creates begins in the state its type says.
+    // The domain type was only found for an identifier argument, so
+    // `new(h.p)` and `new(a[1])` applied no initial state at all.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type node = record x: integer value 7 end;\n"
+        "     pn = ^node;\n"
+        "     holder = record p: pn end;\n"
+        "var h: holder; q: pn; a: array[1..2] of pn;\n"
+        "begin new(q); new(h.p); new(a[1]);\n"
+        "  writeln(q^.x, ' ', h.p^.x, ' ', a[1]^.x) end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "7 7 7\n");
+}
+
+TEST(ForIn, TheControlVariableIsTheDeclaredOne) {
+    // EP §6.9.3.9.3 makes the control variable a variable-access, so the
+    // declared variable takes each value.  The loop bound the name to a fresh
+    // alloca instead, so the body had one variable and everything else had
+    // another: a procedure called from the body read the declared variable,
+    // which the loop never wrote, and saw it unset on every iteration.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "var c: char; s: set of char;\n"
+        "procedure show; begin write(c) end;\n"
+        "begin s := ['q','z']; for c in s do show; writeln end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "qz\n");
+}
+
+TEST(ConformantArray, AValueParameterIsACopy) {
+    // ISO §6.6.3.3: a value parameter is a variable of its own that the actual
+    // is assigned to.  The formal was bound straight to the caller's storage,
+    // so the callee's writes reached the caller.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type vec = array[1..5] of integer;\n"
+        "var a: vec; i: integer;\n"
+        "procedure clobber(x: array[lo..hi: integer] of integer);\n"
+        "var j: integer;\n"
+        "begin for j := lo to hi do x[j] := 99 end;\n"
+        "begin\n"
+        "  for i := 1 to 5 do a[i] := i;\n"
+        "  clobber(a);\n"
+        "  for i := 1 to 5 do write(a[i], ' ');\n"
+        "  writeln\n"
+        "end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "1 2 3 4 5 \n");
+}
+
+TEST(ConformantArray, TwoValueParametersAreBothCopies) {
+    // The copy is decided by paramByRef, which is indexed per AST parameter --
+    // indexing it by the flattened LLVM slot made it miss the second
+    // conformant array, and gave a VAR one after a procedural parameter
+    // somebody else's flag.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type vec = array[1..3] of integer;\n"
+        "var a, b: vec; i: integer;\n"
+        "procedure two(p: array[l1..h1: integer] of integer;\n"
+        "              q: array[l2..h2: integer] of integer);\n"
+        "var k: integer;\n"
+        "begin for k := l1 to h1 do p[k] := 0;\n"
+        "  for k := l2 to h2 do q[k] := 0 end;\n"
+        "begin\n"
+        "  for i := 1 to 3 do begin a[i] := i; b[i] := i * 10 end;\n"
+        "  two(a, b);\n"
+        "  write(a[1], a[2], a[3], ' ', b[1], b[2], b[3]); writeln\n"
+        "end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "123 102030\n");
+}
+
+TEST(ConformantArray, AVarParameterAfterAProceduralOneStillAliases) {
+    // A procedural parameter takes two flattened slots and one AST parameter,
+    // so indexing the by-reference flags by the wrong one made a var
+    // conformant array a copy and the callee's writes stopped arriving.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type vec = array[1..3] of integer;\n"
+        "var a: vec; i: integer;\n"
+        "procedure noise(z: integer); begin end;\n"
+        "procedure viaproc(procedure f(z: integer);\n"
+        "                  var x: array[lo..hi: integer] of integer;\n"
+        "                  tail: integer);\n"
+        "var k: integer;\n"
+        "begin for k := lo to hi do x[k] := 100 + k end;\n"
+        "begin\n"
+        "  for i := 1 to 3 do a[i] := i;\n"
+        "  viaproc(noise, a, 0);\n"
+        "  write(a[1], ' ', a[2], ' ', a[3]); writeln\n"
+        "end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "101 102 103\n");
+}
+
+TEST(ConformantArray, ALargeOneReadOnlyIsNotCopiedAtAll) {
+    // The copy is as big as the actual, so copying unconditionally exhausted
+    // the stack: 800 kB through twenty activations, segfault, no diagnostic.
+    // A body that never modifies the formal cannot tell whether it was copied,
+    // so it gets none -- which is every array merely read or relayed.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type big = array[1..100000] of integer;\n"
+        "var a: big; i: integer;\n"
+        "function down(k: integer; x: array[lo..hi: integer] of integer): integer;\n"
+        "begin if k = 0 then down := x[lo] else down := down(k - 1, x) end;\n"
+        "begin for i := 1 to 100000 do a[i] := i; writeln(down(20, a)) end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "1\n");
+}
+
+TEST(ConformantArray, ALargeOneThatIsModifiedIsCopiedOnTheHeap) {
+    // And where a copy IS needed its size is bounded by memory rather than by
+    // the stack: 1.6 MB copied at each of twenty-one activations.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type big = array[1..200000] of integer;\n"
+        "var a: big; i: integer;\n"
+        "function clobber(k: integer;\n"
+        "                 x: array[lo..hi: integer] of integer): integer;\n"
+        "begin x[lo] := 7777;\n"
+        "  if k = 0 then clobber := x[lo] else clobber := clobber(k - 1, x) end;\n"
+        "begin\n"
+        "  for i := 1 to 200000 do a[i] := i;\n"
+        "  writeln(clobber(20, a), ' ', a[1])\n"
+        "end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "7777 1\n");
+}
+
+TEST(ConformantArray, AVarParameterStillReachesTheCallersArray) {
+    // The other side: making the value form a copy must not make the var form
+    // one too, which is the whole difference between them.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type vec = array[1..5] of integer;\n"
+        "var a: vec; i: integer;\n"
+        "procedure clobber(var x: array[lo..hi: integer] of integer);\n"
+        "var j: integer;\n"
+        "begin for j := lo to hi do x[j] := 99 end;\n"
+        "begin\n"
+        "  for i := 1 to 5 do a[i] := i;\n"
+        "  clobber(a);\n"
+        "  for i := 1 to 5 do write(a[i], ' ');\n"
+        "  writeln\n"
+        "end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "99 99 99 99 99 \n");
+}
+
+TEST(ConformantArray, ASubscriptPastTheConformantDimensionsIndexesTheElement) {
+    // The whole subscript chain was folded into the flat index as if every
+    // subscript were a conformant dimension.  With `array[lo..hi: integer] of
+    // row` and `row = array[1..3] of integer`, a[1][2] came out two whole rows
+    // along -- which for a two-row actual is the variable after the array.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type row = array[1..3] of integer;\n"
+        "     mat = array[1..2] of row;\n"
+        "var m: mat; after: integer; i, j: integer;\n"
+        "procedure poke(var a: array[lo..hi: integer] of row);\n"
+        "begin a[1][2] := 999 end;\n"
+        "begin\n"
+        "  after := 42;\n"
+        "  for i := 1 to 2 do for j := 1 to 3 do m[i][j] := i * 10 + j;\n"
+        "  poke(m);\n"
+        "  writeln(m[1][1], ' ', m[1][2], ' ', m[1][3], ' ', after)\n"
+        "end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "11 999 13 42\n");
+}
+
+TEST(ConformantRelay, RelayingFromInsideAWithUsesTheArraysOwnBounds) {
+    // The relay resolved the bound identifiers by name, so relaying from inside
+    // `with r do`, where r has fields spelled like the bounds, passed the
+    // record's fields as the array's bounds: the callee walked a hundred
+    // elements off the end of a five-element array.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type rec = record lo1, hi1: integer end;\n"
+        "var a: array[1..5] of integer; r: rec; i: integer;\n"
+        "procedure show(var b: array[l..h: integer] of integer);\n"
+        "var k: integer;\n"
+        "begin write(l, '..', h, ':'); for k := l to h do write(' ', b[k]);\n"
+        "  writeln end;\n"
+        "procedure relay(var b: array[lo1..hi1: integer] of integer);\n"
+        "begin show(b); with r do show(b) end;\n"
+        "begin\n"
+        "  for i := 1 to 5 do a[i] := i * 11;\n"
+        "  r.lo1 := 100; r.hi1 := 200; relay(a)\n"
+        "end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    const std::string One = "1..5: 11 22 33 44 55\n";
+    EXPECT_EQ(R.Stdout, One + One);
+}
+
+TEST(StringArgument, AStringReachedAsAFieldOrElementIsPassedByAddress) {
+    // EP §6.4.3.3: a string(n) is carried by its address, and every caller
+    // that takes one expects a pointer to the { length, bytes } struct.  That
+    // contract held for an identifier and nothing else, so a string reached as
+    // a field, an element or a dereference was loaded by VALUE and the call
+    // failed IR verification.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type rec = record s: string(20); n: integer end;\n"
+        "var r: rec; a: array[1..3] of string(20); q: ^rec;\n"
+        "procedure show(t: string(25)); begin write('[', t, ']') end;\n"
+        "begin\n"
+        "  r.s := 'hello'; a[1] := 'world'; new(q); q^.s := 'deref';\n"
+        "  show(r.s); show(a[1]); show(q^.s); writeln\n"
+        "end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "[hello][world][deref]\n");
+}
+
+TEST(ConformantArray, ANestedProcedureIndexesItsParentsConformantArrayCorrectly) {
+    // The static-link prologue registers a captured variable with its address
+    // and its type and nothing else, so a conformant array parameter stopped
+    // being one to a procedure nested inside the one that received it: no
+    // lower bound was subtracted, `x[k]` there named the element before the
+    // one it names in the parent, and the last subscript ran past the end.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type vec = array[1..3] of integer;\n"
+        "var a: vec; canary: integer;\n"
+        "procedure work(var x: array[lo..hi: integer] of integer);\n"
+        "  procedure show;\n"
+        "  var k: integer;\n"
+        "  begin for k := lo to hi do write(x[k], ' '); writeln;\n"
+        "    x[lo] := 555 end;\n"
+        "begin show end;\n"
+        "begin\n"
+        "  a[1] := 11; a[2] := 22; a[3] := 33; canary := 7777;\n"
+        "  work(a);\n"
+        "  writeln(a[1], ' ', a[2], ' ', a[3], ' ', canary)\n"
+        "end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    // The nested procedure sees the same elements the parent does, and its
+    // write to x[lo] lands in a[1].
+    EXPECT_EQ(R.Stdout, "11 22 33 \n555 22 33 7777\n");
+}
+
+TEST(EP7Schema, ADiscriminatedRecordIsReachedByEveryRouteNotJustByItsOwnName) {
+    // §6.4.9: a schema applied to actual discriminants names an ordinary
+    // fixed-size type, usable as an array component, a field of another record
+    // or a function result like any other.  Codegen resolved the struct for a
+    // field access by asking whether the Sema kind was Record -- and a
+    // discriminated schema is kinded SchemaInstance, with the record hung off
+    // SchemaBody.  A directly-declared variable took an earlier path and worked,
+    // which is what hid this; every other route ICEd with "cannot resolve the
+    // record type of field".  The varying field sits between two fixed ones so
+    // that a shared or unspecialised struct would put `m` at the wrong offset.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type buf(cap: integer) = record n: integer; s: string(cap); m: integer end;\n"
+        "     small = buf(4);\n"
+        "     outer = record b: small; tag: integer end;\n"
+        "var d: small; v: array[1..2] of small; o: outer; i: integer;\n"
+        "begin\n"
+        "  d.n := 7; d.s := 'de'; d.m := 70;\n"
+        "  for i := 1 to 2 do begin v[i].n := i; v[i].s := 'ab'; v[i].m := i * 10 end;\n"
+        "  o.b.n := 5; o.b.s := 'in'; o.b.m := 50; o.tag := 99;\n"
+        "  writeln(d.n:1, ' ', d.m:1, ' ', d.s);\n"
+        "  for i := 1 to 2 do writeln(v[i].n:1, ' ', v[i].m:1, ' ', v[i].s);\n"
+        "  writeln(o.b.n:1, ' ', o.b.m:1, ' ', o.b.s, ' ', o.tag:1)\n"
+        "end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "7 70 de\n1 10 ab\n2 20 ab\n5 50 in 99\n");
+}
+
+TEST(EP7Schema, ANilSchemaPointerRaisesRatherThanCrashing) {
+    // Indexing p^ for an undiscriminated schema first reads the discriminants
+    // out of the header new() wrote in front of the body.  That is a
+    // dereference of p, and it was the one route to a p^ that did not say so:
+    // with p nil the header was read at address 0 and the process died of a
+    // segmentation fault instead of raising, so a Pascal program could not
+    // report it and -fno-nil-checks was not what turned it off.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type Vec(n: integer) = array[1..n] of integer;\n"
+        "     pv = ^Vec;\n"
+        "var q: pv;\n"
+        "begin q := nil; writeln('before'); q^[1] := 1; writeln('after') end.\n",
+        kEP);
+    EXPECT_NE(R.ExitCode, 0);
+    EXPECT_EQ(R.Stdout, "before\n");
+    EXPECT_NE(R.Stderr.find("nil"), std::string::npos) << R.Stderr;
+}

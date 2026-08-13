@@ -68,6 +68,11 @@ Codegen::Impl::schemaRefOf(const ExprNode& e) {
         auto* base = emitExpr(*de->Pointer);
         if (!base) codegenICE("pointer to schema '" + T->SchemaName
                               + "' has no lowerable value");
+        // Recovering the discriminants dereferences p just as surely as reading
+        // the body does.  Every other route to a p^ emits this check; this one
+        // did not, so `p^[i]` through a nil schema pointer read the header at
+        // address 0 and took the process down instead of raising.
+        if (base->getType()->isPointerTy()) emitNilCheck(base);
         SchemaRef ref;
         ref.semaTy = T;
         for (size_t i = 0; i < T->SchemaDiscs.size(); ++i) {

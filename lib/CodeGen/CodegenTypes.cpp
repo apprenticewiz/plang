@@ -98,8 +98,18 @@ void Codegen::Impl::init(const std::string& progName) {
 
 void Codegen::Impl::defVar(const std::string& name, llvm::Value* ptr, llvm::Type* type,
                             const TypeNode* typeNode) {
-    if (!scopes.empty())
-        scopes.back()[toLower(name)] = VarEntry{ ptr, type, typeNode };
+    if (scopes.empty()) return;
+    const std::string Key = toLower(name);
+    // A variable of this name hides a constant of it for as long as the scope
+    // lasts.  See shadowedConsts: the constant table is flat, so without this
+    // the constant answered every read while the writes went to the variable.
+    if (const auto It = consts.find(Key); It != consts.end()) {
+        if (shadowedConsts.size() == scopes.size()
+                && !shadowedConsts.back().count(Key))
+            shadowedConsts.back()[Key] = It->second;
+        consts.erase(It);
+    }
+    scopes.back()[Key] = VarEntry{ ptr, type, typeNode };
 }
 
 const Codegen::Impl::VarEntry* Codegen::Impl::findVar(const std::string& name) const {
@@ -348,6 +358,16 @@ llvm::Type* Codegen::Impl::llvmTypeOfNode(const TypeNode& node) {
         // cannot tell the two apart, so a resolved capacity wins over it.
         if (node.ResolvedType && node.ResolvedType->Kind == TypeKind::VarString)
             return strStructType(node.ResolvedType->StrCapacity);
+        // A record's struct is reached through Type::RecordDecl, a pointer to
+        // the declaration it came from, while llvmTypeOfName below goes through
+        // a table rebuilt per procedure and answered by SPELLING.  A procedure
+        // declaring its own type of this name re-aimed an outer variable's type
+        // at the inner record -- caught by the size-agreement check as "type
+        // 't' takes 1 bytes as it is written and 24 bytes as Sema resolved it",
+        // which is an internal error on a program fpc compiles and runs.
+        if (node.ResolvedType && node.ResolvedType->Kind == TypeKind::Record
+                && node.ResolvedType->RecordDecl)
+            return llvmTypeOfSemaType(*node.ResolvedType);
         if (auto* t = llvmTypeOfName(n->Name)) return t;
         return llvmTypeOfNodeViaSema(node, "unknown type name '" + n->Name + "'");
     }

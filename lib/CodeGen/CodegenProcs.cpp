@@ -1,3 +1,4 @@
+#include <set>
 #include "CodegenImpl.h"
 using namespace plang;
 
@@ -230,7 +231,11 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
     auto  savedPrefix     = namePrefix;
     auto  savedIP         = builder.saveIP();
     auto* savedStaticLink = curStaticLink;
+    auto  savedFuncDepth  = curFuncScopeDepth;
     auto  savedOuterVars  = outerVarNames;
+    auto  savedOuterBinds = outerVarBindings;
+    auto  savedConfCopies = std::move(valueConformantCopies_);
+    valueConformantCopies_.clear();
     // ISO §6.2.2.3: a type or constant declared in this block is invisible
     // outside it.  Both maps are flat, so an inner declaration would otherwise
     // outlive its block and be picked up by whatever the enclosing block
@@ -256,13 +261,17 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
     // If nested, collect all outer-scope variables that this procedure may access.
     // We collect ALL visible outer variables (conservative; avoids escape analysis).
     std::vector<std::pair<std::string, VarEntry>> outerVars;
+    std::vector<size_t>                           outerVarDepths;
     if (isNested) {
-        // Walk the scope stack (all scopes except the innermost, which belongs to
-        // nested procs not yet emitted) to gather outer variables.
-        for (auto it = scopes.rbegin(); it != scopes.rend(); ++it) {
-            for (const auto& [nm, ve] : *it)
+        // Walk the scope stack innermost-out, keeping each variable's DEPTH.
+        // Two levels may declare the same name, and then the frame has two
+        // slots spelled alike; without the depth there is nothing to tell them
+        // apart at the call site, and both were filled with the innermost.
+        for (size_t di = scopes.size(); di-- > 0;)
+            for (const auto& [nm, ve] : scopes[di]) {
                 outerVars.push_back({nm, ve});
-        }
+                outerVarDepths.push_back(di);
+            }
     }
 
     // Build LLVM parameter types.
@@ -465,7 +474,8 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
         names.reserve(outerVars.size());
         for (const auto& [nm, ve] : outerVars)
             names.push_back(nm);
-        funcOuterVarNames_[mangledName] = std::move(names);
+        funcOuterVarNames_[mangledName]  = std::move(names);
+        funcOuterVarDepths_[mangledName] = outerVarDepths;
     }
 
     // Parameter metadata a call site needs in order to pass the hidden
@@ -489,6 +499,7 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
         namePrefix    = savedPrefix;
         curStaticLink = savedStaticLink;
         outerVarNames = savedOuterVars;
+        outerVarBindings = savedOuterBinds;
         labelBlocks   = std::move(savedLabels);
         builder.restoreIP(savedIP);
         return;
@@ -514,18 +525,32 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
     builder.SetInsertPoint(entry);
 
     pushScope();
+    // Everything pushed from here on is inside the body -- a with-statement,
+    // in practice.  The function's own scope is NOT included: it holds the
+    // result cell under the function's name, put there so a nested function
+    // can assign it, and finding that would defeat the test.
+    curFuncScopeDepth = scopes.size();
 
     // If nested, expose outer variables via the static link.
     // The frame struct is { ptr, ptr, ... } — one ptr per outer variable,
     // each pointing to the outer alloca so reads and writes go through.
     curStaticLink = staticLinkArg;
     outerVarNames.clear();
+    outerVarBindings.clear();
     if (staticLinkArg && !outerVars.empty()) {
         // Frame is { ptr, ptr, ... } — one slot per outer var.
         std::vector<llvm::Type*> ptrFields(outerVars.size(), ptrTy);
         auto* frameTy = llvm::StructType::get(ctx, ptrFields);
 
         auto* zero = llvm::ConstantInt::get(i32Ty, 0);
+        // outerVars is innermost-first, so the FIRST occurrence of a name is
+        // the one that name denotes here.  Every slot is still loaded and
+        // recorded -- the outer ones have to travel on to a callee that
+        // captured them -- but only the innermost takes the name, or a
+        // grandparent's variable would answer to it and the body would read
+        // straight past its parent's.
+        std::set<std::string> Named;
+        std::vector<std::string> ConformantCaptures;
         for (size_t fi = 0; fi < outerVars.size(); ++fi) {
             const auto& [nm, ve] = outerVars[fi];
             auto* fidx    = llvm::ConstantInt::get(i32Ty, (unsigned)fi);
@@ -533,17 +558,60 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
             auto* ptrSlot = builder.CreateGEP(frameTy, staticLinkArg,
                                               {zero, fidx}, "frame.slot." + nm);
             auto* outerPtr = builder.CreateLoad(ptrTy, ptrSlot, "outer." + nm);
-            // Register it as the variable's alloca so reads/writes go through.
-            defVar(nm, outerPtr, ve.type, ve.typeNode);
-            // ISO §6.6.3.1: an outer procedural parameter is still one here.
-            // Only the address travels, which is why the pair was spilled to a
-            // cell; what it means has to be carried across separately.
-            if (ve.isProcParam) {
-                auto& nve       = scopes.back()[toLower(nm)];
-                nve.isProcParam = true;
-                nve.procType    = ve.procType;
+
+            VarEntry Bound = ve;
+            Bound.ptr = outerPtr;
+            if (Named.insert(toLower(nm)).second) {
+                // Register it as the variable's alloca so reads/writes go through.
+                defVar(nm, outerPtr, ve.type, ve.typeNode);
+                // ISO §6.6.3.1: an outer procedural parameter is still one here.
+                // Only the address travels, which is why the pair was spilled to
+                // a cell; what it means has to be carried across separately.
+                if (ve.isProcParam) {
+                    auto& nve       = scopes.back()[toLower(nm)];
+                    nve.isProcParam = true;
+                    nve.procType    = ve.procType;
+                }
+                // §6.6.3.7.1: a conformant array parameter is still one to a
+                // procedure nested inside the one that received it.  defVar
+                // carries the address and the type and nothing else, so the
+                // conformant flag and the bound names were dropped and the
+                // nested procedure indexed the block with NO lower bound
+                // subtracted: `x[k]` there named the element before the one it
+                // names in the parent, and the last subscript ran past the end.
+                //
+                // The bound variables are the parent's own locals, so this
+                // activation captured them too; their addresses here are
+                // filled in below, once every capture is bound.
+                if (ve.isConformantArray) {
+                    auto& nve = scopes.back()[toLower(nm)];
+                    nve.isConformantArray = true;
+                    nve.conformantLoName  = ve.conformantLoName;
+                    nve.conformantHiName  = ve.conformantHiName;
+                    nve.conformantElemTy  = ve.conformantElemTy;
+                    nve.conformantDims    = ve.conformantDims;
+                    ConformantCaptures.push_back(toLower(nm));
+                }
+                Bound = scopes.back()[toLower(nm)];
             }
             outerVarNames.push_back(nm);
+            // Kept apart from the scope, which a local of the same name will
+            // overwrite, and keyed by depth so that two levels sharing a name
+            // stay two variables.
+            outerVarBindings[{outerVarDepths[fi], toLower(nm)}] = Bound;
+        }
+        // Every capture is bound now, and nothing local has shadowed anything
+        // yet, so this is where a captured conformant array's bounds are the
+        // ones it was passed with.
+        for (const auto& CN : ConformantCaptures) {
+            auto& nve = scopes.back()[CN];
+            nve.conformantDimPtrs.clear();
+            for (const auto& [LoNm, HiNm] : nve.conformantDims) {
+                const auto* L = findVar(LoNm);
+                const auto* H = findVar(HiNm);
+                nve.conformantDimPtrs.emplace_back(L ? L->ptr : nullptr,
+                                                   H ? H->ptr : nullptr);
+            }
         }
     }
 
@@ -630,7 +698,11 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
                 std::string firstLo = dims[0].first;
                 std::string firstHi = dims[0].second;
 
-                // Allocas for each dimension's lo and hi bounds.
+                // Allocas for each dimension's lo and hi bounds.  Their
+                // addresses are kept as well as their names: a subscript must
+                // reach this activation's bound, and the name can be answered
+                // by any scope that opens later.
+                std::vector<std::pair<llvm::Value*, llvm::Value*>> dimPtrs;
                 for (const auto& [loNm, hiNm] : dims) {
                     llvm::Value* loArg = &*it; ++it;
                     llvm::Value* hiArg = &*it; ++it;
@@ -642,12 +714,65 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
                     auto* hiA = createEntryAlloca(i64Ty, hiNm + ".addr");
                     builder.CreateStore(hiArg, hiA);
                     defVar(hiNm, hiA, i64Ty);
+
+                    dimPtrs.emplace_back(loA, hiA);
                 }
 
-                // Register the array itself as a conformant VarEntry.
-                // We use the raw incoming ptr (no extra alloca needed) because
-                // the actual data already lives in the caller's alloca.
-                defVar(nm, arrPtrArg, elemTy);
+                // ISO §6.6.3.3: a value parameter is a variable of its own
+                // that the actual is assigned to, so a conformant array passed
+                // by value is a COPY and assigning to it must not reach the
+                // actual.
+                //
+                // Two things make the copy awkward, and both are answered here
+                // rather than by copying unconditionally.  Its extent is only
+                // known at the call, so it cannot be an entry alloca; and a
+                // dynamic one is as big as the actual, so a 100 kB array passed
+                // down twenty activations exhausted the stack and the program
+                // died with no diagnostic.
+                //
+                // So: a body that never modifies the formal cannot tell whether
+                // it was copied, and gets none -- which is the case for every
+                // array merely read or relayed, including the recursion above.
+                // Sema works out which formals are modified, because deciding
+                // it needs each callee's signature: handing the formal on as
+                // somebody else's `var` parameter modifies it and handing it on
+                // by value does not.
+                //
+                // Where a copy IS needed it goes on the heap, freed at the end
+                // of the body, so its size is bounded by memory rather than by
+                // the stack.
+                llvm::Value* dataPtr = arrPtrArg;
+                const bool ByValue = ci < paramByRef.size() && !paramByRef[ci];
+                const bool Modified =
+                    proc.heading().ModifiedParams.count(toLower(nm)) > 0;
+                if (ByValue && Modified) {
+                    llvm::Value* count = llvm::ConstantInt::get(i64Ty, 1);
+                    for (const auto& [loA, hiA] : dimPtrs) {
+                        auto* lo  = builder.CreateLoad(i64Ty, loA, "cp.lo");
+                        auto* hi  = builder.CreateLoad(i64Ty, hiA, "cp.hi");
+                        auto* ext = builder.CreateAdd(
+                            builder.CreateSub(hi, lo, "cp.span"),
+                            llvm::ConstantInt::get(i64Ty, 1), "cp.ext");
+                        count = builder.CreateMul(count, ext, "cp.count");
+                    }
+                    // An empty conformant array is a legal shape to pass, and a
+                    // negative count would ask for an enormous block.
+                    auto* zero64 = llvm::ConstantInt::get(i64Ty, 0);
+                    count = builder.CreateSelect(
+                        builder.CreateICmpSGT(count, zero64, "cp.pos"),
+                        count, zero64, "cp.n");
+                    const uint64_t esz =
+                        mod->getDataLayout().getTypeAllocSize(elemTy).getFixedValue();
+                    const auto align = mod->getDataLayout().getABITypeAlign(elemTy);
+                    auto* bytes = builder.CreateMul(
+                        count, llvm::ConstantInt::get(i64Ty, esz), "cp.bytes");
+                    auto* copy = builder.CreateCall(getRuntimeNewFn(), {bytes},
+                                                    nm + ".copy");
+                    builder.CreateMemCpy(copy, align, arrPtrArg, align, bytes);
+                    valueConformantCopies_.push_back(copy);
+                    dataPtr = copy;
+                }
+                defVar(nm, dataPtr, elemTy);
                 {
                     auto& ve             = scopes.back()[toLower(nm)];
                     ve.isConformantArray = true;
@@ -655,6 +780,7 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
                     ve.conformantHiName  = firstHi;
                     ve.conformantElemTy  = elemTy;
                     ve.conformantDims.assign(dims.begin(), dims.end());
+                    ve.conformantDimPtrs = std::move(dimPtrs);
                 }
 
                 // Advance flatIdx past: 1 (array ptr) + 2*D (lo/hi pairs).
@@ -689,6 +815,14 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
         closeLabelScope();
     }
 
+    // Give back the heap a value conformant array parameter was copied into.
+    // The body has one exit; a non-local goto out of the procedure leaves the
+    // block behind, which leaks rather than corrupts.
+    if (!isTerminated())
+        for (auto* C : valueConformantCopies_)
+            builder.CreateCall(getRuntimeDisposeFn(), {C});
+    valueConformantCopies_ = std::move(savedConfCopies);
+
     // Emit return if the last block is not yet terminated.
     if (!isTerminated()) {
         if (curRetType && curRetAlloca) {
@@ -708,7 +842,9 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
     curFuncName   = savedFuncName;
     namePrefix    = savedPrefix;
     curStaticLink = savedStaticLink;
+    curFuncScopeDepth = savedFuncDepth;
     outerVarNames = savedOuterVars;
+    outerVarBindings = savedOuterBinds;
     typeAliases   = std::move(savedTypeAliases);
     consts        = std::move(savedConsts);
     requiredConsts = std::move(savedRequired);

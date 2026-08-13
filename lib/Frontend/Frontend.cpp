@@ -27,6 +27,7 @@
 #include "plang/Lex/Scanner.h"
 #include "plang/Sema/Sema.h"
 
+#include <cstdio>
 #include <fstream>
 #include <iostream>
 #include <optional>
@@ -103,14 +104,16 @@ static std::string exprToString(const ExprNode& E) {
     if (auto* BL = llvm::dyn_cast<BoolLitExpr>(&E))
         return BL->Value ? "true" : "false";
     if (auto* SL = llvm::dyn_cast<StringLitExpr>(&E)) {
-        // Single-char string used as a char constant in a subrange
-        if (SL->Value.size() == 1) {
-            std::string R = "'";
-            R += SL->Value[0];
-            R += "'";
-            return R;
+        // ISO §6.1.7: an apostrophe in a string is written twice.  The value
+        // went out as it stood, so `'it''s'` was recorded as `'it's'` -- which
+        // an importer reads as `it` followed by nonsense, and where the quote
+        // count happens to stay even, reads silently as a different string.
+        std::string R = "'";
+        for (const char C : SL->Value) {
+            R += C;
+            if (C == '\'') R += C;
         }
-        return "'" + SL->Value + "'";
+        return R + "'";
     }
     if (auto* UN = llvm::dyn_cast<UnaryExpr>(&E)) {
         if (UN->Operand)
@@ -139,7 +142,19 @@ static std::string exprToString(const ExprNode& E) {
         return R + ")";
     }
     if (auto* RL = llvm::dyn_cast<RealLitExpr>(&E)) {
-        std::string R = std::to_string(RL->Value);
+        // std::to_string gives six decimals, which is not a double.  A module
+        // kept the full value and its interface file recorded 3.141593 for
+        // 3.14159265358979, and 0.000000 for 1e-9 -- so an importer computed
+        // with a different constant than the module it imported from, or with
+        // exactly zero.
+        //
+        // Seventeen significant digits is what round-trips a double.  %g drops
+        // a trailing '.0', and a real literal needs one or an exponent to be
+        // read back as a real at all, so it is put back when neither is there.
+        char Buf[40];
+        std::snprintf(Buf, sizeof Buf, "%.17g", RL->Value);
+        std::string R = Buf;
+        if (R.find_first_of(".eEnN") == std::string::npos) R += ".0";
         return R;
     }
     if (auto* RG = llvm::dyn_cast<SetRangeExpr>(&E))

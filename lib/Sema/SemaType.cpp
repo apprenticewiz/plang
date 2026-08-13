@@ -535,10 +535,24 @@ std::shared_ptr<Type> Sema::resolveUndiscriminatedSchema(Symbol& Sym,
 
     if (!Body || Body->isError()) return TyErr;
 
-    // A discriminant-dependent size is only representable for an array body,
-    // where each access recomputes the bounds — the schema analog of a
-    // conformant array.  A record with a discriminant-sized field would need
-    // run-time field offsets.
+    // EP §6.4.4 allows a bare schema-name as a pointer's domain type and
+    // §6.7.3.7 as a parameter's type, so this restriction is plang's and not
+    // the standard's -- the diagnostic says so.
+    //
+    // The body above was resolved ONCE against a probe binding of 1, and only
+    // an array body recovers from that: schemaArrayBounds re-emits the bound
+    // expressions against the discriminants new() stored in the header, so its
+    // extent is right at run time.  Nothing else re-emits anything, so
+    // `string(cap)` stays string(1) and `array[1..cap]` stays array[1..1], and
+    // those probe extents become the GEPs, the allocation sizes and the range
+    // checks.  Accepting the rest would generate wrong code, not slow code.
+    //
+    // Lifting it needs four things plang does not have: run-time field offsets
+    // and a run-time size in schemaBodySize, per-field bound recovery in
+    // CodegenSchema (schemaArrayBounds requires the whole body be an array), a
+    // string representation carrying its capacity at run time, and a Sema that
+    // marks a discriminant-dependent extent unknown rather than folding it to
+    // the probe.
     if (LayoutVaries && Body->Kind != TypeKind::Array) {
         error(N.Loc, diag::err_schema_body_not_representable, {N.Name});
         return TyErr;

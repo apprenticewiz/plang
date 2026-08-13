@@ -111,10 +111,6 @@ version numbers follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html
   already described the second behavior as the intent; the split was not
   deliberate.  All of them now say what they are.
 
-### Changed
-
-### Fixed
-
 - **`read` into anything but a plain variable overran it.**  ISO §6.9.1's
   `read(v)` chose both the reader and the number of bytes to store from a
   lookup of the argument's *name*.  Only an identifier has one, so
@@ -313,6 +309,115 @@ version numbers follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html
   project version outright, and a shared library called
   `libplang-frontend.so.0.2.0-pre` would be no better an idea for being
   accepted, so the soname stays numeric.
+
+- **A field of a discriminated schema record could only be reached through the
+  variable's own name.**  ISO 10206 §6.4.9 makes `small = buf(8)` an ordinary
+  fixed-size type: an array component, a field of another record, a pointer
+  domain.  Code generation resolved the struct behind a field access by asking
+  whether the Sema type kind was `Record`, and a discriminated schema is kinded
+  `SchemaInstance` with the record hung off `SchemaBody`, so the test failed and
+  the access was rejected outright:
+
+  ```pascal
+  type buf(cap: integer) = record n: integer; s: string(cap); m: integer end;
+       small = buf(4);
+  var d: small; v: array[1..2] of small;
+  begin d.n := 1;    { compiled }
+        v[1].n := 1  { LLVM ERROR: cannot resolve the record type of field 'n' }
+  ```
+
+  `d.n` worked because a directly-declared variable takes an earlier path that
+  reads the struct off the variable entry, which is what hid this: every other
+  route — an array element, a field of another record, a function result — ICEd.
+  The look-through was already written and already used by the two other
+  consumers of the same expression; this one site did not call it.
+
+- **A labelled statement could satisfy an enclosing block's label.**  §6.1.6
+  gives a label-declaration-part the labels of the statements of *that* block.
+  The placement check resolved the label with the ordinary enclosing-scope
+  lookup, which answers by spelling, so a `1:` written inside a nested procedure
+  was accepted against the program block's `label 1` — and the landing place was
+  then planted in the declaring block's function, where nothing branches to it
+  and the basic block ends without a terminator.  It surfaced as an LLVM
+  verifier failure rather than as a diagnostic.
+
+  The set of labels the current block declared was already kept, and the `goto`
+  side already consulted it — that is precisely what makes a non-local goto
+  recognisable as one.  Only the placement side never asked.  `goto` is
+  untouched: naming an enclosing block's label is legal, and it is the
+  statement that has to stay home, not the jump.
+
+- **A field bound by a `with` was accepted as a `for` control variable.**
+  §6.8.3.9 wants an entire-variable declared in the variable-declaration-part of
+  the block containing the for-statement.  The check looked out past the
+  with-statement's scope to find one — but returned the first name it found on
+  the way, which inside a `with` is the field.  `with rr do for i := 1 to 3` then
+  drove `rr.i`.  fpc `-Miso` calls it an illegal counter variable.
+
+  The rule is about what the name *denotes*, not about whether some declaration
+  of the spelling exists, so a field shadowing a variable that is declared in the
+  block is refused too: inside the `with`, that name is the field.
+
+- **A procedure could not assign the result of the function containing it.**
+  §6.8.2.2 asks that the function block *contain* the assignment, not that it be
+  it, so a procedure nested inside the function names the result as well:
+
+  ```pascal
+  function total(k: integer): integer;
+  var n: integer;
+    procedure setit;
+    begin n := n * 2; total := n + k end;   { rejected: 'total' requires an argument list }
+  begin n := k + 1; setit end;
+  ```
+
+  The check that accepts the assignment target knew this and searched the stack
+  of functions whose blocks are open.  The check that gives the identifier its
+  type asked only whether the innermost procedure happened to be that function,
+  so the name fell through to the ordinary lookup and was read as a call with
+  its arguments missing.  Both now ask the same question of the same place.
+
+- **A nil schema pointer took the process down instead of raising.**  Indexing
+  `p^` for an undiscriminated schema first reads the discriminants out of the
+  header `new` wrote in front of the body.  That is a dereference of `p` as much
+  as reaching the body is, and it was the one route to a `p^` that did not say
+  so, so a nil `p` read the header at address zero and died of a segmentation
+  fault.  A Pascal program could not report that, and `-fno-nil-checks` was not
+  what turned it off.
+
+- **`new` silently discarded arguments it had no reading for.**  §6.6.5.3 gives
+  the extra arguments exactly two: variant case-constants for a record with a
+  variant part, and — Extended Pascal §6.7.5.3 — discriminants for a schema.
+  A domain type that was neither had them checked as expressions and then
+  dropped, so `new(p, 8)` for a `^integer` allocated one integer and lost the 8
+  without a word.
+
+  The case that made this worth finding is `new(q, 20)` for a `^string`: it
+  allocated a pointer's worth, and `q^ := 'a string'` then wrote a pointer into
+  it and read back an empty string of length 1.  Extended Pascal §6.4.3.3 does
+  make `string` a schema with a capacity discriminant, so that program is legal
+  and plang does not implement it — it models the bare name as the unbounded
+  string.  That one says so, and says to write `^string(20)` instead.
+
+### Changed
+
+- **The message for an undiscriminated schema plang cannot lay out says whose
+  limit it is.**  It read "schema 'buf' cannot be used without discriminants:
+  its size varies with them and its body is not an array", which is wrong twice.
+  Extended Pascal §6.4.4 and §6.7.3.7 both admit a bare schema-name where it
+  fires, so the restriction is plang's and not the standard's; and the size does
+  not always vary — `record k: 1..n end` is rejected too, and its storage is the
+  same whatever `n` is.  What varies there is the range `k` is checked against.
+
+  The restriction itself stands, and is not a narrowing: the body is resolved
+  once against a probe binding of 1, and only an array body recovers, because
+  the bound expressions are re-emitted against the discriminants at run time.
+  Nothing else re-emits anything, so `string(cap)` would stay `string(1)` and
+  those probe extents would become the actual offsets, sizes and range checks.
+  Lifting it needs run-time field offsets, a run-time body size, per-field bound
+  recovery, a string representation carrying its capacity, and a Sema that marks
+  a discriminant-dependent extent unknown rather than folding it.  The comment
+  at the check now records that, so the next reader does not have to rediscover
+  which of the two it is.
 
 ## [0.1.3] - 2026-08-11
 
