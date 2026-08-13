@@ -183,6 +183,25 @@ std::shared_ptr<Type> Sema::resolveTypeImpl(const TypeNode& Node) {
             // A subrange over the named type, so that indexing checks against
             // its bounds the same way it would for an index written as a range.
             auto Index = Ctx_.getSubrange(IdxTy, Range->first, Range->second);
+            // KNOWN GAP, left loud rather than made wrong.  An index written
+            // as a NAMED ordinal type takes this early exit and never reaches
+            // the varying check below, so `array[colour] of string(n)` in a
+            // schema body keeps the probe's element size.
+            //
+            // Which of two bad outcomes you get depends on the rest of the
+            // record.  If nothing else in it varies, the body is not marked and
+            // the schema is refused with the honest "plang does not implement"
+            // diagnostic -- a conformance gap, but safe.  If another field DOES
+            // vary, the body is marked, the schema is accepted, and this array
+            // reaches codegen at the probe size: caught by the size-agreement
+            // guard as "792 bytes as it is written and 48 bytes as Sema
+            // resolved it".  An ICE, so still not a wrong answer.
+            //
+            // Propagating ExtentVaries here is the obvious fix and is NOT
+            // sufficient: with the guard satisfied, compilation then dies with
+            // no diagnostic at all and exit 254 -- strictly worse than an ICE,
+            // because a silent failure is the one outcome worse than a loud
+            // one.  Find that before reopening this.
             return Ctx_.getArray(Index, Elem, N->Packed);
         }
         // Determine the ordinal base type of the index from the declared bounds.
