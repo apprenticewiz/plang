@@ -2929,18 +2929,30 @@ TEST(Schema, NewDoesNotSilentlyDiscardExtraArguments) {
               std::string::npos) << R.Stderr;
 }
 
-TEST(Schema, ACapacityForAPointerToStringSaysWhoseLimitItIs) {
-    // EP §6.4.3.3 does make `string` a schema with a capacity discriminant, so
-    // `new(q, 20)` for a `^string` is a legal program that plang does not
-    // implement -- it models the bare name as the unbounded string.  It used to
-    // compile and then misbehave: the 20 was dropped, a pointer's worth was
-    // allocated, and `q^ := 'a string'` wrote a pointer into it.
+TEST(Schema, APointerToStringTakesItsCapacityFromNew) {
+    // EP §6.4.3.3 makes `string` a schema whose one discriminant is its
+    // capacity, so a bare `string` is a legal pointer domain-type and `new(q, 20)`
+    // says how wide the string is.  plang used to read the bare name as the
+    // unbounded string wherever it appeared: the 20 was dropped on the floor,
+    // a pointer's worth was allocated, and `q^ := '...'` wrote a pointer into
+    // it and read back an empty string of length 1.
     auto R = compileAndRun(
         "program p(output); type ps = ^string; var q: ps;\n"
-        "begin new(q, 20); q^ := 'a string schema'; writeln(q^) end.\n", kEP);
+        "begin new(q, 20); q^ := 'a string schema';\n"
+        "      writeln('[', q^, '] len=', length(q^):1); dispose(q) end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "[a string schema] len=15\n");
+}
+
+TEST(Schema, APointerToStringChecksAgainstTheCapacityItWasGiven) {
+    // The capacity is the one new() was given, not the probe binding the body
+    // was resolved against -- which would check every such assignment against
+    // a string(1).  Sema cannot decide this one, so it is a run-time check.
+    auto R = compileAndRun(
+        "program p(output); type ps = ^string; var q: ps;\n"
+        "begin new(q, 4); q^ := 'far too long' end.\n", kEP);
     EXPECT_NE(R.ExitCode, 0);
-    EXPECT_NE(R.Stderr.find("plang does not implement"), std::string::npos) << R.Stderr;
-    EXPECT_NE(R.Stderr.find("^string(20)"), std::string::npos) << R.Stderr;
+    EXPECT_NE(R.Stderr.find("string(4)"), std::string::npos) << R.Stderr;
 }
 
 TEST(Schema, AVariantRecordStillTakesItsTagsInNew) {

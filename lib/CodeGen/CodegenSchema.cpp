@@ -63,8 +63,16 @@ Codegen::Impl::schemaRefOf(const ExprNode& e) {
 
     // p^: the discriminants sit in the header emitNewSchema wrote.
     if (auto* de = llvm::dyn_cast<DerefExpr>(&e)) {
-        const plang::Type* T = de->ResolvedType.get();
-        if (!T || T->Kind != TypeKind::Schema) return std::nullopt;
+        // Ask the POINTER what it points at, not the dereference what it
+        // became: for a body that is not an array, `p^` reads as the body --
+        // a string, a record -- so its own type no longer says "schema" and
+        // the header in front of it would go unread.
+        const plang::Type* T = nullptr;
+        if (const auto& PT = de->Pointer->ResolvedType;
+                PT && PT->Kind == TypeKind::Pointer && PT->PointeeType
+                && PT->PointeeType->Kind == TypeKind::Schema)
+            T = PT->PointeeType.get();
+        if (!T) return std::nullopt;
         auto* base = emitExpr(*de->Pointer);
         if (!base) codegenICE("pointer to schema '" + T->SchemaName
                               + "' has no lowerable value");
@@ -249,4 +257,14 @@ void Codegen::Impl::emitNewSchema(const ExprNode& ptrArg,
     auto* addr = emitLValue(ptrArg);
     if (!addr) codegenICE("new() target is not addressable");
     builder.CreateStore(base, addr);
+}
+
+llvm::Value* Codegen::Impl::exprStrCapV(const ExprNode& e) {
+    if (exprIsVarStr(e) && e.ResolvedType->ExtentVaries)
+        if (auto ref = schemaRefOf(e);
+                ref && ref->semaTy && ref->semaTy->SchemaBody
+                && ref->semaTy->SchemaBody->Kind == TypeKind::VarString
+                && ref->discs.size() == 1)
+            return ref->discs[0];
+    return i64c(exprStrCap(e));
 }

@@ -327,6 +327,7 @@ std::shared_ptr<Type> Sema::resolveTypeImpl(const TypeNode& Node) {
         // EP §6.7.5.3: the domain-type of a new-pointer-type may be a bare
         // schema-name; new(p, d1..dn) supplies the discriminants.
         AllowSchemaScope Guard(AllowUndiscriminatedSchema_);
+        AllowSchemaScope Domain(InPointerDomain_);
         auto Base = resolveType(*N->Base);
         return Ctx_.getPointer(Base);
     }
@@ -515,6 +516,14 @@ std::shared_ptr<Type> Sema::resolveNamedUnrestricted(const NamedTypeNode& N) {
             error(N.Loc, diag::err_ep_type, {Lo});
             return TyErr;
         }
+        // EP §6.4.3.3 makes `string` a schema with one discriminant, its
+        // capacity, so a bare `string` is legal exactly where any other bare
+        // schema-name is -- as a pointer's domain type or a parameter's -- and
+        // means the capacity arrives from new() or from the actual parameter.
+        // Reading it as the unbounded String everywhere is what left
+        // `new(p, 20)` for a `^string` with nowhere to put the 20.
+        if (Lo == "string" && InPointerDomain_ > 0)
+            return stringSchemaType();
         return (Lo == "complex") ? TyComplex : TyStr;
     }
     // ISO 7185 §6.4.3.5: text is a predefined file type, and one type rather
@@ -541,6 +550,26 @@ std::shared_ptr<Type> Sema::resolveNamedUnrestricted(const NamedTypeNode& N) {
         return TyErr;
     }
     return Sym->Ty ? Sym->Ty : TyErr;
+}
+
+std::shared_ptr<Type> Sema::stringSchemaType() {
+    // One object, so that two spellings of `^string` give one pointer type the
+    // way two spellings of `^vec` do.
+    if (StringSchemaTy_) return StringSchemaTy_;
+
+    auto Body           = Type::makeVarString(1);   // the probe's answer
+    Body->ExtentVaries  = true;                     // ...and not to be believed
+
+    auto T               = std::make_shared<Type>();
+    T->Kind              = TypeKind::Schema;
+    T->Name              = "string";
+    T->SchemaName        = "string";
+    T->SchemaBody        = Body;
+    T->SchemaFixedLayout = false;
+    T->ExtentVaries      = true;
+    T->SchemaDiscs.push_back({.Name = "capacity", .Ty = TyInt});
+    StringSchemaTy_ = T;
+    return T;
 }
 
 std::shared_ptr<Type> Sema::resolveUndiscriminatedSchema(Symbol& Sym,

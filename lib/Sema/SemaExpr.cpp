@@ -329,8 +329,26 @@ std::shared_ptr<Type> Sema::checkDeref(const DerefExpr& E) {
     auto PtrTy = checkExpr(*E.Pointer);
     if (PtrTy->isError()) return TyErr;
     if (rejectRestrictedComponent(E, *PtrTy)) return TyErr;
-    if (PtrTy->Kind == TypeKind::Pointer)
-        return PtrTy->PointeeType ? PtrTy->PointeeType : TyErr;
+    if (PtrTy->Kind == TypeKind::Pointer) {
+        auto Pointee = PtrTy->PointeeType;
+        if (!Pointee) return TyErr;
+        // EP §6.4.7: `p^` for a pointer to an undiscriminated schema is a value
+        // of the schema's BODY -- the discriminants only say which member of
+        // the family it is.  An array body is left as the schema, because
+        // indexing recovers its bounds from the header and the index path
+        // already looks through; anything else has to read as what it is, or
+        // `q^ := 'hi'` for a `^string` is an assignment to a type called
+        // "string" that no string rule applies to.  Codegen recovers the schema
+        // from the pointer rather than from here.
+        // Only a string body, and deliberately: a record body keeps the schema
+        // type because that is what carries the discriminants as pseudo-fields
+        // and what a schema parameter is matched against, so handing back the
+        // bare record loses `q^.id` and makes `bump(q^)` the wrong type.
+        if (Pointee->Kind == TypeKind::Schema && Pointee->SchemaBody
+                && Pointee->SchemaBody->Kind == TypeKind::VarString)
+            return Pointee->SchemaBody;
+        return Pointee;
+    }
     if (PtrTy->Kind == TypeKind::File) {
         // ISO §6.5.5: f^ for a file variable accesses the file buffer variable.
         // Its type is the file's component type; for text files it is char.

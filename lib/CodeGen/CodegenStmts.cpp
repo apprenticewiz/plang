@@ -260,7 +260,7 @@ void Codegen::Impl::emitAssign(const AssignStmt& s) {
 
     // EP VarString assignment — dispatch on the Sema-annotated types.
     if (exprIsVarStr(*s.Target)) {
-        emitStrStore(addr, exprStrCap(*s.Target), *s.Value);
+        emitStrStore(addr, exprStrCapV(*s.Target), *s.Value);
         return;
     }
 

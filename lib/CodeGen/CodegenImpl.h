@@ -985,6 +985,12 @@ struct Codegen::Impl {
         return exprIsVarStr(e) ? e.ResolvedType->StrCapacity : 0;
     }
 
+    /// The same capacity as a value.  EP §6.4.3.3 makes `string` a schema whose
+    /// one discriminant is the capacity, so for a `^string` the answer is in the
+    /// header new() wrote and is not known until run time; StrCapacity holds the
+    /// probe's answer and would check `q^ := 'hi'` against a string(1).
+    llvm::Value* exprStrCapV(const ExprNode& e);
+
     /// True if the expression is an ISO §6.4.3.2 string-type: a
     /// packed array[1..n] of char, which is n bytes with no length and no
     /// terminator, quite unlike either of the other two string shapes.
