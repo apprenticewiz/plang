@@ -1,5 +1,6 @@
 #pragma once
 
+#include <set>
 #include "plang/AST/AstExpr.h"   // for ExprNode (ConstDef::Value)
 #include "plang/AST/AstType.h"   // for TypeNode (ParamGroup::Type, ProcDecl::ReturnType)
 #include "plang/AST/AstStmt.h"   // for CompoundStmt (BlockNode::Body)
@@ -56,6 +57,20 @@ struct ProcDecl : Node {
     std::vector<ParamGroup>    Params;
     std::unique_ptr<TypeNode>  ReturnType;  /// null for procedures
     std::unique_ptr<BlockNode> Body;        /// null for forward declarations
+
+    /// Which value parameters the body modifies, lower case.
+    ///
+    /// ISO §6.6.3.3 makes a value parameter a variable of its own, so a
+    /// conformant array passed by value has to be copied -- and the copy is as
+    /// big as the actual, which is only known when the call arrives.  A body
+    /// that never modifies the formal cannot tell the difference, so it gets no
+    /// copy at all: that is what keeps a large array passed down a recursion
+    /// from exhausting the stack, which an unconditional copy did.
+    ///
+    /// Sema fills this in because deciding it needs the callee's signature at
+    /// every call: passing the formal on as somebody else's `var` parameter
+    /// modifies it, and passing it as a value parameter does not.
+    mutable std::set<std::string> ModifiedParams;
 
     /// ISO §6.6.1: the defining occurrence of a procedure declared 'forward'
     /// writes the heading again as the name alone — neither the parameter list

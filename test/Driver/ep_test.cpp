@@ -3114,12 +3114,107 @@ TEST(ForIn, TheControlVariableIsTheDeclaredOne) {
     EXPECT_EQ(R.Stdout, "qz\n");
 }
 
-// A value conformant array parameter is NOT copied -- §6.6.3.3 says it should
-// be, and plang has bound the formal to the caller's storage since 0.1.0.  A
-// copy was written and withdrawn: a dynamic alloca in the prologue is as big as
-// the actual, and a 100 kB array through twenty activations exhausted the stack
-// on programs that had run.  There is no test asserting the wrong behaviour,
-// only this note and the one below, which pins what does work.
+TEST(ConformantArray, AValueParameterIsACopy) {
+    // ISO §6.6.3.3: a value parameter is a variable of its own that the actual
+    // is assigned to.  The formal was bound straight to the caller's storage,
+    // so the callee's writes reached the caller.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type vec = array[1..5] of integer;\n"
+        "var a: vec; i: integer;\n"
+        "procedure clobber(x: array[lo..hi: integer] of integer);\n"
+        "var j: integer;\n"
+        "begin for j := lo to hi do x[j] := 99 end;\n"
+        "begin\n"
+        "  for i := 1 to 5 do a[i] := i;\n"
+        "  clobber(a);\n"
+        "  for i := 1 to 5 do write(a[i], ' ');\n"
+        "  writeln\n"
+        "end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "1 2 3 4 5 \n");
+}
+
+TEST(ConformantArray, TwoValueParametersAreBothCopies) {
+    // The copy is decided by paramByRef, which is indexed per AST parameter --
+    // indexing it by the flattened LLVM slot made it miss the second
+    // conformant array, and gave a VAR one after a procedural parameter
+    // somebody else's flag.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type vec = array[1..3] of integer;\n"
+        "var a, b: vec; i: integer;\n"
+        "procedure two(p: array[l1..h1: integer] of integer;\n"
+        "              q: array[l2..h2: integer] of integer);\n"
+        "var k: integer;\n"
+        "begin for k := l1 to h1 do p[k] := 0;\n"
+        "  for k := l2 to h2 do q[k] := 0 end;\n"
+        "begin\n"
+        "  for i := 1 to 3 do begin a[i] := i; b[i] := i * 10 end;\n"
+        "  two(a, b);\n"
+        "  write(a[1], a[2], a[3], ' ', b[1], b[2], b[3]); writeln\n"
+        "end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "123 102030\n");
+}
+
+TEST(ConformantArray, AVarParameterAfterAProceduralOneStillAliases) {
+    // A procedural parameter takes two flattened slots and one AST parameter,
+    // so indexing the by-reference flags by the wrong one made a var
+    // conformant array a copy and the callee's writes stopped arriving.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type vec = array[1..3] of integer;\n"
+        "var a: vec; i: integer;\n"
+        "procedure noise(z: integer); begin end;\n"
+        "procedure viaproc(procedure f(z: integer);\n"
+        "                  var x: array[lo..hi: integer] of integer;\n"
+        "                  tail: integer);\n"
+        "var k: integer;\n"
+        "begin for k := lo to hi do x[k] := 100 + k end;\n"
+        "begin\n"
+        "  for i := 1 to 3 do a[i] := i;\n"
+        "  viaproc(noise, a, 0);\n"
+        "  write(a[1], ' ', a[2], ' ', a[3]); writeln\n"
+        "end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "101 102 103\n");
+}
+
+TEST(ConformantArray, ALargeOneReadOnlyIsNotCopiedAtAll) {
+    // The copy is as big as the actual, so copying unconditionally exhausted
+    // the stack: 800 kB through twenty activations, segfault, no diagnostic.
+    // A body that never modifies the formal cannot tell whether it was copied,
+    // so it gets none -- which is every array merely read or relayed.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type big = array[1..100000] of integer;\n"
+        "var a: big; i: integer;\n"
+        "function down(k: integer; x: array[lo..hi: integer] of integer): integer;\n"
+        "begin if k = 0 then down := x[lo] else down := down(k - 1, x) end;\n"
+        "begin for i := 1 to 100000 do a[i] := i; writeln(down(20, a)) end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "1\n");
+}
+
+TEST(ConformantArray, ALargeOneThatIsModifiedIsCopiedOnTheHeap) {
+    // And where a copy IS needed its size is bounded by memory rather than by
+    // the stack: 1.6 MB copied at each of twenty-one activations.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type big = array[1..200000] of integer;\n"
+        "var a: big; i: integer;\n"
+        "function clobber(k: integer;\n"
+        "                 x: array[lo..hi: integer] of integer): integer;\n"
+        "begin x[lo] := 7777;\n"
+        "  if k = 0 then clobber := x[lo] else clobber := clobber(k - 1, x) end;\n"
+        "begin\n"
+        "  for i := 1 to 200000 do a[i] := i;\n"
+        "  writeln(clobber(20, a), ' ', a[1])\n"
+        "end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "7777 1\n");
+}
 
 TEST(ConformantArray, AVarParameterStillReachesTheCallersArray) {
     // The other side: making the value form a copy must not make the var form
@@ -3204,4 +3299,31 @@ TEST(StringArgument, AStringReachedAsAFieldOrElementIsPassedByAddress) {
         "end.\n", kEP);
     ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
     EXPECT_EQ(R.Stdout, "[hello][world][deref]\n");
+}
+
+TEST(ConformantArray, ANestedProcedureIndexesItsParentsConformantArrayCorrectly) {
+    // The static-link prologue registers a captured variable with its address
+    // and its type and nothing else, so a conformant array parameter stopped
+    // being one to a procedure nested inside the one that received it: no
+    // lower bound was subtracted, `x[k]` there named the element before the
+    // one it names in the parent, and the last subscript ran past the end.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type vec = array[1..3] of integer;\n"
+        "var a: vec; canary: integer;\n"
+        "procedure work(var x: array[lo..hi: integer] of integer);\n"
+        "  procedure show;\n"
+        "  var k: integer;\n"
+        "  begin for k := lo to hi do write(x[k], ' '); writeln;\n"
+        "    x[lo] := 555 end;\n"
+        "begin show end;\n"
+        "begin\n"
+        "  a[1] := 11; a[2] := 22; a[3] := 33; canary := 7777;\n"
+        "  work(a);\n"
+        "  writeln(a[1], ' ', a[2], ' ', a[3], ' ', canary)\n"
+        "end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    // The nested procedure sees the same elements the parent does, and its
+    // write to x[lo] lands in a[1].
+    EXPECT_EQ(R.Stdout, "11 22 33 \n555 22 33 7777\n");
 }

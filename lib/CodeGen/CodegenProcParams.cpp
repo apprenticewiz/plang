@@ -237,7 +237,13 @@ llvm::Value* Codegen::Impl::buildStaticLinkFrame(const std::string& mangledName)
                 {(*varDepths)[fi], toLower(varNames[fi])});
             if (it != outerVarBindings.end()) ve = &it->second;
         }
-        if (!ve) ve = findVar(varNames[fi]);
+        // A slot this activation has no capture for is one declared HERE --
+        // so the search starts at this function's own scope, not at whatever
+        // scope the call happens to sit in.  Starting at the innermost let a
+        // with-statement answer: calling a nested procedure from inside
+        // `with r do` handed it the address of r's field of that name, and the
+        // increments meant for the enclosing variable landed in the record.
+        if (!ve) ve = findVarInFunctionScope(varNames[fi]);
         if (!ve)
             codegenICE("captured variable '" + varNames[fi]
                        + "' is not visible at the call site of '"

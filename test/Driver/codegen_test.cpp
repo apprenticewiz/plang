@@ -4392,3 +4392,26 @@ TEST(NestedProcedure, ABodyReadsTheNearestEnclosingVariableOfThatName) {
     // d must bump c's n, not a's.
     EXPECT_EQ(R.Stdout, "600\n10\n");
 }
+
+TEST(NestedProcedure, ACallFromInsideAWithReachesTheEnclosingVariable) {
+    // A frame slot the caller itself declares was resolved with findVar, which
+    // starts at the innermost scope -- and a with-statement opens one.  Calling
+    // a nested procedure from inside `with r do`, where r has a field spelled
+    // like the captured variable, handed it the address of the FIELD, so the
+    // increments meant for the enclosing variable landed in the record.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type rec = record n: integer end;\n"
+        "var r: rec;\n"
+        "procedure outer;\n"
+        "var n: integer;\n"
+        "  procedure bump; begin n := n + 1 end;\n"
+        "begin\n"
+        "  n := 5; r.n := 900;\n"
+        "  with r do begin bump; bump end;\n"
+        "  writeln(n, ' ', r.n)\n"
+        "end;\n"
+        "begin outer end.\n");
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "7 900\n");
+}

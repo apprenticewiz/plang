@@ -234,6 +234,8 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
     auto  savedFuncDepth  = curFuncScopeDepth;
     auto  savedOuterVars  = outerVarNames;
     auto  savedOuterBinds = outerVarBindings;
+    auto  savedConfCopies = std::move(valueConformantCopies_);
+    valueConformantCopies_.clear();
     // ISO §6.2.2.3: a type or constant declared in this block is invisible
     // outside it.  Both maps are flat, so an inner declaration would otherwise
     // outlive its block and be picked up by whatever the enclosing block
@@ -548,6 +550,7 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
         // grandparent's variable would answer to it and the body would read
         // straight past its parent's.
         std::set<std::string> Named;
+        std::vector<std::string> ConformantCaptures;
         for (size_t fi = 0; fi < outerVars.size(); ++fi) {
             const auto& [nm, ve] = outerVars[fi];
             auto* fidx    = llvm::ConstantInt::get(i32Ty, (unsigned)fi);
@@ -569,6 +572,26 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
                     nve.isProcParam = true;
                     nve.procType    = ve.procType;
                 }
+                // §6.6.3.7.1: a conformant array parameter is still one to a
+                // procedure nested inside the one that received it.  defVar
+                // carries the address and the type and nothing else, so the
+                // conformant flag and the bound names were dropped and the
+                // nested procedure indexed the block with NO lower bound
+                // subtracted: `x[k]` there named the element before the one it
+                // names in the parent, and the last subscript ran past the end.
+                //
+                // The bound variables are the parent's own locals, so this
+                // activation captured them too; their addresses here are
+                // filled in below, once every capture is bound.
+                if (ve.isConformantArray) {
+                    auto& nve = scopes.back()[toLower(nm)];
+                    nve.isConformantArray = true;
+                    nve.conformantLoName  = ve.conformantLoName;
+                    nve.conformantHiName  = ve.conformantHiName;
+                    nve.conformantElemTy  = ve.conformantElemTy;
+                    nve.conformantDims    = ve.conformantDims;
+                    ConformantCaptures.push_back(toLower(nm));
+                }
                 Bound = scopes.back()[toLower(nm)];
             }
             outerVarNames.push_back(nm);
@@ -576,6 +599,19 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
             // overwrite, and keyed by depth so that two levels sharing a name
             // stay two variables.
             outerVarBindings[{outerVarDepths[fi], toLower(nm)}] = Bound;
+        }
+        // Every capture is bound now, and nothing local has shadowed anything
+        // yet, so this is where a captured conformant array's bounds are the
+        // ones it was passed with.
+        for (const auto& CN : ConformantCaptures) {
+            auto& nve = scopes.back()[CN];
+            nve.conformantDimPtrs.clear();
+            for (const auto& [LoNm, HiNm] : nve.conformantDims) {
+                const auto* L = findVar(LoNm);
+                const auto* H = findVar(HiNm);
+                nve.conformantDimPtrs.emplace_back(L ? L->ptr : nullptr,
+                                                   H ? H->ptr : nullptr);
+            }
         }
     }
 
@@ -682,27 +718,60 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
                     dimPtrs.emplace_back(loA, hiA);
                 }
 
-                // ISO §6.6.3.3 makes a value parameter a variable of its own,
-                // so a conformant array passed by value ought to be COPIED --
-                // and it is not: the formal is bound straight to the caller's
-                // storage, and assigning to it reaches the actual.  That has
-                // been true since 0.1.0.
+                // ISO §6.6.3.3: a value parameter is a variable of its own
+                // that the actual is assigned to, so a conformant array passed
+                // by value is a COPY and assigning to it must not reach the
+                // actual.
                 //
-                // A copy was written and then withdrawn, because a dynamic
-                // alloca in the prologue is the wrong home for it.  The extent
-                // is only known here, so the copy is as big as the actual: a
-                // 100 kB array through twenty activations exhausted an 8 MB
-                // stack and the program died with no diagnostic, where it had
-                // run before.  Trading a rare wrong answer for a crash on
-                // programs that worked is not an improvement.
+                // Two things make the copy awkward, and both are answered here
+                // rather than by copying unconditionally.  Its extent is only
+                // known at the call, so it cannot be an entry alloca; and a
+                // dynamic one is as big as the actual, so a 100 kB array passed
+                // down twenty activations exhausted the stack and the program
+                // died with no diagnostic.
                 //
-                // What it needs is either a heap copy freed on every exit --
-                // including the ones goto takes -- or Sema deciding which
-                // formals are ever assigned so that a read-only one needs no
-                // copy at all.  Both are more than a patch, so the defect
-                // stands, recorded rather than half-fixed.  A var parameter is
-                // bound straight through and always was.
+                // So: a body that never modifies the formal cannot tell whether
+                // it was copied, and gets none -- which is the case for every
+                // array merely read or relayed, including the recursion above.
+                // Sema works out which formals are modified, because deciding
+                // it needs each callee's signature: handing the formal on as
+                // somebody else's `var` parameter modifies it and handing it on
+                // by value does not.
+                //
+                // Where a copy IS needed it goes on the heap, freed at the end
+                // of the body, so its size is bounded by memory rather than by
+                // the stack.
                 llvm::Value* dataPtr = arrPtrArg;
+                const bool ByValue = ci < paramByRef.size() && !paramByRef[ci];
+                const bool Modified =
+                    proc.heading().ModifiedParams.count(toLower(nm)) > 0;
+                if (ByValue && Modified) {
+                    llvm::Value* count = llvm::ConstantInt::get(i64Ty, 1);
+                    for (const auto& [loA, hiA] : dimPtrs) {
+                        auto* lo  = builder.CreateLoad(i64Ty, loA, "cp.lo");
+                        auto* hi  = builder.CreateLoad(i64Ty, hiA, "cp.hi");
+                        auto* ext = builder.CreateAdd(
+                            builder.CreateSub(hi, lo, "cp.span"),
+                            llvm::ConstantInt::get(i64Ty, 1), "cp.ext");
+                        count = builder.CreateMul(count, ext, "cp.count");
+                    }
+                    // An empty conformant array is a legal shape to pass, and a
+                    // negative count would ask for an enormous block.
+                    auto* zero64 = llvm::ConstantInt::get(i64Ty, 0);
+                    count = builder.CreateSelect(
+                        builder.CreateICmpSGT(count, zero64, "cp.pos"),
+                        count, zero64, "cp.n");
+                    const uint64_t esz =
+                        mod->getDataLayout().getTypeAllocSize(elemTy).getFixedValue();
+                    const auto align = mod->getDataLayout().getABITypeAlign(elemTy);
+                    auto* bytes = builder.CreateMul(
+                        count, llvm::ConstantInt::get(i64Ty, esz), "cp.bytes");
+                    auto* copy = builder.CreateCall(getRuntimeNewFn(), {bytes},
+                                                    nm + ".copy");
+                    builder.CreateMemCpy(copy, align, arrPtrArg, align, bytes);
+                    valueConformantCopies_.push_back(copy);
+                    dataPtr = copy;
+                }
                 defVar(nm, dataPtr, elemTy);
                 {
                     auto& ve             = scopes.back()[toLower(nm)];
@@ -745,6 +814,14 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
         if (proc.Body->Body) emitCompound(*proc.Body->Body);
         closeLabelScope();
     }
+
+    // Give back the heap a value conformant array parameter was copied into.
+    // The body has one exit; a non-local goto out of the procedure leaves the
+    // block behind, which leaks rather than corrupts.
+    if (!isTerminated())
+        for (auto* C : valueConformantCopies_)
+            builder.CreateCall(getRuntimeDisposeFn(), {C});
+    valueConformantCopies_ = std::move(savedConfCopies);
 
     // Emit return if the last block is not yet terminated.
     if (!isTerminated()) {

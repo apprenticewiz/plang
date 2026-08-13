@@ -1074,6 +1074,76 @@ void Sema::checkProcSignature(const ProcDecl& Proc) {
     (void)Symtab.define(std::move(S));
 }
 
+/// Records every value parameter of \p Proc that its body modifies.
+///
+/// A conformant array passed by value must be copied, and the copy costs what
+/// the actual costs; a body that never modifies the formal cannot tell whether
+/// it was copied, so it needs no copy.  See ProcDecl::ModifiedParams.
+///
+/// Conservative in the one place it has to be: a call to something whose
+/// signature is not to hand counts as modifying every argument it is given.
+void Sema::recordModifiedParams(const ProcDecl& Proc) {
+    const ProcDecl& H = Proc.heading();
+    std::set<std::string> Value;
+    for (const auto& Pg : H.Params)
+        if (!Pg.IsVar)
+            for (const auto& Nm : Pg.Names) Value.insert(toLower(Nm));
+    if (Value.empty() || !Proc.Body) return;
+
+    // The variable an access is ultimately of: a[i], r.f and p^ all modify the
+    // thing they are a part of.
+    const auto baseOf = [](const ExprNode* E) -> std::string {
+        for (int Hops = 0; E && Hops < 64; ++Hops) {
+            if (auto* Id = llvm::dyn_cast<IdentExpr>(E))    return toLower(Id->Name);
+            if (auto* Ix = llvm::dyn_cast<IndexExpr>(E))    { E = Ix->Array.get();  continue; }
+            if (auto* Fd = llvm::dyn_cast<FieldExpr>(E))    { E = Fd->Record.get(); continue; }
+            if (auto* Sb = llvm::dyn_cast<SubstringExpr>(E)){ E = Sb->Str.get();    continue; }
+            // A dereference modifies what the pointer points AT, not the
+            // pointer, so it stops here.
+            return {};
+        }
+        return {};
+    };
+    const auto note = [&](const ExprNode* E) {
+        const std::string B = baseOf(E);
+        if (!B.empty() && Value.count(B)) Proc.ModifiedParams.insert(B);
+    };
+
+    walkStmts(Proc.Body->Body.get(), [&](const StmtNode* S) {
+            if (auto* As = llvm::dyn_cast<AssignStmt>(S)) { note(As->Target.get()); return; }
+            if (auto* Cs = llvm::dyn_cast<CallStmt>(S)) {
+                const std::string Lo = toLower(Cs->Name);
+                const Symbol* Callee = Symtab.lookup(Cs->Name);
+                // read and readln store into every argument but the file.
+                if (Lo == "read" || Lo == "readln") {
+                    for (const auto& A : Cs->Args) note(A.get());
+                    return;
+                }
+                for (size_t I = 0; I < Cs->Args.size(); ++I) {
+                    const bool ByRef =
+                        !Callee || I >= Callee->Params.size() || Callee->Params[I].IsVar;
+                    if (ByRef) note(Cs->Args[I].get());
+                }
+            }
+        });
+    // A function call in an expression can take a var parameter too.
+    walkStmts(Proc.Body->Body.get(), [&](const StmtNode* S) {
+            forEachStmtExpr(S, [&](const ExprNode* E) {
+                walkExprs(E, [&](const ExprNode* X) {
+                    auto* Ce = llvm::dyn_cast<CallExpr>(X);
+                    if (!Ce) return;
+                    const Symbol* Callee = Symtab.lookup(Ce->Name);
+                    for (size_t I = 0; I < Ce->Args.size(); ++I) {
+                        const bool ByRef =
+                            !Callee || I >= Callee->Params.size()
+                            || Callee->Params[I].IsVar;
+                        if (ByRef) note(Ce->Args[I].get());
+                    }
+                });
+            });
+        });
+}
+
 void Sema::checkProcBody(const ProcDecl& Proc) {
     const ProcDecl* Outer = CurrentProc;
     CurrentProc = &Proc;
@@ -1197,6 +1267,10 @@ void Sema::checkProcBody(const ProcDecl& Proc) {
     Symtab.popScope();
     CurrentProc    = Outer;
     CurrentRetType = SavedRetType;
+
+    // Every call in the body has been resolved by now, so the callees'
+    // signatures are available to say which arguments travel by reference.
+    recordModifiedParams(Proc);
 }
 
 // (Type resolution → SemaType.cpp)

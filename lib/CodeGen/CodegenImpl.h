@@ -327,6 +327,10 @@ struct Codegen::Impl {
     /// of the enclosing `n` was gone.  Building a frame for a sibling then
     /// found c's own n and the callee wrote into the wrong activation.
     std::map<std::pair<size_t, std::string>, VarEntry> outerVarBindings;
+    /// Heap blocks a value conformant array parameter was copied into,
+    /// freed where the body ends.  See the conformant branch of the
+    /// parameter prologue.
+    std::vector<llvm::Value*> valueConformantCopies_;
     std::map<std::string, std::vector<std::string>>  funcOuterVarNames_;
     /// The scope DEPTH each captured variable was found at, beside its name.
     ///
@@ -594,6 +598,18 @@ struct Codegen::Impl {
     /// the variable table first would be wrong the other way -- inside
     /// function `count`, a *global* count is shadowed by the result -- so what
     /// matters is whether the binding is newer than the function's own scope.
+    /// Look \p name up from this function's own scope outward, skipping the
+    /// scopes a with-statement or a `for ... in` opened inside the body.
+    [[nodiscard]] const VarEntry* findVarInFunctionScope(const std::string& name) const {
+        const std::string K = toLower(name);
+        const size_t Start = curFuncScopeDepth ? curFuncScopeDepth - 1 : 0;
+        for (size_t i = Start + 1; i-- > 0;) {
+            const auto It = scopes[i].find(K);
+            if (It != scopes[i].end()) return &It->second;
+        }
+        return nullptr;
+    }
+
     [[nodiscard]] bool boundInsideFunction(const std::string& name) const {
         for (size_t i = scopes.size(); i-- > curFuncScopeDepth;)
             if (scopes[i].count(toLower(name))) return true;

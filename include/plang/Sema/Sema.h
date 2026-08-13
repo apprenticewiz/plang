@@ -277,6 +277,8 @@ private:
                     llvm::function_ref<void()> BeforePop = {});
     void checkProcSignature(const ProcDecl& Proc);
     void checkProcBody     (const ProcDecl& Proc);
+    /// Records which value parameters a body modifies; see ProcDecl::ModifiedParams.
+    void recordModifiedParams(const ProcDecl& Proc);
 
     // ---- type resolution ----
     // Converts an AST TypeNode to a semantic Type.
