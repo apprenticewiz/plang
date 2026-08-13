@@ -57,3 +57,6 @@ local/
 
 # One-off scripts not intended for publication
 tools/gen_conformance_tests.py
+
+# Agent worktrees and session state.
+.claude/
