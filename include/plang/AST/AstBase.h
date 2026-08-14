@@ -2,12 +2,33 @@
 
 #include "plang/Basic/Token.h"
 
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <string>
 #include <vector>
 
 namespace plang {
+
+/// EP §6.4.7 R3: a schema body's extent, as arithmetic over the schema's
+/// discriminants BY INDEX, with every other leaf already folded to a value in
+/// the scope the declaration was written in.
+///
+/// The point is what it does NOT contain: an identifier.  CodeGen used to
+/// re-emit the declaration's extent EXPRESSIONS wherever an object was
+/// allocated or accessed, which resolved their names in the procedure doing
+/// the allocating -- so a `const k` used in a bound was captured by any
+/// unrelated `var k` there, and the object was sized from a run-time variable.
+/// That shipped in 0.1.5, corrupted the heap, and 0.1.6 guarded it by hiding
+/// the caller's scope.  A closed form makes it impossible instead: there is no
+/// name left to resolve in the wrong room.
+struct ExtentForm {
+    enum class Op : uint8_t { Const, Disc, Add, Sub, Mul, Div, Mod, Pow, Neg };
+    Op                      Kind{Op::Const};
+    /// Const: the value.  Disc: the discriminant's index.
+    int64_t                 Value{0};
+    std::vector<ExtentForm> Args;
+};
 
 struct Type; // forward declaration — complete definition in plang/Sema/Type.h
 
@@ -182,6 +203,13 @@ struct TypeNode : Node {
     /// the declaration rather than of the type — `bindable text` and `text`
     /// describe the same values — so it is recorded here and not on Type.
     bool Bindable{false};
+    /// R3: this denoter's extents as closed forms, when it is written inside a
+    /// schema body.  A string's capacity and an array's or subrange's lower
+    /// bound are ExtentLow; the upper bound is ExtentHigh.  Absent when the
+    /// denoter is not in a schema body, or when the expression is not one
+    /// buildExtentForm can close over.
+    mutable std::optional<ExtentForm> ExtentLow, ExtentHigh;
+
     /// EP §6.6: the 'value' clause of the denoter, which says what state a
     /// variable of the type starts in.  Like Bindable it belongs to the
     /// denoter and not to the type, since `integer value 0` and `integer`

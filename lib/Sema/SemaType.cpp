@@ -232,6 +232,22 @@ std::shared_ptr<Type> Sema::resolveTypeImpl(const TypeNode& Node) {
         }
         return Ctx_.getArray(Index, Elem, N->Packed);
     }
+    // R3: a denoter written inside a schema body records its extents as closed
+    // forms over the discriminant indices.  Built here, where the declaration
+    // is, so that codegen never re-emits the expression anywhere else.
+    if (ProbeBindingsActive_ && !ProbeDiscNames_.empty()) {
+        if (auto* Sn = llvm::dyn_cast<StringTypeNode>(&Node); Sn && Sn->Capacity)
+            Node.ExtentLow = buildExtentForm(*Sn->Capacity, ProbeDiscNames_);
+        if (auto* An = llvm::dyn_cast<ArrayTypeNode>(&Node); An && An->Low && An->High) {
+            Node.ExtentLow  = buildExtentForm(*An->Low,  ProbeDiscNames_);
+            Node.ExtentHigh = buildExtentForm(*An->High, ProbeDiscNames_);
+        }
+        if (auto* Rn = llvm::dyn_cast<SubrangeTypeNode>(&Node); Rn && Rn->Low && Rn->High) {
+            Node.ExtentLow  = buildExtentForm(*Rn->Low,  ProbeDiscNames_);
+            Node.ExtentHigh = buildExtentForm(*Rn->High, ProbeDiscNames_);
+        }
+    }
+
     if (auto* N = llvm::dyn_cast<SubrangeTypeNode>(&Node)) {
         auto Lo = checkExpr(*N->Low);
         auto Hi = checkExpr(*N->High);
@@ -642,8 +658,12 @@ std::shared_ptr<Type> Sema::resolveUndiscriminatedSchema(Symbol& Sym,
     SchemaBindingUsed_ = false;
     const bool SavedProbe = ProbeBindingsActive_;
     ProbeBindingsActive_  = true;
-    for (const auto& P : Sym.SchemaDeclParams)
+    auto SavedDiscNames = ProbeDiscNames_;
+    ProbeDiscNames_.clear();
+    for (const auto& P : Sym.SchemaDeclParams) {
         ActiveSchemaBindings_[toLower(P.Name)] = 1;
+        ProbeDiscNames_.push_back(P.Name);
+    }
     auto       Body         = resolveTypeImpl(*Sym.SchemaBodyNode);
     const bool LayoutVaries = SchemaBindingUsed_;
     // The probe body is an instantiation like any other and has to say which
@@ -659,6 +679,7 @@ std::shared_ptr<Type> Sema::resolveUndiscriminatedSchema(Symbol& Sym,
     ActiveSchemaBindings_ = std::move(SavedBindings);
     SchemaBindingUsed_    = SavedUsed;
     ProbeBindingsActive_  = SavedProbe;
+    ProbeDiscNames_       = std::move(SavedDiscNames);
 
     if (!Body || Body->isError()) return TyErr;
 

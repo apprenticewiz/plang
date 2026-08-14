@@ -172,6 +172,10 @@ const TypeNode* Codegen::Impl::schemaBodyNodeOf(const plang::Type& T) const {
 }
 
 void Codegen::Impl::bindSchemaDiscs(const SchemaRef& ref) {
+    // R3: the values a closed extent form is evaluated against.  The names
+    // bound below are only for the older route, which re-emits the
+    // declaration's expressions; a form needs no names at all.
+    rtDiscs_ = &ref.discs;
     // The body's bound and capacity expressions are written in terms of the
     // formal discriminant names, so they are bound as ordinary variables and
     // the expressions re-emitted.  The caller pops the scope.
@@ -190,7 +194,7 @@ void Codegen::Impl::bindSchemaDiscs(const SchemaRef& ref) {
 // older route re-emitted the DECLARATION's bound expressions here, at the
 // allocation site, where an unrelated local of the right spelling captured the
 // constant they were written against.
-llvm::Value* Codegen::Impl::emitExtentForm(const plang::Type::ExtentForm& F,
+llvm::Value* Codegen::Impl::emitExtentForm(const plang::ExtentForm& F,
                                            const std::vector<llvm::Value*>& discs) {
     using Op = plang::Type::ExtentForm::Op;
     const auto arg = [&](size_t I) { return emitExtentForm(F.Args[I], discs); };
@@ -516,6 +520,13 @@ std::optional<std::pair<llvm::Value*, llvm::Value*>>
 Codegen::Impl::rtIndexBounds(const ArrayTypeNode& at) {
     // Bounds written as expressions may read a discriminant, so they are
     // emitted against whatever is bound now rather than folded.
+    // R3: the closed forms first.  They name the discriminants by index and
+    // hold no identifier, so nothing in the scope doing the allocating can
+    // capture anything; re-emitting at.Low/at.High below resolves their names
+    // here, which is the defect 0.1.6 shipped a scope barrier to guard.
+    if (auto* lo = extentOf(at.ExtentLow))
+        if (auto* hi = extentOf(at.ExtentHigh))
+            return std::pair{lo, hi};
     if (at.Low && at.High) {
         auto* lo = toI64(emitExpr(*at.Low));
         auto* hi = toI64(emitExpr(*at.High));
@@ -557,7 +568,9 @@ llvm::Value* Codegen::Impl::rtSizeOfTypeNode(const TypeNode* tn) {
         return i64c(static_cast<int64_t>(
             mod->getDataLayout().getTypeAllocSize(llvmTypeOfNode(*d))));
     if (auto* st = llvm::dyn_cast<StringTypeNode>(d)) {
-        auto* cap = toI64(emitExpr(*st->Capacity));
+        // R3: the capacity's closed form, then the expression.
+        auto* cap = extentOf(st->ExtentLow);
+        if (!cap) cap = toI64(emitExpr(*st->Capacity));
         if (!cap) codegenICE("a schema string capacity that cannot be evaluated");
         return alignUpV(builder.CreateAdd(i64c(8), cap, "str.size"), 8);
     }

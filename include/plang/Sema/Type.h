@@ -1,5 +1,6 @@
 #pragma once
 
+#include "plang/AST/AstBase.h"
 #include "plang/Basic/StringUtil.h"
 
 #include <algorithm>
@@ -218,26 +219,9 @@ struct Type {
     };
     std::vector<SchemaDisc> SchemaDiscs;
 
-    /// EP §6.4.7 R3: a schema body's extent, as arithmetic over the schema's
-    /// discriminants BY INDEX, with every other leaf already folded to a value
-    /// in the scope the declaration was written in.
-    ///
-    /// The point is what it does NOT contain: an identifier.  Codegen used to
-    /// re-emit the declaration's bound EXPRESSIONS wherever an object was
-    /// allocated, which resolved their names in the allocating procedure's
-    /// scope -- so a `const k` used in a bound was captured by any unrelated
-    /// `var k` at the new(), and the object was sized from a run-time
-    /// variable.  That shipped in 0.1.5, corrupted the heap, and was fixed in
-    /// 0.1.6 by hiding the caller's scope for the duration.  A closed form
-    /// makes it impossible instead of guarded against: there is no name left
-    /// to resolve in the wrong room.
-    struct ExtentForm {
-        enum class Op : uint8_t { Const, Disc, Add, Sub, Mul, Div, Mod, Pow, Neg };
-        Op                      Kind{Op::Const};
-        /// Const: the value.  Disc: the discriminant's index in SchemaDiscs.
-        int64_t                 Value{0};
-        std::vector<ExtentForm> Args;
-    };
+    /// EP §6.4.7 R3: see plang::ExtentForm.  Aliased here because most callers
+    /// reach it through the schema type.
+    using ExtentForm = plang::ExtentForm;
     /// Array-bodied Schema only: the body's bounds as closed forms.  Absent
     /// when the bound is not expressible as one, in which case codegen keeps
     /// the older route.

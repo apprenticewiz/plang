@@ -1291,8 +1291,16 @@ struct Codegen::Impl {
     /// Bounds of an array-bodied schema, computed from `ref`'s discriminants.
     std::pair<llvm::Value*, llvm::Value*> schemaArrayBounds(const SchemaRef& ref);
     /// R3: a closed extent form evaluated against an object's discriminants.
-    llvm::Value* emitExtentForm(const plang::Type::ExtentForm& F,
+    llvm::Value* emitExtentForm(const plang::ExtentForm& F,
                                 const std::vector<llvm::Value*>& discs);
+    /// The discriminants the run-time layout walk is working against, set by
+    /// bindSchemaDiscs.  The walk is always entered between a bind and its
+    /// popScope, so this is live exactly where a form may be evaluated.
+    const std::vector<llvm::Value*>* rtDiscs_{nullptr};
+    /// A denoter's extent as a value, from its closed form when it has one.
+    llvm::Value* extentOf(const std::optional<plang::ExtentForm>& F) {
+        return (F && rtDiscs_) ? emitExtentForm(*F, *rtDiscs_) : nullptr;
+    }
     /// LLVM type of the schema body's storage: the element type for an array
     /// body, the whole body otherwise.
     llvm::Type* schemaStorageType(const SchemaRef& ref);

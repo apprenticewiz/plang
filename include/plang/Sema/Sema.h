@@ -223,6 +223,10 @@ private:
     /// its values are exact -- marking those extents as varying threw away every
     /// compile-time check on them and truncated a string(300) to 255.
     bool ProbeBindingsActive_{false};
+    /// R3: the schema's discriminant names in declaration order, so that an
+    /// extent form can name them by INDEX.  Set only while a schema body is
+    /// being resolved against the probe.
+    std::vector<std::string> ProbeDiscNames_;
 
     /// Holds a depth counter at zero for the extent of a scope, for a position
     /// that is inside a pointer domain-type syntactically but is not one.
