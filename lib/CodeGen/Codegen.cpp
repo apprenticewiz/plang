@@ -45,7 +45,17 @@ std::optional<int64_t> tryEvalConstInt(
             auto it = known->find(toLower(n->Name));
             if (it != known->end())
                 if (auto* ci = llvm::dyn_cast_or_null<llvm::ConstantInt>(it->second))
-                    return ci->getSExtValue();
+                    // A char constant is held as i8 and its ordinal is 0..255;
+                    // Pascal has no negative char.  Reading every entry back
+                    // sign-extended made `maxchar` fold to -1 here while Sema
+                    // folded it to 255.  Latent rather than live -- a char
+                    // bound pairs with another char, so -1 always produced a
+                    // non-positive extent and tripped the "did not fold"
+                    // fallback into Sema's answer -- but a landmine for any
+                    // future caller without that guard.
+                    return ci->getBitWidth() == 8
+                               ? static_cast<int64_t>(ci->getZExtValue())
+                               : ci->getSExtValue();
         }
         return std::nullopt;
     }

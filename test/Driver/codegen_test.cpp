@@ -4627,3 +4627,25 @@ TEST(Shadowing, ARecordLayoutIsFoldedInTheScopeItWasDeclaredIn) {
     ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
     EXPECT_EQ(R.Stdout, "10 999\n");
 }
+
+TEST(Shadowing, AUserDeclaredEofMeansTheUsersOwn) {
+    // ISO §6.2.2.10: a program that declares one of the required names means
+    // its own.  The guard routing a bare `eof` to the runtime tested findVar
+    // and the constant table -- two of the several things a name can denote --
+    // so a parameterless FUNCTION called eof was in neither and the builtin
+    // won.
+    //
+    // Worse than a wrong answer: the builtin reads standard input, so a
+    // program whose own eof never touches a file hangs on a terminal.  This
+    // test therefore also stands as a hang regression; it is why compileAndRun
+    // closing stdin is not incidental here.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "function eof: boolean;\n"
+        "begin eof := false end;\n"
+        "begin\n"
+        "  if eof then writeln('builtin won') else writeln('user function won')\n"
+        "end.\n");
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "user function won\n");
+}
