@@ -64,14 +64,14 @@ in the current environment.  Every confirmed memory-corruption finding is here.
 | site | what it re-resolves |
 |---|---|
 | `CodegenTypes.cpp:203` | any `NamedTypeNode` reached from a foreign denoter |
-| `CodegenTypes.cpp:309` | `recordLayouts` memoises on (node, schemaCtx) while the layout also depends on ambient `consts`/`typeAliases` |
+| `CodegenTypes.cpp:309` | `recordLayouts` memoises on (node, schemaCtx) while the layout also depends on ambient `consts`/`typeAliases` — **the poisoning source is fixed; the memo key itself is still wrong in principle** |
 | `CodegenExprs.cpp:1467` | `resolveRecordStructType` case 2: `ve->typeNode`, then by spelling |
-| `CodegenExprs.cpp:1759` | re-folds a declaration's `Low`/`High` against use-site `consts` |
+| `CodegenExprs.cpp:1759` | re-folds a declaration's `Low`/`High` against use-site `consts` — **covered by the array-bound rule** |
 | `CodegenStmts.cpp:839` | `new(p)`: the pointer's recorded denoter through `denoterOf`'s spelling walk |
 | `CodegenRuntime.cpp:420` | `getFileElemType`: the file variable's element denoter, by spelling — **covered by the `NamedTypeNode` rule**; no separate change needed |
-| `CodegenProcs.cpp:101` | interface `var` denoters lowered in the body's environment |
+| `CodegenProcs.cpp:101` | interface `var` denoters lowered in the body's environment — **covered by the array-bound rule** |
 | `CodegenProcs.cpp:906`, `:917` | a constant's `llvm::Value` **emitted in one function** and read from another |
-| `CodegenProcs.cpp:869` | enum ordinals pushed into the flat `consts` map |
+| `CodegenProcs.cpp:869` | enum ordinals pushed into the flat `consts` map — probed through records, inline records and file components; no reachable defect found |
 | `CodegenSchema.cpp:34`, `:40` | `schemaDefs_`, flat and never restored |
 | `CodegenSchema.cpp:181`, `:190` | discriminant names and body denoter, by spelling |
 | `CodegenSchema.cpp:184` | **the archetype**: a body's extent expressions re-emitted at the allocation site |
