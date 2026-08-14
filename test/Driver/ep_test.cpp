@@ -3419,3 +3419,53 @@ TEST(EP7Schema, ASchemaBodyIsSizedInTheScopeItWasWrittenIn) {
     EXPECT_EQ(A.Stdout, B.Stdout)
         << "the object's layout depended on the name of an unrelated local";
 }
+
+TEST(EP7Schema, AProcedureLocalSchemaDoesNotOutliveItsProcedure) {
+    // codegen's schemaDefs_ is keyed by the schema's NAME and was the one of
+    // the five per-procedure tables nobody restored -- typeAliases, consts,
+    // requiredConsts and labelBlocks all are.  So a procedure declaring a
+    // schema whose spelling an outer one already used left its definition
+    // behind for every procedure emitted after it, and a sibling's new() was
+    // sized from a stranger's body.
+    //
+    // main escaped this by accident, which is why it went unnoticed: emitMain
+    // re-registers the program block's schemas, putting the outer definition
+    // back before the body is emitted.  It takes a SIBLING procedure to see.
+    //
+    // Under-allocating: `second` allocates through the outer vec, which is a
+    // hundred times bigger than first's.
+    auto Small = compileAndRun(
+        "program p(output);\n"
+        "type vec(n: integer) = array[1..n*100] of integer;\n"
+        "var q: ^vec; i: integer;\n"
+        "procedure first;\n"
+        "type vec(n: integer) = array[1..n] of integer;\n"
+        "var r: ^vec;\n"
+        "begin new(r, 1); r^[1] := 0 end;\n"
+        "procedure second;\n"
+        "begin new(q, 5) end;\n"
+        "begin first; second;\n"
+        "  for i := 1 to 500 do q^[i] := i;\n"
+        "  writeln(q^[500]:1) end.\n", kEP + " -fno-range-checks");
+    ASSERT_EQ(Small.ExitCode, 0)
+        << "new() was sized from another procedure's schema: " << Small.Stderr;
+    EXPECT_EQ(Small.Stdout, "500\n");
+
+    // And the bounds the range check uses come from the same place, so the
+    // check went missing in `second` while main's read of the same object was
+    // checked correctly.
+    auto Bounds = compileAndRun(
+        "program p(output);\n"
+        "type vec(n: integer) = array[1..n] of integer;\n"
+        "var q: ^vec;\n"
+        "procedure first;\n"
+        "type vec(n: integer) = array[1..n*100] of integer;\n"
+        "var r: ^vec;\n"
+        "begin new(r, 1); r^[1] := 0 end;\n"
+        "procedure second;\n"
+        "begin new(q, 5); q^[6] := 77 end;\n"
+        "begin first; second; writeln('unreachable') end.\n",
+        kEP + " -frange-checks");
+    EXPECT_NE(Bounds.ExitCode, 0);
+    EXPECT_NE(Bounds.Stderr.find("1..5"), std::string::npos) << Bounds.Stderr;
+}

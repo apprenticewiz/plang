@@ -243,6 +243,13 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
     auto  savedTypeAliases = typeAliases;
     auto  savedConsts      = consts;
     auto  savedRequired    = requiredConsts;
+    // schemaDefs_ is flat too, and was the one of these five that nobody
+    // restored.  A procedure declaring a schema of a spelling an OUTER one
+    // already used left its definition in place for every procedure emitted
+    // after it -- so a sibling's new() was sized from a stranger's body.  main
+    // escaped it by accident: emitMain re-registers the program block's
+    // schemas, putting the outer definition back before the body is emitted.
+    auto  savedSchemaDefs  = schemaDefs_;
     auto  savedLabels      = std::move(labelBlocks);
     labelBlocks.clear();
 
@@ -848,6 +855,7 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
     typeAliases   = std::move(savedTypeAliases);
     consts        = std::move(savedConsts);
     requiredConsts = std::move(savedRequired);
+    schemaDefs_   = std::move(savedSchemaDefs);
     labelBlocks   = std::move(savedLabels);
     builder.restoreIP(savedIP);
 }
