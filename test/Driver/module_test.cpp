@@ -3488,6 +3488,40 @@ TEST(Schema, AVaryingStringIntoACharArrayChecksItsLength) {
     EXPECT_EQ(Ok.Stdout, "[abcd]\n");
 }
 
+TEST(Schema, ANestedVariantSitsWhereBothWalksAgreeItDoes) {
+    // The run-time size walk started each alternative at zero and added the
+    // offset on afterwards, while the offset walk started at the offset.  Those
+    // two are the same number only when the offset is already aligned to the
+    // widest field in the part -- which the pre-align guaranteed, and which is
+    // not what the STATIC layout does for a NESTED run: layoutVariantCase
+    // places nested fields by their own alignment inside the enclosing blob.
+    //
+    // So `k` sat four bytes past where an ordinary read of it looked.  It takes
+    // all three to show: a nested variant, an alternative whose alignment is
+    // strictly below the part's widest (char against real), and a copy between
+    // `q^` and a discriminated instance, which is where the two layouts meet.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type t(n: integer) = record\n"
+        "       lead: integer;\n"
+        "       s: string(n);\n"
+        "       case tag: boolean of\n"
+        "         true:  (c: char;\n"
+        "                 case inner: boolean of\n"
+        "                    true:  (d: real);\n"
+        "                    false: (k: char));\n"
+        "         false: (z: integer) end;\n"
+        "var q: ^t; v: t(10);\n"
+        "begin new(q, 10);\n"
+        "      q^.lead := 111; q^.s := 'ten chars!';\n"
+        "      q^.tag := true; q^.c := 'x';\n"
+        "      q^.inner := false; q^.k := 'K';\n"
+        "      v := q^;\n"
+        "      writeln('[', q^.k, ']', '[', v.k, ']', v.lead:1, v.c) end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "[K][K]111x\n");
+}
+
 TEST(Schema, AWithOverANestedComponentKeepsTheRunTimeLayout) {
     // `with q^ do` is a Schema and `with q^.inner do` is an ordinary Record
     // that merely lives inside one.  Keying the run-time-layout branch on the

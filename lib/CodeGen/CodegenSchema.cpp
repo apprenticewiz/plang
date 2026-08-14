@@ -553,21 +553,36 @@ llvm::Value* Codegen::Impl::rtWalkFields(const std::vector<FieldDecl>& fields,
 /// since an alternative's own size may depend on a discriminant.  The tag, if
 /// there is one, is an ordinary field ahead of that run.
 llvm::Value* Codegen::Impl::rtVariantSize(const VariantPart& vp,
-                                          llvm::Value* off, bool packed) {
+                                          llvm::Value* off, bool packed,
+                                          bool nested) {
     if (vp.TagType) {
         const uint64_t a = packed ? 1 : rtAlignOfTypeNode(vp.TagType.get());
         off = alignUpV(off, a);
         off = builder.CreateAdd(off, rtSizeOfTypeNode(vp.TagType.get()), "tag.off");
     }
-    off = alignUpV(off, packed ? 1 : rtVariantAlign(vp));
-    llvm::Value* widest = i64c(0);
+    // Only the OUTERMOST run is pre-aligned, because in the static layout only
+    // the outermost run is a struct element of its own and so gets the part's
+    // alignment from LLVM.  A nested part lives inside that element, where
+    // layoutVariantCase places its fields by their own alignment and nothing
+    // else -- so pre-aligning a nested run here put `k` four bytes past where
+    // an ordinary read of it looked, and a whole-value copy between `q^` and a
+    // discriminated instance quietly swapped a character for a space.
+    if (!nested) off = alignUpV(off, packed ? 1 : rtVariantAlign(vp));
+    // Walked from off rather than from zero and added on afterwards.  Those two
+    // are the same number only when off is already aligned to the widest field
+    // in the part, which is exactly what the pre-align used to guarantee and
+    // what a nested run does not have.  rtVariantFieldOffset has always walked
+    // absolutely; now this does too, so the size and the offset are one walk
+    // and cannot drift apart again.
+    llvm::Value* widest = off;
     for (const auto& vc : vp.Cases) {
-        llvm::Value* sz = rtWalkFields(vc.Fields, i64c(0), packed, nullptr, nullptr);
-        if (vc.NestedVariant) sz = rtVariantSize(*vc.NestedVariant, sz, packed);
+        llvm::Value* sz = rtWalkFields(vc.Fields, off, packed, nullptr, nullptr);
+        if (vc.NestedVariant)
+            sz = rtVariantSize(*vc.NestedVariant, sz, packed, /*nested=*/true);
         widest = builder.CreateSelect(builder.CreateICmpUGT(sz, widest),
                                       sz, widest, "variant.max");
     }
-    return builder.CreateAdd(off, widest, "variant.end");
+    return widest;
 }
 
 uint64_t Codegen::Impl::rtVariantAlign(const VariantPart& vp) {
@@ -601,21 +616,24 @@ llvm::Value* Codegen::Impl::rtFieldOffset(const RecordTypeNode& rt,
 /// means, so the alternative the field is in is the only one walked.
 llvm::Value* Codegen::Impl::rtVariantFieldOffset(const VariantPart& vp,
                                                  llvm::Value* off, bool packed,
-                                                 const std::string& field) {
+                                                 const std::string& field,
+                                                 bool nested) {
     if (vp.TagType) {
         const uint64_t a = packed ? 1 : rtAlignOfTypeNode(vp.TagType.get());
         off = alignUpV(off, a);
         if (!vp.TagField.empty() && eqCI(vp.TagField, field)) return off;
         off = builder.CreateAdd(off, rtSizeOfTypeNode(vp.TagType.get()), "tag.off");
     }
-    off = alignUpV(off, packed ? 1 : rtVariantAlign(vp));
+    // Outermost only; see rtVariantSize.
+    if (!nested) off = alignUpV(off, packed ? 1 : rtVariantAlign(vp));
     for (const auto& vc : vp.Cases) {
         bool found = false;
         llvm::Value* v = rtWalkFields(vc.Fields, off, packed, &field, &found);
         if (found) return v;
         if (vc.NestedVariant) {
             llvm::Value* end = rtWalkFields(vc.Fields, off, packed, nullptr, nullptr);
-            if (auto* n = rtVariantFieldOffset(*vc.NestedVariant, end, packed, field))
+            if (auto* n = rtVariantFieldOffset(*vc.NestedVariant, end, packed,
+                                               field, /*nested=*/true))
                 return n;
         }
     }

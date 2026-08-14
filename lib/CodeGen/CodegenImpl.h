@@ -1079,9 +1079,11 @@ struct Codegen::Impl {
     llvm::Value* rtWalkFields(const std::vector<FieldDecl>& fields,
                               llvm::Value* off, bool packed,
                               const std::string* stopAt, bool* found);
-    llvm::Value* rtVariantSize(const VariantPart& vp, llvm::Value* off, bool packed);
+    llvm::Value* rtVariantSize(const VariantPart& vp, llvm::Value* off,
+                               bool packed, bool nested = false);
     llvm::Value* rtVariantFieldOffset(const VariantPart& vp, llvm::Value* off,
-                                      bool packed, const std::string& field);
+                                      bool packed, const std::string& field,
+                                      bool nested = false);
     uint64_t     rtVariantAlign(const VariantPart& vp);
 
     /// A component of a run-time-laid-out object: the enclosing schema whose
