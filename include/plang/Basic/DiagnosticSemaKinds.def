@@ -157,6 +157,11 @@ DIAG(err_case_label_mismatch, Error, "case label type '%0' is not compatible wit
 // The label is spelled the way the program wrote it — 'a', not 97 — so the
 // quotes belong to the value and not to the sentence around it.
 DIAG(err_case_label_duplicate, Error, "case label %0 is used by more than one arm")
+// ISO §6.8.3.5: a case-label is a case-constant.  A label that is not one was
+// accepted and lowered to a LOAD of the variable, so `case i of 1..n:` with n a
+// variable compared against whatever n happened to hold -- an illegal program
+// compiled into a plausible-looking one.
+DIAG(err_case_label_not_const, Error, "case label is not a constant")
 DIAG(err_variant_label_duplicate, Error, "case label %0 is used by more than one variant")
 DIAG(err_line_proc_not_text, Error, "'%0' applies to a text file only, not to 'file of %1'")
 DIAG(err_assign_file, Error, "a variable of a file type, or with a file component, cannot be assigned")

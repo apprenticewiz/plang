@@ -320,6 +320,9 @@ private:
     // cannot mistake "no value" for a bound.  Consults ActiveSchemaBindings_ so
     // schema discriminant names are recognized.
     [[nodiscard]] std::optional<int64_t> constBound(const ExprNode& E) const;
+    /// The body of constBound.  Call constBound, which also records the answer
+    /// on the node for codegen to use instead of folding it a second time.
+    [[nodiscard]] std::optional<int64_t> constBoundImpl(const ExprNode& E) const;
 
     /// Reports the first statement of each run in this sequence that no path
     /// can reach, a run being ended by a label that a goto could land on.

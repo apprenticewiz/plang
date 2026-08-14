@@ -3495,3 +3495,35 @@ TEST(EP8Const, ARuntimeConstantIsReachableFromANestedProcedure) {
     ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
     EXPECT_EQ(R.Stdout, "outer  3.0\nnested 3.0\n");
 }
+
+TEST(EP8Const, AStringCapacityIsFoldedInTheScopeItWasWrittenIn) {
+    // R2.  A capacity written as a constant expression was re-folded where the
+    // denoter is LOWERED, against codegen's flat constant table -- so a record
+    // whose layout is first computed inside a procedure declaring its own `n`
+    // sized the field for the stranger's n.  Sema had folded the same
+    // expression in the declaring scope; codegen now asks for that answer
+    // instead of working out its own.
+    //
+    // A NAMED string type never showed it, because a named type was already
+    // routed through Sema's resolved type.  It takes a capacity written inline
+    // in a record to reach the folder at all -- the same shape of blind spot as
+    // the array case in R1, one layer further in.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "const n = 20;\n"
+        "type r = record s: string(n); tail: integer end;\n"
+        "procedure inner;\n"
+        "const n = 3;\n"
+        "var l: r;\n"
+        "begin l.s := 'abc' end;\n"
+        "procedure later;\n"
+        "var m: r;\n"
+        "begin\n"
+        "  m.tail := 999;\n"
+        "  m.s := 'twenty chars exactly';\n"
+        "  writeln(m.s, ' ', m.tail:1)\n"
+        "end;\n"
+        "begin inner; later end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "twenty chars exactly 999\n");
+}

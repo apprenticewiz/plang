@@ -54,6 +54,19 @@ llvm::Value* Codegen::Impl::constantValueOf(const ConstDef& cd) {
         return exprIsVarStr(*cd.Value) ? internStrStruct(n->Value)
                                        : internStrPtr(n->Value);
     }
+    // R2.  Sema folded this in the scope it was written in, and it folds more
+    // than codegen's evaluator does -- `const k = 2 pow 3` reaches here as an
+    // expression evalConst cannot handle at all.  That used to fabricate 0 and
+    // the program carried on with a constant of the wrong value; making the
+    // failure loud is what turned it up.
+    //
+    // Only for an ordinal-typed constant: ConstVal is an int64_t, and a real or
+    // a string constant still needs evalConst below.
+    if (cd.Value->ConstVal && cd.Value->ResolvedType
+            && cd.Value->ResolvedType->isOrdinal())
+        return llvm::ConstantInt::get(
+            llvmTypeOfSemaType(*cd.Value->ResolvedType), 
+            static_cast<uint64_t>(*cd.Value->ConstVal), /*isSigned=*/true);
     return evalConst(*cd.Value, consts, ctx, i64Ty, dblTy);
 }
 
@@ -180,7 +193,15 @@ void Codegen::Impl::emitGlobals(const BlockNode& block) {
         // unit's code runs — in main for a program, and for a module in its
         // initialiser, which needs storage to leave the answer in.
         if (!cv && !currentUnit_.empty()) { emitRuntimeConst(cd); continue; }
-        if (!cv) cv = llvm::ConstantInt::get(i64Ty, 0);
+        // R2.  This used to fabricate 0 for a constant nothing could evaluate,
+        // and a fabricated value is indistinguishable from a real one to
+        // everything downstream: `const k = <unfoldable>; array[1..k]` became a
+        // one-element array that every subscript ran off the end of.  Sema
+        // records what it folded, so reaching here means neither knows -- which
+        // is a hole in the compiler, not a zero.
+        if (!cv)
+            codegenICE("constant '" + cd.Name + "' has no value that Sema "
+                       "folded or that codegen can emit");
         defineConst(cd.Name, cv);
     }
     for (const auto& vg : block.Vars) registerEnumValues(vg.Type.get());
@@ -940,7 +961,8 @@ void Codegen::Impl::emitBlockDecls(const BlockNode& block) {
             defVar(cd.Name, slot, ty);
             continue;
         }
-        defineConst(cd.Name, llvm::ConstantInt::get(i64Ty, 0));
+        codegenICE("constant '" + cd.Name + "' has no value that Sema folded "
+                   "or that codegen can emit");
     }
 }
 

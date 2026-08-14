@@ -871,10 +871,25 @@ void Sema::checkCase(const CaseStmt& S) {
             checkLabel(*Lbl.Low);
             if (Lbl.High) checkLabel(*Lbl.High);
 
+            // ISO §6.8.3.5: a case-label is a case-CONSTANT.  This used to
+            // fold only to find duplicates and skip quietly when it could not,
+            // so a label that was not constant reached codegen and lowered to a
+            // load of the variable: `case i of 1..n:` compared the selector
+            // against whatever n held at that moment.  An illegal program
+            // compiled into a plausible-looking one.
+            auto mustBeConst = [&](const ExprNode& E,
+                                   const std::optional<int64_t>& V) {
+                // Quiet where the label was already reported as ill-typed;
+                // one mistake should not be told twice.
+                if (!V && E.ResolvedType && !E.ResolvedType->isError())
+                    error(E.Loc, diag::err_case_label_not_const);
+            };
             // A range stands for every value in it, and any of them can be the
             // one another arm repeats.
             const auto Lo = constBound(*Lbl.Low);
+            mustBeConst(*Lbl.Low, Lo);
             const auto Hi = Lbl.High ? constBound(*Lbl.High) : Lo;
+            if (Lbl.High) mustBeConst(*Lbl.High, Hi);
             if (!Lo || !Hi || *Hi < *Lo) continue;
             for (int64_t V = *Lo; V <= *Hi; ++V) {
                 noteValue(V, Lbl.High ? *Lbl.Low : *Lbl.Low);

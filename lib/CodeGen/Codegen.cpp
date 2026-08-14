@@ -21,6 +21,17 @@
 std::optional<int64_t> tryEvalConstInt(
         const ExprNode& e,
         const std::unordered_map<std::string, llvm::Value*>* known) {
+    // R2.  Sema folded this expression in the scope it was WRITTEN in, and
+    // that is the answer.  Everything below re-folds it here, against a table
+    // holding whatever is innermost where the expression is being lowered --
+    // a different question the moment a name is redeclared between the two
+    // points, and the source of every finding in class A of
+    // docs/single-source-of-truth.md.
+    //
+    // Sema does not record a value it folded against a schema's probe binding,
+    // so a bound over a discriminant still falls through to the code below and
+    // is emitted against the discriminants actually in hand.
+    if (e.ConstVal) return *e.ConstVal;
     if (auto* n = llvm::dyn_cast<IntLitExpr>(&e))  return n->Value;
     if (auto* n = llvm::dyn_cast<BoolLitExpr>(&e)) return n->Value ? 1 : 0;
     // ISO §6.1.7: a one-character string is a char-type constant, so it is an
@@ -34,7 +45,17 @@ std::optional<int64_t> tryEvalConstInt(
             auto it = known->find(toLower(n->Name));
             if (it != known->end())
                 if (auto* ci = llvm::dyn_cast_or_null<llvm::ConstantInt>(it->second))
-                    return ci->getSExtValue();
+                    // A char constant is held as i8 and its ordinal is 0..255;
+                    // Pascal has no negative char.  Reading every entry back
+                    // sign-extended made `maxchar` fold to -1 here while Sema
+                    // folded it to 255.  Latent rather than live -- a char
+                    // bound pairs with another char, so -1 always produced a
+                    // non-positive extent and tripped the "did not fold"
+                    // fallback into Sema's answer -- but a landmine for any
+                    // future caller without that guard.
+                    return ci->getBitWidth() == 8
+                               ? static_cast<int64_t>(ci->getZExtValue())
+                               : ci->getSExtValue();
         }
         return std::nullopt;
     }
