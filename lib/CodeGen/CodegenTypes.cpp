@@ -525,8 +525,12 @@ llvm::Type* Codegen::Impl::llvmTypeOf(const TypeNode* denoter,
     // serves every instantiation and carries the annotation of whichever was
     // resolved last, while the syntax read under the discriminants in force is
     // this instance's own — so there the syntax is the only one asked.
+    // An extent a discriminant fixes makes both answers meaningless here: Sema
+    // holds the probe's and the syntax cannot fold the bound at all, so they
+    // differ by construction.  Neither is the storage -- CodegenSchema lays it
+    // out at run time -- so there is nothing for the two to agree about.
     if (schemaCtx.empty() && resolved && !resolved->isError()
-            && canLowerSemaType(*resolved)) {
+            && !resolved->ExtentVaries && canLowerSemaType(*resolved)) {
         auto* fromSema = llvmTypeOfSemaType(*resolved);
         const auto& dl  = mod->getDataLayout();
         if (fromSema != fromSyntax && fromSema->isSized() && fromSyntax->isSized()
@@ -572,7 +576,7 @@ void Codegen::Impl::checkSizeAgreement(const Type& T, llvm::Type* Built) {
     // SchemaBindings marks a record that *is* an instantiation: it resolves
     // to a plain Record, but its field denoters still carry whichever
     // instantiation was resolved last.
-    if (!schemaCtx.empty() || !T.SchemaBindings.empty()) return;
+    if (!schemaCtx.empty() || !T.SchemaBindings.empty() || T.ExtentVaries) return;
     const auto FromSema = Sema::byteSizeOf(T);
     if (!FromSema || !Built || !Built->isSized()) return;
     const uint64_t FromLayout =
@@ -708,4 +712,55 @@ llvm::AllocaInst* Codegen::Impl::createEntryAlloca(llvm::Type* ty, const std::st
     auto* alloca = builder.CreateAlloca(ty, nullptr, name);
     builder.restoreIP(ip);
     return alloca;
+}
+
+llvm::Value* Codegen::Impl::createDynStrAlloca(llvm::Value* capV,
+                                               const std::string& name) {
+    // The header is 8 bytes and the payload is the capacity, rounded up so the
+    // next thing on the stack stays aligned -- the same shape strStructType
+    // builds, just measured rather than declared.
+    auto* bytes = alignUpV(builder.CreateAdd(llvm::ConstantInt::get(i64Ty, 8),
+                                             capV, "str.tmp.size"), 8);
+    dynAllocaUsed_ = true;
+    auto* mem = builder.CreateAlloca(i8Ty, bytes, name);
+    mem->setAlignment(llvm::Align(8));
+    // A fresh temporary has no characters in it yet, and every runtime entry
+    // point reads the length before it writes one.
+    builder.CreateStore(llvm::ConstantInt::get(i64Ty, 0), mem);
+    return mem;
+}
+
+// The save is emitted up front and thrown away again if it turned out to be
+// unnecessary.  Recording an insertion point and coming back to it does not
+// work: a scope that opens on an empty block records end(), and end() is still
+// end() once the statement has filled the block, so the save landed after the
+// block's own branch and the IR did not verify.
+Codegen::Impl::StackScope::StackScope(Impl& I)
+        : I(I), SavedUsed(I.dynAllocaUsed_) {
+    I.dynAllocaUsed_ = false;
+    Save = I.builder.CreateStackSave("stack.mark");
+}
+
+Codegen::Impl::StackScope::~StackScope() {
+    if (I.dynAllocaUsed_ && !I.isTerminated()) {
+        I.builder.CreateStackRestore(Save);
+        // Given back here, so an enclosing scope has nothing left to give back
+        // on this account.
+        I.dynAllocaUsed_ = false;
+    } else if (Save->use_empty()) {
+        // Nothing took a dynamic allocation, so the mark is dead.  Removing it
+        // is what lets this scope sit on every simple statement without costing
+        // anything in the ordinary case -- and it is why the IR for a program
+        // with no schema strings in it is unchanged.
+        auto* decl = llvm::cast<llvm::CallInst>(Save)->getCalledFunction();
+        Save->eraseFromParent();
+        // The DECLARATION outlives the call it was created for, and a module
+        // carrying an unused `declare ptr @llvm.stacksave.p0()` is not the
+        // module it was before.  The IR gate caught exactly that: 116 ISO 7185
+        // listings differing by a declaration and an attribute group and
+        // nothing else.  A later scope that needs it will declare it again.
+        if (decl && decl->isDeclaration() && decl->use_empty())
+            decl->eraseFromParent();
+    }
+    I.dynAllocaUsed_ = SavedUsed || I.dynAllocaUsed_;
 }

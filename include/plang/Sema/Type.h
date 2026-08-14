@@ -1,5 +1,6 @@
 #pragma once
 
+#include "plang/AST/AstBase.h"
 #include "plang/Basic/StringUtil.h"
 
 #include <algorithm>
@@ -13,6 +14,7 @@
 namespace plang {
 
 struct RecordTypeNode;
+struct TypeNode;
 
 /// Number of distinct ordinals a set can hold.  A set is lowered to one bit
 /// per ordinal, so this is both the width of the set representation and the
@@ -118,6 +120,18 @@ struct Type {
     /// Capacity (N) of an EP string(N) type; 0 for unbounded String.
     int64_t StrCapacity{0};
 
+    /// EP §6.4.7: an extent of this type is fixed by a discriminant whose value
+    /// is not known until run time -- `string(cap)` or `array[1..n]` written in
+    /// the body of a schema that is used without its discriminants.
+    ///
+    /// The body of such a schema is resolved once against a probe binding, so
+    /// StrCapacity and the index bounds below hold the probe's answer and are
+    /// NOT the storage.  Nothing may fold against them: the object carries its
+    /// discriminants and the layout is worked out from those at run time.  A
+    /// type that reaches codegen with this set is laid out by CodegenSchema's
+    /// run-time path rather than by the specialising one.
+    bool ExtentVaries{false};
+
     // --- Subrange ---
     /// Underlying ordinal type for a subrange.
     std::shared_ptr<Type> SubBase;
@@ -205,26 +219,9 @@ struct Type {
     };
     std::vector<SchemaDisc> SchemaDiscs;
 
-    /// EP §6.4.7 R3: a schema body's extent, as arithmetic over the schema's
-    /// discriminants BY INDEX, with every other leaf already folded to a value
-    /// in the scope the declaration was written in.
-    ///
-    /// The point is what it does NOT contain: an identifier.  Codegen used to
-    /// re-emit the declaration's bound EXPRESSIONS wherever an object was
-    /// allocated, which resolved their names in the allocating procedure's
-    /// scope -- so a `const k` used in a bound was captured by any unrelated
-    /// `var k` at the new(), and the object was sized from a run-time
-    /// variable.  That shipped in 0.1.5, corrupted the heap, and was fixed in
-    /// 0.1.6 by hiding the caller's scope for the duration.  A closed form
-    /// makes it impossible instead of guarded against: there is no name left
-    /// to resolve in the wrong room.
-    struct ExtentForm {
-        enum class Op : uint8_t { Const, Disc, Add, Sub, Mul, Div, Mod, Pow, Neg };
-        Op                      Kind{Op::Const};
-        /// Const: the value.  Disc: the discriminant's index in SchemaDiscs.
-        int64_t                 Value{0};
-        std::vector<ExtentForm> Args;
-    };
+    /// EP §6.4.7 R3: see plang::ExtentForm.  Aliased here because most callers
+    /// reach it through the schema type.
+    using ExtentForm = plang::ExtentForm;
     /// Array-bodied Schema only: the body's bounds as closed forms.  Absent
     /// when the bound is not expressible as one, in which case codegen keeps
     /// the older route.
@@ -234,6 +231,14 @@ struct Type {
     /// field types are accurate but its extent is only accurate when
     /// SchemaFixedLayout is set.
     std::shared_ptr<Type>   SchemaBody;
+    /// The declaration denoter the body was resolved from.  Codegen re-emits
+    /// the body's own bound and capacity expressions against the run-time
+    /// discriminants, and it used to find them by looking the SCHEMA NAME up in
+    /// a flat map keyed by bare name across the whole compilation -- so a
+    /// schema declared in a nested procedure, shadowing an outer one of the
+    /// same name, handed back the wrong body.  A type knows its own
+    /// declaration; the name does not identify it.
+    const TypeNode*         SchemaBodyNode{nullptr};
     /// Schema only: true when the body's storage layout does not depend on the
     /// discriminants, so SchemaBody describes the storage exactly.  When false
     /// the body is an array whose bounds are computed at run time.

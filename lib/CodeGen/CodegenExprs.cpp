@@ -159,8 +159,17 @@ llvm::Value* Codegen::Impl::emitExpr(const ExprNode& e) {
         //
         // The assignment path a few lines away in CodegenStmts already asks
         // exprStrCap.  Only the rvalue did this.
-        int64_t cap = exprStrCap(*n->Str);
+        // Two different capacities, and conflating them cut a
+        // discriminant-sized string's substring to one character: the result
+        // TEMPORARY has to be sized by a constant, while what the runtime is
+        // told about the SOURCE is the capacity that source really has.
+        int64_t cap = exprStrCapStatic(*n->Str);
         if (cap <= 0) cap = PlangMaxStringCapacity;
+        // The source capacity falls back to the same widest-capacity answer
+        // when the operand is not typed as a string(n); exprStrCapV reports 0
+        // there, and telling the runtime the source holds nothing put every
+        // substring of one outside its own bounds.
+        auto* srcCap = exprIsVarStr(*n->Str) ? exprStrCapV(*n->Str) : i64c(cap);
         auto* resPtr = createEntryAlloca(strStructType(cap), "substr.res");
         auto* low    = toI64(emitExpr(*n->Low));
         auto* high   = toI64(emitExpr(*n->High));
@@ -170,8 +179,7 @@ llvm::Value* Codegen::Impl::emitExpr(const ExprNode& e) {
             llvm::ConstantInt::get(i64Ty, 1), "substr.len");
         auto* fn     = getStrFn("plang_str_substr",
             llvm::Type::getVoidTy(ctx), {ptrTy, i64Ty, ptrTy, i64Ty, i64Ty, i64Ty});
-        builder.CreateCall(fn, {resPtr, llvm::ConstantInt::get(i64Ty, cap),
-            strAddr, llvm::ConstantInt::get(i64Ty, cap), low, len});
+        builder.CreateCall(fn, {resPtr, i64c(cap), strAddr, srcCap, low, len});
         return resPtr;
     }
     if (auto* n = llvm::dyn_cast<WriteParam>(&e)) {
@@ -221,6 +229,18 @@ llvm::Value* Codegen::Impl::emitLValue(const ExprNode& e) {
         // for by name.  Loading the file variable would hand back the handle
         // itself, which is what used to reach the store below.
         if (isFileVar(*n->Pointer)) return fileBufferPtr(*n->Pointer);
+        // EP §6.7.5.3: new(p, d..) writes the discriminants into a header in
+        // FRONT of the body, so what p holds is not the address of p^.  Two
+        // places answer "where is p^'s storage" -- this one and schemaRefOf --
+        // and they differed by the header size, so `q^ := 'first'` for a
+        // ^string wrote the length field over the capacity discriminant and
+        // the NEXT assignment was checked against the previous string's
+        // length.  Asked of the pointer, not of the dereference, because for a
+        // string body p^ reads as the string and no longer says "schema".
+        if (const auto& PT = n->Pointer->ResolvedType;
+                PT && PT->Kind == TypeKind::Pointer && PT->PointeeType
+                && PT->PointeeType->Kind == TypeKind::Schema)
+            if (auto ref = schemaRefOf(*n)) return ref->data;
         // p^ — load the pointer value; that IS the target address.
         auto* p = emitExpr(*n->Pointer);
         if (p && p->getType()->isPointerTy()) emitNilCheck(p);
@@ -316,36 +336,61 @@ llvm::Value* Codegen::Impl::emitBinary(const BinaryExpr& e) {
         // EP §6.8.3.2 makes a char operand string-compatible, so either side of
         // the concatenation may be one.  The runtime concatenates onto a string,
         // so a char on the left has to become a one-character string first.
-        auto strOperand = [&](const ExprNode& x) -> std::pair<llvm::Value*, int64_t> {
-            if (exprIsVarStr(x)) return {emitStrAddr(x), exprStrCap(x)};
+        // The RESULT is a temporary and has to be sized by a constant, so a
+        // discriminant-fixed operand contributes the widest capacity plang has
+        // rather than the probe's one character.  What each operand is declared
+        // to hold is told to the runtime separately, as a value.
+        auto strOperand = [&](const ExprNode& x) -> std::pair<llvm::Value*, llvm::Value*> {
+            if (exprIsVarStr(x)) return {emitStrAddr(x), exprStrCapV(x)};
             auto* v   = emitExpr(x);
             auto* tmp = createEntryAlloca(strStructType(1), "str.chr");
             if (v && v->getType()->isIntegerTy(8)) emitStrFromChar(tmp, 1, v);
             else if (v)                            emitStrFromCStr(tmp, 1, v);
-            return {tmp, 1};
+            return {tmp, i64c(1)};
         };
         auto [lv, capL] = strOperand(*e.Left);
-        int64_t capR   = exprIsVarStr(*e.Right) ? exprStrCap(*e.Right) : 1;
-        int64_t capRes = capL + capR;
-        auto*   resPtr = createEntryAlloca(strStructType(capRes), "str.concat");
+        auto* capR = exprIsVarStr(*e.Right) ? exprStrCapV(*e.Right) : i64c(1);
+        // A non-string operand is one character, as it was before: returning
+        // zero for it sized the result temporary at 1 and cut 'x' + 'y' to "x".
+        auto staticCap = [&](const ExprNode& x) -> int64_t {
+            return exprIsVarStr(x) ? exprStrCapStatic(x) : 1;
+        };
+        // No clamp: a declared capacity may exceed PlangMaxStringCapacity --
+        // string(300) is legal and the corpus has one -- and capping the sum
+        // here cut `n := n + 'x'` to 255.  That constant is the answer for a
+        // capacity that is not known, not a ceiling on ones that are.
+        //
+        // And where a discriminant fixes it, nobody knows it at compile time
+        // but somebody knows it: capL and capR are the real capacities, as
+        // values.  Sizing the result by the static guess instead truncated
+        // `q^ := q^ + 'x'` at 256 for a q^ of capacity 300 -- silently, and on
+        // a program that is entirely legal.  So the result temporary is sized
+        // by the same arithmetic the runtime is told about.
+        auto varies = [](const ExprNode& x) {
+            return exprIsVarStr(x) && x.ResolvedType->ExtentVaries;
+        };
+        const bool capVaries = varies(*e.Left) || varies(*e.Right);
+        const int64_t capRes = staticCap(*e.Left) + staticCap(*e.Right);
+        llvm::Value* capResV = capVaries
+            ? builder.CreateAdd(capL, capR, "concat.cap") : i64c(capRes);
+        llvm::Value* resPtr  = capVaries
+            ? createDynStrAlloca(capResV, "str.concat")
+            : static_cast<llvm::Value*>(
+                  createEntryAlloca(strStructType(capRes), "str.concat"));
         auto*   rv     = exprIsVarStr(*e.Right) ? emitStrAddr(*e.Right)
                                                 : emitExpr(*e.Right);
         if (exprIsVarStr(*e.Right)) {
             auto* fn = getStrFn("plang_str_concat", llvm::Type::getVoidTy(ctx),
                 {ptrTy, i64Ty, ptrTy, i64Ty, ptrTy, i64Ty});
-            builder.CreateCall(fn, {resPtr, llvm::ConstantInt::get(i64Ty, capRes),
-                lv, llvm::ConstantInt::get(i64Ty, capL),
-                rv, llvm::ConstantInt::get(i64Ty, capR)});
+            builder.CreateCall(fn, {resPtr, capResV, lv, capL, rv, capR});
         } else if (rv && rv->getType()->isIntegerTy(8)) {
             auto* fn = getStrFn("plang_str_concat_char", llvm::Type::getVoidTy(ctx),
                 {ptrTy, i64Ty, ptrTy, i64Ty, i8Ty});
-            builder.CreateCall(fn, {resPtr, llvm::ConstantInt::get(i64Ty, capRes),
-                lv, llvm::ConstantInt::get(i64Ty, capL), rv});
+            builder.CreateCall(fn, {resPtr, capResV, lv, capL, rv});
         } else {
             auto* fn = getStrFn("plang_str_concat_cstr", llvm::Type::getVoidTy(ctx),
                 {ptrTy, i64Ty, ptrTy, i64Ty, ptrTy});
-            builder.CreateCall(fn, {resPtr, llvm::ConstantInt::get(i64Ty, capRes),
-                lv, llvm::ConstantInt::get(i64Ty, capL), rv});
+            builder.CreateCall(fn, {resPtr, capResV, lv, capL, rv});
         }
         return resPtr;
     }
@@ -366,11 +411,11 @@ llvm::Value* Codegen::Impl::emitBinary(const BinaryExpr& e) {
                 e.Op == TokenKind::LessThanOrEqual ? "plang_str_le" :
                 e.Op == TokenKind::GreaterThan     ? "plang_str_gt" : "plang_str_ge";
             // Convert each operand to a (ptr, cap) pair, wrapping literals in a temp.
-            auto toStrPtr = [&](const ExprNode& expr) -> std::pair<llvm::Value*, int64_t> {
+            auto toStrPtr = [&](const ExprNode& expr) -> std::pair<llvm::Value*, llvm::Value*> {
                 if (exprIsVarStr(expr))
-                    return {emitStrAddr(expr), exprStrCap(expr)};
+                    return {emitStrAddr(expr), exprStrCapV(expr)};
                 if (exprIsCharStr(expr))
-                    return {emitCharStrAsStr(expr), exprCharStrLen(expr)};
+                    return {emitCharStrAsStr(expr), i64c(exprCharStrLen(expr))};
                 // String literal or char — wrap in a temporary VarString.
                 int64_t cap = 1;
                 if (auto* sl = llvm::dyn_cast<StringLitExpr>(&expr))
@@ -381,14 +426,12 @@ llvm::Value* Codegen::Impl::emitBinary(const BinaryExpr& e) {
                     emitStrFromChar(tmp, cap, val);
                 else if (val)
                     emitStrFromCStr(tmp, cap, val);
-                return {tmp, cap};
+                return {tmp, i64c(cap)};
             };
             auto [la, capL] = toStrPtr(*e.Left);
             auto [ra, capR] = toStrPtr(*e.Right);
             auto* fn  = getStrFn(fnName, i8Ty, {ptrTy, i64Ty, ptrTy, i64Ty});
-            auto* raw = builder.CreateCall(fn, {la,
-                llvm::ConstantInt::get(i64Ty, capL), ra,
-                llvm::ConstantInt::get(i64Ty, capR)}, "str.cmp");
+            auto* raw = builder.CreateCall(fn, {la, capL, ra, capR}, "str.cmp");
             return ensureI1(raw);
         }
     }
@@ -852,26 +895,46 @@ llvm::Value* Codegen::Impl::emitCallExpr(const CallExpr& e) {
 
     // ---- EP string functions (§6.7.6.7) ----
     // Return (ptr, cap) for a string argument using Sema-annotated type.
-    auto getStrArgPtr = [&](int idx) -> std::pair<llvm::Value*, int64_t> {
-        if (e.Args.size() <= (size_t)idx) return {nullptr, 0};
+    auto getStrArgPtr = [&](int idx) -> std::pair<llvm::Value*, llvm::Value*> {
+        if (e.Args.size() <= (size_t)idx) return {nullptr, nullptr};
         const auto& arg = *e.Args[idx];
         if (exprIsVarStr(arg))
-            return {emitStrAddr(arg), exprStrCap(arg)};
+            return {emitStrAddr(arg), exprStrCapV(arg)};
         // String literal — create a temp VarString.
         if (auto* sl = llvm::dyn_cast<StringLitExpr>(&arg)) {
             int64_t cap = (int64_t)sl->Value.size();
             auto* tmp = createEntryAlloca(strStructType(cap), "str.arg");
             emitStrFromCStr(tmp, cap, internStrPtr(sl->Value));
-            return {tmp, cap};
+            return {tmp, i64c(cap)};
         }
-        return {nullptr, 0};
+        return {nullptr, nullptr};
+    };
+    // For sizing a temporary, which needs a constant; see exprStrCapStatic.
+    auto strArgCapStatic = [&](int idx) -> int64_t {
+        if (e.Args.size() <= (size_t)idx) return 0;
+        const auto& arg = *e.Args[idx];
+        if (exprIsVarStr(arg)) return exprStrCapStatic(arg);
+        if (auto* sl = llvm::dyn_cast<StringLitExpr>(&arg))
+            return (int64_t)sl->Value.size();
+        return 0;
+    };
+    /// A result temporary as wide as the argument it is derived from.  Where a
+    /// discriminant fixes that argument's capacity the width is not a constant,
+    /// and exprStrCapStatic's 255 is the answer for a capacity nobody knows --
+    /// so sizing by it cut substr and trim of a 400-capacity string to 255.
+    auto strResultTemp = [&](int idx, llvm::Value* capV, const char* name)
+            -> std::pair<llvm::Value*, llvm::Value*> {
+        if (const auto& arg = *e.Args[idx];
+                exprIsVarStr(arg) && arg.ResolvedType->ExtentVaries)
+            return {createDynStrAlloca(capV, name), capV};
+        const int64_t c = strArgCapStatic(idx);
+        return {createEntryAlloca(strStructType(c), name), i64c(c)};
     };
     if (lo == "length") {
         auto [ptr, cap] = getStrArgPtr(0);
         if (ptr) {
             auto* fn = getStrFn("plang_str_length", i64Ty, {ptrTy, i64Ty});
-            return builder.CreateCall(fn,
-                {ptr, llvm::ConstantInt::get(i64Ty, cap)}, "length");
+            return builder.CreateCall(fn, {ptr, cap}, "length");
         }
         // Fallback: strlen on a char*
         auto* s  = emitExpr(*e.Args[0]);
@@ -884,9 +947,7 @@ llvm::Value* Codegen::Impl::emitCallExpr(const CallExpr& e) {
         if (sp && pp) {
             auto* fn = getStrFn("plang_str_index", i64Ty,
                 {ptrTy, i64Ty, ptrTy, i64Ty});
-            return builder.CreateCall(fn,
-                {sp, llvm::ConstantInt::get(i64Ty, sc),
-                 pp, llvm::ConstantInt::get(i64Ty, pc)}, "index");
+            return builder.CreateCall(fn, {sp, sc, pp, pc}, "index");
         }
     }
     if (lo == "substr") {
@@ -900,24 +961,20 @@ llvm::Value* Codegen::Impl::emitCallExpr(const CallExpr& e) {
                 : builder.CreateAdd(
                       builder.CreateSub(strLoadLen(sp), i, "substr.rest"),
                       llvm::ConstantInt::get(i64Ty, 1), "substr.len");
-            auto* resPtr = createEntryAlloca(strStructType(sc), "substr.res");
+            auto [resPtr, resCapV] = strResultTemp(0, sc, "substr.res");
             auto* fn     = getStrFn("plang_str_substr",
                 llvm::Type::getVoidTy(ctx), {ptrTy, i64Ty, ptrTy, i64Ty, i64Ty, i64Ty});
-            builder.CreateCall(fn,
-                {resPtr, llvm::ConstantInt::get(i64Ty, sc),
-                 sp,     llvm::ConstantInt::get(i64Ty, sc), i, n});
+            builder.CreateCall(fn, {resPtr, resCapV, sp, sc, i, n});
             return resPtr;
         }
     }
     if (lo == "trim") {
         auto [sp, sc] = getStrArgPtr(0);
         if (sp) {
-            auto* resPtr = createEntryAlloca(strStructType(sc), "trim.res");
+            auto [resPtr, resCapV] = strResultTemp(0, sc, "trim.res");
             auto* fn     = getStrFn("plang_str_trim",
                 llvm::Type::getVoidTy(ctx), {ptrTy, i64Ty, ptrTy, i64Ty});
-            builder.CreateCall(fn,
-                {resPtr, llvm::ConstantInt::get(i64Ty, sc),
-                 sp,     llvm::ConstantInt::get(i64Ty, sc)});
+            builder.CreateCall(fn, {resPtr, resCapV, sp, sc});
             return resPtr;
         }
     }
@@ -933,9 +990,7 @@ llvm::Value* Codegen::Impl::emitCallExpr(const CallExpr& e) {
             auto [rp, rc] = getStrArgPtr(1);
             if (lp && rp) {
                 auto* fn  = getStrFn(it->second, i8Ty, {ptrTy, i64Ty, ptrTy, i64Ty});
-                auto* raw = builder.CreateCall(fn,
-                    {lp, llvm::ConstantInt::get(i64Ty, lc),
-                     rp, llvm::ConstantInt::get(i64Ty, rc)}, lo);
+                auto* raw = builder.CreateCall(fn, {lp, lc, rp, rc}, lo);
                 return ensureI1(raw);
             }
         }
@@ -1137,9 +1192,27 @@ llvm::Value* Codegen::Impl::emitConformantElemPtr(const IndexExpr& e) {
 }
 
 llvm::Value* Codegen::Impl::emitIndexGEP(const IndexExpr& e) {
+    // EP §6.4.7: an array FIELD of a run-time-laid-out body has bounds the
+    // discriminants fix, so they are re-emitted here rather than read off the
+    // type -- which holds the probe's, and would check `q^.d[2]` against 1..1.
+    // The address of the field itself already comes from the run-time offset.
+    // An array whose extent a discriminant fixes, reached anywhere in a path:
+    // its bounds and its stride are recomputed, and both come from the same
+    // recursion so that `q^.d[i, j]` checks BOTH subscripts rather than only
+    // the innermost.
+    if (e.Array->ResolvedType && e.Array->ResolvedType->ExtentVaries)
+        if (auto path = schemaPathOf(e)) return path->addr;
     // EP §6.4.7: an undiscriminated schema recomputes its bounds from the
     // discriminants it carries, then indexes like a conformant array.
-    if (auto ref = schemaRefOf(*e.Array)) {
+    //
+    // Only when its body actually IS an array.  `q^[1]` for a `^string` is a
+    // string component, EP §6.5.3.2, and asking this branch for it went looking
+    // for an array body on the string schema and killed the compiler -- the
+    // string case below was never reached.  A record-bodied schema has no
+    // subscript at all and must fall through to be diagnosed, not crash.
+    if (auto ref = schemaRefOf(*e.Array);
+            ref && ref->semaTy && ref->semaTy->SchemaBody
+            && ref->semaTy->SchemaBody->Kind == TypeKind::Array) {
         auto [lo, hi] = schemaArrayBounds(*ref);
         auto* elemTy  = schemaStorageType(*ref);
         auto* idx     = toI64(emitExpr(*e.Index));
@@ -1458,12 +1531,28 @@ llvm::Value* Codegen::Impl::emitFieldGEP(const FieldExpr& e) {
     // EP §6.4.7: for p^ the body starts past the discriminant header, so the
     // record pointer has to come from the schematic view rather than emitLValue.
     llvm::Value* recPtr = nullptr;
+    std::optional<SchemaRef> sref;
     if (e.Record->ResolvedType
             && e.Record->ResolvedType->Kind == TypeKind::Schema) {
-        if (auto ref = schemaRefOf(*e.Record)) recPtr = ref->data;
+        sref = schemaRefOf(*e.Record);
+        if (sref) recPtr = sref->data;
     }
     if (!recPtr) recPtr = emitLValue(*e.Record);
     if (!recPtr) return nullptr;
+
+    // EP §6.4.7: a body whose extent a discriminant fixes has no one struct --
+    // layoutOf specialises per discriminant tuple and there is no tuple until
+    // run time -- so the address is worked out from the declaration instead.
+    // This has to come before resolveRecordStructType, because the struct it
+    // would hand back is the probe's and is exactly what must not be indexed.
+    //
+    // Asked of the whole access PATH, not of this one field: `q^.inner.k` and
+    // `q^.a[i].s` reach a run-time-laid-out component through an operand that
+    // is itself not a p^, and matching on that shape is what let them fall
+    // through to the probe struct.
+    if (const Type* RecTy = recordTypeOf(*e.Record);
+            RecTy && RecTy->ExtentVaries && RecTy->RecordDecl)
+        if (auto path = schemaPathOf(e)) return path->addr;
 
     // Returning recPtr unchanged here would silently alias the whole record,
     // so both failures below are hard errors.

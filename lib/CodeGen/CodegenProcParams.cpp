@@ -17,6 +17,8 @@
 
 #include "CodegenImpl.h"
 
+#include <optional>
+
 using namespace plang;
 
 void Codegen::Impl::storeProcPair(llvm::Value* cell, llvm::Value* fn,
@@ -65,8 +67,39 @@ void Codegen::Impl::pushConformantArgs(std::vector<llvm::Value*>& args,
         if (auto* v = findVar(id->Name); v && v->isConformantArray)
             ave = v;
 
+    // EP §6.4.7: an actual whose extent a discriminant fixes has no static
+    // bounds either, and its recorded ones are the probe's.  The denoter its
+    // bounds are written in is walked alongside the type so each dimension can
+    // re-emit them against the discriminants the object carries.
+    const TypeNode* pathDecl = nullptr;
+    std::optional<SchemaPath> argPath;
+    if (arg.ResolvedType && arg.ResolvedType->ExtentVaries) {
+        argPath = schemaPathOf(arg);
+        if (argPath) pathDecl = argPath->decl;
+    }
+
     for (size_t di = 0; di < dims; ++di) {
         bool fromConformant = false;
+        if (argPath && pathDecl) {
+            const TypeNode* d = pathDecl;
+            while (auto* pk = llvm::dyn_cast_or_null<PackedTypeNode>(d))
+                d = pk->Inner.get();
+            if (auto* at = llvm::dyn_cast_or_null<ArrayTypeNode>(d);
+                    at && at->Low && at->High) {
+                bindSchemaDiscs(argPath->root);
+                auto* lo = toI64(emitExpr(*at->Low));
+                auto* hi = toI64(emitExpr(*at->High));
+                popScope();
+                if (lo && hi) {
+                    args.push_back(lo);
+                    args.push_back(hi);
+                    fromConformant = true;
+                }
+                pathDecl = at->Element.get();
+            } else {
+                pathDecl = nullptr;
+            }
+        }
         if (ave) {
             // By address where we have one.  The names are what the programmer
             // wrote in the parameter list, and any scope opened since can
@@ -102,18 +135,34 @@ void Codegen::Impl::pushConformantArgs(std::vector<llvm::Value*>& args,
                 fromConformant = true;
             }
         }
+        // EP §6.4.9: a DISCRIMINATED schema is an ordinary fixed-size type, so
+        // `vec(5)` is an array wherever a conformant actual is wanted.  Sema's
+        // isConformable was widened to unwrap SchemaInstance and reach the
+        // array; this was not, so the test below failed and the fallback
+        // pushed literal 0, 0.  The callee then saw an empty array and its
+        // loop ran no times -- and v0.1.5 REJECTED the call outright, so this
+        // branch turned a compile error into a silent wrong answer.
+        const auto unwrapSchema = [](const Type* T) {
+            while (T && T->Kind == TypeKind::SchemaInstance && T->SchemaBody)
+                T = T->SchemaBody.get();
+            return T;
+        };
         if (!fromConformant) {
             int64_t lo = 0, hi = 0;
-            if (dimTy && (dimTy->Kind == TypeKind::Array
-                          || dimTy->Kind == TypeKind::ConformantArray)
-                && dimTy->IndexType) {
-                lo = dimTy->IndexType->SubLo;
-                hi = dimTy->IndexType->SubHi;
+            const Type* d = unwrapSchema(dimTy);
+            if (d && (d->Kind == TypeKind::Array
+                      || d->Kind == TypeKind::ConformantArray)
+                && d->IndexType) {
+                lo = d->IndexType->SubLo;
+                hi = d->IndexType->SubHi;
             }
             args.push_back(llvm::ConstantInt::get(i64Ty, lo));
             args.push_back(llvm::ConstantInt::get(i64Ty, hi));
         }
-        if (dimTy && dimTy->ElemType) dimTy = dimTy->ElemType.get();
+        // The next dimension is reached through the body too, for the same
+        // reason: a schema instance has no ElemType of its own.
+        if (const Type* d = unwrapSchema(dimTy); d && d->ElemType)
+            dimTy = d->ElemType.get();
     }
 }
 

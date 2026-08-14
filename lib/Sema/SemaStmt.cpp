@@ -161,6 +161,11 @@ bool Sema::isFunctionResultTarget(const ExprNode& Target) const {
 }
 
 void Sema::checkAssign(const AssignStmt& S) {
+    // The target is resolved before it is judged, because whether it is
+    // assignable can depend on what it turned out to be: `v.n` is a field in
+    // the syntax and a schema discriminant in the type, and only the second
+    // says it cannot be written to.
+    auto Dst = checkExpr(*S.Target);
     if (!isLValue(*S.Target)) {
         // ISO §6.6.3.1: a functional parameter reads like the function-result
         // variable of the enclosing function, so say which one it is rather
@@ -201,7 +206,6 @@ void Sema::checkAssign(const AssignStmt& S) {
         }
     }
 
-    auto Dst = checkExpr(*S.Target);
     auto Src = checkExpr(*S.Value);
 
     // EP §6.9.2.2: the value has to suit the type of the variable — except for
@@ -242,6 +246,11 @@ void Sema::checkAssign(const AssignStmt& S) {
 // admits.
 void Sema::warnIfConstantOutOfRange(const Type& Dst, const ExprNode& Src) {
     if (Dst.Kind != TypeKind::Subrange) return;
+    // EP §6.4.7: bounds a discriminant fixes are not known here.  The recorded
+    // ones are the probe's, so this warned that every value but 1 was outside
+    // 1..1 -- certain of a trap that does not happen, on a program that is
+    // correct.  Codegen checks it against the value the object carries.
+    if (Dst.ExtentVaries) return;
     auto V = constBound(Src);
     if (!V) return;
     if (*V >= Dst.SubLo && *V <= Dst.SubHi) return;
@@ -270,6 +279,12 @@ void Sema::checkStringCapacity(const Type& Dst, const ExprNode& Src) {
     }
 
     if (Dst.Kind != TypeKind::VarString) return;
+    // EP §6.4.7: a capacity fixed by a discriminant is not known here.  The
+    // recorded one is the probe's, so comparing against it would reject
+    // `p^.s := 'twelve chars'` for not fitting a string(1).  Whether it fits is
+    // a run-time question, and codegen asks it against the capacity the object
+    // carries.
+    if (Dst.ExtentVaries) return;
     if (Len > Dst.StrCapacity)
         error(Src.Loc, diag::err_string_too_long,
               {std::to_string(Len), std::to_string(Dst.StrCapacity)});
@@ -736,6 +751,37 @@ int Sema::pushWithScope(const WithStmt& S) {
         if (T->isError()) continue;
 
         // EP §6.4.7: schema instance — expose discriminants and body record fields.
+        // EP §6.4.7: an UNDISCRIMINATED schema -- `with p^ do` for a `^buf`.
+        // Its fields are selectable by name like any record's; the difference
+        // is that the discriminants are values carried by the object rather
+        // than constants, so they are exposed as integer variables and NOT put
+        // into ActiveSchemaBindings_, which exists for compile-time folding and
+        // has no answer here.
+        if (T->Kind == TypeKind::Schema && T->SchemaBody
+                && T->SchemaBody->Kind == TypeKind::Record) {
+            Symtab.pushScope(/*IsBlock=*/false);
+            ++Count;
+            for (const auto& D : T->SchemaDiscs) {
+                Symbol DS;
+                // Const, as the discriminated branch below already has it.
+                // Var here confused WHEN the value is known with WHETHER it may
+                // be written: it is not known until run time and it may never
+                // be written, and `with q^ do n := 99` was accepted because
+                // this said otherwise.
+                DS.Kind = SymbolKind::Const;
+                DS.Name = D.Name;
+                DS.Ty   = TyInt;
+                (void)Symtab.define(std::move(DS));
+            }
+            for (const auto& F : T->SchemaBody->RecordFields) {
+                Symbol FS;
+                FS.Kind = SymbolKind::Var;
+                FS.Name = F.Name;
+                FS.Ty   = F.Ty;
+                (void)Symtab.define(std::move(FS));
+            }
+            continue;
+        }
         if (T->Kind == TypeKind::SchemaInstance) {
             Symtab.pushScope(/*IsBlock=*/false);
             ++Count;

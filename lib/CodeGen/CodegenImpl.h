@@ -129,6 +129,13 @@ struct Codegen::Impl {
     llvm::Type*        dblTy{nullptr};
     llvm::PointerType* ptrTy{nullptr};
 
+    /// A signed i64 constant.  Enough places now pass a capacity or an extent
+    /// that may be either a literal or a run-time value that spelling out
+    /// ConstantInt::get at each of them buries which is which.
+    llvm::Constant* i64c(int64_t v) const {
+        return llvm::ConstantInt::get(i64Ty, static_cast<uint64_t>(v), true);
+    }
+
     // ---- symbol table ----
     struct VarEntry {
         llvm::Value*     ptr;               // alloca or GlobalVariable (used as ptr)
@@ -159,6 +166,12 @@ struct Codegen::Impl {
         // that stay live for the whole activation.
         const plang::Type*        schemaTy{nullptr};
         std::vector<llvm::Value*> schemaDiscs{};
+        /// The names those discriminants were spilled to in the declaring
+        /// procedure.  A nested procedure reaches an outer variable through a
+        /// static link, which carries ADDRESSES: schemaDiscs above are the
+        /// parent's own function arguments and mean nothing there, so a nested
+        /// binding reloads them from these cells instead.
+        std::vector<std::string> schemaDiscNames{};
         // ISO §6.6.3.1: set for a procedural or functional formal parameter.
         // ptr addresses a { ptr, ptr } cell holding the closure pair: where to
         // jump, and the frame the target reads its own outer variables
@@ -168,6 +181,27 @@ struct Codegen::Impl {
         // to another activation is not something this one may name.
         bool                       isProcParam{false};
         const ProcedureTypeNode*   procType{nullptr};
+        /// EP §6.4.7: a `with`-bound field of a run-time-laid-out record has a
+        /// capacity its object carries, and once bound it is an ordinary name
+        /// with no path back to the object.  Recorded here so that
+        /// `with p^ do s := ...` checks against the real capacity rather than
+        /// the probe's string(1).  Last, and default-initialised, so that every
+        /// existing aggregate initialisation of this struct is unaffected.
+        llvm::Value*     strCapV{nullptr};
+        /// EP §6.4.7: a `with`-bound component of a run-time-laid-out object.
+        /// Binding it as a bare address loses the layout for anything reached
+        /// THROUGH it -- an array field indexed against the probe's bounds, a
+        /// nested record addressed by the probe struct -- so the denoter its
+        /// extents are written in is kept, and schemaPathOf resumes from here.
+        const TypeNode*  pathDecl{nullptr};
+        /// The schema the path above is rooted in.  Separate from schemaTy on
+        /// purpose: schemaTy means "this NAME is a schematic object", which a
+        /// with-bound FIELD is not.  Writing the root there made every bound
+        /// field answer schemaRefOf, so indexing a fixed array field went
+        /// looking for an array body on the enclosing RECORD and killed the
+        /// compiler on a legal program.
+        const plang::Type* pathRootTy{nullptr};
+        std::vector<llvm::Value*> pathDiscs;
     };
     std::vector<std::unordered_map<std::string, VarEntry>> scopes;
 
@@ -794,6 +828,44 @@ struct Codegen::Impl {
     // ====================================================================
     llvm::AllocaInst* createEntryAlloca(llvm::Type* ty, const std::string& name);
 
+    /// A type denoter with any `packed` wrappers taken off.
+    static const TypeNode* peelPackedNode(const TypeNode* tn) {
+        while (auto* pk = llvm::dyn_cast_or_null<PackedTypeNode>(tn))
+            tn = pk->Inner.get();
+        return tn;
+    }
+
+    /// A { i64 len, [cap x i8] } temporary whose capacity is only known at run
+    /// time -- the result of concatenating a `string(n)` whose n a discriminant
+    /// fixes.  Sizing one of these by a constant is what silently truncated
+    /// such a result to PlangMaxStringCapacity: 255 is the answer for a
+    /// capacity nobody knows, and here somebody does, just not yet.
+    ///
+    /// The allocation lands where the builder is rather than in the entry
+    /// block, because that is where its size is known.  A StackScope over the
+    /// statement gives it back afterwards, so one in a loop costs a fixed
+    /// amount of stack rather than one allocation per iteration.
+    llvm::Value* createDynStrAlloca(llvm::Value* capV, const std::string& name);
+
+    /// Restores the stack pointer on the way out, but only if something inside
+    /// actually took a dynamic allocation -- a scope that costs nothing is one
+    /// that can be put everywhere a statement is emitted without reading like
+    /// an optimisation decision.  The save is spliced in at the point the scope
+    /// opened, which is why the flag can be consulted at the end.
+    class StackScope {
+    public:
+        explicit StackScope(Impl& I);
+        ~StackScope();
+        StackScope(const StackScope&)            = delete;
+        StackScope& operator=(const StackScope&) = delete;
+    private:
+        Impl&        I;
+        llvm::Instruction* Save;
+        bool         SavedUsed;
+    };
+    /// Set by createDynStrAlloca, cleared and restored by StackScope.
+    bool dynAllocaUsed_{false};
+
     // ====================================================================
     // String interning
     // ====================================================================
@@ -1023,6 +1095,65 @@ struct Codegen::Impl {
         return exprIsVarStr(e) ? e.ResolvedType->StrCapacity : 0;
     }
 
+    /// The same capacity as a value.  EP §6.4.3.3 makes `string` a schema whose
+    /// one discriminant is the capacity, so for a `^string` the answer is in the
+    /// header new() wrote and is not known until run time; StrCapacity holds the
+    /// probe's answer and would check `q^ := 'hi'` against a string(1).
+    llvm::Value* exprStrCapV(const ExprNode& e);
+    void setVarStrCap(const std::string& name, llvm::Value* cap);
+    void setVarSchemaPath(const std::string& name, const SchemaRef& root,
+                          const TypeNode* decl);
+
+    /// The capacity to SIZE A TEMPORARY with, which has to be a constant.  A
+    /// discriminant-fixed capacity is not one, and the probe's answer would cut
+    /// the temporary to a single character, so such a string gets the widest
+    /// capacity plang has -- every real capacity fits in it.  Use exprStrCapV
+    /// wherever the capacity is a value the runtime is told, not a size.
+    static int64_t exprStrCapStatic(const ExprNode& e) {
+        if (!exprIsVarStr(e)) return 0;
+        return e.ResolvedType->ExtentVaries ? PlangMaxStringCapacity
+                                            : e.ResolvedType->StrCapacity;
+    }
+
+    /// EP §6.4.7 run-time layout, for a schema body whose extent a discriminant
+    /// fixes.  Call with the discriminants bound in the current scope (see
+    /// bindSchemaDiscs): the bound and capacity expressions are re-emitted
+    /// against them.  A subtree that reads no discriminant folds to a constant.
+    uint64_t     rtAlignOfTypeNode(const TypeNode* tn);
+    llvm::Value* rtSizeOfTypeNode(const TypeNode* tn);
+    /// The index bounds of \p at as run-time values.  The only place that
+    /// answers this, so that the run-time walk and the static layout cannot
+    /// disagree about how many elements an array has.
+    std::optional<std::pair<llvm::Value*, llvm::Value*>>
+    rtIndexBounds(const ArrayTypeNode& at);
+    llvm::Value* rtFieldOffset(const RecordTypeNode& rt, const std::string& field);
+    llvm::Value* rtWalkFields(const std::vector<FieldDecl>& fields,
+                              llvm::Value* off, bool packed,
+                              const std::string* stopAt, bool* found);
+    llvm::Value* rtVariantSize(const VariantPart& vp, llvm::Value* off,
+                               bool packed, bool nested = false);
+    llvm::Value* rtVariantFieldOffset(const VariantPart& vp, llvm::Value* off,
+                                      bool packed, const std::string& field,
+                                      bool nested = false);
+    uint64_t     rtVariantAlign(const VariantPart& vp);
+
+    /// A component of a run-time-laid-out object: the enclosing schema whose
+    /// header carries the discriminants, the component's address, and the
+    /// denoter its extents are written in.
+    struct SchemaPath {
+        SchemaRef       root;
+        llvm::Value*    addr{nullptr};
+        const TypeNode* decl{nullptr};
+    };
+    std::optional<SchemaPath> schemaPathOf(const ExprNode& e);
+    llvm::Value* strCapFromPath(const SchemaPath& path);
+    const TypeNode* fieldDenoterOf(const RecordTypeNode& rt, const std::string& field);
+    const TypeNode* variantFieldDenoterOf(const VariantPart& vp, const std::string& field);
+    static bool isRuntimeLaidOut(const ExprNode& e);
+    llvm::Value* alignUpV(llvm::Value* v, uint64_t align);
+    void bindSchemaDiscs(const SchemaRef& ref);
+    const ArrayTypeNode* varyingArrayFieldOf(const FieldExpr& fe);
+
     /// True if the expression is an ISO §6.4.3.2 string-type: a
     /// packed array[1..n] of char, which is n bytes with no length and no
     /// terminator, quite unlike either of the other two string shapes.
@@ -1112,8 +1243,15 @@ struct Codegen::Impl {
                               std::initializer_list<llvm::Type*> argTys);
     llvm::Value* strLoadLen(llvm::Value* strPtr);
     llvm::Value* strDataPtr(llvm::Value* strPtr);
+    // EP §6.4.7: a capacity fixed by a schema discriminant is not a literal, so
+    // these take it as a value.  The int64_t overloads wrap a constant and are
+    // what every fixed-capacity caller still uses, so their IR is unchanged.
+    void emitStrAssign(llvm::Value* dst, llvm::Value* capDst,
+                       llvm::Value* src, llvm::Value* capSrc);
     void emitStrAssign(llvm::Value* dst, int64_t capDst,
-                       llvm::Value* src, int64_t capSrc);
+                       llvm::Value* src, int64_t capSrc) {
+        emitStrAssign(dst, i64c(capDst), src, i64c(capSrc));
+    }
     void emitReadArg(const ExprNode& arg, llvm::Value* fp);
     void emitSkipLine(llvm::Value* fp);
 
@@ -1141,6 +1279,7 @@ struct Codegen::Impl {
     /// re-emitted with run-time discriminants.
     void registerSchemaDefs(const BlockNode& block);
     const SchemaDef* findSchemaDef(const std::string& name) const;
+    const TypeNode* schemaBodyNodeOf(const plang::Type& T) const;
     /// The run-time view of `e`, or nullopt when `e` is not schematic.
     /// May emit loads, so call it once per use.
     std::optional<SchemaRef> schemaRefOf(const ExprNode& e);
@@ -1158,8 +1297,18 @@ struct Codegen::Impl {
     /// Bounds of an array-bodied schema, computed from `ref`'s discriminants.
     std::pair<llvm::Value*, llvm::Value*> schemaArrayBounds(const SchemaRef& ref);
     /// R3: a closed extent form evaluated against an object's discriminants.
-    llvm::Value* emitExtentForm(const plang::Type::ExtentForm& F,
+    /// Bytes of discriminant header in front of a schema body; see the definition.
+    uint64_t schemaHeaderBytes(const plang::Type& schema);
+    llvm::Value* emitExtentForm(const plang::ExtentForm& F,
                                 const std::vector<llvm::Value*>& discs);
+    /// The discriminants the run-time layout walk is working against, set by
+    /// bindSchemaDiscs.  The walk is always entered between a bind and its
+    /// popScope, so this is live exactly where a form may be evaluated.
+    const std::vector<llvm::Value*>* rtDiscs_{nullptr};
+    /// A denoter's extent as a value, from its closed form when it has one.
+    llvm::Value* extentOf(const std::optional<plang::ExtentForm>& F) {
+        return (F && rtDiscs_) ? emitExtentForm(*F, *rtDiscs_) : nullptr;
+    }
     /// LLVM type of the schema body's storage: the element type for an array
     /// body, the whole body otherwise.
     llvm::Type* schemaStorageType(const SchemaRef& ref);
@@ -1169,13 +1318,22 @@ struct Codegen::Impl {
     /// EP §6.7.5.3: new(p, d1..ds) for a pointer whose domain is a schema.
     void emitNewSchema(const ExprNode& ptrArg, const plang::Type& schema,
                        std::span<const std::unique_ptr<ExprNode>> discArgs);
-    void emitStrFromCStr(llvm::Value* dst, int64_t cap, llvm::Value* cstr);
-    void emitStrFromChar(llvm::Value* dst, int64_t cap, llvm::Value* c);
+    void emitStrFromCStr(llvm::Value* dst, llvm::Value* cap, llvm::Value* cstr);
+    void emitStrFromCStr(llvm::Value* dst, int64_t cap, llvm::Value* cstr) {
+        emitStrFromCStr(dst, i64c(cap), cstr);
+    }
+    void emitStrFromChar(llvm::Value* dst, llvm::Value* cap, llvm::Value* c);
+    void emitStrFromChar(llvm::Value* dst, int64_t cap, llvm::Value* c) {
+        emitStrFromChar(dst, i64c(cap), c);
+    }
     /// Store \p src into the string variable at \p dst, whose capacity is
     /// \p capDst.  A string is a length and a buffer, so which runtime call
     /// this takes depends on what the source is; assignment and the 'value'
     /// initializer both come through here.
-    void emitStrStore(llvm::Value* dst, int64_t capDst, const ExprNode& src);
+    void emitStrStore(llvm::Value* dst, llvm::Value* capDst, const ExprNode& src);
+    void emitStrStore(llvm::Value* dst, int64_t capDst, const ExprNode& src) {
+        emitStrStore(dst, i64c(capDst), src);
+    }
 
     /// The address of the { length, bytes } struct a string expression denotes,
     /// which is what every string runtime entry point takes.  Whether that is
@@ -1229,6 +1387,8 @@ struct Codegen::Impl {
     const ExprNode* writtenInitialState(const TypeNode* tn,
                                         const TypeNode** carrier = nullptr) const;
     bool hasInitialState(const TypeNode* tn, int depth = 0) const;
+    /// The body denoter a schema instantiation `t(5)` stands for.
+    const TypeNode* schemaInstanceBody(const TypeNode* tn) const;
     /// EP §6.6: brings a variable of the denoter's type to the state such a
     /// variable begins in.
     void emitInitialState(llvm::Value* ptr, llvm::Type* ty,

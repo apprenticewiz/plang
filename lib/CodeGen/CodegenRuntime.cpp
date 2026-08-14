@@ -475,26 +475,25 @@ llvm::Value* Codegen::Impl::strDataPtr(llvm::Value* strPtr) {
     return i8Ptr;
 }
 
-void Codegen::Impl::emitStrAssign(llvm::Value* dst, int64_t capDst,
-                                   llvm::Value* src, int64_t capSrc) {
+void Codegen::Impl::emitStrAssign(llvm::Value* dst, llvm::Value* capDst,
+                                   llvm::Value* src, llvm::Value* capSrc) {
     auto* fn = getStrFn("plang_str_assign",
         llvm::Type::getVoidTy(ctx), {ptrTy, i64Ty, ptrTy, i64Ty});
-    builder.CreateCall(fn, {dst,
-        llvm::ConstantInt::get(i64Ty, capDst, true),
-        src,
-        llvm::ConstantInt::get(i64Ty, capSrc, true)});
+    builder.CreateCall(fn, {dst, capDst, src, capSrc});
 }
 
-void Codegen::Impl::emitStrFromCStr(llvm::Value* dst, int64_t cap, llvm::Value* cstr) {
+void Codegen::Impl::emitStrFromCStr(llvm::Value* dst, llvm::Value* cap,
+                                    llvm::Value* cstr) {
     auto* fn = getStrFn("plang_str_from_cstr",
         llvm::Type::getVoidTy(ctx), {ptrTy, i64Ty, ptrTy});
-    builder.CreateCall(fn, {dst, llvm::ConstantInt::get(i64Ty, cap, true), cstr});
+    builder.CreateCall(fn, {dst, cap, cstr});
 }
 
-void Codegen::Impl::emitStrFromChar(llvm::Value* dst, int64_t cap, llvm::Value* c) {
+void Codegen::Impl::emitStrFromChar(llvm::Value* dst, llvm::Value* cap,
+                                    llvm::Value* c) {
     auto* fn = getStrFn("plang_str_from_char",
         llvm::Type::getVoidTy(ctx), {ptrTy, i64Ty, i8Ty});
-    builder.CreateCall(fn, {dst, llvm::ConstantInt::get(i64Ty, cap, true), c});
+    builder.CreateCall(fn, {dst, cap, c});
 }
 
 llvm::Value* Codegen::Impl::emitCallArg(const ExprNode& arg,
@@ -598,6 +597,22 @@ void Codegen::Impl::emitCharStrStore(llvm::Value* dst, int64_t n,
     if (exprIsVarStr(src)) {
         auto* from = emitStrAddr(src);
         if (!from) codegenICE("a string value with no address");
+        // §6.4.3.2 requires the lengths to match, and Sema settles that when it
+        // knows the capacity.  It cannot when a discriminant fixes it, so it
+        // lets the assignment through -- and copying n bytes out of a string
+        // holding fewer read past the end of the allocation and dropped heap
+        // bytes into the array.  Checked here instead, against the length the
+        // string actually has.
+        if (src.ResolvedType->ExtentVaries) {
+            auto* len = strLoadLen(from);
+            auto* bad = builder.CreateICmpNE(len, i64c(n), "charstr.len.bad");
+            emitGuard(bad, "charstrlen", [&] {
+                builder.CreateCall(
+                    getExternFnN("plang_err_str_length",
+                                 llvm::Type::getVoidTy(ctx), {i64Ty, i64Ty}),
+                    {len, i64c(n)});
+            });
+        }
         builder.CreateMemCpy(dst, llvm::MaybeAlign(), strDataPtr(from),
                              llvm::MaybeAlign(),
                              llvm::ConstantInt::get(i64Ty, n));
@@ -609,7 +624,7 @@ void Codegen::Impl::emitCharStrStore(llvm::Value* dst, int64_t n,
                          llvm::ConstantInt::get(i64Ty, n));
 }
 
-void Codegen::Impl::emitStrStore(llvm::Value* dst, int64_t capDst,
+void Codegen::Impl::emitStrStore(llvm::Value* dst, llvm::Value* capDst,
                                  const ExprNode& src) {
     // A literal is already a run of bytes; going through emitExpr would build
     // a string temporary first and copy it twice.
@@ -621,13 +636,13 @@ void Codegen::Impl::emitStrStore(llvm::Value* dst, int64_t capDst,
     // one before the string runtime can read it.
     if (exprIsCharStr(src)) {
         const int64_t n = exprCharStrLen(src);
-        emitStrAssign(dst, capDst, emitCharStrAsStr(src), n);
+        emitStrAssign(dst, capDst, emitCharStrAsStr(src), i64c(n));
         return;
     }
     auto* rhs = emitExpr(src); // VarString → ptr; char → i8; other → ptr (cstr)
     if (!rhs) codegenICE("string assignment from an unlowerable expression");
     if (exprIsVarStr(src))
-        emitStrAssign(dst, capDst, rhs, exprStrCap(src));
+        emitStrAssign(dst, capDst, rhs, exprStrCapV(src));
     else if (rhs->getType()->isIntegerTy(8))
         emitStrFromChar(dst, capDst, rhs);
     else

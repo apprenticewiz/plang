@@ -12,14 +12,25 @@ static_assert(NumStmtKinds == 12, "a new statement needs a case in emitStmt");
 void Codegen::Impl::emitStmt(const StmtNode* stmt) {
     if (!stmt || isTerminated()) return;
 
-    if (auto* s = llvm::dyn_cast<AssignStmt>(stmt))    { emitAssign(*s);   return; }
+    // The two statement kinds that evaluate an arbitrary expression and then
+    // finish are the two that can leave a run-time-sized string temporary
+    // behind, and giving the stack back here is what keeps one inside a loop
+    // costing a fixed amount rather than one allocation per iteration.
+    //
+    // Deliberately not around every statement: a labeled statement moves the
+    // insertion point to a block that any goto may enter, so the save would not
+    // dominate the restore and the IR would not verify.  A structured statement
+    // is covered by the scopes of the simple statements inside it.
+    if (auto* s = llvm::dyn_cast<AssignStmt>(stmt)) {
+        StackScope frame(*this); emitAssign(*s);   return; }
     if (auto* s = llvm::dyn_cast<CompoundStmt>(stmt))  { emitCompound(*s); return; }
     if (auto* s = llvm::dyn_cast<IfStmt>(stmt))        { emitIf(*s);       return; }
     if (auto* s = llvm::dyn_cast<WhileStmt>(stmt))     { emitWhile(*s);    return; }
     if (auto* s = llvm::dyn_cast<ForStmt>(stmt))       { emitFor(*s);      return; }
     if (auto* s = llvm::dyn_cast<ForInStmt>(stmt))    { emitForIn(*s);    return; }
     if (auto* s = llvm::dyn_cast<RepeatStmt>(stmt))    { emitRepeat(*s);   return; }
-    if (auto* s = llvm::dyn_cast<CallStmt>(stmt))      { emitCallStmt(*s); return; }
+    if (auto* s = llvm::dyn_cast<CallStmt>(stmt)) {
+        StackScope frame(*this); emitCallStmt(*s); return; }
     if (auto* s = llvm::dyn_cast<GotoStmt>(stmt)) { emitGoto(*s); return; }
     if (auto* s = llvm::dyn_cast<LabeledStmt>(stmt)) {
         auto* lblBB = getOrCreateLabel("lbl_" + s->Label);
@@ -217,18 +228,45 @@ void Codegen::Impl::emitAssign(const AssignStmt& s) {
     // EP §6.4.7: a whole schematic variable copies its body, whose length only
     // the discriminants know.  It has to run before emitLValue because for p^
     // the body starts past the discriminant header.
-    if (const auto& tt = s.Target->ResolvedType;
-            tt && tt->Kind == TypeKind::Schema) {
-        auto dst = schemaRefOf(*s.Target);
-        auto src = schemaRefOf(*s.Value);
-        if (!dst || !src)
-            codegenICE("assignment between schematic variables that codegen "
-                       "cannot locate");
-        emitSchemaDiscMatch(*dst, *src);
-        auto* bytes = schemaBodySize(*dst->semaTy, dst->discs);
-        builder.CreateMemCpy(dst->data, llvm::MaybeAlign(),
-                             src->data, llvm::MaybeAlign(), bytes);
-        return;
+    //
+    // EITHER side may be the undiscriminated one.  Only the target was handled
+    // here, so both halves of the pair took the compiler down: `v := q^` fell
+    // through to the ordinary path and asked for the LLVM type of a schema,
+    // which by construction has none, and `q^ := v` reached for run-time
+    // discriminants that a discriminated instance does not carry.  Both are
+    // legal EP.
+    {
+        const plang::Type* tt = s.Target->ResolvedType.get();
+        const plang::Type* vt = s.Value->ResolvedType.get();
+        auto isSchema   = [](const plang::Type* T) {
+            return T && T->Kind == TypeKind::Schema; };
+        auto isInstance = [](const plang::Type* T) {
+            return T && T->Kind == TypeKind::SchemaInstance; };
+
+        // Two discriminated instances are ordinary values with a static layout
+        // and keep the ordinary path; this is only for a pair where at least
+        // one side knows its discriminants no earlier than run time.
+        if (isSchema(tt) || (isInstance(tt) && isSchema(vt))) {
+            if (!isSchema(vt) && !isInstance(vt))
+                codegenICE("assignment between schematic variables that codegen "
+                           "cannot locate");
+            // The undiscriminated side names the schema and carries the
+            // discriminant NAMES; a discriminated instance knows the VALUES at
+            // compile time.  schemaActual answers for both shapes, so neither
+            // side has to know which the other is -- and once the two agree,
+            // either one sizes the copy.
+            const plang::Type& schemaTy = isSchema(tt) ? *tt : *vt;
+            const auto n = static_cast<unsigned>(schemaTy.SchemaDiscs.size());
+            auto [dstData, dstDiscs] = schemaActual(*s.Target, n);
+            auto [srcData, srcDiscs] = schemaActual(*s.Value,  n);
+            SchemaRef dst{&schemaTy, dstData, dstDiscs};
+            SchemaRef src{&schemaTy, srcData, srcDiscs};
+            emitSchemaDiscMatch(dst, src);
+            builder.CreateMemCpy(dstData, llvm::MaybeAlign(),
+                                 srcData, llvm::MaybeAlign(),
+                                 schemaBodySize(schemaTy, dstDiscs));
+            return;
+        }
     }
 
     // EP §6.5.6: assigning to a substring replaces those characters and leaves
@@ -237,7 +275,10 @@ void Codegen::Impl::emitAssign(const AssignStmt& s) {
     if (auto* sub = llvm::dyn_cast<SubstringExpr>(s.Target.get())) {
         auto* dst = emitLValue(*sub->Str);
         if (!dst) codegenICE("assignment to a substring of a non-addressable string");
-        const int64_t cap = exprStrCap(*sub->Str);
+        // Sizing a temporary needs a constant; what the runtime is told about
+        // the destination is the capacity it really has.
+        const int64_t cap = exprStrCapStatic(*sub->Str);
+        auto* dstCap      = exprStrCapV(*sub->Str);
         auto* low  = toI64(emitExpr(*sub->Low));
         auto* high = toI64(emitExpr(*sub->High));
         auto* n    = builder.CreateAdd(
@@ -247,7 +288,7 @@ void Codegen::Impl::emitAssign(const AssignStmt& s) {
         // where a string belongs and then copied in.
         auto* src = createEntryAlloca(strStructType(cap), "substr.src");
         emitStrStore(src, cap, *s.Value);
-        auto* capV = llvm::ConstantInt::get(i64Ty, cap);
+        auto* capV = dstCap;
         builder.CreateCall(
             getStrFn("plang_str_substr_assign", llvm::Type::getVoidTy(ctx),
                      {ptrTy, i64Ty, i64Ty, i64Ty, ptrTy, i64Ty}),
@@ -255,12 +296,24 @@ void Codegen::Impl::emitAssign(const AssignStmt& s) {
         return;
     }
 
+    // EP §6.4.7: a string whose capacity a discriminant fixes needs both an
+    // address and a capacity, and each of emitLValue and exprStrCapV resolves
+    // the access path from scratch -- so every subscript along the way was
+    // emitted twice, and a side-effecting one in `q^.a[next].s := v` ran twice.
+    // One walk, both answers.
+    if (exprIsVarStr(*s.Target) && s.Target->ResolvedType->ExtentVaries)
+        if (auto path = schemaPathOf(*s.Target))
+            if (auto* cap = strCapFromPath(*path)) {
+                emitStrStore(path->addr, cap, *s.Value);
+                return;
+            }
+
     auto* addr = emitLValue(*s.Target);
     if (!addr) codegenICE("assignment to a non-addressable target");
 
     // EP VarString assignment — dispatch on the Sema-annotated types.
     if (exprIsVarStr(*s.Target)) {
-        emitStrStore(addr, exprStrCap(*s.Target), *s.Value);
+        emitStrStore(addr, exprStrCapV(*s.Target), *s.Value);
         return;
     }
 
@@ -291,9 +344,31 @@ void Codegen::Impl::emitAssign(const AssignStmt& s) {
 
     // ISO §6.4.2.4: the value assigned to a subrange must lie within it.
     if (const auto& tt = s.Target->ResolvedType;
-        tt && tt->Kind == TypeKind::Subrange && tt->SubLo != tt->SubHi
-        && rhs->getType()->isIntegerTy())
-        emitRangeCheck(rhs, tt->SubLo, tt->SubHi, /*isIndex=*/false, s.Loc);
+        tt && tt->Kind == TypeKind::Subrange && rhs->getType()->isIntegerTy()) {
+        // EP §6.4.7: `record k: 1..n end` -- the discriminant fixes the range k
+        // is checked against, not any storage.  The recorded bounds are the
+        // probe's, so the check is re-emitted from the declaration against the
+        // discriminants the object carries.
+        bool checked = false;
+        if (tt->ExtentVaries)
+            if (auto path = schemaPathOf(*s.Target)) {
+                const TypeNode* d = path->decl;
+                while (auto* pk = llvm::dyn_cast_or_null<PackedTypeNode>(d))
+                    d = pk->Inner.get();
+                if (auto* sr = llvm::dyn_cast_or_null<SubrangeTypeNode>(d)) {
+                    bindSchemaDiscs(path->root);
+                    auto* lo = toI64(emitExpr(*sr->Low));
+                    auto* hi = toI64(emitExpr(*sr->High));
+                    popScope();
+                    if (lo && hi) {
+                        emitRangeCheckDyn(rhs, lo, hi, /*isIndex=*/false, s.Loc);
+                        checked = true;
+                    }
+                }
+            }
+        if (!checked && tt->SubLo != tt->SubHi)
+            emitRangeCheck(rhs, tt->SubLo, tt->SubHi, /*isIndex=*/false, s.Loc);
+    }
 
     // What the destination holds, not what the source produced: an array
     // element and a record field are just as much a real as a bare variable
@@ -325,7 +400,15 @@ void Codegen::Impl::emitAssign(const AssignStmt& s) {
 }
 
 void Codegen::Impl::emitIf(const IfStmt& s) {
-    auto* cond = ensureI1(emitExpr(*s.Cond));
+    // A condition is an arbitrary expression and is not a statement, so a
+    // run-time-sized string temporary in one had no scope to be given back at.
+    // `while ... do if trim(q^.s) = 'a' then ...` took a fresh piece of stack
+    // every pass and died of exhaustion after some tens of thousands.  emitIf
+    // and emitCase were the two the first version of StackScope missed:
+    // covering the two LOOP conditions and not these mistook "evaluated once"
+    // for "evaluated once per program".
+    llvm::Value* cond = nullptr;
+    { StackScope frame(*this); cond = ensureI1(emitExpr(*s.Cond)); }
 
     auto* thenBB = llvm::BasicBlock::Create(ctx, "if.then", curFunc);
     auto* endBB  = llvm::BasicBlock::Create(ctx, "if.end",  curFunc);
@@ -353,7 +436,12 @@ void Codegen::Impl::emitWhile(const WhileStmt& s) {
 
     builder.CreateBr(condBB);
     builder.SetInsertPoint(condBB);
-    auto* cond = ensureI1(emitExpr(*s.Cond));
+    // A condition is re-evaluated on every pass and is not a statement, so a
+    // run-time-sized string temporary in one -- `while trim(q^) <> '' do` --
+    // would otherwise take a fresh piece of stack per iteration and never give
+    // any of it back.  Scoped here for the same reason a simple statement is.
+    llvm::Value* cond = nullptr;
+    { StackScope frame(*this); cond = ensureI1(emitExpr(*s.Cond)); }
     if (!cond) { builder.SetInsertPoint(endBB); return; }
     builder.CreateCondBr(cond, bodyBB, endBB);
 
@@ -518,7 +606,9 @@ void Codegen::Impl::emitRepeat(const RepeatStmt& s) {
     brIfNeeded(condBB);
 
     builder.SetInsertPoint(condBB);
-    auto* cond = ensureI1(emitExpr(*s.Cond));
+    // Re-evaluated per pass; see emitWhile.
+    llvm::Value* cond = nullptr;
+    { StackScope frame(*this); cond = ensureI1(emitExpr(*s.Cond)); }
     // Branching to endBB here instead would turn the loop into a single
     // unconditional pass through the body.
     if (!cond) codegenICE("'repeat' with an unlowerable termination condition");
@@ -530,7 +620,9 @@ void Codegen::Impl::emitRepeat(const RepeatStmt& s) {
 // case selector of const-list: stmt ; ... end
 // Uses an if-else chain to support both point and lo..hi range labels (EP).
 void Codegen::Impl::emitCase(const CaseStmt& s) {
-    auto* sel   = toI64(emitExpr(*s.Selector));
+    // Re-evaluated on every pass through an enclosing loop; see emitIf.
+    llvm::Value* sel = nullptr;
+    { StackScope frame(*this); sel = toI64(emitExpr(*s.Selector)); }
     auto* endBB = llvm::BasicBlock::Create(ctx, "case.end", curFunc);
 
     // Chain: for each arm build a test block and a body block.
@@ -919,6 +1011,34 @@ void Codegen::Impl::emitPackUnpack(const CallStmt& s, bool isPack) {
         if (!aPtr || !elemTy || !aLo || !aHi)
             codegenICE(what + " has a conformant array whose bounds did not "
                               "arrive with it");
+    } else if (auto path = schemaPathOf(aExpr);
+               path && llvm::isa_and_nonnull<ArrayTypeNode>(
+                           peelPackedNode(path->decl))) {
+        // EP §6.4.7: the bounds of a schema array are not in its type.  Sema
+        // holds the PROBE's, so reading them from the type checked
+        // `pack(q^.a, 3, z)` against "1..-2" -- one minus the width of z, off a
+        // probe upper bound of 1 -- and refused a legal program with a bound
+        // that describes nothing.  Re-emitted here against the discriminants
+        // the object carries, like every other extent in a schema body.
+        auto* at = llvm::cast<ArrayTypeNode>(peelPackedNode(path->decl));
+        bindSchemaDiscs(path->root);
+        auto  bounds = rtIndexBounds(*at);
+        auto* elemSz = rtSizeOfTypeNode(at->Element.get());
+        popScope();
+        if (!bounds)
+            codegenICE(what + " has a schema array whose bounds cannot be "
+                              "evaluated at run time");
+        // The transfer strides by a constant element size, so ask the layout
+        // walk whether this element has one -- rather than asking the node's
+        // annotation, which belongs to whichever instantiation was resolved
+        // last and is not this walk's to trust.  Loud rather than wrong.
+        if (!llvm::isa_and_nonnull<llvm::ConstantInt>(elemSz))
+            codegenICE(what + " on an array whose element size a discriminant "
+                              "fixes");
+        aPtr   = path->addr;
+        elemTy = llvmTypeOfNode(*at->Element);
+        aLo    = bounds->first;
+        aHi    = bounds->second;
     } else {
         const auto& aTy = aExpr.ResolvedType;
         if (!aTy || aTy->Kind != TypeKind::Array || !aTy->IndexType
@@ -959,6 +1079,82 @@ void Codegen::Impl::emitWith(const WithStmt& s) {
     pushScope();
     for (const auto& rec : s.Records) {
         if (!rec->ResolvedType) continue;
+
+        // EP §6.4.7: an undiscriminated schema has no struct to GEP into, so
+        // each field is bound to the address the run-time layout gives it, and
+        // each discriminant to the value the object carries.
+        //
+        // Asked of the ACCESS PATH and not of the type's kind.  `with q^ do` is
+        // a Schema; `with q^.inner do` is an ordinary Record that merely lives
+        // inside one, and keying on the kind sent it to the static branch
+        // below -- where the nested `string(n)` was bound at the probe's
+        // capacity, so reading a field worked and assigning to one raised
+        // "string of length 7 assigned to a string(1)" on legal code.
+        // Whether there is a struct to GEP into is a question about the
+        // storage, which is what the path knows and the kind does not.
+        const bool isInstance =
+            rec->ResolvedType->Kind == TypeKind::SchemaInstance;
+        // schemaPathOf EMITS the access path -- every subscript in it -- so its
+        // result is kept whatever happens next.  Discarding it and letting the
+        // static branch call emitLValue below emitted the path a SECOND time:
+        // `with q^.a[idx] do` called idx twice, bound the element the second
+        // call chose, and left a live range check on the first.  ISO §6.8.3.10
+        // says the record-variable is evaluated once.
+        std::optional<SchemaPath> path;
+        if (!isInstance) path = schemaPathOf(*rec);
+        if (!isInstance) {
+            const RecordTypeNode* rt =
+                path ? llvm::dyn_cast_or_null<RecordTypeNode>(
+                           peelPackedNode(path->decl))
+                     : nullptr;
+            if (path && rt) {
+                // The discriminants belong to the schematic variable, not to a
+                // record nested inside it, so they are exposed only where the
+                // body IS the schema's.
+                const bool isBody = rec->ResolvedType->Kind == TypeKind::Schema;
+                if (isBody) {
+                    const auto& discs = rec->ResolvedType->SchemaDiscs;
+                    for (size_t i = 0;
+                         i < discs.size() && i < path->root.discs.size(); ++i) {
+                        auto* slot = createEntryAlloca(i64Ty,
+                                                       "disc." + discs[i].Name);
+                        builder.CreateStore(path->root.discs[i], slot);
+                        defVar(discs[i].Name, slot, i64Ty);
+                    }
+                }
+                {
+                    const auto& fields =
+                        isBody ? rec->ResolvedType->SchemaBody->RecordFields
+                               : rec->ResolvedType->RecordFields;
+                    for (const auto& F : fields) {
+                        bindSchemaDiscs(path->root);
+                        auto* off = rtFieldOffset(*rt, F.Name);
+                        popScope();
+                        auto* fp = builder.CreateGEP(i8Ty, path->addr, {off},
+                                                     "with.fld");
+                        defVar(F.Name, fp,
+                               F.Ty ? llvmTypeOfSemaType(*F.Ty) : i64Ty);
+                        // Keep the path, not just the address: an array field
+                        // bound here is still indexed, and a nested record is
+                        // still selected from.
+                        setVarSchemaPath(F.Name, path->root,
+                                         fieldDenoterOf(*rt, F.Name));
+                        // A varying string field: record what its capacity
+                        // really is, since the bound name loses the path.
+                        if (F.Ty && F.Ty->Kind == TypeKind::VarString
+                                && F.Ty->ExtentVaries)
+                            if (auto* st = llvm::dyn_cast_or_null<StringTypeNode>(
+                                    fieldDenoterOf(*rt, F.Name))) {
+                                bindSchemaDiscs(path->root);
+                                auto* cap = toI64(emitExpr(*st->Capacity));
+                                popScope();
+                                setVarStrCap(F.Name, cap);
+                            }
+                    }
+                }
+                continue;
+            }
+        }
 
         // EP §6.4.7: schema instance — expose discriminants as constant vars
         // and body record fields as normal GEP-derived vars.
@@ -1024,7 +1220,10 @@ void Codegen::Impl::emitWith(const WithStmt& s) {
             continue;
         }
 
-        auto* recPtr = emitLValue(*rec);
+        // Reuse the address schemaPathOf already emitted, when it produced one.
+        // Calling emitLValue here regardless is what evaluated the record
+        // variable a second time.
+        auto* recPtr = path ? path->addr : emitLValue(*rec);
         if (!recPtr) codegenICE("'with' on a record that has no address");
         if (rec->ResolvedType->Kind != TypeKind::Record)
             codegenICE("'with' on a non-record operand");

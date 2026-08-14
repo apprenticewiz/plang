@@ -212,6 +212,33 @@ private:
     // are required, so resolveNamed rejects it.  Nonzero inside those two
     // contexts; managed by AllowSchemaScope.
     int AllowUndiscriminatedSchema_{0};
+    /// Depth of pointer domain-types being resolved.  EP §6.4.3.3's `string`
+    /// schema is denoted by a bare `string` HERE and not in a parameter's
+    /// type, where resolveParamType already gives it the largest capacity so
+    /// that an actual of any capacity is accepted.
+    int InPointerDomain_{0};
+    /// True only while a schema body is being resolved against the PROBE
+    /// binding, i.e. for a schema used without its discriminants.  An ordinary
+    /// discriminated instantiation `t(300)` fills ActiveSchemaBindings_ too, and
+    /// its values are exact -- marking those extents as varying threw away every
+    /// compile-time check on them and truncated a string(300) to 255.
+    bool ProbeBindingsActive_{false};
+    /// R3: the schema's discriminant names in declaration order, so that an
+    /// extent form can name them by INDEX.  Set only while a schema body is
+    /// being resolved against the probe.
+    std::vector<std::string> ProbeDiscNames_;
+
+    /// Holds a depth counter at zero for the extent of a scope, for a position
+    /// that is inside a pointer domain-type syntactically but is not one.
+    struct ClearSchemaScope {
+        explicit ClearSchemaScope(int& C) : C_(C), Saved_(C) { C = 0; }
+        ~ClearSchemaScope() { C_ = Saved_; }
+        ClearSchemaScope(const ClearSchemaScope&)            = delete;
+        ClearSchemaScope& operator=(const ClearSchemaScope&) = delete;
+    private:
+        int& C_;
+        int  Saved_;
+    };
 
     /// Scoped enable for undiscriminated schema-names as type-denoters.
     struct AllowSchemaScope {
@@ -228,6 +255,8 @@ private:
     // One undiscriminated Type per schema definition; see
     // resolveUndiscriminatedSchema for the key.
     std::unordered_map<std::string, std::shared_ptr<Type>> UndiscSchemaTypes_;
+    /// The one EP string schema; see stringSchemaType().
+    std::shared_ptr<Type> StringSchemaTy_;
 
     // --- goto / label nesting checks (ISO §6.8.1) ---
 
@@ -292,6 +321,13 @@ private:
     [[nodiscard]] std::shared_ptr<Type> resolveType(const TypeNode& Node);
     /// Body of resolveType; call resolveType so the node gets annotated.
     [[nodiscard]] std::shared_ptr<Type> resolveTypeImpl(const TypeNode& Node);
+    /// Records on \p T the discriminants it was resolved under, when T is a
+    /// record built from this very node.  One declaration serves every
+    /// instantiation, so this is what tells codegen which one it is looking at
+    /// -- and it has to be stamped on the probe body too, which reaches the
+    /// declaration through resolveTypeImpl and so never passed through
+    /// resolveType.
+    void stampSchemaBindings(const TypeNode& Node, Type* T) const;
     /// Adds the fields of a variant part, and of the variants nested in it, to
     /// the record type T, so that field access can find them (§6.4.3.3).
     void walkVariantFields(const VariantPart& Vp, Type& T);
@@ -320,6 +356,12 @@ private:
     /// if the body cannot be given a run-time representation.
     [[nodiscard]] std::shared_ptr<Type> resolveUndiscriminatedSchema(
         Symbol& Sym, const NamedTypeNode& N);
+
+    /// EP §6.4.3.3: `string` is a schema with one discriminant, its capacity.
+    /// A bare `string` denotes it where any bare schema-name may be written --
+    /// a pointer's domain type, a parameter's type -- and the capacity comes
+    /// from new() or from the actual parameter.
+    [[nodiscard]] std::shared_ptr<Type> stringSchemaType();
 
     // Extract a compile-time integer value from a constant expression.
     // Returns nothing when the expression is not a constant, so that a caller

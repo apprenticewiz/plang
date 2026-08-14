@@ -3567,3 +3567,208 @@ TEST(EP7Schema, AnExtentIsArithmeticOverDiscriminantsAndNothingElse) {
     ASSERT_EQ(Shadowed.ExitCode, 0) << Shadowed.Stderr;
     EXPECT_EQ(Shadowed.Stdout, "10 20 30 40 50 60 70 \n");
 }
+
+TEST(EP7Schema, ASchemaInstantiatedInsideASchemaBodyIsNotSizedFromTheProbe) {
+    // EP §6.4.8.  A schema instantiated inside another schema's BODY has
+    // discriminants that are arithmetic over the enclosing ones.  Sema folds
+    // the body against a probe binding of 1, so `vector(n)` inside
+    // `matrix(m,n)` came out `vector(1)` -- and that probe answer was taken for
+    // the layout, so the allocation was one element wide in every instance and
+    // the writes ran off the end of it.
+    //
+    // This is the canonical example from the standard itself, which is the
+    // strongest argument for it not being an edge case.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type vector(n: integer) = array[1..n] of real;\n"
+        "     matrix(m, n: integer) = array[1..m] of vector(n);\n"
+        "var q: ^matrix; i, j: integer;\n"
+        "begin new(q, 3, 4);\n"
+        "  for i := 1 to 3 do\n"
+        "    for j := 1 to 4 do q^[i][j] := i * 10 + j;\n"
+        "  for i := 1 to 3 do begin\n"
+        "    for j := 1 to 4 do write(q^[i][j]:5:1);\n"
+        "    writeln end end.\n", kEP + " -frange-checks");
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, " 11.0 12.0 13.0 14.0\n 21.0 22.0 23.0 24.0\n"
+                        " 31.0 32.0 33.0 34.0\n");
+
+    // The record shape, where the instantiation is a FIELD: k sits behind it,
+    // so an instantiation sized from the probe shows up as k being overwritten
+    // rather than as a wrong element.
+    auto Rec = compileAndRun(
+        "program p(output);\n"
+        "type inner(m: integer) = array[1..m] of integer;\n"
+        "     outer(n: integer) = record a: array[1..n] of integer;\n"
+        "                                x: inner(n); k: integer end;\n"
+        "var q: ^outer; i: integer;\n"
+        "begin new(q, 4);\n"
+        "  for i := 1 to 4 do begin q^.a[i] := i; q^.x[i] := i * 100 end;\n"
+        "  q^.k := 99; writeln(q^.x[4]:1, ' ', q^.k:1) end.\n", kEP);
+    ASSERT_EQ(Rec.ExitCode, 0) << Rec.Stderr;
+    EXPECT_EQ(Rec.Stdout, "400 99\n");
+}
+
+TEST(EP7Schema, AConformantActualPassesItsRealBoundsWhenItIsASchemaInstance) {
+    // EP §6.4.9: a DISCRIMINATED schema is an ordinary fixed-size type, so
+    // `vec(5)` is an array wherever a conformant actual is wanted.  Sema's
+    // isConformable was widened to unwrap SchemaInstance and reach the array;
+    // the code that pushes the bounds was not, so its test failed and literal
+    // 0, 0 went across.  The callee saw an empty array and its loop ran no
+    // times -- and v0.1.5 REJECTED the call, so this branch turned a compile
+    // error into a silent wrong answer.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type vec(n: integer) = array[1..n] of integer;\n"
+        "var v: vec(5); i: integer;\n"
+        "function total(a: array[lo..hi: integer] of integer): integer;\n"
+        "var k, t: integer;\n"
+        "begin t := 0; for k := lo to hi do t := t + a[k]; total := t end;\n"
+        "begin for i := 1 to 5 do v[i] := i; writeln(total(v):1) end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "15\n");
+}
+
+TEST(EP7Schema, AWithRecordVariableIsEvaluatedOnce) {
+    // ISO §6.8.3.10: the record-variable of a with-statement is evaluated
+    // once.  schemaPathOf EMITS the access path -- every subscript in it -- and
+    // emitWith discarded that result when the component's denoter was not a
+    // record, then let the static branch call emitLValue and emit the whole
+    // path again.  A side-effecting subscript therefore ran twice, the
+    // statement bound the element the SECOND call chose, and a live range
+    // check on the first was left behind.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type inner = record x: integer end;\n"
+        "     t(n: integer) = record a: array[1..n] of inner end;\n"
+        "var q: ^t; i, calls: integer;\n"
+        "function idx: integer;\n"
+        "begin calls := calls + 1; idx := 2 end;\n"
+        "begin new(q, 5); calls := 0;\n"
+        "  for i := 1 to 5 do q^.a[i].x := i;\n"
+        "  with q^.a[idx] do x := 42;\n"
+        "  writeln('calls=', calls:1, ' a2=', q^.a[2].x:1) end.\n",
+        kEP + " -frange-checks");
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "calls=1 a2=42\n");
+}
+
+TEST(EP7Schema, SubstrAndTrimAreAsWideAsWhatTheyWereTakenFrom) {
+    // substr and trim are typed as the SAME Type object as their argument, so
+    // a result over a discriminant-sized string carries ExtentVaries with the
+    // probe's capacity of 1.  exprStrCapV recognised a with-bound name, a q^
+    // and an access path -- and a CallExpr is none of those, so it fell
+    // through to that 1.  Every later operation was then told the string could
+    // hold one character.
+    //
+    // The nested case is here because the fix is a recursion: the capacity of
+    // substr(trim(s)) is the capacity of s, two questions deep.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type t(n: integer) = record s: string(n) end;\n"
+        "var q: ^t; x: string(400); i: integer;\n"
+        "begin new(q, 120); q^.s := '';\n"
+        "  for i := 1 to 120 do q^.s := q^.s + 'y';\n"
+        "  x := trim(q^.s) + 'Z';         writeln(length(x):1);\n"
+        "  x := substr(q^.s, 5, 100);     writeln(length(x):1);\n"
+        "  x := substr(trim(q^.s), 1, 120); writeln(length(x):1) end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "121\n100\n120\n");
+}
+
+TEST(EP7Schema, TheBodyIsAlignedForWhatItHoldsNotJustForTheHeader) {
+    // new() puts the discriminants in a header and the body behind it.  The
+    // header's size was spelled out as `discs * 8` in two places -- the code
+    // that WRITES it and the code that SKIPS it -- and eight is the alignment
+    // of the header, not of the body.  A body wanting sixteen sat misaligned,
+    // and the aligned vector stores llvm emits from -O1 upward faulted on it:
+    // correct at -O0 and a segmentation fault at every level above.
+    //
+    // Both places ask one function now.  The optimisation levels are the test:
+    // this is invisible at -O0, which is where a suite that compiles at one
+    // level would have looked.
+    for (const char* O : {"-O0", "-O1", "-O2", "-O3"}) {
+        auto R = compileAndRun(
+            "program p(output);\n"
+            "type t(n: integer) = array[1..n] of set of char;\n"
+            "var q: ^t; i: integer;\n"
+            "begin new(q, 4);\n"
+            "  for i := 1 to 4 do q^[i] := ['a'..'c'];\n"
+            "  writeln(('b' in q^[4]):5) end.\n", kEP + " " + O);
+        ASSERT_EQ(R.ExitCode, 0) << O << ": " << R.Stderr;
+        EXPECT_EQ(R.Stdout, " true\n") << O;
+    }
+}
+
+TEST(EP7Schema, APointerMayNameASchemaDeclaredLaterInTheSamePart) {
+    // ISO §6.2.2.9 lets a pointer's domain type be declared later in the same
+    // type-definition-part, and a schema is a type like any other.  Sema filled
+    // in each schema's parameters and body node in declaration ORDER, so `^t`
+    // reached t while its body node was still null, took a silent error return,
+    // and the pointer carried an error pointee all the way to codegen -- which
+    // died with "array bounds did not fold" and no diagnostic before it.
+    //
+    // Swapping the two type definitions round made the identical program
+    // compile and run, which is the clearest statement of the defect.
+    auto Fwd = compileAndRun(
+        "program p(output);\n"
+        "type pl = ^t;\n"
+        "     t(n: integer) = array[1..n] of integer;\n"
+        "var a: pl; i: integer;\n"
+        "begin new(a, 3); for i := 1 to 3 do a^[i] := i;\n"
+        "  for i := 1 to 3 do write(a^[i]:1, ' '); writeln end.\n",
+        kEP + " -frange-checks");
+    ASSERT_EQ(Fwd.ExitCode, 0) << Fwd.Stderr;
+    EXPECT_EQ(Fwd.Stdout, "1 2 3 \n");
+
+    // The order that always worked, so that a fix to the first cannot be a
+    // regression in the second.
+    auto Rev = compileAndRun(
+        "program p(output);\n"
+        "type t(n: integer) = array[1..n] of integer;\n"
+        "     pl = ^t;\n"
+        "var a: pl; i: integer;\n"
+        "begin new(a, 3); for i := 1 to 3 do a^[i] := i;\n"
+        "  for i := 1 to 3 do write(a^[i]:1, ' '); writeln end.\n",
+        kEP + " -frange-checks");
+    ASSERT_EQ(Rev.ExitCode, 0) << Rev.Stderr;
+    EXPECT_EQ(Rev.Stdout, Fwd.Stdout);
+}
+
+TEST(EP7Schema, ANestedProcedureKeepsACapturedSchemaFormalsDiscriminants) {
+    // EP §6.4.7.  A procedure nested inside one that received a schema formal
+    // reaches it through the static link, which carries ADDRESSES -- and the
+    // discriminants are the OUTER procedure's own function arguments, so they
+    // mean nothing in the nested one.  The binding carried none, the object was
+    // laid out from the probe, and `v.s := 'x'` inside the nested procedure
+    // wrote the string at offset 8 instead of 72: straight through the array,
+    // exit 0, no diagnostic.
+    //
+    // They are spilled to named cells now.  Every visible variable is captured,
+    // so naming them is all it takes to carry them across.
+    //
+    // The relay is the second half: passing the captured formal ON to another
+    // schema-parameter procedure aborted code generation outright with
+    // "argument for a schema parameter is not schematic", because there were no
+    // discriminants to hand over.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type t(n: integer) = record a: array[1..n] of integer; s: string(n) end;\n"
+        "var q: ^t;\n"
+        "procedure show(var w: t);\n"
+        "begin writeln('relayed: [', w.s, ']') end;\n"
+        "procedure outer(var v: t);\n"
+        "var i: integer;\n"
+        "  procedure inner;\n"
+        "  begin v.s := 'nine char'; show(v) end;\n"
+        "begin\n"
+        "  for i := 1 to 9 do v.a[i] := i;\n"
+        "  inner;\n"
+        "  write('a: '); for i := 1 to 9 do write(v.a[i]:1, ' ');\n"
+        "  writeln('| s=[', v.s, ']')\n"
+        "end;\n"
+        "begin new(q, 9); outer(q^) end.\n", kEP + " -frange-checks");
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "relayed: [nine char]\n"
+                        "a: 1 2 3 4 5 6 7 8 9 | s=[nine char]\n");
+}

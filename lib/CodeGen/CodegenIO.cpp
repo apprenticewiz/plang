@@ -75,10 +75,10 @@ void Codegen::Impl::emitWriteArgs(
         // until a terminator the array does not have.
         if (exprIsVarStr(*argExpr) || exprIsCharStr(*argExpr)) {
             const bool chars = exprIsCharStr(*argExpr);
-            int64_t cap  = chars ? exprCharStrLen(*argExpr) : exprStrCap(*argExpr);
             auto* sptr = chars ? emitCharStrAsStr(*argExpr) : emitStrAddr(*argExpr);
             if (!sptr) continue;
-            auto* capV = llvm::ConstantInt::get(i64Ty, cap);
+            auto* capV = chars ? i64c(exprCharStrLen(*argExpr))
+                               : exprStrCapV(*argExpr);
             if (fp) {
                 // string(N) is not null-terminated, so it needs its own writer
                 // rather than the char* one the generic path would pick.  A
@@ -288,7 +288,9 @@ void Codegen::Impl::emitReadArg(const ExprNode& arg, llvm::Value* fp) {
     // string(N) is a { i64, [N x i8] } struct, so it needs the string reader;
     // the scalar readers would overwrite the length field.
     if (exprIsVarStr(arg)) {
-        auto* cap = llvm::ConstantInt::get(i64Ty, exprStrCap(arg), true);
+        // How much may be stored, so folding the probe here truncated the
+        // input to one character for a discriminant-sized string.
+        auto* cap = exprStrCapV(arg);
         if (fp)
             builder.CreateCall(
                 getExternFnN("plang_str_read_file", llvm::Type::getVoidTy(ctx),
@@ -441,7 +443,7 @@ void Codegen::Impl::emitBuiltinWriteStr(
 
     builder.CreateCall(
         getExternFnN("plang_writestr_end", voidTy, {ptrTy, i64Ty}),
-        {sPtr, llvm::ConstantInt::get(i64Ty, exprStrCap(dest))});
+        {sPtr, exprStrCapV(dest)});
 }
 
 /// readstr(e, v1, ..., vn) — parse the variables out of the string e.

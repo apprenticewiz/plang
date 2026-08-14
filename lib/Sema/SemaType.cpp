@@ -95,15 +95,23 @@ std::shared_ptr<Type> Sema::resolveType(const TypeNode& Node) {
     // one was resolved last.  Only a record built from this very node is
     // stamped: a named type resolves to a shared type object that belongs to
     // the declaration, not to the use.
-    if (T && !ActiveSchemaBindings_.empty() && T->Kind == TypeKind::Record
-            && T->RecordDecl == llvm::dyn_cast<RecordTypeNode>(&Node)
-            && T->RecordDecl != nullptr) {
-        T->SchemaBindings.assign(ActiveSchemaBindings_.begin(),
-                                 ActiveSchemaBindings_.end());
-        std::sort(T->SchemaBindings.begin(), T->SchemaBindings.end());
-    }
+    stampSchemaBindings(Node, T.get());
     if (Node.InitialState) checkInitialState(Node, *T);
     return T;
+}
+
+void Sema::stampSchemaBindings(const TypeNode& Node, Type* T) const {
+    if (!T || ActiveSchemaBindings_.empty() || T->Kind != TypeKind::Record)
+        return;
+    // Only a record built from THIS node: a named type resolves to a shared
+    // type object that belongs to the declaration and not to the use, and
+    // stamping that would give one instantiation's discriminants to all of them.
+    if (T->RecordDecl == nullptr
+            || T->RecordDecl != llvm::dyn_cast<RecordTypeNode>(&Node))
+        return;
+    T->SchemaBindings.assign(ActiveSchemaBindings_.begin(),
+                             ActiveSchemaBindings_.end());
+    std::sort(T->SchemaBindings.begin(), T->SchemaBindings.end());
 }
 
 // EP §6.6: the value a denoter's 'value' clause gives has to be a value of
@@ -163,6 +171,11 @@ std::shared_ptr<Type> Sema::resolveTypeImpl(const TypeNode& Node) {
         return resolveNamed(*N);
     }
     if (auto* N = llvm::dyn_cast<ArrayTypeNode>(&Node)) {
+        // EP §6.4.4 makes the pointer's IMMEDIATE domain-type the place a bare
+        // schema-name may stand; a component of it is an ordinary type
+        // position.  Without clearing this, `^array[1..3] of string` read its
+        // component as the capacity schema, which no new() supplies.
+        ClearSchemaScope NotDomain(InPointerDomain_);
         auto Elem = resolveType(*N->Element);
         // ISO §6.4.3.2: the index may be named by its type rather than written
         // as a range, in which case the extent is the whole of that type.
@@ -178,30 +191,87 @@ std::shared_ptr<Type> Sema::resolveTypeImpl(const TypeNode& Node) {
             // A subrange over the named type, so that indexing checks against
             // its bounds the same way it would for an index written as a range.
             auto Index = Ctx_.getSubrange(IdxTy, Range->first, Range->second);
+            // The extent of a named index is the whole of its type and cannot
+            // vary, but the ELEMENT's still can: `array[colour] of string(n)`
+            // is fixed in count and varying in size.  Carry that up exactly as
+            // the written-bounds path below does, and for the same reason --
+            // uninterned, so nothing folds against the probe's element size.
+            if (Elem && Elem->ExtentVaries) {
+                auto T          = Ctx_.makeArrayUncached(Index, Elem, N->Packed);
+                T->ExtentVaries = true;
+                return T;
+            }
             return Ctx_.getArray(Index, Elem, N->Packed);
         }
         // Determine the ordinal base type of the index from the declared bounds.
         auto Lo = checkExpr(*N->Low);
         auto Hi = checkExpr(*N->High);
         auto BaseOrd = (Lo->isOrdinal() ? Lo : (Hi->isOrdinal() ? Hi : TyInt));
+        // As for a string capacity above: whether THESE bounds read a
+        // discriminant, not whether anything in the enclosing body did.
+        const bool SavedUsed = SchemaBindingUsed_;
+        SchemaBindingUsed_   = false;
         auto Bounds = foldBounds(*N->Low, *N->High, *BaseOrd,
                                  diag::err_array_lower_bound_not_const,
                                  diag::err_array_upper_bound_not_const);
+        const bool Varies    = SchemaBindingUsed_ && ProbeBindingsActive_;
+        SchemaBindingUsed_   = SavedUsed || SchemaBindingUsed_;
         if (!Bounds) return TyErr;
         // Route index subrange through TypeContext for canonical identity.
         // Include the actual bounds so array[1..3] ≠ array[1..100].
         auto Index = Ctx_.getSubrange(BaseOrd, Bounds->first, Bounds->second);
-        // Route array type through TypeContext for canonical identity.
+        if (Varies || (Elem && Elem->ExtentVaries)) {
+            // Not interned, for the reason the varying string is not: the
+            // bounds recorded here are the probe's and must not be folded
+            // against.  An element whose own extent varies carries up too --
+            // `array[1..4] of string(cap)` is fixed in count and varying in
+            // size, and the array is laid out at run time either way.
+            auto T          = Ctx_.makeArrayUncached(Index, Elem, N->Packed);
+            T->ExtentVaries = true;
+            return T;
+        }
         return Ctx_.getArray(Index, Elem, N->Packed);
     }
+    // R3: a denoter written inside a schema body records its extents as closed
+    // forms over the discriminant indices.  Built here, where the declaration
+    // is, so that codegen never re-emits the expression anywhere else.
+    if (ProbeBindingsActive_ && !ProbeDiscNames_.empty()) {
+        if (auto* Sn = llvm::dyn_cast<StringTypeNode>(&Node); Sn && Sn->Capacity)
+            Node.ExtentLow = buildExtentForm(*Sn->Capacity, ProbeDiscNames_);
+        if (auto* An = llvm::dyn_cast<ArrayTypeNode>(&Node); An && An->Low && An->High) {
+            Node.ExtentLow  = buildExtentForm(*An->Low,  ProbeDiscNames_);
+            Node.ExtentHigh = buildExtentForm(*An->High, ProbeDiscNames_);
+        }
+        if (auto* Rn = llvm::dyn_cast<SubrangeTypeNode>(&Node); Rn && Rn->Low && Rn->High) {
+            Node.ExtentLow  = buildExtentForm(*Rn->Low,  ProbeDiscNames_);
+            Node.ExtentHigh = buildExtentForm(*Rn->High, ProbeDiscNames_);
+        }
+    }
+
     if (auto* N = llvm::dyn_cast<SubrangeTypeNode>(&Node)) {
         auto Lo = checkExpr(*N->Low);
         auto Hi = checkExpr(*N->High);
         auto Base = (Lo->isOrdinal() ? Lo : (Hi->isOrdinal() ? Hi : TyInt));
+        const bool SavedUsed = SchemaBindingUsed_;
+        SchemaBindingUsed_   = false;
         auto Bounds = foldBounds(*N->Low, *N->High, *Base,
                                  diag::err_subrange_lower_bound_not_const,
                                  diag::err_subrange_upper_bound_not_const);
+        const bool Varies    = SchemaBindingUsed_ && ProbeBindingsActive_;
+        SchemaBindingUsed_   = SavedUsed || SchemaBindingUsed_;
         if (!Bounds) return TyErr;
+        if (Varies) {
+            // `record k: 1..n end`: what the discriminant fixes here is the
+            // RANGE k is checked against, not any storage -- the subrange is as
+            // wide as its host ordinal whatever n is.  Marked all the same, so
+            // that nothing folds against the probe's bounds and the check is
+            // emitted against the value the object carries.  Not interned, for
+            // the same reason a varying string is not.
+            auto T = std::make_shared<Type>(*Ctx_.getSubrange(Base, Bounds->first,
+                                                              Bounds->second));
+            T->ExtentVaries = true;
+            return T;
+        }
         return Ctx_.getSubrange(Base, Bounds->first, Bounds->second);
     }
     if (auto* N = llvm::dyn_cast<EnumTypeNode>(&Node)) {
@@ -225,6 +295,7 @@ std::shared_ptr<Type> Sema::resolveTypeImpl(const TypeNode& Node) {
         return T;
     }
     if (auto* N = llvm::dyn_cast<RecordTypeNode>(&Node)) {
+        ClearSchemaScope NotDomain(InPointerDomain_);   // as for an array above
         auto T = std::make_shared<Type>();
         T->Kind       = TypeKind::Record;
         T->Anonymous  = true;   // until a declaration names it
@@ -232,6 +303,11 @@ std::shared_ptr<Type> Sema::resolveTypeImpl(const TypeNode& Node) {
         T->RecordDecl = N;
         for (const auto& Fd : N->Fields) {
             auto Ft = resolveType(*Fd.Type);
+            // One field whose extent is fixed by a discriminant makes the whole
+            // record's layout a run-time question: the fields after it move, and
+            // so does its size.  The marker travels up so that the one test at
+            // the top of a lowering says which path the record takes.
+            if (Ft && Ft->ExtentVaries) T->ExtentVaries = true;
             for (const auto& Nm : Fd.Names) {
                 if (std::ranges::any_of(T->RecordFields,
                         [&](const Type::Field& F) { return eqCI(F.Name, Nm); }))
@@ -243,6 +319,12 @@ std::shared_ptr<Type> Sema::resolveTypeImpl(const TypeNode& Node) {
         // Walk the variant part (and nested variants) adding all variant fields to
         // RecordFields so that field-access checking can find them (ISO §6.4.3.3).
         if (N->Variant) walkVariantFields(*N->Variant, *T);
+        // A varying extent inside a variant part moves the record's end just as
+        // one in a fixed field does, and walkVariantFields adds those fields
+        // without carrying the marker up -- so a schema whose only varying
+        // extent was in a variant looked fixed and was laid out by the probe.
+        for (const auto& F : T->RecordFields)
+            if (F.Ty && F.Ty->ExtentVaries) { T->ExtentVaries = true; break; }
         // Named after its fields so two inline records read differently in a
         // diagnostic; nameNominalType replaces this if a declaration names it.
         std::vector<std::string> FieldNames;
@@ -307,8 +389,12 @@ std::shared_ptr<Type> Sema::resolveTypeImpl(const TypeNode& Node) {
         // EP §6.7.5.3: the domain-type of a new-pointer-type may be a bare
         // schema-name; new(p, d1..dn) supplies the discriminants.
         AllowSchemaScope Guard(AllowUndiscriminatedSchema_);
+        AllowSchemaScope Domain(InPointerDomain_);
         auto Base = resolveType(*N->Base);
         return Ctx_.getPointer(Base);
+        // NOTE: both guards are scoped to THIS denoter only -- see the reset in
+        // the structured denoters below, which is what stops `^array[1..3] of
+        // string` reading its component as the capacity schema.
     }
     if (auto* N = llvm::dyn_cast<StringTypeNode>(&Node)) {
         // EP §6.4.3.3: string(N) — variable-length string with capacity N.
@@ -328,7 +414,14 @@ std::shared_ptr<Type> Sema::resolveTypeImpl(const TypeNode& Node) {
         // A capacity that will not fold used to become 255, which is not what
         // was written and hides the mistake behind a string that silently
         // holds the wrong amount.
-        const auto Cap = constBound(*N->Capacity);
+        // Whether THIS capacity read a discriminant, as opposed to whether
+        // anything in the enclosing body did: the flag is cleared around the
+        // one call so the answer belongs to this extent and no other.
+        const bool SavedUsed = SchemaBindingUsed_;
+        SchemaBindingUsed_   = false;
+        const auto Cap       = constBound(*N->Capacity);
+        const bool Varies    = SchemaBindingUsed_ && ProbeBindingsActive_;
+        SchemaBindingUsed_   = SavedUsed || SchemaBindingUsed_;
         if (!Cap) {
             if (!CapTy->isError()) error(N->Loc, diag::err_string_cap_not_int);
             return TyErr;
@@ -337,6 +430,15 @@ std::shared_ptr<Type> Sema::resolveTypeImpl(const TypeNode& Node) {
             error(N->Loc, diag::err_string_cap_not_positive,
                   {std::to_string(*Cap)});
             return TyErr;
+        }
+        // A varying capacity is not interned: `string(cap)` under the probe
+        // would otherwise BE `string(1)`, and every fold against the shared
+        // type object would be reading the probe's answer as if it were the
+        // program's.
+        if (Varies) {
+            auto T = Type::makeVarString(*Cap);
+            T->ExtentVaries = true;
+            return T;
         }
         return Ctx_.getVarString(*Cap);
     }
@@ -396,6 +498,14 @@ std::shared_ptr<Type> Sema::resolveTypeImpl(const TypeNode& Node) {
         }
         // Save current bindings (support nested schema instantiation).
         auto SavedBindings = ActiveSchemaBindings_;
+        // Whether folding THESE actuals reads an enclosing schema's
+        // discriminant.  `inner(n)` written inside the body of `outer(n)` is
+        // not a fixed instance: n is 1 only because the body is being resolved
+        // against the probe, and taking that for the answer sized the object
+        // for one element in every instance.  The canonical EP example --
+        // matrix(m,n) = array[1..m] of vector(n) -- is exactly this shape.
+        const bool SavedActualUsed = SchemaBindingUsed_;
+        SchemaBindingUsed_         = false;
         // Evaluate each discriminant as a compile-time integer constant.
         std::vector<Type::SchemaDisc> Discs;
         bool HasError = false;
@@ -413,6 +523,18 @@ std::shared_ptr<Type> Sema::resolveTypeImpl(const TypeNode& Node) {
                 ActiveSchemaBindings_[toLower(Sym->SchemaDeclParams[I].Name)] = *Val;
             }
         }
+        const bool ActualsVary = SchemaBindingUsed_ && ProbeBindingsActive_;
+        // The actuals as closed forms over the ENCLOSING discriminants, so the
+        // run-time walk can work out this instantiation's discriminants without
+        // re-resolving a name at the allocation site.
+        if (ActualsVary && !ProbeDiscNames_.empty()) {
+            N->ActualForms.clear();
+            for (const auto& A : N->Actuals)
+                if (auto F = buildExtentForm(*A, ProbeDiscNames_))
+                    N->ActualForms.push_back(*F);
+                else { N->ActualForms.clear(); break; }
+        }
+        SchemaBindingUsed_     = SavedActualUsed || SchemaBindingUsed_;
         if (HasError) {
             ActiveSchemaBindings_ = std::move(SavedBindings);
             return TyErr;
@@ -434,6 +556,10 @@ std::shared_ptr<Type> Sema::resolveTypeImpl(const TypeNode& Node) {
         T->SchemaName = N->Name;
         T->SchemaDiscs = Discs;
         T->SchemaBody  = Body;
+        // Marked so that nothing folds against the probe's discriminants and
+        // the run-time layout is used instead -- the same marker every other
+        // denoter with a discriminant-fixed extent carries.
+        T->ExtentVaries = ActualsVary || (Body && Body->ExtentVaries);
         // Cache for codegen (mutable annotation, same pattern as ExprNode::ResolvedType).
         N->ResolvedBody = T;
         return T;
@@ -479,6 +605,14 @@ std::shared_ptr<Type> Sema::resolveNamedUnrestricted(const NamedTypeNode& N) {
             error(N.Loc, diag::err_ep_type, {Lo});
             return TyErr;
         }
+        // EP §6.4.3.3 makes `string` a schema with one discriminant, its
+        // capacity, so a bare `string` is legal exactly where any other bare
+        // schema-name is -- as a pointer's domain type or a parameter's -- and
+        // means the capacity arrives from new() or from the actual parameter.
+        // Reading it as the unbounded String everywhere is what left
+        // `new(p, 20)` for a `^string` with nowhere to put the 20.
+        if (Lo == "string" && InPointerDomain_ > 0)
+            return stringSchemaType();
         return (Lo == "complex") ? TyComplex : TyStr;
     }
     // ISO 7185 §6.4.3.5: text is a predefined file type, and one type rather
@@ -507,6 +641,26 @@ std::shared_ptr<Type> Sema::resolveNamedUnrestricted(const NamedTypeNode& N) {
     return Sym->Ty ? Sym->Ty : TyErr;
 }
 
+std::shared_ptr<Type> Sema::stringSchemaType() {
+    // One object, so that two spellings of `^string` give one pointer type the
+    // way two spellings of `^vec` do.
+    if (StringSchemaTy_) return StringSchemaTy_;
+
+    auto Body           = Type::makeVarString(1);   // the probe's answer
+    Body->ExtentVaries  = true;                     // ...and not to be believed
+
+    auto T               = std::make_shared<Type>();
+    T->Kind              = TypeKind::Schema;
+    T->Name              = "string";
+    T->SchemaName        = "string";
+    T->SchemaBody        = Body;
+    T->SchemaFixedLayout = false;
+    T->ExtentVaries      = true;
+    T->SchemaDiscs.push_back({.Name = "capacity", .Ty = TyInt});
+    StringSchemaTy_ = T;
+    return T;
+}
+
 std::shared_ptr<Type> Sema::resolveUndiscriminatedSchema(Symbol& Sym,
                                                          const NamedTypeNode& N) {
     if (!Sym.SchemaBodyNode) return TyErr;
@@ -526,12 +680,30 @@ std::shared_ptr<Type> Sema::resolveUndiscriminatedSchema(Symbol& Sym,
     auto       SavedBindings = ActiveSchemaBindings_;
     const bool SavedUsed     = SchemaBindingUsed_;
     SchemaBindingUsed_ = false;
-    for (const auto& P : Sym.SchemaDeclParams)
+    const bool SavedProbe = ProbeBindingsActive_;
+    ProbeBindingsActive_  = true;
+    auto SavedDiscNames = ProbeDiscNames_;
+    ProbeDiscNames_.clear();
+    for (const auto& P : Sym.SchemaDeclParams) {
         ActiveSchemaBindings_[toLower(P.Name)] = 1;
+        ProbeDiscNames_.push_back(P.Name);
+    }
     auto       Body         = resolveTypeImpl(*Sym.SchemaBodyNode);
     const bool LayoutVaries = SchemaBindingUsed_;
+    // The probe body is an instantiation like any other and has to say which
+    // one it is.  resolveTypeImpl is called directly here -- deliberately, so
+    // the probe does not overwrite the node's annotation -- and that skipped
+    // the stamp, so the probe body was the one record with no bindings on it.
+    // Codegen then laid it out in the empty binding context, where `string(n)`
+    // folds to nothing and the field's stale annotation from a REAL
+    // instantiation was the only other answer available: an internal error
+    // reading "string(20) takes 264 bytes as it is written and 32 as Sema
+    // resolved it" on a program that declares both `^t` and `t(20)`.
+    stampSchemaBindings(*Sym.SchemaBodyNode, Body.get());
     ActiveSchemaBindings_ = std::move(SavedBindings);
     SchemaBindingUsed_    = SavedUsed;
+    ProbeBindingsActive_  = SavedProbe;
+    ProbeDiscNames_       = std::move(SavedDiscNames);
 
     if (!Body || Body->isError()) return TyErr;
 
@@ -547,16 +719,32 @@ std::shared_ptr<Type> Sema::resolveUndiscriminatedSchema(Symbol& Sym,
     // those probe extents become the GEPs, the allocation sizes and the range
     // checks.  Accepting the rest would generate wrong code, not slow code.
     //
-    // Lifting it needs four things plang does not have: run-time field offsets
-    // and a run-time size in schemaBodySize, per-field bound recovery in
-    // CodegenSchema (schemaArrayBounds requires the whole body be an array), a
-    // string representation carrying its capacity at run time, and a Sema that
-    // marks a discriminant-dependent extent unknown rather than folding it to
-    // the probe.
-    if (LayoutVaries && Body->Kind != TypeKind::Array) {
+    // All four of the things that once made this impossible now exist:
+    // run-time field offsets, a run-time body size, per-field bound recovery,
+    // and a Sema that marks a discriminant-dependent extent rather than
+    // folding it to the probe.
+    // What is left to refuse: a body that varies without any extent, range or
+    // capacity of it saying so -- a discriminant read somewhere that fixes
+    // neither storage nor a check.  There is nothing to compute a layout from
+    // there, and nothing to check against either.
+    //
+    // `record k: 1..n end` used to be refused here and is not any more: the
+    // storage is the host ordinal's width whatever n is, and what the
+    // discriminant fixes is the RANGE k is checked against, which the run-time
+    // check now reads from the object.
+    // Two different questions, and conflating them is what made the old message
+    // wrong.  The first is whether the body says where its extents come from:
+    // a discriminant used as an extent (`string(cap)`, `array[1..n]`) marks the
+    // type it sizes, and one used as anything else -- `record k: 1..n end`, where
+    // what it fixes is the range k is checked against -- marks nothing and
+    // leaves nothing to compute from.  That one can never be laid out.
+    if (LayoutVaries && Body->Kind != TypeKind::Array && !Body->ExtentVaries) {
         error(N.Loc, diag::err_schema_body_not_representable, {N.Name});
         return TyErr;
     }
+    // A variant part is laid out too: its alternatives share one run of
+    // storage, so the part is as wide as the widest of them -- a max taken at
+    // run time, since an alternative's own size may depend on a discriminant.
 
     auto T = std::make_shared<Type>();
     T->Kind              = TypeKind::Schema;
@@ -564,6 +752,12 @@ std::shared_ptr<Type> Sema::resolveUndiscriminatedSchema(Symbol& Sym,
     T->SchemaName        = N.Name;
     T->SchemaBody        = Body;
     T->SchemaFixedLayout = !LayoutVaries;
+    // The schema type itself says whether its body needs the run-time layout.
+    // Without this the flag stopped at the body, so `p^` for an array-bodied
+    // schema looked fixed and every consumer that tests the deref's type --
+    // the index stride among them -- took the probe path.
+    T->ExtentVaries      = Body->ExtentVaries;
+    T->SchemaBodyNode    = Sym.SchemaBodyNode;
     for (const auto& P : Sym.SchemaDeclParams)
         T->SchemaDiscs.push_back({.Name = P.Name, .Ty = P.Ty});
 

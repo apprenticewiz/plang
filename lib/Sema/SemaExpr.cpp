@@ -341,8 +341,26 @@ std::shared_ptr<Type> Sema::checkDeref(const DerefExpr& E) {
     auto PtrTy = checkExpr(*E.Pointer);
     if (PtrTy->isError()) return TyErr;
     if (rejectRestrictedComponent(E, *PtrTy)) return TyErr;
-    if (PtrTy->Kind == TypeKind::Pointer)
-        return PtrTy->PointeeType ? PtrTy->PointeeType : TyErr;
+    if (PtrTy->Kind == TypeKind::Pointer) {
+        auto Pointee = PtrTy->PointeeType;
+        if (!Pointee) return TyErr;
+        // EP §6.4.7: `p^` for a pointer to an undiscriminated schema is a value
+        // of the schema's BODY -- the discriminants only say which member of
+        // the family it is.  An array body is left as the schema, because
+        // indexing recovers its bounds from the header and the index path
+        // already looks through; anything else has to read as what it is, or
+        // `q^ := 'hi'` for a `^string` is an assignment to a type called
+        // "string" that no string rule applies to.  Codegen recovers the schema
+        // from the pointer rather than from here.
+        // Only a string body, and deliberately: a record body keeps the schema
+        // type because that is what carries the discriminants as pseudo-fields
+        // and what a schema parameter is matched against, so handing back the
+        // bare record loses `q^.id` and makes `bump(q^)` the wrong type.
+        if (Pointee->Kind == TypeKind::Schema && Pointee->SchemaBody
+                && Pointee->SchemaBody->Kind == TypeKind::VarString)
+            return Pointee->SchemaBody;
+        return Pointee;
+    }
     if (PtrTy->Kind == TypeKind::File) {
         // ISO §6.5.5: f^ for a file variable accesses the file buffer variable.
         // Its type is the file's component type; for text files it is char.
@@ -381,7 +399,13 @@ std::shared_ptr<Type> Sema::checkBinary(const BinaryExpr& E) {
                         && Lt->Kind == TypeKind::Char
                         && Rt->Kind == TypeKind::Char)) {
                 auto cap = [](const std::shared_ptr<Type>& T) -> int64_t {
-                    if (T->Kind == TypeKind::VarString) return T->StrCapacity;
+                    // A capacity fixed by a discriminant is the probe's here,
+                    // so it is treated the way an unbounded string is: the
+                    // result of a concatenation is a temporary, and the widest
+                    // one plang has is the honest bound for it.
+                    if (T->Kind == TypeKind::VarString)
+                        return T->ExtentVaries ? PlangMaxStringCapacity
+                                               : T->StrCapacity;
                     if (T->Kind == TypeKind::Char)      return 1;
                     return PlangMaxStringCapacity; // unbounded string
                 };
@@ -1154,8 +1178,19 @@ void Sema::checkCallArgs(const Symbol& Sym, SourceLocation CallLoc,
         // ISO §6.6.3.8: a conformant array parameter takes any array that
         // conforms to its schema, whatever bounds that array was declared with.
         if (Param.Ty && Param.Ty->Kind == TypeKind::ConformantArray) {
-            if (!isConformable(*Param.Ty, *At)) {
-                if (At->Kind != TypeKind::Array && At->Kind != TypeKind::ConformantArray) {
+            // EP §6.4.7: a schema whose body is an array IS an array for this
+            // purpose -- `p^` for a `^vec` conforms to the same formals a
+            // declared array does, and refusing it made the one way to write a
+            // procedure over an undiscriminated schema unavailable.
+            const Type* Actual = At.get();
+            if ((Actual->Kind == TypeKind::Schema
+                 || Actual->Kind == TypeKind::SchemaInstance)
+                    && Actual->SchemaBody
+                    && Actual->SchemaBody->Kind == TypeKind::Array)
+                Actual = Actual->SchemaBody.get();
+            if (!isConformable(*Param.Ty, *Actual)) {
+                if (Actual->Kind != TypeKind::Array
+                        && Actual->Kind != TypeKind::ConformantArray) {
                     error(ArgNode.Loc, diag::err_conformant_actual_not_array,
                           {Param.Name, At->Name});
                 } else {
@@ -1251,7 +1286,20 @@ bool Sema::isLValue(const ExprNode& E) const {
         return Sym->Kind == SymbolKind::Var || Sym->Kind == SymbolKind::VarParam;
     }
     if (auto* Ix  = llvm::dyn_cast<IndexExpr>(&E))  return isLValue(*Ix->Array);
-    if (auto* Fld = llvm::dyn_cast<FieldExpr>(&E))  return isLValue(*Fld->Record);
+    if (auto* Fld = llvm::dyn_cast<FieldExpr>(&E)) {
+        // EP §6.4.7: a discriminant is a value the schematic variable carries,
+        // not a component of it.  It is spelled like a field and reads like
+        // one, so `v.n` and `q^.n` were assignable and passable as var
+        // parameters -- and codegen, which knows the body has no such field,
+        // died on every one of them with "record has no field named 'n'".
+        // Writing to it would claim the storage is a size it is not.
+        if (const auto& RT = Fld->Record->ResolvedType;
+                RT && (RT->Kind == TypeKind::Schema
+                       || RT->Kind == TypeKind::SchemaInstance))
+            for (const auto& D : RT->SchemaDiscs)
+                if (eqCI(D.Name, Fld->Field)) return false;
+        return isLValue(*Fld->Record);
+    }
     if (llvm::dyn_cast<DerefExpr>(&E))               return true;
     // EP §6.5.6: a substring-variable is a variable, so a substring of a
     // variable may be assigned to.
@@ -1438,7 +1486,11 @@ bool Sema::isAssignCompatible(const Type& Dst, const Type& Src,
     if (isCharStringType(Dst)) {
         if (Src.Kind == TypeKind::String) return true;
         if (Src.Kind == TypeKind::VarString)
-            return Src.StrCapacity == charStringLength(Dst);
+            // A discriminant-fixed capacity is not known here, so whether the
+            // lengths match is a run-time question rather than a reason to
+            // refuse the program.
+            return Src.ExtentVaries
+                || Src.StrCapacity == charStringLength(Dst);
     }
     // A string-type is a string value, so it goes where one is expected.
     if (Dst.Kind == TypeKind::VarString && isCharStringType(Src))

@@ -1223,35 +1223,115 @@ TEST(Schema, DiscriminantNeedNotAffectTheLayout) {
     EXPECT_EQ(R.Stdout, "7 8\n5 15\n");
 }
 
-// A record body whose extent depends on the discriminants would be lowered
-// against the probe binding of 1, so plang refuses it rather than generating
-// wrong code.  EP allows it; the message has to say the limit is plang's.
-TEST(Schema, VaryingRecordBodyIsRejectedWithAReason) {
+// EP §6.4.4 allows a record-bodied schema as a pointer domain-type.  The body
+// is laid out at run time from the discriminants the object carries, because
+// there is no one struct for it -- layoutOf specialises per discriminant tuple
+// and there is no tuple until new() runs.
+TEST(Schema, AVaryingRecordBodyIsLaidOutAtRunTime) {
     auto R = compileAndRun(
-        "program p;\n"
+        "program p(output);\n"
         "type buf(n: integer) = record len: integer; d: array[1..n] of char end;\n"
-        "var q: ^buf;\n"
-        "begin end.\n", kEP);
-    EXPECT_NE(R.ExitCode, 0);
-    // Asserted on the intent, not on a phrase: the previous wording was pinned
-    // here by its "size varies" and that is the part that was wrong.
-    EXPECT_NE(R.Stderr.find("plang does not implement"), std::string::npos) << R.Stderr;
-    EXPECT_NE(R.Stderr.find("buf(...)"), std::string::npos) << R.Stderr;
+        "var q: ^buf; i: integer;\n"
+        "begin\n"
+        "  new(q, 5); q^.len := 5;\n"
+        "  for i := 1 to 5 do q^.d[i] := chr(ord('a') + i - 1);\n"
+        "  write(q^.len:1, ' ');\n"
+        "  for i := 1 to 5 do write(q^.d[i]);\n"
+        "  writeln; dispose(q)\n"
+        "end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "5 abcde\n");
 }
 
-TEST(Schema, AFixedSizedBodyWithADiscriminantBoundIsRejectedTooAndNotAsASize) {
-    // `k: 1..n` makes the storage {i64, i64} whatever n is, so the old message's
-    // "its size varies with them" was not true of every case it fired on.  What
-    // the discriminant decides here is the range k is checked against, and
-    // folding it to the probe would range-check against 1..1.
+TEST(Schema, AFieldAfterTheVaryingOneMovesWithIt) {
+    // The case that says the offsets are genuinely computed rather than taken
+    // from the probe: `n` sits AFTER a field whose size the discriminant fixes,
+    // so its offset differs between the two objects.  A probe layout would put
+    // both at 8 and the second write would land on top of the first's data.
     auto R = compileAndRun(
-        "program p;\n"
+        "program p(output);\n"
+        "type buf(cap: integer) = record s: string(cap); n: integer end;\n"
+        "     pb = ^buf;\n"
+        "var a, b: pb;\n"
+        "begin\n"
+        "  new(a, 4);  a^.s := 'abcd';          a^.n := 11;\n"
+        "  new(b, 40); b^.s := 'a much longer string'; b^.n := 22;\n"
+        "  writeln('[', a^.s, '] ', a^.n:1, ' len=', length(a^.s):1);\n"
+        "  writeln('[', b^.s, '] ', b^.n:1, ' len=', length(b^.s):1);\n"
+        "  dispose(a); dispose(b)\n"
+        "end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "[abcd] 11 len=4\n[a much longer string] 22 len=20\n");
+}
+
+TEST(Schema, AVariantPartInAVaryingBodyIsLaidOutToo) {
+    // §6.4.3.3: the alternatives share one run of storage, so the part is as
+    // wide as the widest of them -- a max taken at run time, since an
+    // alternative's own size may itself depend on a discriminant.  The variant
+    // sits after a field whose size the discriminant fixes, so its offset is
+    // computed rather than taken from the probe.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type buf(n: integer) = record d: array[1..n] of char;\n"
+        "       case tag: boolean of true: (x: integer); false: (y: real) end;\n"
+        "var q: ^buf; i: integer;\n"
+        "begin\n"
+        "  new(q, 6);\n"
+        "  for i := 1 to 6 do q^.d[i] := chr(ord('a') + i - 1);\n"
+        "  q^.tag := true; q^.x := 1234;\n"
+        "  write('d='); for i := 1 to 6 do write(q^.d[i]);\n"
+        "  writeln(' tag=', q^.tag, ' x=', q^.x:1);\n"
+        "  dispose(q)\n"
+        "end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "d=abcdef tag=true x=1234\n");
+}
+
+TEST(Schema, TheVariantPartIsAsWideAsItsWidestAlternative) {
+    // The max is what stops the smaller alternative's storage being all that is
+    // allocated: `y` is a real and `x` an integer, and writing y through a
+    // block sized for x would run past the end of the allocation.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type buf(n: integer) = record d: array[1..n] of char;\n"
+        "       case tag: boolean of true: (x: char); false: (y: real) end;\n"
+        "var q: ^buf; canary: integer;\n"
+        "begin\n"
+        "  canary := 4321;\n"
+        "  new(q, 3); q^.d[1] := 'z';\n"
+        "  q^.tag := false; q^.y := 2.5;\n"
+        "  writeln(q^.d[1], ' ', q^.y:3:1, ' ', canary:1);\n"
+        "  dispose(q)\n"
+        "end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "z 2.5 4321\n");
+}
+
+TEST(Schema, ADiscriminantMayFixARangeRatherThanAnExtent) {
+    // `record k: 1..n end` was refused, and the message blamed the size: the
+    // storage is the host ordinal's width whatever n is, and what the
+    // discriminant fixes is the RANGE k is checked against.  So there is
+    // nothing to lay out differently and everything to check differently.
+    // Sema cannot decide it -- the recorded bounds are the probe's -- so the
+    // check is emitted against the value the object carries, and the
+    // compile-time warning that folded against the probe stands aside.
+    auto R = compileAndRun(
+        "program p(output);\n"
         "type box(n: integer) = record k: 1..n; m: integer end;\n"
         "var q: ^box;\n"
-        "begin end.\n", kEP);
+        "begin\n"
+        "  new(q, 100);\n"
+        "  q^.k := 50; q^.m := 7;\n"
+        "  writeln('k=', q^.k:1, ' m=', q^.m:1);\n"
+        "  q^.k := 200;\n"
+        "  writeln('not reached')\n"
+        "end.\n", kEP);
     EXPECT_NE(R.ExitCode, 0);
-    EXPECT_NE(R.Stderr.find("plang does not implement"), std::string::npos) << R.Stderr;
-    EXPECT_EQ(R.Stderr.find("size varies"), std::string::npos) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "k=50 m=7\n");
+    // The real bound, not the probe's 1..1, and no compile-time warning about
+    // a trap that does not happen.
+    EXPECT_NE(R.Stderr.find("1..100"), std::string::npos) << R.Stderr;
+    EXPECT_EQ(R.Stderr.find("outside the range"), std::string::npos) << R.Stderr;
 }
 
 TEST(Schema, AFixedRecordBodyIsStillAUsableDomainType) {
@@ -2929,18 +3009,30 @@ TEST(Schema, NewDoesNotSilentlyDiscardExtraArguments) {
               std::string::npos) << R.Stderr;
 }
 
-TEST(Schema, ACapacityForAPointerToStringSaysWhoseLimitItIs) {
-    // EP §6.4.3.3 does make `string` a schema with a capacity discriminant, so
-    // `new(q, 20)` for a `^string` is a legal program that plang does not
-    // implement -- it models the bare name as the unbounded string.  It used to
-    // compile and then misbehave: the 20 was dropped, a pointer's worth was
-    // allocated, and `q^ := 'a string'` wrote a pointer into it.
+TEST(Schema, APointerToStringTakesItsCapacityFromNew) {
+    // EP §6.4.3.3 makes `string` a schema whose one discriminant is its
+    // capacity, so a bare `string` is a legal pointer domain-type and `new(q, 20)`
+    // says how wide the string is.  plang used to read the bare name as the
+    // unbounded string wherever it appeared: the 20 was dropped on the floor,
+    // a pointer's worth was allocated, and `q^ := '...'` wrote a pointer into
+    // it and read back an empty string of length 1.
     auto R = compileAndRun(
         "program p(output); type ps = ^string; var q: ps;\n"
-        "begin new(q, 20); q^ := 'a string schema'; writeln(q^) end.\n", kEP);
+        "begin new(q, 20); q^ := 'a string schema';\n"
+        "      writeln('[', q^, '] len=', length(q^):1); dispose(q) end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "[a string schema] len=15\n");
+}
+
+TEST(Schema, APointerToStringChecksAgainstTheCapacityItWasGiven) {
+    // The capacity is the one new() was given, not the probe binding the body
+    // was resolved against -- which would check every such assignment against
+    // a string(1).  Sema cannot decide this one, so it is a run-time check.
+    auto R = compileAndRun(
+        "program p(output); type ps = ^string; var q: ps;\n"
+        "begin new(q, 4); q^ := 'far too long' end.\n", kEP);
     EXPECT_NE(R.ExitCode, 0);
-    EXPECT_NE(R.Stderr.find("plang does not implement"), std::string::npos) << R.Stderr;
-    EXPECT_NE(R.Stderr.find("^string(20)"), std::string::npos) << R.Stderr;
+    EXPECT_NE(R.Stderr.find("string(4)"), std::string::npos) << R.Stderr;
 }
 
 TEST(Schema, AVariantRecordStillTakesItsTagsInNew) {
@@ -2956,6 +3048,1002 @@ TEST(Schema, AVariantRecordStillTakesItsTagsInNew) {
     ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
     EXPECT_EQ(R.Stdout, "r=5\n");
 }
+
+TEST(Schema, APointerToStringSurvivesASecondAssignment) {
+    // The body sits AFTER the discriminant header new() wrote, and two places
+    // answered "where is q^'s storage" -- emitLValue and schemaRefOf -- which
+    // differed by the header size.  So the length field and the capacity
+    // discriminant were the same eight bytes: `q^ := 'first'` stored 5 over the
+    // capacity 20, and the next assignment was checked against 5.  A single
+    // assignment hid it, because the capacity is loaded before the store that
+    // destroys it, and reads were self-consistent at the wrong address.
+    auto R = compileAndRun(
+        "program p(output); type ps = ^string; var q: ps;\n"
+        "begin new(q, 20);\n"
+        "      writeln('birth=', length(q^):1);\n"
+        "      q^ := 'first';  writeln('[', q^, ']');\n"
+        "      q^ := 'a much longer second'; writeln('[', q^, ']');\n"
+        "      dispose(q) end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    // A freshly allocated string is empty; reading 20 here is the header.
+    EXPECT_EQ(R.Stdout, "birth=0\n[first]\n[a much longer second]\n");
+}
+
+TEST(Schema, ARunTimeLayoutReachesBelowTheTopLevel) {
+    // The run-time address was worked out for `p^`, then for `p^.f`, then for
+    // `p^.f[i]` -- each as its own branch, so a component one level deeper fell
+    // through to the probe struct and `q^.inner.k` was written into the middle
+    // of the string beside it.  Nothing caught it: Sema accepts the program and
+    // both size-agreement tripwires stand aside for a varying type.  The whole
+    // access path is resolved by one recursion now.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type t(n: integer) = record\n"
+        "       inner: record s: string(n); k: integer end;\n"
+        "       tail: integer\n"
+        "     end;\n"
+        "var q: ^t;\n"
+        "begin\n"
+        "  new(q, 20);\n"
+        "  q^.inner.s := 'hello'; q^.inner.k := 7; q^.tail := 9;\n"
+        "  writeln(q^.inner.k:1, ' ', q^.tail:1, ' [', q^.inner.s, ']');\n"
+        "  dispose(q)\n"
+        "end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "7 9 [hello]\n");
+}
+
+TEST(Schema, AnArrayOfRecordsInAVaryingBodyStridesAndAddressesCorrectly) {
+    // Two extents fixed by the same discriminant, one inside the other: the
+    // element stride is a run-time size, and the string capacity inside each
+    // element is a run-time capacity reached through the array index.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type t(n: integer) =\n"
+        "       record a: array[1..n] of record s: string(n); k: integer end end;\n"
+        "var q: ^t; i: integer;\n"
+        "begin\n"
+        "  new(q, 3);\n"
+        "  for i := 1 to 3 do begin q^.a[i].s := 'xy'; q^.a[i].k := i * 5 end;\n"
+        "  for i := 1 to 3 do write('[', q^.a[i].s, ']', q^.a[i].k:1, ' ');\n"
+        "  writeln; dispose(q)\n"
+        "end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "[xy]5 [xy]10 [xy]15 \n");
+}
+
+TEST(Schema, IOIntoARunTimeCapacityStringUsesTheRealCapacity) {
+    // The capacity bounds how much read and writestr may store, so folding the
+    // probe truncated both to a single character.  Only plain assignment asked
+    // for the run-time capacity; every other operation on the string still
+    // believed the probe.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type ps = ^string;\n"
+        "var q: ps; s: string(30);\n"
+        "begin\n"
+        "  new(q, 25);\n"
+        "  writestr(q^, 'built ', 42:1, ' here');\n"
+        "  writeln('[', q^, '] len=', length(q^):1);\n"
+        "  s := q^;\n"
+        "  writeln('copied [', s, ']');\n"
+        "  dispose(q)\n"
+        "end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "[built 42 here] len=13\ncopied [built 42 here]\n");
+}
+
+TEST(Schema, ReadIntoARunTimeCapacityStringDoesNotTruncate) {
+    auto R = compileAndRun(
+        "program p(input, output);\n"
+        "type ps = ^string;\n"
+        "var q: ps;\n"
+        "begin new(q, 25); readln(q^);\n"
+        "      writeln('[', q^, '] len=', length(q^):1) end.\n",
+        kEP, "hello there world\n");
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "[hello there world] len=17\n");
+}
+
+TEST(Schema, EveryStringOperationUsesTheRunTimeCapacity) {
+    // Only plain assignment asked for it; substring, substr, concatenation,
+    // comparison, index and substring-assignment all folded the probe's
+    // string(1), so each of them either truncated or refused a legal program.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type ps = ^string;\n"
+        "var q, r: ps;\n"
+        "begin\n"
+        "  new(q, 30); new(r, 30);\n"
+        "  q^ := 'hello world'; r^ := 'hello world';\n"
+        "  writeln('len=', length(q^):1);\n"
+        "  writeln('sub=[', q^[1..5], ']');\n"
+        "  writeln('substr=[', substr(q^, 7, 5), ']');\n"
+        "  writeln('cat=[', q^ + '!', ']');\n"
+        "  writeln('eq=', q^ = r^, ' idx=', index(q^, 'world'):1);\n"
+        "  q^[1..5] := 'HELLO';\n"
+        "  writeln('after=[', q^, ']');\n"
+        "  dispose(q); dispose(r)\n"
+        "end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout,
+              "len=11\nsub=[hello]\nsubstr=[world]\ncat=[hello world!]\n"
+              "eq=true idx=7\nafter=[HELLO world]\n");
+}
+
+TEST(Schema, NewRejectsADiscriminantThatIsNotAUsableExtent) {
+    // EP §6.7.5.3 takes the discriminants as expressions, so nothing before
+    // run time can tell that one is unusable.  A zero or negative extent sized
+    // the allocation from nonsense and put every later access outside it, and
+    // was accepted without a word.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type ps = ^string;\n"
+        "var q: ps; n: integer;\n"
+        "begin n := -5; writeln('before'); new(q, n); writeln('after') end.\n",
+        kEP);
+    EXPECT_NE(R.ExitCode, 0);
+    EXPECT_EQ(R.Stdout, "before\n");
+    EXPECT_NE(R.Stderr.find("not a usable extent"), std::string::npos) << R.Stderr;
+}
+
+TEST(Schema, AnArrayLowerBoundOfZeroIsNotAnUnusableExtent) {
+    // The check belongs on the EXTENT, not on the discriminants: ExtentVaries
+    // is one flag for the whole body and does not say which discriminant sizes
+    // anything, so testing them all rejected a legal `array[lo..hi]` whose
+    // lower bound is zero.  The commit that added the check claimed it only
+    // looked at discriminants that size something; it did not.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type vec(lo, hi: integer) = array[lo..hi] of integer;\n"
+        "var v: ^vec; i: integer;\n"
+        "begin new(v, 0, 4);\n"
+        "      for i := 0 to 4 do v^[i] := i * i;\n"
+        "      writeln(v^[0]:1, ' ', v^[4]:1); dispose(v) end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "0 16\n");
+}
+
+TEST(Schema, ADiscriminantThatFixesNoExtentIsNotRangeChecked) {
+    // The check is only for a discriminant that actually sizes something.  A
+    // fixed-layout body's discriminant may legitimately be any value, and
+    // refusing zero there would reject a program EP allows.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type tagged(id: integer) = record count: integer end;\n"
+        "var q: ^tagged;\n"
+        "begin new(q, 0); q^.count := 7; writeln(q^.count:1, ' ', q^.id:1) end.\n",
+        kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "7 0\n");
+}
+
+TEST(Schema, WithOverAnUndiscriminatedSchemaPointer) {
+    // `with p^ do` was refused outright for a record-bodied schema pointer.
+    // The fields are selectable by name like any record's; the difference is
+    // that there is no struct to GEP into, so each is bound to the address the
+    // run-time layout gives it, and the discriminants to the values the object
+    // carries.  A bound string field also has to remember its real capacity:
+    // once bound it is an ordinary name with no path back to its object, and
+    // it would otherwise be checked against the probe's string(1).
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type buf(cap: integer) = record s: string(cap); n: integer end;\n"
+        "var p: ^buf;\n"
+        "begin\n"
+        "  new(p, 10);\n"
+        "  with p^ do begin s := 'hi there'; n := 3 end;\n"
+        "  writeln('[', p^.s, '] n=', p^.n:1);\n"
+        "  with p^ do writeln('inside [', s, '] n=', n:1, ' cap=', cap:1);\n"
+        "  dispose(p)\n"
+        "end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "[hi there] n=3\ninside [hi there] n=3 cap=10\n");
+}
+
+TEST(Schema, AWithBoundComponentKeepsItsRunTimeLayout) {
+    // `with p^ do` bound each field to a bare address, which loses the layout
+    // for anything reached THROUGH it: an array field was indexed against the
+    // probe's 1..1 and a nested record was addressed by the probe struct.  A
+    // bound name now resumes the path it was bound from -- the same recursion
+    // that resolves `q^.d[i]` written out in full.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type t(n: integer) = record\n"
+        "       d: array[1..n] of integer;\n"
+        "       inner: record s: string(n); k: integer end\n"
+        "     end;\n"
+        "var q: ^t; i: integer;\n"
+        "begin\n"
+        "  new(q, 5);\n"
+        "  with q^ do begin\n"
+        "    for i := 1 to 5 do d[i] := i * 3;\n"
+        "    inner.s := 'five!'; inner.k := 9\n"
+        "  end;\n"
+        "  with q^ do begin\n"
+        "    for i := 1 to 5 do write(d[i]:1, ' ');\n"
+        "    writeln('| [', inner.s, '] ', inner.k:1)\n"
+        "  end;\n"
+        "  dispose(q)\n"
+        "end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "3 6 9 12 15 | [five!] 9\n");
+}
+
+TEST(Schema, AVaryingExtentInsideAVariantPartIsStillRunTimeLaidOut) {
+    // walkVariantFields adds a variant's fields to the record without carrying
+    // ExtentVaries up, so a schema whose ONLY varying extent sits in a variant
+    // looked fixed and was laid out against the probe.  rtAlignOfTypeNode also
+    // skipped the variant part, so the size walk padded to an alignment the
+    // align walk did not know about.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type buf(n: integer) = record\n"
+        "       k: integer;\n"
+        "       case tag: boolean of true: (s: string(n)); false: (x: integer)\n"
+        "     end;\n"
+        "var q: ^buf; canary: integer;\n"
+        "begin\n"
+        "  canary := 999;\n"
+        "  new(q, 20);\n"
+        "  q^.k := 5; q^.tag := true; q^.s := 'inside the variant';\n"
+        "  writeln(q^.k:1, ' ', q^.tag, ' [', q^.s, '] ', canary:1);\n"
+        "  dispose(q)\n"
+        "end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "5 true [inside the variant] 999\n");
+}
+
+TEST(Schema, AnAccessPathIsWalkedOncePerAssignment) {
+    // A string whose capacity a discriminant fixes needs both an address and a
+    // capacity, and emitLValue and exprStrCapV each resolved the path from
+    // scratch -- so every subscript along the way was emitted twice and a
+    // side-effecting one ran twice.  ISO §6.8.2.2 evaluates the variable-access
+    // of an assignment once.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type t(n: integer) = record a: array[1..n] of record s: string(n) end end;\n"
+        "var q: ^t; calls: integer;\n"
+        "function next: integer;\n"
+        "begin calls := calls + 1; next := 1 end;\n"
+        "begin\n"
+        "  calls := 0; new(q, 8);\n"
+        "  q^.a[next].s := 'hi';\n"
+        "  writeln('next called ', calls:1, ' time(s); [', q^.a[1].s, ']');\n"
+        "  dispose(q)\n"
+        "end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "next called 1 time(s); [hi]\n");
+}
+
+TEST(Schema, ASchemaArrayConformsAndPassesItsRealBounds) {
+    // Two halves.  Sema refused a schema-bodied array as a conformant actual at
+    // all, which made the one way to write a procedure over an undiscriminated
+    // schema unavailable; a schema whose body is an array IS an array here.
+    // And codegen then passed the bounds off the type, which for such an array
+    // are the probe's -- so the callee would have walked 1..1.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type vec(n: integer) = array[1..n] of integer;\n"
+        "var q: ^vec; i: integer;\n"
+        "procedure show(var x: array[lo..hi: integer] of integer);\n"
+        "var k: integer;\n"
+        "begin\n"
+        "  write('lo=', lo:1, ' hi=', hi:1, ':');\n"
+        "  for k := lo to hi do write(' ', x[k]:1);\n"
+        "  writeln\n"
+        "end;\n"
+        "begin\n"
+        "  new(q, 5);\n"
+        "  for i := 1 to 5 do q^[i] := i * 11;\n"
+        "  show(q^);\n"
+        "  dispose(q)\n"
+        "end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "lo=1 hi=5: 11 22 33 44 55\n");
+}
+
+TEST(Schema, AnElementAlignedOnlyByItsVariantStridesCorrectly) {
+    // An array element whose alignment comes only from inside a variant part.
+    //
+    // Written to cover the variant-part alignment fix, and it does NOT: reverting
+    // that fix leaves this passing.  rtVariantSize already aligns the blob to the
+    // variant's own alignment, so the record's total is a multiple of it and the
+    // trailing pad the fix adds is a no-op.  Kept because the shape -- an array
+    // of variant-bearing records in a varying body -- is otherwise uncovered,
+    // and labelled so nobody reads it as protecting that line.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type rec(n: integer) = array[1..n] of record\n"
+        "       c: char;\n"
+        "       case tag: boolean of true: (i: integer); false: (j: integer)\n"
+        "     end;\n"
+        "var q: ^rec; k: integer;\n"
+        "begin\n"
+        "  new(q, 3);\n"
+        "  for k := 1 to 3 do begin\n"
+        "    q^[k].c := chr(96+k); q^[k].tag := true; q^[k].i := k*100 end;\n"
+        "  for k := 1 to 3 do write(q^[k].c, q^[k].i:1, ' ');\n"
+        "  writeln; dispose(q)\n"
+        "end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "a100 b200 c300 \n");
+}
+
+TEST(Schema, ANestedVaryingStringReportsItsCapacityToAReader) {
+    // A substring of a string reached below the top level of a varying body.
+    //
+    // Also written to cover strCapFromPath, and also does not: the substring
+    // runtime bounds against the string's LENGTH rather than its capacity, so
+    // the source capacity does not change the answer here.  strCapFromPath is a
+    // refactor, not a behaviour fix -- what it was extracted for, walking the
+    // path once, is covered by AnAccessPathIsWalkedOncePerAssignment.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type t(n: integer) = record inner: record s: string(n) end end;\n"
+        "var q: ^t;\n"
+        "begin\n"
+        "  new(q, 20);\n"
+        "  q^.inner.s := 'hello world';\n"
+        "  writeln('[', q^.inner.s[1..5], ']');\n"
+        "  dispose(q)\n"
+        "end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "[hello]\n");
+}
+
+TEST(Schema, AWithBoundFixedFieldIsNotTreatedAsSchematic) {
+    // Binding a with-field recorded its path in VarEntry::schemaTy, which means
+    // "this NAME is a schematic object" -- true of `p^`, not of a field of it.
+    // So every bound name answered schemaRefOf, and indexing a field whose own
+    // layout is FIXED went looking for an array body on the enclosing record and
+    // killed the compiler outright on a legal program.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type t(n: integer) = record s: string(n); d: array[1..5] of integer end;\n"
+        "var q: ^t; i: integer;\n"
+        "begin\n"
+        "  new(q, 8);\n"
+        "  with q^ do begin\n"
+        "    s := 'eight ch';\n"
+        "    for i := 1 to 5 do d[i] := i;\n"
+        "    writeln(d[3]:1, ' ', s[1])\n"
+        "  end;\n"
+        "  dispose(q)\n"
+        "end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "3 e\n");
+}
+
+TEST(Schema, ADiscriminatedInstanceKeepsItsCompileTimeChecks) {
+    // ActiveSchemaBindings_ is filled by an ordinary instantiation `t(300)` as
+    // well as by the undiscriminated probe, so marking an extent as varying
+    // whenever a binding was read marked every DISCRIMINATED instance's fields
+    // too -- where the capacity is exactly known.  That silently disabled
+    // err_string_too_long and the subrange warning, and capped a string(300) at
+    // the 255 that stands in for a capacity plang does not know.  No
+    // undiscriminated schema is involved: it was a regression on plain EP.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type t(m: integer) = record s: string(m) end;\n"
+        "var v: t(300); i: integer;\n"
+        "begin v.s := 'x';\n"
+        "      for i := 1 to 280 do v.s := v.s + 'y';\n"
+        "      writeln(length(v.s):1) end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "281\n");   // 256 while the capacity was treated as unknown
+
+    auto Bad = compileAndRun(
+        "program p(output);\n"
+        "type t(m: integer) = record s: string(m) end;\n"
+        "var v: t(5);\n"
+        "begin v.s := 'far longer than five' end.\n", kEP);
+    EXPECT_NE(Bad.ExitCode, 0);
+    EXPECT_NE(Bad.Stderr.find("does not fit a string(5)"), std::string::npos) << Bad.Stderr;
+}
+
+TEST(Schema, AStringIndexOnAPointerToStringIsNotASchemaArray) {
+    // `q^[1]` for a `^string` is a string component, §6.5.3.2 -- but the
+    // schema-array branch claimed any schema before the string case was
+    // reached, went looking for an array body on the string schema, and killed
+    // the compiler.  A record-bodied schema has no subscript at all and has to
+    // reach a diagnostic rather than the same crash.
+    auto R = compileAndRun(
+        "program p(output); type ps = ^string; var q: ps;\n"
+        "begin new(q, 8); q^ := 'abc'; writeln(q^[1]) end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "a\n");
+
+    auto Rec = compileAndRun(
+        "program p(output); type buf(n: integer) = record k: integer end;\n"
+        "var p2: ^buf;\n"
+        "begin new(p2, 3); writeln(p2^[1]) end.\n", kEP);
+    EXPECT_NE(Rec.ExitCode, 0);
+    EXPECT_EQ(Rec.Stderr.find("internal error"), std::string::npos) << Rec.Stderr;
+    EXPECT_NE(Rec.Stderr.find("non-array"), std::string::npos) << Rec.Stderr;
+}
+
+TEST(Schema, AVaryingStringIntoACharArrayChecksItsLength) {
+    // §6.4.3.2 wants the lengths equal.  Sema settles that when it knows the
+    // capacity and cannot when a discriminant fixes one, so it lets the
+    // assignment through -- and copying the array's length out of a shorter
+    // string read past the end of the allocation and dropped heap bytes into
+    // the array.  A read overrun, introduced by the compatibility rule that
+    // made this assignment legal in the first place.
+    auto Bad = compileAndRun(
+        "program p(output);\n"
+        "type ps = ^string;\n"
+        "var q: ps; a: packed array[1..40] of char;\n"
+        "begin new(q, 4); q^ := 'ab'; a := q^ end.\n", kEP);
+    EXPECT_NE(Bad.ExitCode, 0);
+    EXPECT_NE(Bad.Stderr.find("cannot fill"), std::string::npos) << Bad.Stderr;
+
+    auto Ok = compileAndRun(
+        "program p(output);\n"
+        "type ps = ^string;\n"
+        "var q: ps; a: packed array[1..4] of char; i: integer;\n"
+        "begin new(q, 4); q^ := 'abcd'; a := q^;\n"
+        "      write('['); for i := 1 to 4 do write(a[i]); writeln(']') end.\n", kEP);
+    ASSERT_EQ(Ok.ExitCode, 0) << Ok.Stderr;
+    EXPECT_EQ(Ok.Stdout, "[abcd]\n");
+}
+
+TEST(Schema, AValueClauseInsideASchemaBodyIsNotDropped) {
+    // EP §6.4.7 with §6.6.  `t(5)` is written as a schema instantiation, and
+    // what it denotes is the schema's body -- which neither hasInitialState nor
+    // emitInitialState looked through, so every `value` clause inside a schema
+    // body was silently ignored and the field began at zero.
+    //
+    // The varying components are the point of the second half: the body is laid
+    // out under THIS instantiation's discriminants, and initializing it through
+    // the unbound layout would put the fields at offsets belonging to no
+    // instance at all.  s and a either side of k say whether that happened.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type t(n: integer) = record\n"
+        "       s: string(n); k: integer value 7;\n"
+        "       a: array[1..n] of integer end;\n"
+        "var v: t(20); i: integer;\n"
+        "begin writeln(v.k:1);\n"
+        "      v.s := 'hello'; for i := 1 to 20 do v.a[i] := i;\n"
+        "      writeln(v.s, ' ', v.k:1, ' ', v.a[20]:1) end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "7\nhello 7 20\n");
+}
+
+TEST(Schema, TheRunTimeLayoutSurvivesTheOptimizer) {
+    // Everything here is emitted as arithmetic over values rather than as
+    // constants in a type, and two of the pieces -- a dynamic alloca and the
+    // stacksave/stackrestore pair around it -- are exactly the shapes an
+    // optimizer is entitled to move.  The suite compiles at the default level
+    // only, so nothing else in it would notice.
+    const std::string Src =
+        "program p(output);\n"
+        "type t(n: integer) = record lead: integer; s: string(n);\n"
+        "       case tag: boolean of\n"
+        "         true:  (c: char;\n"
+        "                 case inner: boolean of\n"
+        "                    true: (d: real); false: (k: char));\n"
+        "         false: (z: integer) end;\n"
+        "var q: ^t; v: t(10); r: ^string; i: integer;\n"
+        "begin new(q, 10); q^.lead := 111; q^.s := 'ten chars!';\n"
+        "      q^.tag := true; q^.c := 'x';\n"
+        "      q^.inner := false; q^.k := 'K';\n"
+        "      v := q^;\n"
+        "      new(r, 300); r^ := '';\n"
+        "      for i := 1 to 300 do r^ := r^ + 'x';\n"
+        "      writeln('[', v.k, ']', v.lead:1, v.c, ' ',\n"
+        "              length(r^):1, ' ', length(trim(r^)):1) end.\n";
+    for (const char* O : {"-O0", "-O1", "-O2", "-O3"}) {
+        auto R = compileAndRun(Src, kEP + " " + O + " -frange-checks");
+        ASSERT_EQ(R.ExitCode, 0) << O << ": " << R.Stderr;
+        EXPECT_EQ(R.Stdout, "[K]111x 300 300\n") << O;
+    }
+}
+
+TEST(Schema, PackAndUnpackCheckTheBoundsTheObjectHas) {
+    // ISO §6.7.5.4.  The bounds of a schema array are not in its type -- Sema
+    // holds the probe's -- so the check on the starting index was made against
+    // "1..-2": one minus the width of z, taken off a probe upper bound of 1.
+    // A bound that describes nothing, refusing a legal program.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type t(n: integer) = record a: array[1..n] of char end;\n"
+        "var q: ^t; z: packed array[1..4] of char; i: integer;\n"
+        "begin new(q, 10);\n"
+        "      for i := 1 to 10 do q^.a[i] := chr(ord('a') + i - 1);\n"
+        "      pack(q^.a, 3, z); writeln('[', z, ']');\n"
+        "      unpack(z, q^.a, 6);\n"
+        "      for i := 1 to 10 do write(q^.a[i]); writeln end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "[cdef]\nabcdecdefj\n");
+
+    // And the check still refuses an index that really is out of range, now
+    // naming the bound the object actually has rather than the probe's.
+    auto Bad = compileAndRun(
+        "program p(output);\n"
+        "type t(n: integer) = record a: array[1..n] of char end;\n"
+        "var q: ^t; z: packed array[1..4] of char;\n"
+        "begin new(q, 10); pack(q^.a, 9, z) end.\n", kEP + " -frange-checks");
+    EXPECT_NE(Bad.ExitCode, 0);
+    EXPECT_NE(Bad.Stderr.find("1..7"), std::string::npos) << Bad.Stderr;
+}
+
+TEST(Schema, ANestedVariantSitsWhereBothWalksAgreeItDoes) {
+    // The run-time size walk started each alternative at zero and added the
+    // offset on afterwards, while the offset walk started at the offset.  Those
+    // two are the same number only when the offset is already aligned to the
+    // widest field in the part -- which the pre-align guaranteed, and which is
+    // not what the STATIC layout does for a NESTED run: layoutVariantCase
+    // places nested fields by their own alignment inside the enclosing blob.
+    //
+    // So `k` sat four bytes past where an ordinary read of it looked.  It takes
+    // all three to show: a nested variant, an alternative whose alignment is
+    // strictly below the part's widest (char against real), and a copy between
+    // `q^` and a discriminated instance, which is where the two layouts meet.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type t(n: integer) = record\n"
+        "       lead: integer;\n"
+        "       s: string(n);\n"
+        "       case tag: boolean of\n"
+        "         true:  (c: char;\n"
+        "                 case inner: boolean of\n"
+        "                    true:  (d: real);\n"
+        "                    false: (k: char));\n"
+        "         false: (z: integer) end;\n"
+        "var q: ^t; v: t(10);\n"
+        "begin new(q, 10);\n"
+        "      q^.lead := 111; q^.s := 'ten chars!';\n"
+        "      q^.tag := true; q^.c := 'x';\n"
+        "      q^.inner := false; q^.k := 'K';\n"
+        "      v := q^;\n"
+        "      writeln('[', q^.k, ']', '[', v.k, ']', v.lead:1, v.c) end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "[K][K]111x\n");
+}
+
+TEST(Schema, AWithOverANestedComponentKeepsTheRunTimeLayout) {
+    // `with q^ do` is a Schema and `with q^.inner do` is an ordinary Record
+    // that merely lives inside one.  Keying the run-time-layout branch on the
+    // type's KIND sent the second to the static path, where the nested
+    // string(n) was bound at the probe's capacity of 1: reading a field worked
+    // and assigning to one raised "assigned to a string(1)" on legal code.
+    //
+    // lead and tail bracket the nested record, so a field bound at the wrong
+    // offset shows up as one of them changing rather than as a wrong string.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type t(n: integer) = record\n"
+        "       lead: integer;\n"
+        "       inner: record x: integer; a: array[1..n] of integer;\n"
+        "                     s: string(n) end;\n"
+        "       tail: integer end;\n"
+        "var q: ^t; i: integer;\n"
+        "begin new(q, 5); q^.lead := 111; q^.tail := 222;\n"
+        "      with q^.inner do begin\n"
+        "        x := 9; s := 'five!';\n"
+        "        for i := 1 to 5 do a[i] := i * 3 end;\n"
+        "      write(q^.inner.x:1, ' ', q^.inner.s, ' ');\n"
+        "      for i := 1 to 5 do write(q^.inner.a[i]:1, ' ');\n"
+        "      writeln('/ ', q^.lead:1, ' ', q^.tail:1) end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "9 five! 3 6 9 12 15 / 111 222\n");
+}
+
+TEST(Schema, AStringResultIsAsWideAsTheCapacityNobodyKnewYet) {
+    // A result temporary needs a size, and for a capacity a discriminant fixes
+    // there is no constant to give it -- so exprStrCapStatic's 255 was used,
+    // which is the answer for a capacity NOBODY knows.  Here somebody knows it;
+    // it is simply not known yet.  Every one of these silently produced a
+    // shorter string than the program asked for, on entirely legal code.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "var q: ^string; s: string(400); i: integer;\n"
+        "begin new(q, 400); q^ := '';\n"
+        "      for i := 1 to 400 do q^ := q^ + 'y';\n"
+        "      writeln('concat ', length(q^):1);\n"
+        "      s := substr(q^, 1, 400); writeln('substr ', length(s):1);\n"
+        "      s := trim(q^);           writeln('trim   ', length(s):1) end.\n",
+        kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "concat 400\nsubstr 400\ntrim   400\n");
+}
+
+TEST(Schema, ARunTimeSizedTemporaryDoesNotGrowTheStackPerIteration) {
+    // The allocation lands where its size is known, which is inside the loop.
+    // Without a scope to give the stack back, two million passes take two
+    // million pieces of it; with one, the cost is fixed.  The assertion is that
+    // this finishes at all -- it does not terminate on a stack that grows.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "var q: ^string; i: integer;\n"
+        "begin new(q, 4000);\n"
+        "      for i := 1 to 2000000 do begin q^ := 'abc'; q^ := q^ + 'd' end;\n"
+        "      writeln(length(q^):1, ' ', q^) end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "4 abcd\n");
+}
+
+TEST(Schema, ADiscriminantIsReadableAndNotWritable) {
+    // EP §6.4.7: a discriminant is a value the schematic variable carries, not
+    // a component of it.  It is spelled like a field and reads like one, so
+    // every way of writing to it was accepted by Sema and then killed codegen
+    // with "record has no field named 'n'" -- an internal error on four
+    // separate programs that should each have had a diagnostic.
+    struct { const char* what; const char* src; const char* wants; } Cases[] = {
+        {"assigned through a pointer",
+         "begin new(q, 4); q^.n := 5 end.\n",            "not an assignable"},
+        {"assigned on an instance",
+         "begin v.n := 5 end.\n",                        "not an assignable"},
+        {"passed as a var parameter",
+         "begin new(q, 4); r(q^.n) end.\n",              "requires a variable"},
+        {"assigned inside with",
+         "begin new(q, 4); with q^ do n := 99 end.\n",   "not an assignable"},
+    };
+    for (const auto& C : Cases) {
+        const std::string Src =
+            "program p(output);\n"
+            "type t(n: integer) = record a: array[1..n] of integer end;\n"
+            "var q: ^t; v: t(6);\n"
+            "procedure r(var x: integer); begin x := 77 end;\n"
+            + std::string(C.src);
+        auto R = compileAndRun(Src, kEP);
+        EXPECT_NE(R.ExitCode, 0) << C.what;
+        EXPECT_NE(R.Stderr.find(C.wants), std::string::npos)
+            << C.what << ": " << R.Stderr;
+    }
+
+    // Reading one is how a program learns how big its own value is, so the
+    // rule has to stop at writing.  All three spellings still read.
+    auto Ok = compileAndRun(
+        "program p(output);\n"
+        "type t(n: integer) = record a: array[1..n] of integer end;\n"
+        "var q: ^t; v: t(6);\n"
+        "begin new(q, 4);\n"
+        "      writeln(q^.n:1); writeln(v.n:1);\n"
+        "      with q^ do writeln(n:1) end.\n", kEP);
+    ASSERT_EQ(Ok.ExitCode, 0) << Ok.Stderr;
+    EXPECT_EQ(Ok.Stdout, "4\n6\n4\n");
+}
+
+TEST(Schema, APointerAndAnInstanceOfOneSchemaDoNotShareAnAnnotation) {
+    // One declaration serves every instantiation and carries the annotation of
+    // whichever Sema resolved LAST, so the run-time layout walk -- which used
+    // to ask the node whether its extent varied -- read `^t`'s probe body
+    // through `t(20)`'s field types.  It decided the string was fixed and sized
+    // it from syntax the discriminants are not bound in: 264 bytes for a
+    // 32-byte field, with the rest of the record past the end of it.
+    //
+    // Declaring the pointer and the instance is the whole test; neither alone
+    // reproduces it, because neither alone leaves a foreign annotation behind.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type t(n: integer) = record s: string(n); k: integer end;\n"
+        "var q: ^t; v: t(20);\n"
+        "begin new(q, 20); q^.s := 'via pointer'; q^.k := 5;\n"
+        "      writeln(q^.s, ' / ', q^.k:1);\n"
+        "      v.s := 'instance'; v.k := 6;\n"
+        "      writeln(v.s, ' / ', v.k:1);\n"
+        "      v := q^;\n"
+        "      writeln(v.s, ' / ', v.k:1) end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout,
+              "via pointer / 5\ninstance / 6\nvia pointer / 5\n");
+}
+
+TEST(Schema, AWholeValueCopyCarriesAVaryingStringBothWays) {
+    // A varying string in the body is the case where the copy length is neither
+    // the struct's nor a constant, and where getting it wrong writes past the
+    // end of the destination rather than merely producing a wrong string.  k
+    // sits behind the string to say where the copy actually stopped.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type t(n: integer) = record s: string(n); k: integer end;\n"
+        "var q: ^t; v: t(20); w: t(20);\n"
+        "begin new(q, 20);\n"
+        "      q^.s := 'a varying body'; q^.k := 42;\n"
+        "      v := q^;\n"
+        "      writeln(v.s, ' / ', v.k:1);\n"
+        "      w.s := 'back the other way'; w.k := 99;\n"
+        "      q^ := w;\n"
+        "      writeln(q^.s, ' / ', q^.k:1) end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout,
+              "a varying body / 42\nback the other way / 99\n");
+}
+
+TEST(Schema, AWholeValueCopiesEitherWayBetweenAPointerAndAnInstance) {
+    // EP §6.4.7.  Only the TARGET being undiscriminated was handled, so both
+    // halves of the pair took the compiler down: `v := q^` asked for the LLVM
+    // type of a schema, which by construction has none, and `q^ := v` reached
+    // for run-time discriminants that a discriminated instance does not carry.
+    //
+    // The array is what makes this worth testing: a body that really does vary
+    // is the only one where the copy length has to come from the discriminants
+    // rather than from the struct, and k rides along after it to catch a length
+    // that is right for the array and wrong for the record.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type t(n: integer) = record a: array[1..n] of integer; k: integer end;\n"
+        "var q: ^t; v: t(4); i: integer;\n"
+        "begin new(q, 4);\n"
+        "      for i := 1 to 4 do q^.a[i] := i * 10;\n"
+        "      q^.k := 77;\n"
+        "      v := q^;\n"
+        "      for i := 1 to 4 do write(v.a[i]:1, ' ');\n"
+        "      writeln(v.k:1);\n"
+        "      for i := 1 to 4 do v.a[i] := i;\n"
+        "      v.k := 88;\n"
+        "      q^ := v;\n"
+        "      for i := 1 to 4 do write(q^.a[i]:1, ' ');\n"
+        "      writeln(q^.k:1) end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "10 20 30 40 77\n1 2 3 4 88\n");
+}
+
+TEST(Schema, AWholeValueCopyStillChecksTheDiscriminantsAgree) {
+    // The copy length is only right because the two agree, so the check is what
+    // makes the memcpy safe rather than a decoration on it.  One side knows its
+    // discriminant at compile time and the other at run time, which is exactly
+    // the case a compile-time check cannot settle.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type t(n: integer) = record k: integer end;\n"
+        "var q: ^t; v: t(4);\n"
+        "begin new(q, 3); q^.k := 1; v := q^; writeln(v.k:1) end.\n", kEP);
+    EXPECT_NE(R.ExitCode, 0);
+    EXPECT_NE(R.Stderr.find("discriminant n differs"), std::string::npos)
+        << R.Stderr;
+}
+
+TEST(Schema, AnArrayIndexedByANamedTypeVariesWithItsElement) {
+    // ISO §6.4.3.2 lets the index be named by its type rather than written as a
+    // range, and that branch of array resolution returns early -- so
+    // `array[colour] of string(n)` kept the probe's element size and the record
+    // was laid out too small.  The named index cannot itself vary; the ELEMENT
+    // can, and that is what has to carry up.
+    //
+    // The fields either side of the array are the point of the test: they are
+    // where a stride the run-time walk and the static layout disagree about
+    // shows up as corruption rather than as a wrong string.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type colour = (red, green, blue);\n"
+        "     t(n: integer) = record\n"
+        "       lo: integer; a: array[colour] of string(n); hi: integer end;\n"
+        "var q: ^t; c: colour;\n"
+        "begin new(q, 12); q^.lo := 111; q^.hi := 222;\n"
+        "      q^.a[red] := 'scarlet'; q^.a[green] := 'emerald';\n"
+        "      q^.a[blue] := 'cobalt';\n"
+        "      for c := red to blue do writeln(q^.a[c]);\n"
+        "      writeln(q^.lo:1, ' ', q^.hi:1) end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "scarlet\nemerald\ncobalt\n111 222\n");
+}
+
+TEST(Schema, ANamedIndexIsTheOnlyVaryingFieldInItsRecord) {
+    // The same gap with nothing else in the record to mark it: the body was not
+    // marked varying at all and the schema was refused outright.  A named
+    // SUBRANGE index as well as an enumeration, since they reach the branch by
+    // different routes.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type digit = 1..4;\n"
+        "     t(n: integer) = record a: array[digit] of string(n) end;\n"
+        "var q: ^t; i: digit;\n"
+        "begin new(q, 9);\n"
+        "      for i := 1 to 4 do q^.a[i] := 'row';\n"
+        "      q^.a[3] := 'third';\n"
+        "      for i := 1 to 4 do writeln(i:1, ' ', q^.a[i]) end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "1 row\n2 row\n3 third\n4 row\n");
+}
+
+// ===========================================================================
+// EP §6.4.7 differential harness.
+//
+// One schema body, written once, exercised through every lowering this
+// compiler has for it:
+//
+//   instance   var v: t(K)              a static struct
+//   pointer    var q: ^t; new(q, K)     run-time walk, discriminants in a header
+//   parameter  procedure b(var v: t)    run-time walk, discriminants as arguments
+//
+// The essential trick is that writing and reading must CROSS the forms.  A
+// lowering that is wrong but self-consistent writes and reads the same wrong
+// offsets and looks perfect; the disagreement only becomes observable when one
+// form stores a value and a different form loads it.  The first two versions of
+// this harness did not cross, and the packed-record and tagless-variant
+// defects walked straight through both.
+//
+// Combinations, each compared against the pure-instance reference:
+//   A  write instance  read instance   (reference)
+//   B  write pointer   read pointer    (self-consistent: catches size errors)
+//   C  write instance  read parameter  (crosses static -> run-time)
+//   D  write pointer   copy to instance, read instance  (crosses run-time -> static)
+//
+// This exists because the fourth review found ten defects that 1,738 tests,
+// AddressSanitizer, IR byte-identity and a four-level optimisation sweep were
+// all green through.  Those gates measure the ISO 7185 core.
+//
+// A shape whose defect is still open is marked expectAgree=false and asserted
+// to STILL differ, so fixing one fails this test until the shape is promoted.
+// ===========================================================================
+namespace {
+
+struct SchemaShape {
+    const char* name;
+    const char* prelude;   // extra type declarations the body needs
+    const char* body;      // schema body, after `t(n: integer) = `
+    const char* decls;     // extra variables, e.g. "i: integer"
+    const char* write;     // statements that fill the object; %s is the object
+    const char* read;      // statements that print it; %s is the object
+    int         disc;
+    bool        expectAgree;
+};
+
+std::string subst(const char* Text, const std::string& Obj) {
+    std::string Out;
+    for (const char* p = Text; *p; ++p) {
+        if (p[0] == '%' && p[1] == 's') { Out += Obj; ++p; }
+        else Out += *p;
+    }
+    return Out;
+}
+
+// A: instance throughout.  B: pointer throughout.  C: instance stores, a
+// schema parameter loads.  D: pointer stores, a whole-value copy hands it to
+// an instance which loads.
+enum class Combo { A, B, C, D };
+
+RunResult runCombo(const SchemaShape& S, Combo C) {
+    const std::string K = std::to_string(S.disc);
+    const bool HasDecls = S.decls && *S.decls;
+    const std::string DeclTail = HasDecls ? std::string("; ") + S.decls : "";
+
+    std::string Src = "program p(output);\ntype ";
+    if (S.prelude && *S.prelude) { Src += S.prelude; Src += "\n     "; }
+    Src += "t(n: integer) = "; Src += S.body; Src += ";\n";
+
+    switch (C) {
+    case Combo::A:
+        Src += "var v: t(" + K + ")" + DeclTail + ";\nbegin\n"
+             + subst(S.write, "v") + subst(S.read, "v") + "end.\n";
+        break;
+    case Combo::B:
+        Src += "var q: ^t" + DeclTail + ";\nbegin\n  new(q, " + K + ");\n"
+             + subst(S.write, "q^") + subst(S.read, "q^") + "end.\n";
+        break;
+    case Combo::C:
+        Src += "var a: t(" + K + ")" + DeclTail + ";\n";
+        Src += "procedure rd(var v: t);\n";
+        if (HasDecls) { Src += "var "; Src += S.decls; Src += ";\n"; }
+        Src += "begin\n" + subst(S.read, "v") + "end;\n";
+        Src += "begin\n" + subst(S.write, "a") + "  rd(a)\nend.\n";
+        break;
+    case Combo::D:
+        Src += "var q: ^t; v: t(" + K + ")" + DeclTail + ";\nbegin\n"
+             + "  new(q, " + K + ");\n" + subst(S.write, "q^")
+             + "  v := q^;\n" + subst(S.read, "v") + "end.\n";
+        break;
+    }
+    return compileAndRun(Src, kEP);
+}
+
+const SchemaShape kShapes[] = {
+  { "array-string-trailer", "",
+    "record a: array[1..n] of integer; s: string(n); k: integer end",
+    "i: integer",
+    "  for i := 1 to 6 do %s.a[i] := i * 7;\n  %s.s := 'abcdef'; %s.k := 4242;\n",
+    "  for i := 1 to 6 do write(%s.a[i]:1, ' ');\n"
+    "  writeln(%s.s, ' ', %s.k:1);\n",
+    6, true },
+
+  { "named-ordinal-index", "",
+    "record lo: integer; a: array[boolean] of string(n); hi: integer end",
+    "",
+    "  %s.lo := 11; %s.hi := 22;\n"
+    "  %s.a[false] := 'no'; %s.a[true] := 'yes';\n",
+    "  writeln(%s.a[false], ' ', %s.a[true], ' ', %s.lo:1, ' ', %s.hi:1);\n",
+    5, true },
+
+  { "nested-variant", "",
+    "record lead: integer; s: string(n);\n"
+    "       case tag: boolean of\n"
+    "         true:  (c: char; case inner: boolean of\n"
+    "                            true: (d: real); false: (k: char));\n"
+    "         false: (z: integer) end",
+    "",
+    "  %s.lead := 111; %s.s := 'ten chars!';\n"
+    "  %s.tag := true; %s.c := 'x'; %s.inner := false; %s.k := 'K';\n",
+    "  writeln('[', %s.k, ']', %s.lead:1, %s.c, ' ', %s.s);\n",
+    10, true },
+
+  // ---- shapes whose defects review 4 left open ----
+
+  { "nested-instantiation",                       // review-4 finding 1
+    "inner(m: integer) = array[1..m] of integer;",
+    "record a: array[1..n] of integer; x: inner(n); k: integer end",
+    "i: integer",
+    "  for i := 1 to 4 do begin %s.a[i] := i; %s.x[i] := i * 100 end;\n"
+    "  %s.k := 99;\n",
+    "  writeln(%s.x[4]:1, ' ', %s.k:1);\n",
+    // Still differs: instance writes, schema-PARAMETER reads, and the
+    // parameter sees 0 0.  The pointer form and the parameter form are each
+    // self-consistent -- only crossing them shows it.  Static layout against
+    // the run-time walk, which is R4's to remove rather than another patch
+    // here; see docs/single-source-of-truth.md.
+    4, false },
+
+  { "tagless-variant", "",                        // review-4 finding 2: FIXED
+    "record a: array[1..n] of integer;\n"
+    "       case boolean of true: (u: integer); false: (w: char) end",
+    "i: integer",
+    "  for i := 1 to 2 do %s.a[i] := i * 5;\n  %s.u := 4242;\n",
+    "  writeln(%s.a[1]:1, ' ', %s.u:1);\n",
+    2, true },
+
+  { "inline-packed-record", "",                   // review-4 finding 3: FIXED
+    "record c0: char; p: packed record c: char; x: integer end;\n"
+    "       s: string(n) end",
+    "",
+    "  %s.c0 := 'A'; %s.p.c := 'B'; %s.p.x := 77; %s.s := 'hello';\n",
+    "  writeln(%s.c0, ' ', %s.p.c, ' ', %s.p.x:1, ' ', %s.s);\n",
+    5, true },
+
+  { "packed-array-element", "",                   // the other half of the flag
+    "record c0: char;\n"
+    "       a: packed array[1..3] of integer;\n"
+    "       s: string(n) end",
+    "i: integer",
+    "  %s.c0 := 'A'; %s.s := 'hi';\n"
+    "  for i := 1 to 3 do %s.a[i] := i * 9;\n",
+    "  write(%s.c0, ' ');\n"
+    "  for i := 1 to 3 do write(%s.a[i]:1, ' ');\n"
+    "  writeln(%s.s);\n",
+    4, true },
+};
+
+const char* comboName(Combo C) {
+    switch (C) {
+    case Combo::A: return "instance->instance";
+    case Combo::B: return "pointer->pointer";
+    case Combo::C: return "instance->parameter";
+    case Combo::D: return "pointer->instance (whole-value copy)";
+    }
+    return "?";
+}
+
+} // namespace
+
+TEST(SchemaDifferential, EveryLoweringOfOneTypeAgrees) {
+    for (const auto& S : kShapes) {
+        const auto Ref = runCombo(S, Combo::A);
+        bool AnyDiffers = false;
+
+        for (const Combo C : {Combo::B, Combo::C, Combo::D}) {
+            const auto R = runCombo(S, C);
+            const bool Differs = R.ExitCode != Ref.ExitCode || R.Stdout != Ref.Stdout;
+            AnyDiffers = AnyDiffers || Differs;
+            if (!S.expectAgree) continue;
+
+            EXPECT_EQ(Ref.ExitCode, 0) << S.name << " reference: " << Ref.Stderr;
+            EXPECT_FALSE(Differs)
+                << S.name << ": " << comboName(C) << " disagrees with the "
+                << "instance reference.\n"
+                << "  reference: [" << Ref.Stdout << "] exit " << Ref.ExitCode << "\n"
+                << "  this one : [" << R.Stdout   << "] exit " << R.ExitCode   << "\n"
+                << "  stderr   : " << R.Stderr;
+        }
+
+        if (!S.expectAgree)
+            EXPECT_TRUE(AnyDiffers)
+                << S.name << " now agrees across every lowering -- a review-4 defect "
+                   "has been fixed.  Set expectAgree = true for this shape.";
+    }
+}
+
 
 TEST(SeparateCompilation, AnExportedVariableIsSizedByItsInterfacesConstants) {
     // The interface's `var` denoters are lowered after the module BODY's
