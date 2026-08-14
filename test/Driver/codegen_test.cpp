@@ -4561,3 +4561,38 @@ TEST(Shadowing, AnInnerTypeOfTheSameNameDoesNotResizeAValueOfIt) {
     ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
     EXPECT_EQ(R.Stdout, "11 22 33\n");
 }
+
+TEST(Shadowing, AFileElementIsSizedByTheTypeItWasDeclaredWith) {
+    // getFileElemType reads the file variable's recorded denoter -- a node
+    // written where the VARIABLE was declared -- and lowers its element.  When
+    // that element is a type name and the lowering answered by spelling, a
+    // procedure redeclaring the name resized the file's component: `f^ := x`
+    // wrote two integers where ten were declared, and the program aborted
+    // inside glibc with a corrupted heap.
+    //
+    // A record element never showed it, because a record named type was
+    // already special-cased to consult Sema.  It took an array to see, which
+    // is the same reason the general rule had to replace those special cases
+    // rather than gain a third.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type t = array[1..10] of integer;\n"
+        "var f: file of t; x, y: t; i: integer;\n"
+        "procedure inner;\n"
+        "type t = array[1..2] of integer;\n"
+        "var l: t; i: integer;\n"
+        "begin\n"
+        "  l[1] := 0;\n"
+        "  rewrite(f);\n"
+        "  for i := 1 to 10 do x[i] := i * 5;\n"
+        "  f^ := x; put(f)\n"
+        "end;\n"
+        "begin\n"
+        "  inner;\n"
+        "  reset(f); y := f^;\n"
+        "  for i := 1 to 10 do write(y[i]:1, ' ');\n"
+        "  writeln\n"
+        "end.\n");
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "5 10 15 20 25 30 35 40 45 50 \n");
+}

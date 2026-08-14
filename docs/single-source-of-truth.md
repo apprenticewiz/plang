@@ -68,7 +68,7 @@ in the current environment.  Every confirmed memory-corruption finding is here.
 | `CodegenExprs.cpp:1467` | `resolveRecordStructType` case 2: `ve->typeNode`, then by spelling |
 | `CodegenExprs.cpp:1759` | re-folds a declaration's `Low`/`High` against use-site `consts` |
 | `CodegenStmts.cpp:839` | `new(p)`: the pointer's recorded denoter through `denoterOf`'s spelling walk |
-| `CodegenRuntime.cpp:420` | `getFileElemType`: the file variable's element denoter, by spelling |
+| `CodegenRuntime.cpp:420` | `getFileElemType`: the file variable's element denoter, by spelling — **covered by the `NamedTypeNode` rule**; no separate change needed |
 | `CodegenProcs.cpp:101` | interface `var` denoters lowered in the body's environment |
 | `CodegenProcs.cpp:906`, `:917` | a constant's `llvm::Value` **emitted in one function** and read from another |
 | `CodegenProcs.cpp:869` | enum ordinals pushed into the flat `consts` map |
@@ -141,6 +141,13 @@ than after:
   defects walked through both.
 
 ## Order
+
+Some class A sites need no edit of their own: they reach a foreign node
+*through* `llvmTypeOfNode`, so the `NamedTypeNode` rule already fixes them.
+`getFileElemType` is one — an array-typed file component was sized from an
+inner procedure's homonym and corrupted the heap, and it is correct now without
+`CodegenRuntime.cpp` being touched.  Each such site still earns a regression
+test, because what covers it today is one condition in another file.
 
 1. **R1 — class A.**  Route every foreign-node site through Sema's annotation.
    Start here because the size-agreement ICE already fails loudly wherever the
