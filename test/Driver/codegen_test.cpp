@@ -4510,3 +4510,179 @@ TEST(Shadowing, EveryKindOfBindingHidesAConstant) {
     ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
     EXPECT_EQ(R.Stdout, "5 3 123 99\n");
 }
+
+TEST(Shadowing, AnInnerTypeOfTheSameNameDoesNotResizeAnOuterVariable) {
+    // ISO §6.2.2.1: a name denotes what the innermost enclosing declaration of
+    // it says, judged where the name is WRITTEN.  Codegen resolved type names
+    // through a flat table keyed by spelling and rebuilt per procedure, so
+    // inside `inner` the outer g's domain type was re-read as inner's `t`.
+    //
+    // new(g) then allocated two elements for a ten-element array, and the
+    // writes that followed ran off the end of the block: the program aborted
+    // inside glibc with a corrupted heap.  Plain ISO 7185 -- no schema, no
+    // extension, nothing exotic.
+    //
+    // The size-agreement check could not see it: both readings are ordinary
+    // array types, and it compares a denoter against Sema only where BOTH can
+    // answer, which is exactly what the spelling table had already decided.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type t = array[1..10] of integer;\n"
+        "var g: ^t; i: integer;\n"
+        "procedure inner;\n"
+        "type t = array[1..2] of integer;\n"
+        "var q: ^t;\n"
+        "begin new(q); q^[1] := 0; new(g) end;\n"
+        "begin\n"
+        "  inner;\n"
+        "  for i := 1 to 10 do g^[i] := i * 3;\n"
+        "  for i := 1 to 10 do write(g^[i]:1, ' ');\n"
+        "  writeln\n"
+        "end.\n");
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "3 6 9 12 15 18 21 24 27 30 \n");
+}
+
+TEST(Shadowing, AnInnerTypeOfTheSameNameDoesNotResizeAValueOfIt) {
+    // NOT a test of the change that added it: this passes without it.  A
+    // RECORD named type was already special-cased to consult Sema, which is
+    // why only the array shape above failed -- and that special case is one of
+    // the two the general rule replaces.  It is here so that deleting them
+    // cannot quietly take this behaviour with it.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type r = record a, b, c: integer end;\n"
+        "var g: r;\n"
+        "procedure inner;\n"
+        "type r = record a: integer end;\n"
+        "var l: r;\n"
+        "begin l.a := 1; g.a := 11; g.b := 22; g.c := 33 end;\n"
+        "begin inner; writeln(g.a:1, ' ', g.b:1, ' ', g.c:1) end.\n");
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "11 22 33\n");
+}
+
+TEST(Shadowing, AFileElementIsSizedByTheTypeItWasDeclaredWith) {
+    // getFileElemType reads the file variable's recorded denoter -- a node
+    // written where the VARIABLE was declared -- and lowers its element.  When
+    // that element is a type name and the lowering answered by spelling, a
+    // procedure redeclaring the name resized the file's component: `f^ := x`
+    // wrote two integers where ten were declared, and the program aborted
+    // inside glibc with a corrupted heap.
+    //
+    // A record element never showed it, because a record named type was
+    // already special-cased to consult Sema.  It took an array to see, which
+    // is the same reason the general rule had to replace those special cases
+    // rather than gain a third.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type t = array[1..10] of integer;\n"
+        "var f: file of t; x, y: t; i: integer;\n"
+        "procedure inner;\n"
+        "type t = array[1..2] of integer;\n"
+        "var l: t; i: integer;\n"
+        "begin\n"
+        "  l[1] := 0;\n"
+        "  rewrite(f);\n"
+        "  for i := 1 to 10 do x[i] := i * 5;\n"
+        "  f^ := x; put(f)\n"
+        "end;\n"
+        "begin\n"
+        "  inner;\n"
+        "  reset(f); y := f^;\n"
+        "  for i := 1 to 10 do write(y[i]:1, ' ');\n"
+        "  writeln\n"
+        "end.\n");
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "5 10 15 20 25 30 35 40 45 50 \n");
+}
+
+TEST(Shadowing, ARecordLayoutIsFoldedInTheScopeItWasDeclaredIn) {
+    // `arrayIndexRange` folded a field's bounds against codegen's constant
+    // table, which holds whatever is innermost where the denoter is being
+    // LOWERED rather than where it was written.  A record whose layout is first
+    // computed inside a procedure declaring its own `n` was sized for the
+    // stranger's n -- and `recordLayouts` memoises on the declaration node, so
+    // that wrong layout then served every later use of the type.
+    //
+    // The declaration order is the whole test: with a global variable of `r`
+    // the layout is computed at file scope first and the memo is correct, which
+    // is why this needs a type used ONLY from procedures.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "const n = 10;\n"
+        "type r = record a: array[1..n] of integer; tail: integer end;\n"
+        "procedure inner;\n"
+        "const n = 2;\n"
+        "var l: r;\n"
+        "begin l.a[1] := 0 end;\n"
+        "procedure later;\n"
+        "var m: r; i: integer;\n"
+        "begin\n"
+        "  m.tail := 999;\n"
+        "  for i := 1 to 10 do m.a[i] := i;\n"
+        "  writeln(m.a[10]:1, ' ', m.tail:1)\n"
+        "end;\n"
+        "begin inner; later end.\n");
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "10 999\n");
+}
+
+TEST(Shadowing, AUserDeclaredEofMeansTheUsersOwn) {
+    // ISO §6.2.2.10: a program that declares one of the required names means
+    // its own.  The guard routing a bare `eof` to the runtime tested findVar
+    // and the constant table -- two of the several things a name can denote --
+    // so a parameterless FUNCTION called eof was in neither and the builtin
+    // won.
+    //
+    // Worse than a wrong answer: the builtin reads standard input, so a
+    // program whose own eof never touches a file hangs on a terminal.  This
+    // test therefore also stands as a hang regression; it is why compileAndRun
+    // closing stdin is not incidental here.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "function eof: boolean;\n"
+        "begin eof := false end;\n"
+        "begin\n"
+        "  if eof then writeln('builtin won') else writeln('user function won')\n"
+        "end.\n");
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "user function won\n");
+}
+
+TEST(CaseStatement, ALabelMustBeAConstant) {
+    // ISO §6.8.3.5: a case-label is a case-CONSTANT.  Sema folded labels only
+    // to find duplicates and skipped quietly when a label would not fold, so
+    // one that was not constant reached codegen and lowered to a LOAD of the
+    // variable -- `case i of 1..n:` compared the selector against whatever n
+    // held at that moment, and the illegal program compiled into a
+    // plausible-looking one that even produced the "right" answer here.
+    auto Bad = compileAndRun(
+        "program p(output);\n"
+        "var i, n: integer;\n"
+        "begin\n"
+        "  n := 3; i := 2;\n"
+        "  case i of\n"
+        "    1..n: writeln('in range');\n"
+        "    otherwise writeln('out')\n"
+        "  end\n"
+        "end.\n", kEP);
+    EXPECT_NE(Bad.ExitCode, 0);
+    EXPECT_NE(Bad.Stderr.find("not a constant"), std::string::npos) << Bad.Stderr;
+
+    // A constant range is still a range; the diagnostic must not cost the
+    // feature it is protecting.
+    auto Ok = compileAndRun(
+        "program p(output);\n"
+        "const hi = 3;\n"
+        "var i: integer;\n"
+        "begin\n"
+        "  i := 2;\n"
+        "  case i of\n"
+        "    1..hi: writeln('in range');\n"
+        "    otherwise writeln('out')\n"
+        "  end\n"
+        "end.\n", kEP);
+    ASSERT_EQ(Ok.ExitCode, 0) << Ok.Stderr;
+    EXPECT_EQ(Ok.Stdout, "in range\n");
+}

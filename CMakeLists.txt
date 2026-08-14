@@ -32,7 +32,7 @@ set(PLANG_VERSION_STRING "${PROJECT_VERSION}${PLANG_VERSION_SUFFIX}")
 # The date in the man page header, which by convention is when the page last
 # changed rather than when it was built — a build date would make two builds of
 # the same source differ.
-set(PLANG_MANPAGE_DATE "2026-08-12")
+set(PLANG_MANPAGE_DATE "2026-08-14")
 
 message(STATUS "plang version ${PLANG_VERSION_STRING}")
 

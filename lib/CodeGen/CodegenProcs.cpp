@@ -54,6 +54,19 @@ llvm::Value* Codegen::Impl::constantValueOf(const ConstDef& cd) {
         return exprIsVarStr(*cd.Value) ? internStrStruct(n->Value)
                                        : internStrPtr(n->Value);
     }
+    // R2.  Sema folded this in the scope it was written in, and it folds more
+    // than codegen's evaluator does -- `const k = 2 pow 3` reaches here as an
+    // expression evalConst cannot handle at all.  That used to fabricate 0 and
+    // the program carried on with a constant of the wrong value; making the
+    // failure loud is what turned it up.
+    //
+    // Only for an ordinal-typed constant: ConstVal is an int64_t, and a real or
+    // a string constant still needs evalConst below.
+    if (cd.Value->ConstVal && cd.Value->ResolvedType
+            && cd.Value->ResolvedType->isOrdinal())
+        return llvm::ConstantInt::get(
+            llvmTypeOfSemaType(*cd.Value->ResolvedType), 
+            static_cast<uint64_t>(*cd.Value->ConstVal), /*isSigned=*/true);
     return evalConst(*cd.Value, consts, ctx, i64Ty, dblTy);
 }
 
@@ -180,7 +193,15 @@ void Codegen::Impl::emitGlobals(const BlockNode& block) {
         // unit's code runs — in main for a program, and for a module in its
         // initialiser, which needs storage to leave the answer in.
         if (!cv && !currentUnit_.empty()) { emitRuntimeConst(cd); continue; }
-        if (!cv) cv = llvm::ConstantInt::get(i64Ty, 0);
+        // R2.  This used to fabricate 0 for a constant nothing could evaluate,
+        // and a fabricated value is indistinguishable from a real one to
+        // everything downstream: `const k = <unfoldable>; array[1..k]` became a
+        // one-element array that every subscript ran off the end of.  Sema
+        // records what it folded, so reaching here means neither knows -- which
+        // is a hole in the compiler, not a zero.
+        if (!cv)
+            codegenICE("constant '" + cd.Name + "' has no value that Sema "
+                       "folded or that codegen can emit");
         defineConst(cd.Name, cv);
     }
     for (const auto& vg : block.Vars) registerEnumValues(vg.Type.get());
@@ -243,6 +264,13 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
     auto  savedTypeAliases = typeAliases;
     auto  savedConsts      = consts;
     auto  savedRequired    = requiredConsts;
+    // schemaDefs_ is flat too, and was the one of these five that nobody
+    // restored.  A procedure declaring a schema of a spelling an OUTER one
+    // already used left its definition in place for every procedure emitted
+    // after it -- so a sibling's new() was sized from a stranger's body.  main
+    // escaped it by accident: emitMain re-registers the program block's
+    // schemas, putting the outer definition back before the body is emitted.
+    auto  savedSchemaDefs  = schemaDefs_;
     auto  savedLabels      = std::move(labelBlocks);
     labelBlocks.clear();
 
@@ -848,6 +876,7 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
     typeAliases   = std::move(savedTypeAliases);
     consts        = std::move(savedConsts);
     requiredConsts = std::move(savedRequired);
+    schemaDefs_   = std::move(savedSchemaDefs);
     labelBlocks   = std::move(savedLabels);
     builder.restoreIP(savedIP);
 }
@@ -913,10 +942,27 @@ void Codegen::Impl::emitBlockDecls(const BlockNode& block) {
             defVar(cd.Name, a, ty, tn);
             continue;
         }
-        llvm::Value* cv = constantValueOf(cd);
-        if (!cv) cv = emitExpr(*cd.Value); // runtime fallback (EP only)
-        if (!cv) cv = llvm::ConstantInt::get(i64Ty, 0);
-        defineConst(cd.Name, cv);
+        if (llvm::Value* cv = constantValueOf(cd)) { defineConst(cd.Name, cv); continue; }
+        // EP §6.8.2 lets a constant be a general constant expression, and one
+        // this cannot fold has to be computed where the code runs.  The value
+        // used to be put straight into `consts`, which is flat and outlives
+        // this function -- so a nested procedure emitted afterwards read an
+        // instruction belonging to another function and the module did not
+        // verify: "Referring to an instruction in another function!" on a
+        // perfectly legal program.
+        //
+        // It goes in storage instead, and is defVar'd like any other local, so
+        // a nested procedure reaches it through the static link the same way it
+        // reaches everything else its enclosing procedure declared.
+        if (llvm::Value* val = emitExpr(*cd.Value)) {
+            llvm::Type* ty = val->getType();
+            auto* slot = createEntryAlloca(ty, cd.Name + ".const");
+            builder.CreateStore(val, slot);
+            defVar(cd.Name, slot, ty);
+            continue;
+        }
+        codegenICE("constant '" + cd.Name + "' has no value that Sema folded "
+                   "or that codegen can emit");
     }
 }
 

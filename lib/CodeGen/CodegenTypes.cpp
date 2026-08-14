@@ -114,15 +114,31 @@ void Codegen::Impl::defVar(const std::string& name, llvm::Value* ptr, llvm::Type
 
 const Codegen::Impl::VarEntry* Codegen::Impl::findVar(const std::string& name) const {
     std::string key = toLower(name);
-    for (auto it = scopes.rbegin(); it != scopes.rend(); ++it) {
-        auto f = it->find(key);
-        if (f != it->end()) return &f->second;
+    // Down to varLookupFloor_ and no further; see DeclarationScopeOnly.
+    for (size_t i = scopes.size(); i-- > varLookupFloor_;) {
+        auto f = scopes[i].find(key);
+        if (f != scopes[i].end()) return &f->second;
     }
     return nullptr;
 }
 
 std::optional<std::pair<int64_t, int64_t>>
 Codegen::Impl::arrayIndexRange(const ArrayTypeNode& n) const {
+    // R1.  Sema folded these bounds in the scope they were WRITTEN in; folding
+    // them here folds them where the denoter is being LOWERED, against a
+    // constant table that holds whatever is innermost at that moment.  A record
+    // whose field is `array[1..n]` and whose layout is first computed inside a
+    // procedure declaring its own `n` came out sized for the stranger's n --
+    // caught, on a legal ISO 7185 program, as "takes 16 bytes as it is written
+    // and 80 bytes as Sema resolved it".
+    //
+    // Inside a schema instantiation the syntax is still the only answer: a
+    // bound over a discriminant is a constant per instance and not in the
+    // syntax, and Sema's annotation there is the probe's.  Same exemption the
+    // size-agreement guard makes.
+    if (schemaCtx.empty() && n.ResolvedType
+            && n.ResolvedType->Kind == TypeKind::Array && n.ResolvedType->IndexType)
+        if (auto R = ordinalRange(*n.ResolvedType->IndexType)) return R;
     if (n.Low && n.High) {
         const auto lo = tryEvalConstInt(*n.Low,  &consts);
         const auto hi = tryEvalConstInt(*n.High, &consts);
@@ -368,6 +384,22 @@ llvm::Type* Codegen::Impl::llvmTypeOfNode(const TypeNode& node) {
         if (node.ResolvedType && node.ResolvedType->Kind == TypeKind::Record
                 && node.ResolvedType->RecordDecl)
             return llvmTypeOfSemaType(*node.ResolvedType);
+        // R1.  The two cases above are this rule applied one TypeKind at a
+        // time, each added when a spelling collision was traced back to here.
+        // A NamedTypeNode is nothing BUT a name, so there is no information in
+        // it that Sema did not already use: Sema bound the name in the scope it
+        // was written in and hung the answer on the node.  llvmTypeOfName below
+        // answers out of typeAliases, a flat table rebuilt per procedure and
+        // keyed by spelling, which can only agree by coincidence -- and when it
+        // disagrees it hands back a type of a different SIZE, which is how an
+        // inner procedure's homonym came to size an outer variable.
+        //
+        // Inside a schema instantiation the annotation is the last instance's
+        // and not this one's, so there the syntax is still the only answer;
+        // that is the same exemption the size-agreement guard already makes.
+        if (schemaCtx.empty() && node.ResolvedType && !node.ResolvedType->isError()
+                && canLowerSemaType(*node.ResolvedType))
+            return llvmTypeOfSemaType(*node.ResolvedType);
         if (auto* t = llvmTypeOfName(n->Name)) return t;
         return llvmTypeOfNodeViaSema(node, "unknown type name '" + n->Name + "'");
     }
@@ -394,8 +426,26 @@ llvm::Type* Codegen::Impl::llvmTypeOfNode(const TypeNode& node) {
     // would then fire on every one of them.
     if (llvm::dyn_cast<SubrangeTypeNode>(&node))  return ordinalTyOf(node);
     if (auto* n = llvm::dyn_cast<StringTypeNode>(&node)) {
-        int64_t cap = evalConstInt(*n->Capacity, 255, &consts);
-        return strStructType(cap);
+        // R2.  The capacity Sema resolved, then the capacity the syntax folds
+        // to.  This used to fold first and fall back to 255 -- the very thing
+        // tryEvalConstInt's own comment says must never be done, because a
+        // fabricated extent is indistinguishable from a real one downstream.
+        //
+        // 255 survives for exactly one case: a `string(cap)` in a schema body
+        // being lowered as the PROBE type.  There the capacity is genuinely
+        // unknown until an instance exists, the type built here is nobody's
+        // storage, and CodegenSchema lays the real one out at run time.  Every
+        // other route now has an answer or is an internal error, rather than a
+        // number that describes nothing.
+        if (schemaCtx.empty() && node.ResolvedType
+                && node.ResolvedType->Kind == TypeKind::VarString)
+            return strStructType(node.ResolvedType->StrCapacity);
+        if (auto Cap = tryEvalConstInt(*n->Capacity, &consts))
+            return strStructType(*Cap);
+        if (schemaCtx.empty())
+            codegenICE("a string capacity that is neither resolved nor "
+                       "constant-foldable");
+        return strStructType(PlangMaxStringCapacity);
     }
     if (llvm::dyn_cast<EnumTypeNode>(&node))      return ordinalTyOf(node);
     if (llvm::dyn_cast<SetTypeNode>(&node))       return setTy();
@@ -535,6 +585,44 @@ void Codegen::Impl::checkSizeAgreement(const Type& T, llvm::Type* Built) {
         codegenICE("type '" + T.Name + "' is "
                    + llvm::Twine(*FromSema) + " bytes to Sema and "
                    + llvm::Twine(FromLayout) + " bytes as it was laid out");
+    checkFieldOffsetAgreement(T, Built);
+}
+
+// R4.  A record can be exactly the right size with every field in the wrong
+// place, and until now only the total was ever compared -- Sema's walk and
+// codegen's layout are two implementations of one algorithm, and Sema's own
+// comment says it mirrors codegen's.  This asks the question that would notice.
+void Codegen::Impl::checkFieldOffsetAgreement(const Type& T, llvm::Type* Built) {
+    auto* st = llvm::dyn_cast_or_null<llvm::StructType>(Built);
+    if (!st || T.Kind != TypeKind::Record || !T.RecordDecl) return;
+    if (st->isOpaque() || !st->isSized()) return;
+
+    Sema::FieldOffsets Want;
+    if (!Sema::byteSizeOf(T, &Want)) return;
+
+    const auto* L = layoutOfRecord(T);
+    if (!L) return;
+    const auto* SL = mod->getDataLayout().getStructLayout(st);
+
+    for (const auto& [Name, Offset] : Want) {
+        auto It = L->Fields.find(toLower(Name));
+        if (It == L->Fields.end()) continue;
+        const auto& P = It->second;
+        if (P.Index >= st->getNumElements()) continue;
+        // A field inside a variant is placed at an offset within the shared
+        // run, so its absolute position is where the run starts plus that.
+        // Sema now reports these too, which matters: the one layout
+        // disagreement anybody has actually found -- over whether a TAGLESS
+        // selector reserves storage for a tag that does not exist -- was in a
+        // variant part, and comparing only the fixed fields would have been
+        // green through it.
+        const uint64_t Got = SL->getElementOffset(P.Index)
+                           + (P.InVariant ? P.Offset : 0);
+        if (Got != Offset)
+            codegenICE("field '" + Name + "' of type '" + T.Name + "' is at "
+                       + llvm::Twine(Offset) + " to Sema and at "
+                       + llvm::Twine(Got) + " as it was laid out");
+    }
 }
 
 llvm::Type* Codegen::Impl::llvmTypeOfSemaType(const Type& T) {

@@ -3374,3 +3374,196 @@ TEST(EP7Schema, ANilSchemaPointerRaisesRatherThanCrashing) {
     EXPECT_EQ(R.Stdout, "before\n");
     EXPECT_NE(R.Stderr.find("nil"), std::string::npos) << R.Stderr;
 }
+
+TEST(EP7Schema, ASchemaBodyIsSizedInTheScopeItWasWrittenIn) {
+    // EP §6.4.7.  A schema body's bound expressions are written where the
+    // schema is DECLARED, and the only names in scope there are its own
+    // discriminants and compile-time constants.  new() re-emits those
+    // expressions where the ALLOCATION happens, and that put the allocating
+    // procedure's own variables in front of the names the body meant: a
+    // `const k` used in a bound was captured by any unrelated `var k` at the
+    // call site, which sized the object from a run-time variable.
+    //
+    // The two programs differ only in the SPELLING of a local variable in a
+    // procedure that has nothing to do with the type.  Before the fix the
+    // first one aborted inside glibc with a corrupted heap and the second was
+    // correct, which is as clear a statement of the defect as it gets.
+    const char* Shadowing =
+        "program p(output);\n"
+        "const k = 3;\n"
+        "type t(n: integer) = array[1..n+k] of integer;\n"
+        "var q: ^t; i: integer;\n"
+        "procedure alloc;\n"
+        "var k: integer;\n"
+        "begin k := 1; new(q, 4) end;\n"
+        "begin alloc;\n"
+        "  for i := 1 to 7 do q^[i] := i * 10;\n"
+        "  for i := 1 to 7 do write(q^[i]:1, ' ');\n"
+        "  writeln end.\n";
+    // Identical but for the local's name.
+    std::string Distinct = Shadowing;
+    for (const std::string From : {"var k: integer;", "begin k := 1;"}) {
+        const std::string To = From == "var k: integer;" ? "var kk: integer;"
+                                                         : "begin kk := 1;";
+        Distinct.replace(Distinct.find(From), From.size(), To);
+    }
+
+    auto A = compileAndRun(Shadowing, kEP);
+    auto B = compileAndRun(Distinct,  kEP);
+
+    ASSERT_EQ(B.ExitCode, 0) << B.Stderr;
+    EXPECT_EQ(B.Stdout, "10 20 30 40 50 60 70 \n");
+    EXPECT_EQ(A.ExitCode, 0) << "a local variable sharing a spelling with a "
+                                "constant used in the schema body changed how "
+                                "the object was sized: " << A.Stderr;
+    EXPECT_EQ(A.Stdout, B.Stdout)
+        << "the object's layout depended on the name of an unrelated local";
+}
+
+TEST(EP7Schema, AProcedureLocalSchemaDoesNotOutliveItsProcedure) {
+    // codegen's schemaDefs_ is keyed by the schema's NAME and was the one of
+    // the five per-procedure tables nobody restored -- typeAliases, consts,
+    // requiredConsts and labelBlocks all are.  So a procedure declaring a
+    // schema whose spelling an outer one already used left its definition
+    // behind for every procedure emitted after it, and a sibling's new() was
+    // sized from a stranger's body.
+    //
+    // main escaped this by accident, which is why it went unnoticed: emitMain
+    // re-registers the program block's schemas, putting the outer definition
+    // back before the body is emitted.  It takes a SIBLING procedure to see.
+    //
+    // Under-allocating: `second` allocates through the outer vec, which is a
+    // hundred times bigger than first's.
+    auto Small = compileAndRun(
+        "program p(output);\n"
+        "type vec(n: integer) = array[1..n*100] of integer;\n"
+        "var q: ^vec; i: integer;\n"
+        "procedure first;\n"
+        "type vec(n: integer) = array[1..n] of integer;\n"
+        "var r: ^vec;\n"
+        "begin new(r, 1); r^[1] := 0 end;\n"
+        "procedure second;\n"
+        "begin new(q, 5) end;\n"
+        "begin first; second;\n"
+        "  for i := 1 to 500 do q^[i] := i;\n"
+        "  writeln(q^[500]:1) end.\n", kEP + " -fno-range-checks");
+    ASSERT_EQ(Small.ExitCode, 0)
+        << "new() was sized from another procedure's schema: " << Small.Stderr;
+    EXPECT_EQ(Small.Stdout, "500\n");
+
+    // And the bounds the range check uses come from the same place, so the
+    // check went missing in `second` while main's read of the same object was
+    // checked correctly.
+    auto Bounds = compileAndRun(
+        "program p(output);\n"
+        "type vec(n: integer) = array[1..n] of integer;\n"
+        "var q: ^vec;\n"
+        "procedure first;\n"
+        "type vec(n: integer) = array[1..n*100] of integer;\n"
+        "var r: ^vec;\n"
+        "begin new(r, 1); r^[1] := 0 end;\n"
+        "procedure second;\n"
+        "begin new(q, 5); q^[6] := 77 end;\n"
+        "begin first; second; writeln('unreachable') end.\n",
+        kEP + " -frange-checks");
+    EXPECT_NE(Bounds.ExitCode, 0);
+    EXPECT_NE(Bounds.Stderr.find("1..5"), std::string::npos) << Bounds.Stderr;
+}
+
+TEST(EP8Const, ARuntimeConstantIsReachableFromANestedProcedure) {
+    // EP §6.8.2 lets a constant be a general constant expression.  One codegen
+    // cannot fold is computed where the code runs, and its llvm::Value used to
+    // go straight into the flat `consts` map -- which outlives the function it
+    // was produced in.  A nested procedure emitted afterwards then referred to
+    // an instruction belonging to another function, and the module failed IR
+    // verification: "Referring to an instruction in another function!" on a
+    // legal program, with no diagnostic a user could act on.
+    //
+    // It lives in storage now and is bound like any other local, so the static
+    // link reaches it the same way it reaches everything else the enclosing
+    // procedure declared.  Both readings must agree: a constant that differed
+    // between the procedure that declared it and one nested inside it would be
+    // a stranger thing than the crash.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "procedure outer;\n"
+        "const k = sqrt(4.0) + 1.0;\n"
+        "  procedure nested;\n"
+        "  begin writeln('nested ', k:3:1) end;\n"
+        "begin writeln('outer  ', k:3:1); nested end;\n"
+        "begin outer end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "outer  3.0\nnested 3.0\n");
+}
+
+TEST(EP8Const, AStringCapacityIsFoldedInTheScopeItWasWrittenIn) {
+    // R2.  A capacity written as a constant expression was re-folded where the
+    // denoter is LOWERED, against codegen's flat constant table -- so a record
+    // whose layout is first computed inside a procedure declaring its own `n`
+    // sized the field for the stranger's n.  Sema had folded the same
+    // expression in the declaring scope; codegen now asks for that answer
+    // instead of working out its own.
+    //
+    // A NAMED string type never showed it, because a named type was already
+    // routed through Sema's resolved type.  It takes a capacity written inline
+    // in a record to reach the folder at all -- the same shape of blind spot as
+    // the array case in R1, one layer further in.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "const n = 20;\n"
+        "type r = record s: string(n); tail: integer end;\n"
+        "procedure inner;\n"
+        "const n = 3;\n"
+        "var l: r;\n"
+        "begin l.s := 'abc' end;\n"
+        "procedure later;\n"
+        "var m: r;\n"
+        "begin\n"
+        "  m.tail := 999;\n"
+        "  m.s := 'twenty chars exactly';\n"
+        "  writeln(m.s, ' ', m.tail:1)\n"
+        "end;\n"
+        "begin inner; later end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "twenty chars exactly 999\n");
+}
+
+TEST(EP7Schema, AnExtentIsArithmeticOverDiscriminantsAndNothingElse) {
+    // R3.  A schema body's bounds are carried to codegen as a closed form over
+    // the discriminants BY INDEX, with every other leaf folded in the scope the
+    // schema was declared in.  The form contains no identifier, so there is
+    // nothing left for a procedure's locals to capture at the allocation site
+    // -- the defect 0.1.6 shipped a scope barrier to guard against.
+    //
+    // Non-trivial arithmetic on both bounds, over two discriminants and a named
+    // constant, so that the form is exercised rather than reduced to a literal:
+    // lo*2-1 = 3 and hi*hi+k = 12 for new(q, 2, 3).
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "const k = 3;\n"
+        "type v(lo, hi: integer) = array[lo*2 - 1 .. hi*hi + k] of integer;\n"
+        "var q: ^v; i: integer;\n"
+        "begin new(q, 2, 3);\n"
+        "  for i := 3 to 12 do q^[i] := i;\n"
+        "  writeln(q^[3]:1, ' ', q^[12]:1) end.\n", kEP + " -frange-checks");
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "3 12\n");
+
+    // The same shape with the constant shadowed by a local at the allocation
+    // site.  This is the 0.1.6 defect; it now cannot arise, because the form
+    // has no name in it to resolve here.
+    auto Shadowed = compileAndRun(
+        "program p(output);\n"
+        "const k = 3;\n"
+        "type v(n: integer) = array[1..n+k] of integer;\n"
+        "var q: ^v; i: integer;\n"
+        "procedure alloc;\n"
+        "var k: integer;\n"
+        "begin k := 1; new(q, 4) end;\n"
+        "begin alloc;\n"
+        "  for i := 1 to 7 do q^[i] := i * 10;\n"
+        "  for i := 1 to 7 do write(q^[i]:1, ' ');\n"
+        "  writeln end.\n", kEP);
+    ASSERT_EQ(Shadowed.ExitCode, 0) << Shadowed.Stderr;
+    EXPECT_EQ(Shadowed.Stdout, "10 20 30 40 50 60 70 \n");
+}

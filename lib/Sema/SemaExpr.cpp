@@ -164,6 +164,18 @@ std::shared_ptr<Type> Sema::checkExpr(const ExprNode& E) {
 }
 
 std::shared_ptr<Type> Sema::checkIdent(const IdentExpr& E) {
+    // Recorded before anything else decides what the name means: what codegen
+    // needs to know is whether the PROGRAM declared it, and that is a fact
+    // about this scope rather than about which of codegen's tables happens to
+    // hold the spelling.
+    // Not merely "found": ISO §6.2.2.10 puts the required identifiers in a
+    // region ENCLOSING the program, and Sema models that by defining each one
+    // as a Builtin symbol -- so a plain lookup finds `eof` in every program
+    // ever written.  What matters here is a declaration nearer than that one.
+    if (const Symbol* S = Symtab.lookup(E.Name);
+            S && S->Kind != SymbolKind::Builtin)
+        E.UserDeclared = true;
+
     // Inside a function body, the function's own name (or named result variable,
     // EP §6.7.2) is the result pseudo-variable.
     // §6.8.2.2 says the function block must *contain* the assignment, not be

@@ -79,6 +79,51 @@ version numbers follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html
   assignment so a side-effecting subscript ran twice, and an over-capacity
   string assignment that read past the end of a shorter allocation.
 
+## [0.1.6] - 2026-08-14
+
+A single fix, for a defect that corrupts the heap.
+
+### Fixed
+
+- **A schema body was sized in the scope where the object was allocated,
+  not the scope where the schema was declared.**
+
+  EP §6.4.7 lets a schema's extents be written as expressions:
+
+  ```pascal
+  const k = 3;
+  type t(n: integer) = array[1..n+k] of integer;
+  ```
+
+  `new(q, 4)` re-emits those expressions to work out how much to allocate, and
+  it did so at the point of the call.  Every identifier in them other than the
+  discriminants was therefore resolved against whatever happened to be in
+  scope *there* — so a local variable of an unrelated procedure captured the
+  `k` the body was written against, and the object was sized from a run-time
+  variable:
+
+  ```pascal
+  procedure alloc;
+  var k: integer;              { nothing to do with the type }
+  begin k := 1; new(q, 4) end; { allocates for k = 1, not k = 3 }
+  ```
+
+  The allocation comes out too small and the subsequent writes run off the end
+  of it.  In the reported case the program aborted inside glibc with a
+  corrupted heap; renaming that local to anything else made it correct.  The
+  program's behaviour depended on the spelling of a variable in a procedure
+  that has nothing to do with the type.
+
+  The bounds are now emitted with only the schema's own discriminants and the
+  compile-time constants visible, which is exactly the set of names the
+  declaration could legally have used.
+
+  Affects any program where a name used in a schema body's bounds is also
+  declared as a variable somewhere an object of that schema is allocated.
+  Present since schema types were introduced.
+
+---
+
 ## [0.1.5] - 2026-08-12
 
 **Where 0.1.4 went.**  It was cut from the 0.1.3 lineage rather than from this
