@@ -4510,3 +4510,54 @@ TEST(Shadowing, EveryKindOfBindingHidesAConstant) {
     ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
     EXPECT_EQ(R.Stdout, "5 3 123 99\n");
 }
+
+TEST(Shadowing, AnInnerTypeOfTheSameNameDoesNotResizeAnOuterVariable) {
+    // ISO §6.2.2.1: a name denotes what the innermost enclosing declaration of
+    // it says, judged where the name is WRITTEN.  Codegen resolved type names
+    // through a flat table keyed by spelling and rebuilt per procedure, so
+    // inside `inner` the outer g's domain type was re-read as inner's `t`.
+    //
+    // new(g) then allocated two elements for a ten-element array, and the
+    // writes that followed ran off the end of the block: the program aborted
+    // inside glibc with a corrupted heap.  Plain ISO 7185 -- no schema, no
+    // extension, nothing exotic.
+    //
+    // The size-agreement check could not see it: both readings are ordinary
+    // array types, and it compares a denoter against Sema only where BOTH can
+    // answer, which is exactly what the spelling table had already decided.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type t = array[1..10] of integer;\n"
+        "var g: ^t; i: integer;\n"
+        "procedure inner;\n"
+        "type t = array[1..2] of integer;\n"
+        "var q: ^t;\n"
+        "begin new(q); q^[1] := 0; new(g) end;\n"
+        "begin\n"
+        "  inner;\n"
+        "  for i := 1 to 10 do g^[i] := i * 3;\n"
+        "  for i := 1 to 10 do write(g^[i]:1, ' ');\n"
+        "  writeln\n"
+        "end.\n");
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "3 6 9 12 15 18 21 24 27 30 \n");
+}
+
+TEST(Shadowing, AnInnerTypeOfTheSameNameDoesNotResizeAValueOfIt) {
+    // NOT a test of the change that added it: this passes without it.  A
+    // RECORD named type was already special-cased to consult Sema, which is
+    // why only the array shape above failed -- and that special case is one of
+    // the two the general rule replaces.  It is here so that deleting them
+    // cannot quietly take this behaviour with it.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type r = record a, b, c: integer end;\n"
+        "var g: r;\n"
+        "procedure inner;\n"
+        "type r = record a: integer end;\n"
+        "var l: r;\n"
+        "begin l.a := 1; g.a := 11; g.b := 22; g.c := 33 end;\n"
+        "begin inner; writeln(g.a:1, ' ', g.b:1, ' ', g.c:1) end.\n");
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "11 22 33\n");
+}
