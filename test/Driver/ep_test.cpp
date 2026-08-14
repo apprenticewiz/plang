@@ -3652,3 +3652,26 @@ TEST(EP7Schema, AWithRecordVariableIsEvaluatedOnce) {
     ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
     EXPECT_EQ(R.Stdout, "calls=1 a2=42\n");
 }
+
+TEST(EP7Schema, SubstrAndTrimAreAsWideAsWhatTheyWereTakenFrom) {
+    // substr and trim are typed as the SAME Type object as their argument, so
+    // a result over a discriminant-sized string carries ExtentVaries with the
+    // probe's capacity of 1.  exprStrCapV recognised a with-bound name, a q^
+    // and an access path -- and a CallExpr is none of those, so it fell
+    // through to that 1.  Every later operation was then told the string could
+    // hold one character.
+    //
+    // The nested case is here because the fix is a recursion: the capacity of
+    // substr(trim(s)) is the capacity of s, two questions deep.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type t(n: integer) = record s: string(n) end;\n"
+        "var q: ^t; x: string(400); i: integer;\n"
+        "begin new(q, 120); q^.s := '';\n"
+        "  for i := 1 to 120 do q^.s := q^.s + 'y';\n"
+        "  x := trim(q^.s) + 'Z';         writeln(length(x):1);\n"
+        "  x := substr(q^.s, 5, 100);     writeln(length(x):1);\n"
+        "  x := substr(trim(q^.s), 1, 120); writeln(length(x):1) end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "121\n100\n120\n");
+}

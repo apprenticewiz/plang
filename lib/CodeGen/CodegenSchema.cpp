@@ -418,6 +418,19 @@ llvm::Value* Codegen::Impl::exprStrCapV(const ExprNode& e) {
     // and `p^.s` is what left every deeper one folding the probe's string(1).
     if (auto path = schemaPathOf(e))
         if (auto* cap = strCapFromPath(*path)) return cap;
+
+    // substr and trim are typed as the SAME Type object as their argument, so
+    // a result over a discriminant-sized string carries ExtentVaries with the
+    // probe's capacity of 1 -- and a CallExpr matches none of the shapes above,
+    // so it fell through to exactly that 1.  Every later operation was then
+    // told the string could hold one character: `substr(q^.s,1,99) + 'Z'` came
+    // out two characters long on a q^ of capacity 100.  The result is as wide
+    // as what it was taken from, which is a question the argument can answer.
+    if (auto* call = llvm::dyn_cast<CallExpr>(&e)) {
+        const std::string fn = toLower(call->Name);
+        if ((fn == "substr" || fn == "trim") && !call->Args.empty())
+            return exprStrCapV(*call->Args[0]);
+    }
     return i64c(exprStrCap(e));
 }
 
