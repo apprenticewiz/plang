@@ -504,6 +504,11 @@ uint64_t Codegen::Impl::rtAlignOfTypeNode(const TypeNode* tn) {
         if (rt->Variant) a = std::max(a, rtVariantAlign(*rt->Variant));
         return a;
     }
+    // A nested instantiation is aligned as its body is; the discriminants
+    // change its size and not its alignment.
+    if (auto* sn = llvm::dyn_cast<SchemaTypeNode>(d); sn && sn->ResolvedBody)
+        if (const TypeNode* body = schemaBodyNodeOf(*sn->ResolvedBody))
+            return rtAlignOfTypeNode(body);
     // Everything else -- a name, a subrange, an enumeration, a set, a file --
     // has no extent written in it and is aligned as the DataLayout says.
     return mod->getDataLayout().getABITypeAlign(llvmTypeOfNode(*d)).value();
@@ -601,6 +606,34 @@ llvm::Value* Codegen::Impl::rtSizeOfTypeNode(const TypeNode* tn) {
     // reached here is a node kind whose extent nothing knows how to recover,
     // which is an internal error rather than a size: keeping that loud is the
     // whole reason this is a check and not a fallthrough.
+    // R3: a schema instantiated INSIDE another schema's body.  Its own
+    // discriminants are arithmetic over the enclosing ones -- the standard's
+    // own `matrix(m,n) = array[1..m] of vector(n)` is exactly this -- so they
+    // are evaluated first and the inner body is then walked against them.
+    // Without this the instantiation was laid out from the probe, and the
+    // allocation came out one element wide in every instance.
+    if (auto* sn = llvm::dyn_cast<SchemaTypeNode>(d);
+            sn && !sn->ActualForms.empty() && rtDiscs_ && sn->ResolvedBody) {
+        std::vector<llvm::Value*> inner;
+        inner.reserve(sn->ActualForms.size());
+        for (const auto& F : sn->ActualForms)
+            inner.push_back(emitExtentForm(F, *rtDiscs_));
+        if (const TypeNode* body = schemaBodyNodeOf(*sn->ResolvedBody)) {
+            // Bound as a schema in its own right: the inner body's extents are
+            // forms over ITS discriminants, and where a form could not be built
+            // the fallback needs the inner names in scope.  Resolving the inner
+            // body happens while the OUTER probe is in force, so its bounds are
+            // never forms over the outer names -- which is why binding, rather
+            // than only swapping the values, is what this needs.
+            const auto* saved = rtDiscs_;
+            SchemaRef iref{sn->ResolvedBody.get(), nullptr, inner};
+            bindSchemaDiscs(iref);
+            auto* sz = rtSizeOfTypeNode(body);
+            popScope();
+            rtDiscs_ = saved;
+            return sz;
+        }
+    }
     if (nodeExtentVaries(d))
         codegenICE("a schema body denoter with no run-time layout");
     return i64c(static_cast<int64_t>(
@@ -807,9 +840,29 @@ Codegen::Impl::schemaPathOf(const ExprNode& e) {
     if (auto* ie = llvm::dyn_cast<IndexExpr>(&e)) {
         auto base = schemaPathOf(*ie->Array);
         if (!base) return std::nullopt;
-        auto* at = llvm::dyn_cast_or_null<ArrayTypeNode>(peel(base->decl));
+        // R3: the component may itself be a schema INSTANTIATION whose
+        // discriminants are arithmetic over the enclosing ones -- indexing
+        // `q^[i][j]` for `matrix(m,n) = array[1..m] of vector(n)` lands here
+        // with a SchemaTypeNode where an array was wanted.  Evaluate that
+        // instantiation's discriminants from the outer ones and carry on
+        // inside it; the bounds and the stride are then its own, not the
+        // probe's, which is what made the inner index check read 1..1.
+        SchemaRef       root = base->root;
+        const TypeNode* decl = peel(base->decl);
+        if (auto* sn = llvm::dyn_cast_or_null<SchemaTypeNode>(decl);
+                sn && !sn->ActualForms.empty() && sn->ResolvedBody) {
+            std::vector<llvm::Value*> inner;
+            inner.reserve(sn->ActualForms.size());
+            for (const auto& F : sn->ActualForms)
+                inner.push_back(emitExtentForm(F, base->root.discs));
+            if (const TypeNode* body = schemaBodyNodeOf(*sn->ResolvedBody)) {
+                decl = peel(body);
+                root = SchemaRef{sn->ResolvedBody.get(), base->addr, inner};
+            }
+        }
+        auto* at = llvm::dyn_cast_or_null<ArrayTypeNode>(decl);
         if (!at) return std::nullopt;
-        bindSchemaDiscs(base->root);
+        bindSchemaDiscs(root);
         auto bounds = rtIndexBounds(*at);
         if (!bounds) { popScope(); return std::nullopt; }
         auto* lo     = bounds->first;
@@ -821,7 +874,7 @@ Codegen::Impl::schemaPathOf(const ExprNode& e) {
         emitRangeCheckDyn(idx, lo, hi, /*isIndex=*/true, ie->Loc);
         auto* off = builder.CreateMul(builder.CreateSub(idx, lo), stride,
                                       "path.idx");
-        return SchemaPath{base->root,
+        return SchemaPath{root,
                           builder.CreateGEP(i8Ty, base->addr, {off}, "path.elem"),
                           at->Element.get()};
     }

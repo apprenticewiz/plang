@@ -498,6 +498,14 @@ std::shared_ptr<Type> Sema::resolveTypeImpl(const TypeNode& Node) {
         }
         // Save current bindings (support nested schema instantiation).
         auto SavedBindings = ActiveSchemaBindings_;
+        // Whether folding THESE actuals reads an enclosing schema's
+        // discriminant.  `inner(n)` written inside the body of `outer(n)` is
+        // not a fixed instance: n is 1 only because the body is being resolved
+        // against the probe, and taking that for the answer sized the object
+        // for one element in every instance.  The canonical EP example --
+        // matrix(m,n) = array[1..m] of vector(n) -- is exactly this shape.
+        const bool SavedActualUsed = SchemaBindingUsed_;
+        SchemaBindingUsed_         = false;
         // Evaluate each discriminant as a compile-time integer constant.
         std::vector<Type::SchemaDisc> Discs;
         bool HasError = false;
@@ -515,6 +523,18 @@ std::shared_ptr<Type> Sema::resolveTypeImpl(const TypeNode& Node) {
                 ActiveSchemaBindings_[toLower(Sym->SchemaDeclParams[I].Name)] = *Val;
             }
         }
+        const bool ActualsVary = SchemaBindingUsed_ && ProbeBindingsActive_;
+        // The actuals as closed forms over the ENCLOSING discriminants, so the
+        // run-time walk can work out this instantiation's discriminants without
+        // re-resolving a name at the allocation site.
+        if (ActualsVary && !ProbeDiscNames_.empty()) {
+            N->ActualForms.clear();
+            for (const auto& A : N->Actuals)
+                if (auto F = buildExtentForm(*A, ProbeDiscNames_))
+                    N->ActualForms.push_back(*F);
+                else { N->ActualForms.clear(); break; }
+        }
+        SchemaBindingUsed_     = SavedActualUsed || SchemaBindingUsed_;
         if (HasError) {
             ActiveSchemaBindings_ = std::move(SavedBindings);
             return TyErr;
@@ -536,6 +556,10 @@ std::shared_ptr<Type> Sema::resolveTypeImpl(const TypeNode& Node) {
         T->SchemaName = N->Name;
         T->SchemaDiscs = Discs;
         T->SchemaBody  = Body;
+        // Marked so that nothing folds against the probe's discriminants and
+        // the run-time layout is used instead -- the same marker every other
+        // denoter with a discriminant-fixed extent carries.
+        T->ExtentVaries = ActualsVary || (Body && Body->ExtentVaries);
         // Cache for codegen (mutable annotation, same pattern as ExprNode::ResolvedType).
         N->ResolvedBody = T;
         return T;

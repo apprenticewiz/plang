@@ -3567,3 +3567,44 @@ TEST(EP7Schema, AnExtentIsArithmeticOverDiscriminantsAndNothingElse) {
     ASSERT_EQ(Shadowed.ExitCode, 0) << Shadowed.Stderr;
     EXPECT_EQ(Shadowed.Stdout, "10 20 30 40 50 60 70 \n");
 }
+
+TEST(EP7Schema, ASchemaInstantiatedInsideASchemaBodyIsNotSizedFromTheProbe) {
+    // EP §6.4.8.  A schema instantiated inside another schema's BODY has
+    // discriminants that are arithmetic over the enclosing ones.  Sema folds
+    // the body against a probe binding of 1, so `vector(n)` inside
+    // `matrix(m,n)` came out `vector(1)` -- and that probe answer was taken for
+    // the layout, so the allocation was one element wide in every instance and
+    // the writes ran off the end of it.
+    //
+    // This is the canonical example from the standard itself, which is the
+    // strongest argument for it not being an edge case.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type vector(n: integer) = array[1..n] of real;\n"
+        "     matrix(m, n: integer) = array[1..m] of vector(n);\n"
+        "var q: ^matrix; i, j: integer;\n"
+        "begin new(q, 3, 4);\n"
+        "  for i := 1 to 3 do\n"
+        "    for j := 1 to 4 do q^[i][j] := i * 10 + j;\n"
+        "  for i := 1 to 3 do begin\n"
+        "    for j := 1 to 4 do write(q^[i][j]:5:1);\n"
+        "    writeln end end.\n", kEP + " -frange-checks");
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, " 11.0 12.0 13.0 14.0\n 21.0 22.0 23.0 24.0\n"
+                        " 31.0 32.0 33.0 34.0\n");
+
+    // The record shape, where the instantiation is a FIELD: k sits behind it,
+    // so an instantiation sized from the probe shows up as k being overwritten
+    // rather than as a wrong element.
+    auto Rec = compileAndRun(
+        "program p(output);\n"
+        "type inner(m: integer) = array[1..m] of integer;\n"
+        "     outer(n: integer) = record a: array[1..n] of integer;\n"
+        "                                x: inner(n); k: integer end;\n"
+        "var q: ^outer; i: integer;\n"
+        "begin new(q, 4);\n"
+        "  for i := 1 to 4 do begin q^.a[i] := i; q^.x[i] := i * 100 end;\n"
+        "  q^.k := 99; writeln(q^.x[4]:1, ' ', q^.k:1) end.\n", kEP);
+    ASSERT_EQ(Rec.ExitCode, 0) << Rec.Stderr;
+    EXPECT_EQ(Rec.Stdout, "400 99\n");
+}

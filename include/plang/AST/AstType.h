@@ -172,6 +172,13 @@ struct SchemaTypeNode : TypeNode {
     std::vector<std::unique_ptr<ExprNode>> Actuals; ///< discriminant value expressions
     /// Cached by Sema (mutable so const TypeNode& can be annotated); used by codegen.
     mutable std::shared_ptr<Type> ResolvedBody;
+    /// R3: each actual as a closed form over the ENCLOSING schema's
+    /// discriminant indices, when this instantiation is written inside another
+    /// schema's body.  `matrix(m,n) = array[1..m] of vector(n)` needs n here,
+    /// and n is the outer schema's discriminant -- so the inner schema's
+    /// extents are arithmetic over forms rather than over constants.  Empty
+    /// when the actuals are ordinary constants.
+    mutable std::vector<ExtentForm> ActualForms;
 };
 
 } // namespace plang
