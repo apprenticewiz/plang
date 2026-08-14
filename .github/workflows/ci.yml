@@ -21,8 +21,8 @@ env:
 
 jobs:
   build:
-    name: ${{ matrix.compiler }} / ${{ matrix.build_type }}
-    runs-on: ubuntu-latest
+    name: ${{ matrix.arch }} / ${{ matrix.compiler }} / ${{ matrix.build_type }}
+    runs-on: ${{ matrix.runner }}
     strategy:
       # gcc-14 and gcc-15 are both here to hold the README to "GCC >= 14".
       # They are the versions that reject, and then crash on, lambdas taking an
@@ -31,8 +31,28 @@ jobs:
       # One combination failing should not hide the state of the others.
       fail-fast: false
       matrix:
+        arch: [x86_64]
         compiler: [gcc-14, gcc-15, clang]
         build_type: [Debug, Release]
+        include:
+          # Attaches the runner to every x86_64 combination above.
+          - arch: x86_64
+            runner: ubuntu-latest
+          # aarch64 Linux.  Two combinations rather than six: what differs by
+          # architecture is code generation and the driver's idea of the host
+          # -- linker emulation, dynamic loader, crt paths, data layout -- and
+          # none of that varies with which C++ compiler built plang.  One GCC
+          # and one clang, one Debug and one Release, covers the axes that
+          # matter here.  The gcc-14/gcc-15 pair is about a C++ front-end bug
+          # and is architecture-independent, so it stays on x86_64 alone.
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+            compiler: gcc-15
+            build_type: Debug
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+            compiler: clang
+            build_type: Release
 
     steps:
       - uses: actions/checkout@v5
@@ -93,9 +113,16 @@ jobs:
         # directory holding Scrt1.o.  Both come with the runner's gcc, but a
         # failure here is far easier to read than "could not detect GCC
         # installation" from the far end of the test suite.
+        #
+        # The triple is asked of gcc rather than written out, because this step
+        # now runs on two architectures and detectGCC() derives it from the host
+        # the same way.  Hard-coding x86_64-linux-gnu here would have passed on
+        # aarch64 by never being true.
         run: |
-          ls /usr/lib/gcc/x86_64-linux-gnu/*/crtbeginS.o
-          ls /usr/lib/x86_64-linux-gnu/Scrt1.o
+          triple="$(gcc -dumpmachine)"
+          echo "host triple: $triple"
+          ls /usr/lib/gcc/"$triple"/*/crtbeginS.o
+          ls /usr/lib/"$triple"/Scrt1.o
 
       - name: Configure
         run: |
