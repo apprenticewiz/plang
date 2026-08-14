@@ -3488,6 +3488,34 @@ TEST(Schema, AVaryingStringIntoACharArrayChecksItsLength) {
     EXPECT_EQ(Ok.Stdout, "[abcd]\n");
 }
 
+TEST(Schema, AWithOverANestedComponentKeepsTheRunTimeLayout) {
+    // `with q^ do` is a Schema and `with q^.inner do` is an ordinary Record
+    // that merely lives inside one.  Keying the run-time-layout branch on the
+    // type's KIND sent the second to the static path, where the nested
+    // string(n) was bound at the probe's capacity of 1: reading a field worked
+    // and assigning to one raised "assigned to a string(1)" on legal code.
+    //
+    // lead and tail bracket the nested record, so a field bound at the wrong
+    // offset shows up as one of them changing rather than as a wrong string.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type t(n: integer) = record\n"
+        "       lead: integer;\n"
+        "       inner: record x: integer; a: array[1..n] of integer;\n"
+        "                     s: string(n) end;\n"
+        "       tail: integer end;\n"
+        "var q: ^t; i: integer;\n"
+        "begin new(q, 5); q^.lead := 111; q^.tail := 222;\n"
+        "      with q^.inner do begin\n"
+        "        x := 9; s := 'five!';\n"
+        "        for i := 1 to 5 do a[i] := i * 3 end;\n"
+        "      write(q^.inner.x:1, ' ', q^.inner.s, ' ');\n"
+        "      for i := 1 to 5 do write(q^.inner.a[i]:1, ' ');\n"
+        "      writeln('/ ', q^.lead:1, ' ', q^.tail:1) end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "9 five! 3 6 9 12 15 / 111 222\n");
+}
+
 TEST(Schema, AStringResultIsAsWideAsTheCapacityNobodyKnewYet) {
     // A result temporary needs a size, and for a capacity a discriminant fixes
     // there is no constant to give it -- so exprStrCapStatic's 255 was used,

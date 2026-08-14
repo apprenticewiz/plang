@@ -777,6 +777,13 @@ struct Codegen::Impl {
     // ====================================================================
     llvm::AllocaInst* createEntryAlloca(llvm::Type* ty, const std::string& name);
 
+    /// A type denoter with any `packed` wrappers taken off.
+    static const TypeNode* peelPackedNode(const TypeNode* tn) {
+        while (auto* pk = llvm::dyn_cast_or_null<PackedTypeNode>(tn))
+            tn = pk->Inner.get();
+        return tn;
+    }
+
     /// A { i64 len, [cap x i8] } temporary whose capacity is only known at run
     /// time -- the result of concatenating a `string(n)` whose n a discriminant
     /// fixes.  Sizing one of these by a constant is what silently truncated

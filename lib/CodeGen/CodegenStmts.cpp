@@ -1045,19 +1045,43 @@ void Codegen::Impl::emitWith(const WithStmt& s) {
         // EP §6.4.7: an undiscriminated schema has no struct to GEP into, so
         // each field is bound to the address the run-time layout gives it, and
         // each discriminant to the value the object carries.
-        if (rec->ResolvedType->Kind == TypeKind::Schema
-                && rec->ResolvedType->SchemaBody
-                && rec->ResolvedType->SchemaBody->Kind == TypeKind::Record) {
-            if (auto path = schemaPathOf(*rec)) {
-                const auto& discs = rec->ResolvedType->SchemaDiscs;
-                for (size_t i = 0; i < discs.size() && i < path->root.discs.size(); ++i) {
-                    auto* slot = createEntryAlloca(i64Ty, "disc." + discs[i].Name);
-                    builder.CreateStore(path->root.discs[i], slot);
-                    defVar(discs[i].Name, slot, i64Ty);
+        //
+        // Asked of the ACCESS PATH and not of the type's kind.  `with q^ do` is
+        // a Schema; `with q^.inner do` is an ordinary Record that merely lives
+        // inside one, and keying on the kind sent it to the static branch
+        // below -- where the nested `string(n)` was bound at the probe's
+        // capacity, so reading a field worked and assigning to one raised
+        // "string of length 7 assigned to a string(1)" on legal code.
+        // Whether there is a struct to GEP into is a question about the
+        // storage, which is what the path knows and the kind does not.
+        const bool isInstance =
+            rec->ResolvedType->Kind == TypeKind::SchemaInstance;
+        if (!isInstance) {
+            auto path = schemaPathOf(*rec);
+            const RecordTypeNode* rt =
+                path ? llvm::dyn_cast_or_null<RecordTypeNode>(
+                           peelPackedNode(path->decl))
+                     : nullptr;
+            if (path && rt) {
+                // The discriminants belong to the schematic variable, not to a
+                // record nested inside it, so they are exposed only where the
+                // body IS the schema's.
+                const bool isBody = rec->ResolvedType->Kind == TypeKind::Schema;
+                if (isBody) {
+                    const auto& discs = rec->ResolvedType->SchemaDiscs;
+                    for (size_t i = 0;
+                         i < discs.size() && i < path->root.discs.size(); ++i) {
+                        auto* slot = createEntryAlloca(i64Ty,
+                                                       "disc." + discs[i].Name);
+                        builder.CreateStore(path->root.discs[i], slot);
+                        defVar(discs[i].Name, slot, i64Ty);
+                    }
                 }
-                if (auto* rt = llvm::dyn_cast_or_null<RecordTypeNode>(
-                        rec->ResolvedType->SchemaBody->RecordDecl)) {
-                    for (const auto& F : rec->ResolvedType->SchemaBody->RecordFields) {
+                {
+                    const auto& fields =
+                        isBody ? rec->ResolvedType->SchemaBody->RecordFields
+                               : rec->ResolvedType->RecordFields;
+                    for (const auto& F : fields) {
                         bindSchemaDiscs(path->root);
                         auto* off = rtFieldOffset(*rt, F.Name);
                         popScope();
