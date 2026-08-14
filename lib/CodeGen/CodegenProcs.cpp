@@ -921,10 +921,26 @@ void Codegen::Impl::emitBlockDecls(const BlockNode& block) {
             defVar(cd.Name, a, ty, tn);
             continue;
         }
-        llvm::Value* cv = constantValueOf(cd);
-        if (!cv) cv = emitExpr(*cd.Value); // runtime fallback (EP only)
-        if (!cv) cv = llvm::ConstantInt::get(i64Ty, 0);
-        defineConst(cd.Name, cv);
+        if (llvm::Value* cv = constantValueOf(cd)) { defineConst(cd.Name, cv); continue; }
+        // EP §6.8.2 lets a constant be a general constant expression, and one
+        // this cannot fold has to be computed where the code runs.  The value
+        // used to be put straight into `consts`, which is flat and outlives
+        // this function -- so a nested procedure emitted afterwards read an
+        // instruction belonging to another function and the module did not
+        // verify: "Referring to an instruction in another function!" on a
+        // perfectly legal program.
+        //
+        // It goes in storage instead, and is defVar'd like any other local, so
+        // a nested procedure reaches it through the static link the same way it
+        // reaches everything else its enclosing procedure declared.
+        if (llvm::Value* val = emitExpr(*cd.Value)) {
+            llvm::Type* ty = val->getType();
+            auto* slot = createEntryAlloca(ty, cd.Name + ".const");
+            builder.CreateStore(val, slot);
+            defVar(cd.Name, slot, ty);
+            continue;
+        }
+        defineConst(cd.Name, llvm::ConstantInt::get(i64Ty, 0));
     }
 }
 

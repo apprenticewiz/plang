@@ -3469,3 +3469,29 @@ TEST(EP7Schema, AProcedureLocalSchemaDoesNotOutliveItsProcedure) {
     EXPECT_NE(Bounds.ExitCode, 0);
     EXPECT_NE(Bounds.Stderr.find("1..5"), std::string::npos) << Bounds.Stderr;
 }
+
+TEST(EP8Const, ARuntimeConstantIsReachableFromANestedProcedure) {
+    // EP §6.8.2 lets a constant be a general constant expression.  One codegen
+    // cannot fold is computed where the code runs, and its llvm::Value used to
+    // go straight into the flat `consts` map -- which outlives the function it
+    // was produced in.  A nested procedure emitted afterwards then referred to
+    // an instruction belonging to another function, and the module failed IR
+    // verification: "Referring to an instruction in another function!" on a
+    // legal program, with no diagnostic a user could act on.
+    //
+    // It lives in storage now and is bound like any other local, so the static
+    // link reaches it the same way it reaches everything else the enclosing
+    // procedure declared.  Both readings must agree: a constant that differed
+    // between the procedure that declared it and one nested inside it would be
+    // a stranger thing than the crash.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "procedure outer;\n"
+        "const k = sqrt(4.0) + 1.0;\n"
+        "  procedure nested;\n"
+        "  begin writeln('nested ', k:3:1) end;\n"
+        "begin writeln('outer  ', k:3:1); nested end;\n"
+        "begin outer end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "outer  3.0\nnested 3.0\n");
+}
