@@ -94,13 +94,23 @@ defects — see class C.
 Grouping these with the rest is what made the problem look bigger and vaguer
 than it is.  They belong to the later phases:
 
-- **R2, folding and representation** — the 255 fallback for a capacity that did
-  not fold (`CodegenTypes.cpp:397`); `maxchar` stored as `i8` `0xFF` and read
-  back with `getSExtValue()`, so it folds to −1 (`CodegenTypes.cpp:74`,
-  latent: every legal use produces a non-positive count that trips the existing
-  fallback); case labels lowering to a *load* (`CodegenStmts.cpp:634`);
-  `eof`/`eoln` checking two of the several things a name can denote
-  (`CodegenExprs.cpp:47`).
+- **R2, folding and representation — DONE.**  `ExprNode::ConstVal` carries the
+  value Sema folded, in the scope the expression was written in, and both
+  `tryEvalConstInt` and `constantValueOf` ask for it first.  The `255` capacity
+  and `= 0` constant fabrications are gone; `IdentExpr::UserDeclared` replaced
+  codegen's guessing at which of its tables held a spelling; a case label is
+  now required to be a constant.
+
+  **`ConstVal` holds ordinals only, and that is not a gap in R2.**  Sema folds
+  ordinals and nothing else — it has `Symbol::ConstOrdinal` and no real
+  equivalent — so a real or string constant has exactly ONE folder,
+  `evalConst` in codegen, and no second answer to disagree with.  Making Sema
+  fold reals is *building a folder*, not fixing a duplicated one, and it
+  belongs to whoever wants constant reals diagnosed rather than to this work.
+
+  Not a `const Symbol*` on `IdentExpr`, as first planned: symbols live in a
+  `std::vector<Scope>` whose `popScope()` destroys them, so the pointer would
+  dangle — the same defect as the raw `Type*` in `~TypeContext`.
 - **R4, one layout engine** — `Sema::layoutVariantCase` is a hand-written
   mirror of `Codegen::Impl::layoutVariantCase`, and **only total size is ever
   compared; field offsets are compared by nobody** (`CodegenTypes.cpp:218`,
@@ -152,8 +162,9 @@ test, because what covers it today is one condition in another file.
 1. **R1 — class A.**  Route every foreign-node site through Sema's annotation.
    Start here because the size-agreement ICE already fails loudly wherever the
    two answers differ, so the tree stays honest during the change.
-2. **R2** — one constant folder, in Sema.  Needs `ExprNode::ConstVal` and
-   `IdentExpr::ResolvedSym`, neither of which exists today.
+2. **R2 — done.**  See the class C entry above for what landed and for the two
+   places the plan turned out to be wrong: `ConstVal` is ordinal-only on
+   purpose, and the identifier annotation is a flag rather than a `Symbol*`.
 3. **R4** — one `LayoutEngine`, with field offsets compared and not just sizes.
 4. **R3** — `ExtentForm`: a closed arithmetic form over discriminant *indices*
    with every other leaf pre-folded, so CodeGen never re-resolves an identifier
