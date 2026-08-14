@@ -217,18 +217,45 @@ void Codegen::Impl::emitAssign(const AssignStmt& s) {
     // EP §6.4.7: a whole schematic variable copies its body, whose length only
     // the discriminants know.  It has to run before emitLValue because for p^
     // the body starts past the discriminant header.
-    if (const auto& tt = s.Target->ResolvedType;
-            tt && tt->Kind == TypeKind::Schema) {
-        auto dst = schemaRefOf(*s.Target);
-        auto src = schemaRefOf(*s.Value);
-        if (!dst || !src)
-            codegenICE("assignment between schematic variables that codegen "
-                       "cannot locate");
-        emitSchemaDiscMatch(*dst, *src);
-        auto* bytes = schemaBodySize(*dst->semaTy, dst->discs);
-        builder.CreateMemCpy(dst->data, llvm::MaybeAlign(),
-                             src->data, llvm::MaybeAlign(), bytes);
-        return;
+    //
+    // EITHER side may be the undiscriminated one.  Only the target was handled
+    // here, so both halves of the pair took the compiler down: `v := q^` fell
+    // through to the ordinary path and asked for the LLVM type of a schema,
+    // which by construction has none, and `q^ := v` reached for run-time
+    // discriminants that a discriminated instance does not carry.  Both are
+    // legal EP.
+    {
+        const plang::Type* tt = s.Target->ResolvedType.get();
+        const plang::Type* vt = s.Value->ResolvedType.get();
+        auto isSchema   = [](const plang::Type* T) {
+            return T && T->Kind == TypeKind::Schema; };
+        auto isInstance = [](const plang::Type* T) {
+            return T && T->Kind == TypeKind::SchemaInstance; };
+
+        // Two discriminated instances are ordinary values with a static layout
+        // and keep the ordinary path; this is only for a pair where at least
+        // one side knows its discriminants no earlier than run time.
+        if (isSchema(tt) || (isInstance(tt) && isSchema(vt))) {
+            if (!isSchema(vt) && !isInstance(vt))
+                codegenICE("assignment between schematic variables that codegen "
+                           "cannot locate");
+            // The undiscriminated side names the schema and carries the
+            // discriminant NAMES; a discriminated instance knows the VALUES at
+            // compile time.  schemaActual answers for both shapes, so neither
+            // side has to know which the other is -- and once the two agree,
+            // either one sizes the copy.
+            const plang::Type& schemaTy = isSchema(tt) ? *tt : *vt;
+            const auto n = static_cast<unsigned>(schemaTy.SchemaDiscs.size());
+            auto [dstData, dstDiscs] = schemaActual(*s.Target, n);
+            auto [srcData, srcDiscs] = schemaActual(*s.Value,  n);
+            SchemaRef dst{&schemaTy, dstData, dstDiscs};
+            SchemaRef src{&schemaTy, srcData, srcDiscs};
+            emitSchemaDiscMatch(dst, src);
+            builder.CreateMemCpy(dstData, llvm::MaybeAlign(),
+                                 srcData, llvm::MaybeAlign(),
+                                 schemaBodySize(schemaTy, dstDiscs));
+            return;
+        }
     }
 
     // EP §6.5.6: assigning to a substring replaces those characters and leaves

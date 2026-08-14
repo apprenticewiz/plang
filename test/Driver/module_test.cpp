@@ -3488,6 +3488,50 @@ TEST(Schema, AVaryingStringIntoACharArrayChecksItsLength) {
     EXPECT_EQ(Ok.Stdout, "[abcd]\n");
 }
 
+TEST(Schema, AWholeValueCopiesEitherWayBetweenAPointerAndAnInstance) {
+    // EP §6.4.7.  Only the TARGET being undiscriminated was handled, so both
+    // halves of the pair took the compiler down: `v := q^` asked for the LLVM
+    // type of a schema, which by construction has none, and `q^ := v` reached
+    // for run-time discriminants that a discriminated instance does not carry.
+    //
+    // The array is what makes this worth testing: a body that really does vary
+    // is the only one where the copy length has to come from the discriminants
+    // rather than from the struct, and k rides along after it to catch a length
+    // that is right for the array and wrong for the record.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type t(n: integer) = record a: array[1..n] of integer; k: integer end;\n"
+        "var q: ^t; v: t(4); i: integer;\n"
+        "begin new(q, 4);\n"
+        "      for i := 1 to 4 do q^.a[i] := i * 10;\n"
+        "      q^.k := 77;\n"
+        "      v := q^;\n"
+        "      for i := 1 to 4 do write(v.a[i]:1, ' ');\n"
+        "      writeln(v.k:1);\n"
+        "      for i := 1 to 4 do v.a[i] := i;\n"
+        "      v.k := 88;\n"
+        "      q^ := v;\n"
+        "      for i := 1 to 4 do write(q^.a[i]:1, ' ');\n"
+        "      writeln(q^.k:1) end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "10 20 30 40 77\n1 2 3 4 88\n");
+}
+
+TEST(Schema, AWholeValueCopyStillChecksTheDiscriminantsAgree) {
+    // The copy length is only right because the two agree, so the check is what
+    // makes the memcpy safe rather than a decoration on it.  One side knows its
+    // discriminant at compile time and the other at run time, which is exactly
+    // the case a compile-time check cannot settle.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type t(n: integer) = record k: integer end;\n"
+        "var q: ^t; v: t(4);\n"
+        "begin new(q, 3); q^.k := 1; v := q^; writeln(v.k:1) end.\n", kEP);
+    EXPECT_NE(R.ExitCode, 0);
+    EXPECT_NE(R.Stderr.find("discriminant n differs"), std::string::npos)
+        << R.Stderr;
+}
+
 TEST(Schema, AnArrayIndexedByANamedTypeVariesWithItsElement) {
     // ISO §6.4.3.2 lets the index be named by its type rather than written as a
     // range, and that branch of array resolution returns early -- so
