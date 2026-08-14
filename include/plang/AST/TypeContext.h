@@ -66,12 +66,22 @@ public:
     /// context outlives every type it hands out, so it is the one place that
     /// can cut the links once nothing will read them again.
     ~TypeContext() {
+        // Collected as shared_ptr, and held that way until every link is cut.
+        // Raw pointers were enough only while everything reachable was also
+        // owned by a cache.  A type whose extent a schema discriminant fixes is
+        // deliberately NOT interned -- folding against the probe's bounds is
+        // exactly what must not happen -- so it is reachable here and owned
+        // only by the field that names it.  Clearing that field's owner dropped
+        // the last reference, and the loop then walked into a Type it had
+        // already freed.  Found by AddressSanitizer, not by the suite.
         std::set<Type*> Seen;
+        std::vector<std::shared_ptr<Type>> Alive;
         for (auto* Cache : {&SubrangeCache_, &ArrayCache_, &PointerCache_,
                             &SetCache_, &FileCache_})
-            for (auto& [K, T] : *Cache) collect(T, Seen);
-        for (auto& [Cap, T] : VarStringCache_) collect(T, Seen);
-        for (auto* T : Seen) {
+            for (auto& [K, T] : *Cache) collect(T, Seen, Alive);
+        for (auto& [Cap, T] : VarStringCache_) collect(T, Seen, Alive);
+        for (const auto& Sp : Alive) {
+            Type* T = Sp.get();
             T->SubBase.reset();
             T->PointeeType.reset();
             T->IndexType.reset();
@@ -292,16 +302,21 @@ private:
     /// Every type reachable from \p T, so the destructor can reach the nominal
     /// types too: a record is not interned, and the only way to it is through
     /// whatever refers to it.
-    static void collect(const std::shared_ptr<Type>& T, std::set<Type*>& Seen) {
+    /// Seen keeps the walk finite; Alive keeps every type found in it alive
+    /// until the caller has finished cutting links, since cutting one link may
+    /// otherwise free a type still waiting its turn.
+    static void collect(const std::shared_ptr<Type>& T, std::set<Type*>& Seen,
+                        std::vector<std::shared_ptr<Type>>& Alive) {
         if (!T || !Seen.insert(T.get()).second) return;
-        collect(T->SubBase,     Seen);
-        collect(T->PointeeType, Seen);
-        collect(T->IndexType,   Seen);
-        collect(T->ElemType,    Seen);
-        collect(T->RetType,     Seen);
-        collect(T->SchemaBody,  Seen);
-        for (const auto& F : T->RecordFields) collect(F.Ty, Seen);
-        for (const auto& P : T->Params)       collect(P.Ty, Seen);
+        Alive.push_back(T);
+        collect(T->SubBase,     Seen, Alive);
+        collect(T->PointeeType, Seen, Alive);
+        collect(T->IndexType,   Seen, Alive);
+        collect(T->ElemType,    Seen, Alive);
+        collect(T->RetType,     Seen, Alive);
+        collect(T->SchemaBody,  Seen, Alive);
+        for (const auto& F : T->RecordFields) collect(F.Ty, Seen, Alive);
+        for (const auto& P : T->Params)       collect(P.Ty, Seen, Alive);
     }
 
     /// Cache-key fragment identifying a component type.  Null is a distinct
