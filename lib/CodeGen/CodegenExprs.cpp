@@ -353,22 +353,38 @@ llvm::Value* Codegen::Impl::emitBinary(const BinaryExpr& e) {
         // string(300) is legal and the corpus has one -- and capping the sum
         // here cut `n := n + 'x'` to 255.  That constant is the answer for a
         // capacity that is not known, not a ceiling on ones that are.
+        //
+        // And where a discriminant fixes it, nobody knows it at compile time
+        // but somebody knows it: capL and capR are the real capacities, as
+        // values.  Sizing the result by the static guess instead truncated
+        // `q^ := q^ + 'x'` at 256 for a q^ of capacity 300 -- silently, and on
+        // a program that is entirely legal.  So the result temporary is sized
+        // by the same arithmetic the runtime is told about.
+        auto varies = [](const ExprNode& x) {
+            return exprIsVarStr(x) && x.ResolvedType->ExtentVaries;
+        };
+        const bool capVaries = varies(*e.Left) || varies(*e.Right);
         const int64_t capRes = staticCap(*e.Left) + staticCap(*e.Right);
-        auto*   resPtr = createEntryAlloca(strStructType(capRes), "str.concat");
+        llvm::Value* capResV = capVaries
+            ? builder.CreateAdd(capL, capR, "concat.cap") : i64c(capRes);
+        llvm::Value* resPtr  = capVaries
+            ? createDynStrAlloca(capResV, "str.concat")
+            : static_cast<llvm::Value*>(
+                  createEntryAlloca(strStructType(capRes), "str.concat"));
         auto*   rv     = exprIsVarStr(*e.Right) ? emitStrAddr(*e.Right)
                                                 : emitExpr(*e.Right);
         if (exprIsVarStr(*e.Right)) {
             auto* fn = getStrFn("plang_str_concat", llvm::Type::getVoidTy(ctx),
                 {ptrTy, i64Ty, ptrTy, i64Ty, ptrTy, i64Ty});
-            builder.CreateCall(fn, {resPtr, i64c(capRes), lv, capL, rv, capR});
+            builder.CreateCall(fn, {resPtr, capResV, lv, capL, rv, capR});
         } else if (rv && rv->getType()->isIntegerTy(8)) {
             auto* fn = getStrFn("plang_str_concat_char", llvm::Type::getVoidTy(ctx),
                 {ptrTy, i64Ty, ptrTy, i64Ty, i8Ty});
-            builder.CreateCall(fn, {resPtr, i64c(capRes), lv, capL, rv});
+            builder.CreateCall(fn, {resPtr, capResV, lv, capL, rv});
         } else {
             auto* fn = getStrFn("plang_str_concat_cstr", llvm::Type::getVoidTy(ctx),
                 {ptrTy, i64Ty, ptrTy, i64Ty, ptrTy});
-            builder.CreateCall(fn, {resPtr, i64c(capRes), lv, capL, rv});
+            builder.CreateCall(fn, {resPtr, capResV, lv, capL, rv});
         }
         return resPtr;
     }
@@ -896,6 +912,18 @@ llvm::Value* Codegen::Impl::emitCallExpr(const CallExpr& e) {
             return (int64_t)sl->Value.size();
         return 0;
     };
+    /// A result temporary as wide as the argument it is derived from.  Where a
+    /// discriminant fixes that argument's capacity the width is not a constant,
+    /// and exprStrCapStatic's 255 is the answer for a capacity nobody knows --
+    /// so sizing by it cut substr and trim of a 400-capacity string to 255.
+    auto strResultTemp = [&](int idx, llvm::Value* capV, const char* name)
+            -> std::pair<llvm::Value*, llvm::Value*> {
+        if (const auto& arg = *e.Args[idx];
+                exprIsVarStr(arg) && arg.ResolvedType->ExtentVaries)
+            return {createDynStrAlloca(capV, name), capV};
+        const int64_t c = strArgCapStatic(idx);
+        return {createEntryAlloca(strStructType(c), name), i64c(c)};
+    };
     if (lo == "length") {
         auto [ptr, cap] = getStrArgPtr(0);
         if (ptr) {
@@ -927,22 +955,20 @@ llvm::Value* Codegen::Impl::emitCallExpr(const CallExpr& e) {
                 : builder.CreateAdd(
                       builder.CreateSub(strLoadLen(sp), i, "substr.rest"),
                       llvm::ConstantInt::get(i64Ty, 1), "substr.len");
-            const int64_t resCap = strArgCapStatic(0);
-            auto* resPtr = createEntryAlloca(strStructType(resCap), "substr.res");
+            auto [resPtr, resCapV] = strResultTemp(0, sc, "substr.res");
             auto* fn     = getStrFn("plang_str_substr",
                 llvm::Type::getVoidTy(ctx), {ptrTy, i64Ty, ptrTy, i64Ty, i64Ty, i64Ty});
-            builder.CreateCall(fn, {resPtr, i64c(resCap), sp, sc, i, n});
+            builder.CreateCall(fn, {resPtr, resCapV, sp, sc, i, n});
             return resPtr;
         }
     }
     if (lo == "trim") {
         auto [sp, sc] = getStrArgPtr(0);
         if (sp) {
-            const int64_t resCap = strArgCapStatic(0);
-            auto* resPtr = createEntryAlloca(strStructType(resCap), "trim.res");
+            auto [resPtr, resCapV] = strResultTemp(0, sc, "trim.res");
             auto* fn     = getStrFn("plang_str_trim",
                 llvm::Type::getVoidTy(ctx), {ptrTy, i64Ty, ptrTy, i64Ty});
-            builder.CreateCall(fn, {resPtr, i64c(resCap), sp, sc});
+            builder.CreateCall(fn, {resPtr, resCapV, sp, sc});
             return resPtr;
         }
     }

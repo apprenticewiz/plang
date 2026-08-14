@@ -12,14 +12,25 @@ static_assert(NumStmtKinds == 12, "a new statement needs a case in emitStmt");
 void Codegen::Impl::emitStmt(const StmtNode* stmt) {
     if (!stmt || isTerminated()) return;
 
-    if (auto* s = llvm::dyn_cast<AssignStmt>(stmt))    { emitAssign(*s);   return; }
+    // The two statement kinds that evaluate an arbitrary expression and then
+    // finish are the two that can leave a run-time-sized string temporary
+    // behind, and giving the stack back here is what keeps one inside a loop
+    // costing a fixed amount rather than one allocation per iteration.
+    //
+    // Deliberately not around every statement: a labeled statement moves the
+    // insertion point to a block that any goto may enter, so the save would not
+    // dominate the restore and the IR would not verify.  A structured statement
+    // is covered by the scopes of the simple statements inside it.
+    if (auto* s = llvm::dyn_cast<AssignStmt>(stmt)) {
+        StackScope frame(*this); emitAssign(*s);   return; }
     if (auto* s = llvm::dyn_cast<CompoundStmt>(stmt))  { emitCompound(*s); return; }
     if (auto* s = llvm::dyn_cast<IfStmt>(stmt))        { emitIf(*s);       return; }
     if (auto* s = llvm::dyn_cast<WhileStmt>(stmt))     { emitWhile(*s);    return; }
     if (auto* s = llvm::dyn_cast<ForStmt>(stmt))       { emitFor(*s);      return; }
     if (auto* s = llvm::dyn_cast<ForInStmt>(stmt))    { emitForIn(*s);    return; }
     if (auto* s = llvm::dyn_cast<RepeatStmt>(stmt))    { emitRepeat(*s);   return; }
-    if (auto* s = llvm::dyn_cast<CallStmt>(stmt))      { emitCallStmt(*s); return; }
+    if (auto* s = llvm::dyn_cast<CallStmt>(stmt)) {
+        StackScope frame(*this); emitCallStmt(*s); return; }
     if (auto* s = llvm::dyn_cast<GotoStmt>(stmt)) { emitGoto(*s); return; }
     if (auto* s = llvm::dyn_cast<LabeledStmt>(stmt)) {
         auto* lblBB = getOrCreateLabel("lbl_" + s->Label);
@@ -417,7 +428,12 @@ void Codegen::Impl::emitWhile(const WhileStmt& s) {
 
     builder.CreateBr(condBB);
     builder.SetInsertPoint(condBB);
-    auto* cond = ensureI1(emitExpr(*s.Cond));
+    // A condition is re-evaluated on every pass and is not a statement, so a
+    // run-time-sized string temporary in one -- `while trim(q^) <> '' do` --
+    // would otherwise take a fresh piece of stack per iteration and never give
+    // any of it back.  Scoped here for the same reason a simple statement is.
+    llvm::Value* cond = nullptr;
+    { StackScope frame(*this); cond = ensureI1(emitExpr(*s.Cond)); }
     if (!cond) { builder.SetInsertPoint(endBB); return; }
     builder.CreateCondBr(cond, bodyBB, endBB);
 
@@ -582,7 +598,9 @@ void Codegen::Impl::emitRepeat(const RepeatStmt& s) {
     brIfNeeded(condBB);
 
     builder.SetInsertPoint(condBB);
-    auto* cond = ensureI1(emitExpr(*s.Cond));
+    // Re-evaluated per pass; see emitWhile.
+    llvm::Value* cond = nullptr;
+    { StackScope frame(*this); cond = ensureI1(emitExpr(*s.Cond)); }
     // Branching to endBB here instead would turn the loop into a single
     // unconditional pass through the body.
     if (!cond) codegenICE("'repeat' with an unlowerable termination condition");

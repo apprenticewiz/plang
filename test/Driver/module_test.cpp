@@ -3488,6 +3488,40 @@ TEST(Schema, AVaryingStringIntoACharArrayChecksItsLength) {
     EXPECT_EQ(Ok.Stdout, "[abcd]\n");
 }
 
+TEST(Schema, AStringResultIsAsWideAsTheCapacityNobodyKnewYet) {
+    // A result temporary needs a size, and for a capacity a discriminant fixes
+    // there is no constant to give it -- so exprStrCapStatic's 255 was used,
+    // which is the answer for a capacity NOBODY knows.  Here somebody knows it;
+    // it is simply not known yet.  Every one of these silently produced a
+    // shorter string than the program asked for, on entirely legal code.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "var q: ^string; s: string(400); i: integer;\n"
+        "begin new(q, 400); q^ := '';\n"
+        "      for i := 1 to 400 do q^ := q^ + 'y';\n"
+        "      writeln('concat ', length(q^):1);\n"
+        "      s := substr(q^, 1, 400); writeln('substr ', length(s):1);\n"
+        "      s := trim(q^);           writeln('trim   ', length(s):1) end.\n",
+        kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "concat 400\nsubstr 400\ntrim   400\n");
+}
+
+TEST(Schema, ARunTimeSizedTemporaryDoesNotGrowTheStackPerIteration) {
+    // The allocation lands where its size is known, which is inside the loop.
+    // Without a scope to give the stack back, two million passes take two
+    // million pieces of it; with one, the cost is fixed.  The assertion is that
+    // this finishes at all -- it does not terminate on a stack that grows.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "var q: ^string; i: integer;\n"
+        "begin new(q, 4000);\n"
+        "      for i := 1 to 2000000 do begin q^ := 'abc'; q^ := q^ + 'd' end;\n"
+        "      writeln(length(q^):1, ' ', q^) end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "4 abcd\n");
+}
+
 TEST(Schema, ADiscriminantIsReadableAndNotWritable) {
     // EP §6.4.7: a discriminant is a value the schematic variable carries, not
     // a component of it.  It is spelled like a field and reads like one, so

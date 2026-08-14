@@ -777,6 +777,37 @@ struct Codegen::Impl {
     // ====================================================================
     llvm::AllocaInst* createEntryAlloca(llvm::Type* ty, const std::string& name);
 
+    /// A { i64 len, [cap x i8] } temporary whose capacity is only known at run
+    /// time -- the result of concatenating a `string(n)` whose n a discriminant
+    /// fixes.  Sizing one of these by a constant is what silently truncated
+    /// such a result to PlangMaxStringCapacity: 255 is the answer for a
+    /// capacity nobody knows, and here somebody does, just not yet.
+    ///
+    /// The allocation lands where the builder is rather than in the entry
+    /// block, because that is where its size is known.  A StackScope over the
+    /// statement gives it back afterwards, so one in a loop costs a fixed
+    /// amount of stack rather than one allocation per iteration.
+    llvm::Value* createDynStrAlloca(llvm::Value* capV, const std::string& name);
+
+    /// Restores the stack pointer on the way out, but only if something inside
+    /// actually took a dynamic allocation -- a scope that costs nothing is one
+    /// that can be put everywhere a statement is emitted without reading like
+    /// an optimisation decision.  The save is spliced in at the point the scope
+    /// opened, which is why the flag can be consulted at the end.
+    class StackScope {
+    public:
+        explicit StackScope(Impl& I);
+        ~StackScope();
+        StackScope(const StackScope&)            = delete;
+        StackScope& operator=(const StackScope&) = delete;
+    private:
+        Impl&        I;
+        llvm::Instruction* Save;
+        bool         SavedUsed;
+    };
+    /// Set by createDynStrAlloca, cleared and restored by StackScope.
+    bool dynAllocaUsed_{false};
+
     // ====================================================================
     // String interning
     // ====================================================================
