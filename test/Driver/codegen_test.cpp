@@ -4649,3 +4649,40 @@ TEST(Shadowing, AUserDeclaredEofMeansTheUsersOwn) {
     ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
     EXPECT_EQ(R.Stdout, "user function won\n");
 }
+
+TEST(CaseStatement, ALabelMustBeAConstant) {
+    // ISO §6.8.3.5: a case-label is a case-CONSTANT.  Sema folded labels only
+    // to find duplicates and skipped quietly when a label would not fold, so
+    // one that was not constant reached codegen and lowered to a LOAD of the
+    // variable -- `case i of 1..n:` compared the selector against whatever n
+    // held at that moment, and the illegal program compiled into a
+    // plausible-looking one that even produced the "right" answer here.
+    auto Bad = compileAndRun(
+        "program p(output);\n"
+        "var i, n: integer;\n"
+        "begin\n"
+        "  n := 3; i := 2;\n"
+        "  case i of\n"
+        "    1..n: writeln('in range');\n"
+        "    otherwise writeln('out')\n"
+        "  end\n"
+        "end.\n", kEP);
+    EXPECT_NE(Bad.ExitCode, 0);
+    EXPECT_NE(Bad.Stderr.find("not a constant"), std::string::npos) << Bad.Stderr;
+
+    // A constant range is still a range; the diagnostic must not cost the
+    // feature it is protecting.
+    auto Ok = compileAndRun(
+        "program p(output);\n"
+        "const hi = 3;\n"
+        "var i: integer;\n"
+        "begin\n"
+        "  i := 2;\n"
+        "  case i of\n"
+        "    1..hi: writeln('in range');\n"
+        "    otherwise writeln('out')\n"
+        "  end\n"
+        "end.\n", kEP);
+    ASSERT_EQ(Ok.ExitCode, 0) << Ok.Stderr;
+    EXPECT_EQ(Ok.Stdout, "in range\n");
+}
