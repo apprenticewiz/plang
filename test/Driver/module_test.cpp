@@ -3979,13 +3979,25 @@ const SchemaShape kShapes[] = {
     "  writeln(%s.a[1]:1, ' ', %s.u:1);\n",
     2, false },
 
-  { "inline-packed-record", "",                   // review-4 finding 3
+  { "inline-packed-record", "",                   // review-4 finding 3: FIXED
     "record c0: char; p: packed record c: char; x: integer end;\n"
     "       s: string(n) end",
     "",
     "  %s.c0 := 'A'; %s.p.c := 'B'; %s.p.x := 77; %s.s := 'hello';\n",
     "  writeln(%s.c0, ' ', %s.p.c, ' ', %s.p.x:1, ' ', %s.s);\n",
-    5, false },
+    5, true },
+
+  { "packed-array-element", "",                   // the other half of the flag
+    "record c0: char;\n"
+    "       a: packed array[1..3] of integer;\n"
+    "       s: string(n) end",
+    "i: integer",
+    "  %s.c0 := 'A'; %s.s := 'hi';\n"
+    "  for i := 1 to 3 do %s.a[i] := i * 9;\n",
+    "  write(%s.c0, ' ');\n"
+    "  for i := 1 to 3 do write(%s.a[i]:1, ' ');\n"
+    "  writeln(%s.s);\n",
+    4, true },
 };
 
 const char* comboName(Combo C) {

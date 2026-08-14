@@ -408,9 +408,12 @@ bool nodeExtentVaries(const TypeNode* tn) {
 } // namespace
 
 uint64_t Codegen::Impl::rtAlignOfTypeNode(const TypeNode* tn) {
-    bool packed = false;
-    const TypeNode* d = peelPacked(tn, &packed);
-    if (packed) return 1;
+    // `packed` is peeled and then IGNORED here, because llvmTypeOfNode ignores
+    // it too: a PackedTypeNode wrapper lowers to its inner type unchanged, so
+    // `packed array[1..3] of integer` is [3 x i64] and aligned like one.
+    // Answering 1 for it made this walk disagree with the layout it has to
+    // reproduce.  Where `packed` really does pack is a RECORD, below.
+    const TypeNode* d = peelPacked(tn);
     // Alignment is static even where size is not -- a string(cap) is
     // i64-aligned for every cap, and an array is aligned as its element is --
     // so the three denoters that can hold a varying extent are answered
@@ -424,6 +427,14 @@ uint64_t Codegen::Impl::rtAlignOfTypeNode(const TypeNode* tn) {
     if (auto* at = llvm::dyn_cast<ArrayTypeNode>(d))
         return rtAlignOfTypeNode(at->Element.get());
     if (auto* rt = llvm::dyn_cast<RecordTypeNode>(d)) {
+        // `packed record ... end` is a RecordTypeNode carrying Packed, NOT a
+        // PackedTypeNode wrapper -- the parser only wraps `packed <name>`.  So
+        // the peel above never saw it, this returned the widest member's
+        // alignment, and layoutOf built a StructType with packed=true and
+        // alignment 1 for the very same declaration.  rtSizeOfTypeNode has
+        // always honoured rt->Packed for the SIZE, so the file disagreed with
+        // itself about one flag.
+        if (rt->Packed) return 1;
         uint64_t a = 1;
         for (const auto& fd : rt->Fields)
             a = std::max(a, rtAlignOfTypeNode(fd.Type.get()));
