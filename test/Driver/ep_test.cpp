@@ -3675,3 +3675,27 @@ TEST(EP7Schema, SubstrAndTrimAreAsWideAsWhatTheyWereTakenFrom) {
     ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
     EXPECT_EQ(R.Stdout, "121\n100\n120\n");
 }
+
+TEST(EP7Schema, TheBodyIsAlignedForWhatItHoldsNotJustForTheHeader) {
+    // new() puts the discriminants in a header and the body behind it.  The
+    // header's size was spelled out as `discs * 8` in two places -- the code
+    // that WRITES it and the code that SKIPS it -- and eight is the alignment
+    // of the header, not of the body.  A body wanting sixteen sat misaligned,
+    // and the aligned vector stores llvm emits from -O1 upward faulted on it:
+    // correct at -O0 and a segmentation fault at every level above.
+    //
+    // Both places ask one function now.  The optimisation levels are the test:
+    // this is invisible at -O0, which is where a suite that compiles at one
+    // level would have looked.
+    for (const char* O : {"-O0", "-O1", "-O2", "-O3"}) {
+        auto R = compileAndRun(
+            "program p(output);\n"
+            "type t(n: integer) = array[1..n] of set of char;\n"
+            "var q: ^t; i: integer;\n"
+            "begin new(q, 4);\n"
+            "  for i := 1 to 4 do q^[i] := ['a'..'c'];\n"
+            "  writeln(('b' in q^[4]):5) end.\n", kEP + " " + O);
+        ASSERT_EQ(R.ExitCode, 0) << O << ": " << R.Stderr;
+        EXPECT_EQ(R.Stdout, " true\n") << O;
+    }
+}

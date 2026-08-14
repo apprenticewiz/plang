@@ -1291,6 +1291,8 @@ struct Codegen::Impl {
     /// Bounds of an array-bodied schema, computed from `ref`'s discriminants.
     std::pair<llvm::Value*, llvm::Value*> schemaArrayBounds(const SchemaRef& ref);
     /// R3: a closed extent form evaluated against an object's discriminants.
+    /// Bytes of discriminant header in front of a schema body; see the definition.
+    uint64_t schemaHeaderBytes(const plang::Type& schema);
     llvm::Value* emitExtentForm(const plang::ExtentForm& F,
                                 const std::vector<llvm::Value*>& discs);
     /// The discriminants the run-time layout walk is working against, set by

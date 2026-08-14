@@ -54,6 +54,21 @@ const ArrayTypeNode* arrayBodyOf(const TypeNode* body) {
 // Recovering the run-time view
 // ---------------------------------------------------------------------------
 
+/// Bytes of discriminant header in front of a schema body.
+///
+/// One question, one answer: emitNewSchema lays this out and schemaRefOf skips
+/// it, and they were each spelling `SchemaDiscs.size() * 8` for themselves.
+/// That is also the wrong number -- it aligns the body to 8 whatever the body
+/// needs, so a body wanting 16 sat misaligned and the aligned vector stores
+/// llvm emits at -O1 and above faulted on it.
+uint64_t Codegen::Impl::schemaHeaderBytes(const plang::Type& schema) {
+    const uint64_t raw = schema.SchemaDiscs.size() * 8;
+    uint64_t a = 8;
+    if (const TypeNode* body = schemaBodyNodeOf(schema))
+        a = std::max(a, rtAlignOfTypeNode(body));
+    return (raw + a - 1) / a * a;
+}
+
 std::optional<Codegen::Impl::SchemaRef>
 Codegen::Impl::schemaRefOf(const ExprNode& e) {
     // A formal parameter: the body pointer and the discriminants are arguments.
@@ -90,8 +105,9 @@ Codegen::Impl::schemaRefOf(const ExprNode& e) {
                 {llvm::ConstantInt::get(i64Ty, i)}, "sch.disc.ptr");
             ref.discs.push_back(builder.CreateLoad(i64Ty, slot, "sch.disc"));
         }
-        ref.data = builder.CreateGEP(i64Ty, base,
-            {llvm::ConstantInt::get(i64Ty, T->SchemaDiscs.size())}, "sch.data");
+        ref.data = builder.CreateGEP(i8Ty, base,
+            {llvm::ConstantInt::get(i64Ty,
+                static_cast<int64_t>(schemaHeaderBytes(*T)))}, "sch.data");
         return ref;
     }
 
@@ -376,7 +392,7 @@ void Codegen::Impl::emitNewSchema(const ExprNode& ptrArg,
         discs.push_back(v);
     }
 
-    const uint64_t hdrBytes = s * 8;
+    const uint64_t hdrBytes = schemaHeaderBytes(schema);
     auto* bytes = builder.CreateAdd(llvm::ConstantInt::get(i64Ty, hdrBytes),
                                     schemaBodySize(schema, discs), "sch.alloc");
     auto* base  = builder.CreateCall(getRuntimeNewFn(), {bytes}, "sch.new");
