@@ -61,3 +61,4 @@ tools/gen_conformance_tests.py
 # Agent worktrees and session state.
 .claude/
 build-asan/
+-
