@@ -3839,3 +3839,190 @@ TEST(Schema, ANamedIndexIsTheOnlyVaryingFieldInItsRecord) {
     ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
     EXPECT_EQ(R.Stdout, "1 row\n2 row\n3 third\n4 row\n");
 }
+
+// ===========================================================================
+// EP §6.4.7 differential harness.
+//
+// One schema body, written once, exercised through every lowering this
+// compiler has for it:
+//
+//   instance   var v: t(K)              a static struct
+//   pointer    var q: ^t; new(q, K)     run-time walk, discriminants in a header
+//   parameter  procedure b(var v: t)    run-time walk, discriminants as arguments
+//
+// The essential trick is that writing and reading must CROSS the forms.  A
+// lowering that is wrong but self-consistent writes and reads the same wrong
+// offsets and looks perfect; the disagreement only becomes observable when one
+// form stores a value and a different form loads it.  The first two versions of
+// this harness did not cross, and the packed-record and tagless-variant
+// defects walked straight through both.
+//
+// Combinations, each compared against the pure-instance reference:
+//   A  write instance  read instance   (reference)
+//   B  write pointer   read pointer    (self-consistent: catches size errors)
+//   C  write instance  read parameter  (crosses static -> run-time)
+//   D  write pointer   copy to instance, read instance  (crosses run-time -> static)
+//
+// This exists because the fourth review found ten defects that 1,738 tests,
+// AddressSanitizer, IR byte-identity and a four-level optimisation sweep were
+// all green through.  Those gates measure the ISO 7185 core.
+//
+// A shape whose defect is still open is marked expectAgree=false and asserted
+// to STILL differ, so fixing one fails this test until the shape is promoted.
+// ===========================================================================
+namespace {
+
+struct SchemaShape {
+    const char* name;
+    const char* prelude;   // extra type declarations the body needs
+    const char* body;      // schema body, after `t(n: integer) = `
+    const char* decls;     // extra variables, e.g. "i: integer"
+    const char* write;     // statements that fill the object; %s is the object
+    const char* read;      // statements that print it; %s is the object
+    int         disc;
+    bool        expectAgree;
+};
+
+std::string subst(const char* Text, const std::string& Obj) {
+    std::string Out;
+    for (const char* p = Text; *p; ++p) {
+        if (p[0] == '%' && p[1] == 's') { Out += Obj; ++p; }
+        else Out += *p;
+    }
+    return Out;
+}
+
+// A: instance throughout.  B: pointer throughout.  C: instance stores, a
+// schema parameter loads.  D: pointer stores, a whole-value copy hands it to
+// an instance which loads.
+enum class Combo { A, B, C, D };
+
+RunResult runCombo(const SchemaShape& S, Combo C) {
+    const std::string K = std::to_string(S.disc);
+    const bool HasDecls = S.decls && *S.decls;
+    const std::string DeclTail = HasDecls ? std::string("; ") + S.decls : "";
+
+    std::string Src = "program p(output);\ntype ";
+    if (S.prelude && *S.prelude) { Src += S.prelude; Src += "\n     "; }
+    Src += "t(n: integer) = "; Src += S.body; Src += ";\n";
+
+    switch (C) {
+    case Combo::A:
+        Src += "var v: t(" + K + ")" + DeclTail + ";\nbegin\n"
+             + subst(S.write, "v") + subst(S.read, "v") + "end.\n";
+        break;
+    case Combo::B:
+        Src += "var q: ^t" + DeclTail + ";\nbegin\n  new(q, " + K + ");\n"
+             + subst(S.write, "q^") + subst(S.read, "q^") + "end.\n";
+        break;
+    case Combo::C:
+        Src += "var a: t(" + K + ")" + DeclTail + ";\n";
+        Src += "procedure rd(var v: t);\n";
+        if (HasDecls) { Src += "var "; Src += S.decls; Src += ";\n"; }
+        Src += "begin\n" + subst(S.read, "v") + "end;\n";
+        Src += "begin\n" + subst(S.write, "a") + "  rd(a)\nend.\n";
+        break;
+    case Combo::D:
+        Src += "var q: ^t; v: t(" + K + ")" + DeclTail + ";\nbegin\n"
+             + "  new(q, " + K + ");\n" + subst(S.write, "q^")
+             + "  v := q^;\n" + subst(S.read, "v") + "end.\n";
+        break;
+    }
+    return compileAndRun(Src, kEP);
+}
+
+const SchemaShape kShapes[] = {
+  { "array-string-trailer", "",
+    "record a: array[1..n] of integer; s: string(n); k: integer end",
+    "i: integer",
+    "  for i := 1 to 6 do %s.a[i] := i * 7;\n  %s.s := 'abcdef'; %s.k := 4242;\n",
+    "  for i := 1 to 6 do write(%s.a[i]:1, ' ');\n"
+    "  writeln(%s.s, ' ', %s.k:1);\n",
+    6, true },
+
+  { "named-ordinal-index", "",
+    "record lo: integer; a: array[boolean] of string(n); hi: integer end",
+    "",
+    "  %s.lo := 11; %s.hi := 22;\n"
+    "  %s.a[false] := 'no'; %s.a[true] := 'yes';\n",
+    "  writeln(%s.a[false], ' ', %s.a[true], ' ', %s.lo:1, ' ', %s.hi:1);\n",
+    5, true },
+
+  { "nested-variant", "",
+    "record lead: integer; s: string(n);\n"
+    "       case tag: boolean of\n"
+    "         true:  (c: char; case inner: boolean of\n"
+    "                            true: (d: real); false: (k: char));\n"
+    "         false: (z: integer) end",
+    "",
+    "  %s.lead := 111; %s.s := 'ten chars!';\n"
+    "  %s.tag := true; %s.c := 'x'; %s.inner := false; %s.k := 'K';\n",
+    "  writeln('[', %s.k, ']', %s.lead:1, %s.c, ' ', %s.s);\n",
+    10, true },
+
+  // ---- shapes whose defects review 4 left open ----
+
+  { "nested-instantiation",                       // review-4 finding 1
+    "inner(m: integer) = array[1..m] of integer;",
+    "record a: array[1..n] of integer; x: inner(n); k: integer end",
+    "i: integer",
+    "  for i := 1 to 4 do begin %s.a[i] := i; %s.x[i] := i * 100 end;\n"
+    "  %s.k := 99;\n",
+    "  writeln(%s.x[4]:1, ' ', %s.k:1);\n",
+    4, false },
+
+  { "tagless-variant", "",                        // review-4 finding 2
+    "record a: array[1..n] of integer;\n"
+    "       case boolean of true: (u: integer); false: (w: char) end",
+    "i: integer",
+    "  for i := 1 to 2 do %s.a[i] := i * 5;\n  %s.u := 4242;\n",
+    "  writeln(%s.a[1]:1, ' ', %s.u:1);\n",
+    2, false },
+
+  { "inline-packed-record", "",                   // review-4 finding 3
+    "record c0: char; p: packed record c: char; x: integer end;\n"
+    "       s: string(n) end",
+    "",
+    "  %s.c0 := 'A'; %s.p.c := 'B'; %s.p.x := 77; %s.s := 'hello';\n",
+    "  writeln(%s.c0, ' ', %s.p.c, ' ', %s.p.x:1, ' ', %s.s);\n",
+    5, false },
+};
+
+const char* comboName(Combo C) {
+    switch (C) {
+    case Combo::A: return "instance->instance";
+    case Combo::B: return "pointer->pointer";
+    case Combo::C: return "instance->parameter";
+    case Combo::D: return "pointer->instance (whole-value copy)";
+    }
+    return "?";
+}
+
+} // namespace
+
+TEST(SchemaDifferential, EveryLoweringOfOneTypeAgrees) {
+    for (const auto& S : kShapes) {
+        const auto Ref = runCombo(S, Combo::A);
+        bool AnyDiffers = false;
+
+        for (const Combo C : {Combo::B, Combo::C, Combo::D}) {
+            const auto R = runCombo(S, C);
+            const bool Differs = R.ExitCode != Ref.ExitCode || R.Stdout != Ref.Stdout;
+            AnyDiffers = AnyDiffers || Differs;
+            if (!S.expectAgree) continue;
+
+            EXPECT_EQ(Ref.ExitCode, 0) << S.name << " reference: " << Ref.Stderr;
+            EXPECT_FALSE(Differs)
+                << S.name << ": " << comboName(C) << " disagrees with the "
+                << "instance reference.\n"
+                << "  reference: [" << Ref.Stdout << "] exit " << Ref.ExitCode << "\n"
+                << "  this one : [" << R.Stdout   << "] exit " << R.ExitCode   << "\n"
+                << "  stderr   : " << R.Stderr;
+        }
+
+        if (!S.expectAgree)
+            EXPECT_TRUE(AnyDiffers)
+                << S.name << " now agrees across every lowering -- a review-4 defect "
+                   "has been fixed.  Set expectAgree = true for this shape.";
+    }
+}
