@@ -808,7 +808,7 @@ uint64_t Sema::byteAlignOf(const Type& T) {
     }
 }
 
-std::optional<uint64_t> Sema::byteSizeOf(const Type& T) {
+std::optional<uint64_t> Sema::byteSizeOf(const Type& T, FieldOffsets* Offsets) {
     switch (T.Kind) {
     case TypeKind::Integer:
     case TypeKind::Subrange:
@@ -863,23 +863,30 @@ std::optional<uint64_t> Sema::byteSizeOf(const Type& T) {
         const bool Packed = RD.Packed;
         bool Ok = true;
         uint64_t Off = 0, Align = 1;
-        const auto place = [&](const Type* Ft) {
+        const auto place = [&](const Type* Ft, const std::string* Name) {
             if (!Ft) { Ok = false; return; }
             const auto Sz = byteSizeOf(*Ft);
             if (!Sz) { Ok = false; return; }
             const uint64_t A = Packed ? 1 : byteAlignOf(*Ft);
             Align = std::max(Align, A);
-            Off   = roundUp(Off, A) + *Sz;
+            Off   = roundUp(Off, A);
+            // R4: the offsets fall out of the walk that computes the size, and
+            // are handed to whoever asked so that codegen can be CHECKED
+            // against them.  Only the total was ever compared before, and a
+            // record can be the right size with every field in the wrong place.
+            if (Offsets && Name) Offsets->emplace_back(*Name, Off);
+            Off += *Sz;
         };
 
         for (const auto& Fd : RD.Fields)
             for (size_t I = 0; I < Fd.Names.size(); ++I)
-                place(Fd.Type ? Fd.Type->ResolvedType.get() : nullptr);
+                place(Fd.Type ? Fd.Type->ResolvedType.get() : nullptr,
+                      &Fd.Names[I]);
 
         if (RD.Variant) {
             const auto& VP = *RD.Variant;
             if (!VP.TagField.empty() && VP.TagType)
-                place(VP.TagType->ResolvedType.get());
+                place(VP.TagType->ResolvedType.get(), &VP.TagField);
             uint64_t Size = 0, BlobAlign = 1;
             for (const auto& VC : VP.Cases)
                 Size = std::max(Size,

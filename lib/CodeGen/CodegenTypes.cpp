@@ -581,6 +581,38 @@ void Codegen::Impl::checkSizeAgreement(const Type& T, llvm::Type* Built) {
         codegenICE("type '" + T.Name + "' is "
                    + llvm::Twine(*FromSema) + " bytes to Sema and "
                    + llvm::Twine(FromLayout) + " bytes as it was laid out");
+    checkFieldOffsetAgreement(T, Built);
+}
+
+// R4.  A record can be exactly the right size with every field in the wrong
+// place, and until now only the total was ever compared -- Sema's walk and
+// codegen's layout are two implementations of one algorithm, and Sema's own
+// comment says it mirrors codegen's.  This asks the question that would notice.
+void Codegen::Impl::checkFieldOffsetAgreement(const Type& T, llvm::Type* Built) {
+    auto* st = llvm::dyn_cast_or_null<llvm::StructType>(Built);
+    if (!st || T.Kind != TypeKind::Record || !T.RecordDecl) return;
+    if (st->isOpaque() || !st->isSized()) return;
+
+    Sema::FieldOffsets Want;
+    if (!Sema::byteSizeOf(T, &Want)) return;
+
+    const auto* L = layoutOfRecord(T);
+    if (!L) return;
+    const auto* SL = mod->getDataLayout().getStructLayout(st);
+
+    for (const auto& [Name, Offset] : Want) {
+        auto It = L->Fields.find(toLower(Name));
+        if (It == L->Fields.end()) continue;
+        const auto& P = It->second;
+        // A field inside a variant lives at an offset within the shared blob,
+        // which is a different question and not one Sema answers yet.
+        if (P.InVariant || P.Index >= st->getNumElements()) continue;
+        const uint64_t Got = SL->getElementOffset(P.Index);
+        if (Got != Offset)
+            codegenICE("field '" + Name + "' of type '" + T.Name + "' is at "
+                       + llvm::Twine(Offset) + " to Sema and at "
+                       + llvm::Twine(Got) + " as it was laid out");
+    }
 }
 
 llvm::Type* Codegen::Impl::llvmTypeOfSemaType(const Type& T) {

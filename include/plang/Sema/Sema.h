@@ -75,7 +75,12 @@ public:
     ///
     /// Nothing is returned for a conformant array or an undiscriminated
     /// schema, whose extent is not known until they are passed or allocated.
-    [[nodiscard]] static std::optional<uint64_t> byteSizeOf(const Type& T);
+    /// Byte offsets of a record's FIXED fields (and its tag), in declaration
+    /// order.  R4: these come out of the same walk that computes the size, so
+    /// there is no second implementation of the layout to disagree with.
+    using FieldOffsets = std::vector<std::pair<std::string, uint64_t>>;
+    [[nodiscard]] static std::optional<uint64_t> byteSizeOf(
+        const Type& T, FieldOffsets* Offsets = nullptr);
 
     /// What \p T must be aligned to.  Natural alignment, which is what plang
     /// already emits and what FPC uses by default; see byteSizeOf.

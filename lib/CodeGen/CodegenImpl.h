@@ -786,6 +786,8 @@ struct Codegen::Impl {
     llvm::Type* llvmTypeOfSemaTypeImpl(const Type& T);
     /// Checks Sema's byteSizeOf against the layout; see the definition.
     void checkSizeAgreement(const Type& T, llvm::Type* Built);
+    /// Every fixed field's offset against Sema's; see the definition.
+    void checkFieldOffsetAgreement(const Type& T, llvm::Type* Built);
 
     // ====================================================================
     // Alloca helpers
