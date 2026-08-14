@@ -3971,13 +3971,13 @@ const SchemaShape kShapes[] = {
     "  writeln(%s.x[4]:1, ' ', %s.k:1);\n",
     4, false },
 
-  { "tagless-variant", "",                        // review-4 finding 2
+  { "tagless-variant", "",                        // review-4 finding 2: FIXED
     "record a: array[1..n] of integer;\n"
     "       case boolean of true: (u: integer); false: (w: char) end",
     "i: integer",
     "  for i := 1 to 2 do %s.a[i] := i * 5;\n  %s.u := 4242;\n",
     "  writeln(%s.a[1]:1, ' ', %s.u:1);\n",
-    2, false },
+    2, true },
 
   { "inline-packed-record", "",                   // review-4 finding 3: FIXED
     "record c0: char; p: packed record c: char; x: integer end;\n"

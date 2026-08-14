@@ -634,7 +634,14 @@ llvm::Value* Codegen::Impl::rtWalkFields(const std::vector<FieldDecl>& fields,
 llvm::Value* Codegen::Impl::rtVariantSize(const VariantPart& vp,
                                           llvm::Value* off, bool packed,
                                           bool nested) {
-    if (vp.TagType) {
+    // ISO §6.4.3.3 makes the tag-field OPTIONAL: `case boolean of` selects on a
+    // type with no field to store it in.  This gated on TagType alone while the
+    // static layout gates on the field having a NAME, so a tagless selector
+    // reserved eight bytes for a tag that does not exist and put every
+    // alternative that far past where an ordinary access looks.  Three lines
+    // below, the field-name match already tests TagField.empty(); the storage
+    // three lines above did not.
+    if (vp.TagType && !vp.TagField.empty()) {
         const uint64_t a = packed ? 1 : rtAlignOfTypeNode(vp.TagType.get());
         off = alignUpV(off, a);
         off = builder.CreateAdd(off, rtSizeOfTypeNode(vp.TagType.get()), "tag.off");
@@ -668,7 +675,9 @@ uint64_t Codegen::Impl::rtVariantAlign(const VariantPart& vp) {
     // The tag is a member of the part as much as any alternative's field is,
     // and the size walk aligns to it, so leaving it out here made the two
     // walks disagree for a variant whose tag is wider than its alternatives.
-    uint64_t a = vp.TagType ? rtAlignOfTypeNode(vp.TagType.get()) : 1;
+    // A tag with no field name occupies nothing, so it constrains nothing.
+    uint64_t a = (vp.TagType && !vp.TagField.empty())
+                     ? rtAlignOfTypeNode(vp.TagType.get()) : 1;
     for (const auto& vc : vp.Cases) {
         for (const auto& fd : vc.Fields)
             a = std::max(a, rtAlignOfTypeNode(fd.Type.get()));
@@ -697,7 +706,14 @@ llvm::Value* Codegen::Impl::rtVariantFieldOffset(const VariantPart& vp,
                                                  llvm::Value* off, bool packed,
                                                  const std::string& field,
                                                  bool nested) {
-    if (vp.TagType) {
+    // ISO §6.4.3.3 makes the tag-field OPTIONAL: `case boolean of` selects on a
+    // type with no field to store it in.  This gated on TagType alone while the
+    // static layout gates on the field having a NAME, so a tagless selector
+    // reserved eight bytes for a tag that does not exist and put every
+    // alternative that far past where an ordinary access looks.  Three lines
+    // below, the field-name match already tests TagField.empty(); the storage
+    // three lines above did not.
+    if (vp.TagType && !vp.TagField.empty()) {
         const uint64_t a = packed ? 1 : rtAlignOfTypeNode(vp.TagType.get());
         off = alignUpV(off, a);
         if (!vp.TagField.empty() && eqCI(vp.TagField, field)) return off;

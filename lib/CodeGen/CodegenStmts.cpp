@@ -400,7 +400,15 @@ void Codegen::Impl::emitAssign(const AssignStmt& s) {
 }
 
 void Codegen::Impl::emitIf(const IfStmt& s) {
-    auto* cond = ensureI1(emitExpr(*s.Cond));
+    // A condition is an arbitrary expression and is not a statement, so a
+    // run-time-sized string temporary in one had no scope to be given back at.
+    // `while ... do if trim(q^.s) = 'a' then ...` took a fresh piece of stack
+    // every pass and died of exhaustion after some tens of thousands.  emitIf
+    // and emitCase were the two the first version of StackScope missed:
+    // covering the two LOOP conditions and not these mistook "evaluated once"
+    // for "evaluated once per program".
+    llvm::Value* cond = nullptr;
+    { StackScope frame(*this); cond = ensureI1(emitExpr(*s.Cond)); }
 
     auto* thenBB = llvm::BasicBlock::Create(ctx, "if.then", curFunc);
     auto* endBB  = llvm::BasicBlock::Create(ctx, "if.end",  curFunc);
@@ -612,7 +620,9 @@ void Codegen::Impl::emitRepeat(const RepeatStmt& s) {
 // case selector of const-list: stmt ; ... end
 // Uses an if-else chain to support both point and lo..hi range labels (EP).
 void Codegen::Impl::emitCase(const CaseStmt& s) {
-    auto* sel   = toI64(emitExpr(*s.Selector));
+    // Re-evaluated on every pass through an enclosing loop; see emitIf.
+    llvm::Value* sel = nullptr;
+    { StackScope frame(*this); sel = toI64(emitExpr(*s.Selector)); }
     auto* endBB = llvm::BasicBlock::Create(ctx, "case.end", curFunc);
 
     // Chain: for each arm build a test block and a body block.
