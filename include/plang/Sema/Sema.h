@@ -89,7 +89,8 @@ public:
 private:
     /// How far one alternative of a variant part reaches; see the definition.
     static uint64_t layoutVariantCase(const VariantCase& VC, bool Packed,
-                                      uint64_t Base, uint64_t& Align, bool& Ok);
+                                      uint64_t Base, uint64_t& Align, bool& Ok,
+                                      FieldOffsets* Offsets = nullptr);
 public:
 
 private:

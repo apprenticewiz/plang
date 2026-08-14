@@ -749,28 +749,36 @@ uint64_t variantBlobBytes(uint64_t Size, uint64_t Align) {
 /// variant all start at the same place, and a nested variant starts after the
 /// fields of the alternative containing it.
 uint64_t Sema::layoutVariantCase(const VariantCase& VC, bool Packed,
-                                 uint64_t Base, uint64_t& Align, bool& Ok) {
+                                 uint64_t Base, uint64_t& Align, bool& Ok,
+                                 FieldOffsets* Offsets) {
     uint64_t At = Base;
-    const auto place = [&](const Type* Ft) {
+    const auto place = [&](const Type* Ft, const std::string* Name) {
         if (!Ft) { Ok = false; return; }
         const auto Sz = byteSizeOf(*Ft);
         if (!Sz) { Ok = false; return; }
         const uint64_t A = Packed ? 1 : byteAlignOf(*Ft);
         Align = std::max(Align, A);
-        At    = roundUp(At, A) + *Sz;
+        At    = roundUp(At, A);
+        // Recorded RELATIVE to the start of the shared run; byteSizeOf adds
+        // where that run begins once it knows, since the run's alignment is
+        // not settled until every alternative has been walked.
+        if (Offsets && Name) Offsets->emplace_back(*Name, At);
+        At += *Sz;
     };
 
     for (const auto& Fd : VC.Fields)
         for (size_t I = 0; I < Fd.Names.size(); ++I)
-            place(Fd.Type ? Fd.Type->ResolvedType.get() : nullptr);
+            place(Fd.Type ? Fd.Type->ResolvedType.get() : nullptr,
+                  &Fd.Names[I]);
 
     if (VC.NestedVariant) {
         const auto& NV = *VC.NestedVariant;
         if (!NV.TagField.empty() && NV.TagType)
-            place(NV.TagType->ResolvedType.get());
+            place(NV.TagType->ResolvedType.get(), &NV.TagField);
         uint64_t End = At;
         for (const auto& Inner : NV.Cases)
-            End = std::max(End, layoutVariantCase(Inner, Packed, At, Align, Ok));
+            End = std::max(End,
+                           layoutVariantCase(Inner, Packed, At, Align, Ok, Offsets));
         At = End;
     }
     return At;
@@ -888,9 +896,11 @@ std::optional<uint64_t> Sema::byteSizeOf(const Type& T, FieldOffsets* Offsets) {
             if (!VP.TagField.empty() && VP.TagType)
                 place(VP.TagType->ResolvedType.get(), &VP.TagField);
             uint64_t Size = 0, BlobAlign = 1;
+            const size_t FirstVariantEntry = Offsets ? Offsets->size() : 0;
             for (const auto& VC : VP.Cases)
                 Size = std::max(Size,
-                                layoutVariantCase(VC, Packed, 0, BlobAlign, Ok));
+                                layoutVariantCase(VC, Packed, 0, BlobAlign, Ok,
+                                                  Offsets));
             // Every alternative may be empty, and then there is nothing to
             // reserve: `case b: boolean of true: (); false: ()` is a record
             // with a tag and no more.
@@ -899,7 +909,13 @@ std::optional<uint64_t> Sema::byteSizeOf(const Type& T, FieldOffsets* Offsets) {
                 const uint64_t A    = Packed ? 1
                                              : std::min<uint64_t>(BlobAlign, 8);
                 Align = std::max(Align, A);
-                Off   = roundUp(Off, A) + Blob;
+                Off   = roundUp(Off, A);
+                // Where the shared run begins is known only now, so the
+                // alternatives' offsets are shifted onto it.
+                if (Offsets)
+                    for (size_t I = FirstVariantEntry; I < Offsets->size(); ++I)
+                        (*Offsets)[I].second += Off;
+                Off  += Blob;
             }
         }
         if (!Ok) return std::nullopt;

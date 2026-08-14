@@ -604,10 +604,16 @@ void Codegen::Impl::checkFieldOffsetAgreement(const Type& T, llvm::Type* Built) 
         auto It = L->Fields.find(toLower(Name));
         if (It == L->Fields.end()) continue;
         const auto& P = It->second;
-        // A field inside a variant lives at an offset within the shared blob,
-        // which is a different question and not one Sema answers yet.
-        if (P.InVariant || P.Index >= st->getNumElements()) continue;
-        const uint64_t Got = SL->getElementOffset(P.Index);
+        if (P.Index >= st->getNumElements()) continue;
+        // A field inside a variant is placed at an offset within the shared
+        // run, so its absolute position is where the run starts plus that.
+        // Sema now reports these too, which matters: the one layout
+        // disagreement anybody has actually found -- over whether a TAGLESS
+        // selector reserves storage for a tag that does not exist -- was in a
+        // variant part, and comparing only the fixed fields would have been
+        // green through it.
+        const uint64_t Got = SL->getElementOffset(P.Index)
+                           + (P.InVariant ? P.Offset : 0);
         if (Got != Offset)
             codegenICE("field '" + Name + "' of type '" + T.Name + "' is at "
                        + llvm::Twine(Offset) + " to Sema and at "
