@@ -95,15 +95,23 @@ std::shared_ptr<Type> Sema::resolveType(const TypeNode& Node) {
     // one was resolved last.  Only a record built from this very node is
     // stamped: a named type resolves to a shared type object that belongs to
     // the declaration, not to the use.
-    if (T && !ActiveSchemaBindings_.empty() && T->Kind == TypeKind::Record
-            && T->RecordDecl == llvm::dyn_cast<RecordTypeNode>(&Node)
-            && T->RecordDecl != nullptr) {
-        T->SchemaBindings.assign(ActiveSchemaBindings_.begin(),
-                                 ActiveSchemaBindings_.end());
-        std::sort(T->SchemaBindings.begin(), T->SchemaBindings.end());
-    }
+    stampSchemaBindings(Node, T.get());
     if (Node.InitialState) checkInitialState(Node, *T);
     return T;
+}
+
+void Sema::stampSchemaBindings(const TypeNode& Node, Type* T) const {
+    if (!T || ActiveSchemaBindings_.empty() || T->Kind != TypeKind::Record)
+        return;
+    // Only a record built from THIS node: a named type resolves to a shared
+    // type object that belongs to the declaration and not to the use, and
+    // stamping that would give one instantiation's discriminants to all of them.
+    if (T->RecordDecl == nullptr
+            || T->RecordDecl != llvm::dyn_cast<RecordTypeNode>(&Node))
+        return;
+    T->SchemaBindings.assign(ActiveSchemaBindings_.begin(),
+                             ActiveSchemaBindings_.end());
+    std::sort(T->SchemaBindings.begin(), T->SchemaBindings.end());
 }
 
 // EP §6.6: the value a denoter's 'value' clause gives has to be a value of
@@ -638,6 +646,16 @@ std::shared_ptr<Type> Sema::resolveUndiscriminatedSchema(Symbol& Sym,
         ActiveSchemaBindings_[toLower(P.Name)] = 1;
     auto       Body         = resolveTypeImpl(*Sym.SchemaBodyNode);
     const bool LayoutVaries = SchemaBindingUsed_;
+    // The probe body is an instantiation like any other and has to say which
+    // one it is.  resolveTypeImpl is called directly here -- deliberately, so
+    // the probe does not overwrite the node's annotation -- and that skipped
+    // the stamp, so the probe body was the one record with no bindings on it.
+    // Codegen then laid it out in the empty binding context, where `string(n)`
+    // folds to nothing and the field's stale annotation from a REAL
+    // instantiation was the only other answer available: an internal error
+    // reading "string(20) takes 264 bytes as it is written and 32 as Sema
+    // resolved it" on a program that declares both `^t` and `t(20)`.
+    stampSchemaBindings(*Sym.SchemaBodyNode, Body.get());
     ActiveSchemaBindings_ = std::move(SavedBindings);
     SchemaBindingUsed_    = SavedUsed;
     ProbeBindingsActive_  = SavedProbe;

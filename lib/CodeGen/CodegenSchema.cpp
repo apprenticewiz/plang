@@ -269,13 +269,7 @@ llvm::Value* Codegen::Impl::schemaBodySize(const plang::Type& schema,
         if (const TypeNode* bodyNode = schemaBodyNodeOf(schema); bodyNode) {
             SchemaRef ref{&schema, nullptr, discs};
             bindSchemaDiscs(ref);
-            // The BODY node carries no resolved type of its own:
-            // resolveUndiscriminatedSchema reaches it through resolveTypeImpl,
-            // and only resolveType records one.  Its CHILDREN are annotated,
-            // which is exactly why the element stride came out right while the
-            // size folded to the 255-capacity default.  Say it varies rather
-            // than asking the node.
-            auto* sz = rtSizeOfTypeNode(bodyNode, /*knownVarying=*/true);
+            auto* sz = rtSizeOfTypeNode(bodyNode);
             popScope();
             return sz;
         }
@@ -413,15 +407,19 @@ bool nodeExtentVaries(const TypeNode* tn) {
 }
 } // namespace
 
-uint64_t Codegen::Impl::rtAlignOfTypeNode(const TypeNode* tn, bool knownVarying) {
+uint64_t Codegen::Impl::rtAlignOfTypeNode(const TypeNode* tn) {
     bool packed = false;
     const TypeNode* d = peelPacked(tn, &packed);
     if (packed) return 1;
-    if (!knownVarying && !nodeExtentVaries(d))
-        return mod->getDataLayout().getABITypeAlign(llvmTypeOfNode(*d)).value();
-    // A varying string is { i64 len, bytes } whatever the capacity is.
-    if (llvm::isa<SubrangeTypeNode>(d))
-        return mod->getDataLayout().getABITypeAlign(llvmTypeOfNode(*d)).value();
+    // Alignment is static even where size is not -- a string(cap) is
+    // i64-aligned for every cap, and an array is aligned as its element is --
+    // so the three denoters that can hold a varying extent are answered
+    // STRUCTURALLY, without asking for a type they may not have.
+    //
+    // Not from the node's annotation, which is what this used to consult.  One
+    // declaration serves every instantiation and carries whichever was resolved
+    // last, so inside a run-time layout walk that annotation is some other
+    // instance's and not this one's.  Nothing here reads it any more.
     if (llvm::isa<StringTypeNode>(d)) return 8;
     if (auto* at = llvm::dyn_cast<ArrayTypeNode>(d))
         return rtAlignOfTypeNode(at->Element.get());
@@ -436,7 +434,9 @@ uint64_t Codegen::Impl::rtAlignOfTypeNode(const TypeNode* tn, bool knownVarying)
         if (rt->Variant) a = std::max(a, rtVariantAlign(*rt->Variant));
         return a;
     }
-    return 8;
+    // Everything else -- a name, a subrange, an enumeration, a set, a file --
+    // has no extent written in it and is aligned as the DataLayout says.
+    return mod->getDataLayout().getABITypeAlign(llvmTypeOfNode(*d)).value();
 }
 
 llvm::Value* Codegen::Impl::alignUpV(llvm::Value* v, uint64_t align) {
@@ -468,15 +468,22 @@ Codegen::Impl::rtIndexBounds(const ArrayTypeNode& at) {
     return std::nullopt;
 }
 
-llvm::Value* Codegen::Impl::rtSizeOfTypeNode(const TypeNode* tn,
-                                             bool knownVarying) {
+llvm::Value* Codegen::Impl::rtSizeOfTypeNode(const TypeNode* tn) {
     const TypeNode* d = peelPacked(tn);
-    // Nothing in it reads a discriminant, so the static answer is the answer --
-    // and using the DataLayout here is what keeps a fixed field at the offset
-    // an ordinary load of it expects.
-    if (!knownVarying && !nodeExtentVaries(d))
-        return i64c(static_cast<int64_t>(
-            mod->getDataLayout().getTypeAllocSize(llvmTypeOfNode(*d))));
+    // This used to ask the node whether its extent varies and take the
+    // DataLayout's answer when it said no.  That question has no reliable
+    // answer here: one declaration serves every instantiation and carries the
+    // annotation of whichever Sema resolved last, so in a program with both
+    // `^t` and `t(20)` the probe walk read the INSTANCE's `string(20)` field,
+    // decided it was fixed, and sized it from syntax the discriminants are not
+    // bound in -- 264 bytes for a 32-byte field.  The record's own fields then
+    // sat past the end of it and a whole-value copy read 272 bytes out of 40.
+    //
+    // So the syntax is read wherever the syntax is where the extent is written,
+    // with the discriminants bound.  A fixed extent emits its constant and
+    // folds to exactly what the DataLayout would have said, so this agrees with
+    // the static layout for everything that has one, and is simply the answer
+    // for everything that does not.
 
     // A subrange is as wide as its host ordinal whatever its bounds are, so a
     // discriminant in them changes the CHECK and not the storage.
@@ -509,8 +516,16 @@ llvm::Value* Codegen::Impl::rtSizeOfTypeNode(const TypeNode* tn,
         // array of them strides correctly.
         return alignUpV(off, rt->Packed ? 1 : rtAlignOfTypeNode(d));
     }
-    codegenICE("a schema body denoter with no run-time layout");
-    return nullptr;
+    // A denoter with no extent written in it -- a name, an enumeration, a set,
+    // a file.  Nothing in one of those can depend on a discriminant, so the
+    // static answer is the answer.  A denoter that SAYS it varies and still
+    // reached here is a node kind whose extent nothing knows how to recover,
+    // which is an internal error rather than a size: keeping that loud is the
+    // whole reason this is a check and not a fallthrough.
+    if (nodeExtentVaries(d))
+        codegenICE("a schema body denoter with no run-time layout");
+    return i64c(static_cast<int64_t>(
+        mod->getDataLayout().getTypeAllocSize(llvmTypeOfNode(*d))));
 }
 
 /// Walk \p fields accumulating from \p off.  With \p stopAt set, returns the

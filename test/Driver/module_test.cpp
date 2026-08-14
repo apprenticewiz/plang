@@ -3488,6 +3488,52 @@ TEST(Schema, AVaryingStringIntoACharArrayChecksItsLength) {
     EXPECT_EQ(Ok.Stdout, "[abcd]\n");
 }
 
+TEST(Schema, APointerAndAnInstanceOfOneSchemaDoNotShareAnAnnotation) {
+    // One declaration serves every instantiation and carries the annotation of
+    // whichever Sema resolved LAST, so the run-time layout walk -- which used
+    // to ask the node whether its extent varied -- read `^t`'s probe body
+    // through `t(20)`'s field types.  It decided the string was fixed and sized
+    // it from syntax the discriminants are not bound in: 264 bytes for a
+    // 32-byte field, with the rest of the record past the end of it.
+    //
+    // Declaring the pointer and the instance is the whole test; neither alone
+    // reproduces it, because neither alone leaves a foreign annotation behind.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type t(n: integer) = record s: string(n); k: integer end;\n"
+        "var q: ^t; v: t(20);\n"
+        "begin new(q, 20); q^.s := 'via pointer'; q^.k := 5;\n"
+        "      writeln(q^.s, ' / ', q^.k:1);\n"
+        "      v.s := 'instance'; v.k := 6;\n"
+        "      writeln(v.s, ' / ', v.k:1);\n"
+        "      v := q^;\n"
+        "      writeln(v.s, ' / ', v.k:1) end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout,
+              "via pointer / 5\ninstance / 6\nvia pointer / 5\n");
+}
+
+TEST(Schema, AWholeValueCopyCarriesAVaryingStringBothWays) {
+    // A varying string in the body is the case where the copy length is neither
+    // the struct's nor a constant, and where getting it wrong writes past the
+    // end of the destination rather than merely producing a wrong string.  k
+    // sits behind the string to say where the copy actually stopped.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type t(n: integer) = record s: string(n); k: integer end;\n"
+        "var q: ^t; v: t(20); w: t(20);\n"
+        "begin new(q, 20);\n"
+        "      q^.s := 'a varying body'; q^.k := 42;\n"
+        "      v := q^;\n"
+        "      writeln(v.s, ' / ', v.k:1);\n"
+        "      w.s := 'back the other way'; w.k := 99;\n"
+        "      q^ := w;\n"
+        "      writeln(q^.s, ' / ', q^.k:1) end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout,
+              "a varying body / 42\nback the other way / 99\n");
+}
+
 TEST(Schema, AWholeValueCopiesEitherWayBetweenAPointerAndAnInstance) {
     // EP §6.4.7.  Only the TARGET being undiscriminated was handled, so both
     // halves of the pair took the compiler down: `v := q^` asked for the LLVM

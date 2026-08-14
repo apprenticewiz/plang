@@ -1030,8 +1030,8 @@ struct Codegen::Impl {
     /// fixes.  Call with the discriminants bound in the current scope (see
     /// bindSchemaDiscs): the bound and capacity expressions are re-emitted
     /// against them.  A subtree that reads no discriminant folds to a constant.
-    uint64_t     rtAlignOfTypeNode(const TypeNode* tn, bool knownVarying = false);
-    llvm::Value* rtSizeOfTypeNode(const TypeNode* tn, bool knownVarying = false);
+    uint64_t     rtAlignOfTypeNode(const TypeNode* tn);
+    llvm::Value* rtSizeOfTypeNode(const TypeNode* tn);
     /// The index bounds of \p at as run-time values.  The only place that
     /// answers this, so that the run-time walk and the static layout cannot
     /// disagree about how many elements an array has.

@@ -311,6 +311,13 @@ private:
     [[nodiscard]] std::shared_ptr<Type> resolveType(const TypeNode& Node);
     /// Body of resolveType; call resolveType so the node gets annotated.
     [[nodiscard]] std::shared_ptr<Type> resolveTypeImpl(const TypeNode& Node);
+    /// Records on \p T the discriminants it was resolved under, when T is a
+    /// record built from this very node.  One declaration serves every
+    /// instantiation, so this is what tells codegen which one it is looking at
+    /// -- and it has to be stamped on the probe body too, which reaches the
+    /// declaration through resolveTypeImpl and so never passed through
+    /// resolveType.
+    void stampSchemaBindings(const TypeNode& Node, Type* T) const;
     /// Adds the fields of a variant part, and of the variants nested in it, to
     /// the record type T, so that field access can find them (§6.4.3.3).
     void walkVariantFields(const VariantPart& Vp, Type& T);
