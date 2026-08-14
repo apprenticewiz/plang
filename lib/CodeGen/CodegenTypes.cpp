@@ -426,8 +426,26 @@ llvm::Type* Codegen::Impl::llvmTypeOfNode(const TypeNode& node) {
     // would then fire on every one of them.
     if (llvm::dyn_cast<SubrangeTypeNode>(&node))  return ordinalTyOf(node);
     if (auto* n = llvm::dyn_cast<StringTypeNode>(&node)) {
-        int64_t cap = evalConstInt(*n->Capacity, 255, &consts);
-        return strStructType(cap);
+        // R2.  The capacity Sema resolved, then the capacity the syntax folds
+        // to.  This used to fold first and fall back to 255 -- the very thing
+        // tryEvalConstInt's own comment says must never be done, because a
+        // fabricated extent is indistinguishable from a real one downstream.
+        //
+        // 255 survives for exactly one case: a `string(cap)` in a schema body
+        // being lowered as the PROBE type.  There the capacity is genuinely
+        // unknown until an instance exists, the type built here is nobody's
+        // storage, and CodegenSchema lays the real one out at run time.  Every
+        // other route now has an answer or is an internal error, rather than a
+        // number that describes nothing.
+        if (schemaCtx.empty() && node.ResolvedType
+                && node.ResolvedType->Kind == TypeKind::VarString)
+            return strStructType(node.ResolvedType->StrCapacity);
+        if (auto Cap = tryEvalConstInt(*n->Capacity, &consts))
+            return strStructType(*Cap);
+        if (schemaCtx.empty())
+            codegenICE("a string capacity that is neither resolved nor "
+                       "constant-foldable");
+        return strStructType(PlangMaxStringCapacity);
     }
     if (llvm::dyn_cast<EnumTypeNode>(&node))      return ordinalTyOf(node);
     if (llvm::dyn_cast<SetTypeNode>(&node))       return setTy();
