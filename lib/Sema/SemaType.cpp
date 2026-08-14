@@ -567,6 +567,24 @@ std::shared_ptr<Type> Sema::resolveUndiscriminatedSchema(Symbol& Sym,
     for (const auto& P : Sym.SchemaDeclParams)
         T->SchemaDiscs.push_back({.Name = P.Name, .Ty = P.Ty});
 
+    // R3.  An array body's bounds as closed forms over the discriminant
+    // indices, folded here -- in the scope the schema was DECLARED in, which is
+    // the only scope in which its bounds mean anything.  Codegen evaluates
+    // these against the discriminants an object carries and never sees an
+    // identifier, so there is nothing left for an allocating procedure's
+    // locals to capture.
+    if (const TypeNode* BodyNode = Sym.SchemaBodyNode) {
+        const TypeNode* D = BodyNode;
+        while (auto* Pk = llvm::dyn_cast<PackedTypeNode>(D)) D = Pk->Inner.get();
+        if (auto* At = llvm::dyn_cast<ArrayTypeNode>(D); At && At->Low && At->High) {
+            std::vector<std::string> Names;
+            for (const auto& Dsc : T->SchemaDiscs) Names.push_back(Dsc.Name);
+            T->SchemaLowForm  = buildExtentForm(*At->Low,  Names);
+            T->SchemaHighForm = buildExtentForm(*At->High, Names);
+        }
+    }
+
+
     UndiscSchemaTypes_[Key] = T;
     return T;
 }
@@ -632,6 +650,56 @@ void Sema::checkSetBaseRange(const Type& Base, SourceLocation Loc) {
 /// array whose bounds were pointer bits: no diagnostic, a zero-element object,
 /// and index checks comparing against nonsense.  Absence is not a number, so
 /// it is no longer spelled as one.
+std::optional<Type::ExtentForm> Sema::buildExtentForm(
+        const ExprNode& E, const std::vector<std::string>& Discs) const {
+    using EF = Type::ExtentForm;
+
+    // A discriminant becomes its INDEX.  Checked before folding, because the
+    // body is resolved with the discriminants bound to a probe value and
+    // folding would quietly turn `n` into 1.
+    if (auto* Id = llvm::dyn_cast<IdentExpr>(&E))
+        for (size_t I = 0; I < Discs.size(); ++I)
+            if (eqCI(Discs[I], Id->Name))
+                return EF{EF::Op::Disc, static_cast<int64_t>(I), {}};
+
+    if (auto* U = llvm::dyn_cast<UnaryExpr>(&E)) {
+        if (U->Op == TokenKind::Plus) return buildExtentForm(*U->Operand, Discs);
+        if (U->Op == TokenKind::Minus)
+            if (auto A = buildExtentForm(*U->Operand, Discs))
+                return EF{EF::Op::Neg, 0, {*A}};
+    }
+
+    if (auto* B = llvm::dyn_cast<BinaryExpr>(&E)) {
+        const auto OpOf = [](TokenKind K) -> std::optional<EF::Op> {
+            switch (K) {
+            case TokenKind::Plus:  return EF::Op::Add;
+            case TokenKind::Minus: return EF::Op::Sub;
+            case TokenKind::Times: return EF::Op::Mul;
+            case TokenKind::Div:   return EF::Op::Div;
+            case TokenKind::Mod:   return EF::Op::Mod;
+            case TokenKind::Pow:   return EF::Op::Pow;
+            default:               return std::nullopt;
+            }
+        };
+        if (auto O = OpOf(B->Op)) {
+            auto L = buildExtentForm(*B->Left,  Discs);
+            auto R = buildExtentForm(*B->Right, Discs);
+            if (L && R) return EF{*O, 0, {*L, *R}};
+        }
+    }
+
+    // Any other leaf is folded HERE, where the declaration was written, and
+    // only if the fold did not read a discriminant -- a probe value is the
+    // extent of no instance, and baking one in would be worse than declining.
+    const bool SavedUsed = SchemaBindingUsed_;
+    SchemaBindingUsed_   = false;
+    const auto V         = constBound(E);
+    const bool UsedProbe = SchemaBindingUsed_;
+    SchemaBindingUsed_   = SavedUsed || SchemaBindingUsed_;
+    if (V && !UsedProbe) return EF{EF::Op::Const, *V, {}};
+    return std::nullopt;
+}
+
 std::optional<int64_t> Sema::constBound(const ExprNode& E) const {
     // Whether THIS fold read a schema discriminant, not whether anything
     // earlier did.
@@ -749,28 +817,36 @@ uint64_t variantBlobBytes(uint64_t Size, uint64_t Align) {
 /// variant all start at the same place, and a nested variant starts after the
 /// fields of the alternative containing it.
 uint64_t Sema::layoutVariantCase(const VariantCase& VC, bool Packed,
-                                 uint64_t Base, uint64_t& Align, bool& Ok) {
+                                 uint64_t Base, uint64_t& Align, bool& Ok,
+                                 FieldOffsets* Offsets) {
     uint64_t At = Base;
-    const auto place = [&](const Type* Ft) {
+    const auto place = [&](const Type* Ft, const std::string* Name) {
         if (!Ft) { Ok = false; return; }
         const auto Sz = byteSizeOf(*Ft);
         if (!Sz) { Ok = false; return; }
         const uint64_t A = Packed ? 1 : byteAlignOf(*Ft);
         Align = std::max(Align, A);
-        At    = roundUp(At, A) + *Sz;
+        At    = roundUp(At, A);
+        // Recorded RELATIVE to the start of the shared run; byteSizeOf adds
+        // where that run begins once it knows, since the run's alignment is
+        // not settled until every alternative has been walked.
+        if (Offsets && Name) Offsets->emplace_back(*Name, At);
+        At += *Sz;
     };
 
     for (const auto& Fd : VC.Fields)
         for (size_t I = 0; I < Fd.Names.size(); ++I)
-            place(Fd.Type ? Fd.Type->ResolvedType.get() : nullptr);
+            place(Fd.Type ? Fd.Type->ResolvedType.get() : nullptr,
+                  &Fd.Names[I]);
 
     if (VC.NestedVariant) {
         const auto& NV = *VC.NestedVariant;
         if (!NV.TagField.empty() && NV.TagType)
-            place(NV.TagType->ResolvedType.get());
+            place(NV.TagType->ResolvedType.get(), &NV.TagField);
         uint64_t End = At;
         for (const auto& Inner : NV.Cases)
-            End = std::max(End, layoutVariantCase(Inner, Packed, At, Align, Ok));
+            End = std::max(End,
+                           layoutVariantCase(Inner, Packed, At, Align, Ok, Offsets));
         At = End;
     }
     return At;
@@ -808,7 +884,7 @@ uint64_t Sema::byteAlignOf(const Type& T) {
     }
 }
 
-std::optional<uint64_t> Sema::byteSizeOf(const Type& T) {
+std::optional<uint64_t> Sema::byteSizeOf(const Type& T, FieldOffsets* Offsets) {
     switch (T.Kind) {
     case TypeKind::Integer:
     case TypeKind::Subrange:
@@ -863,27 +939,36 @@ std::optional<uint64_t> Sema::byteSizeOf(const Type& T) {
         const bool Packed = RD.Packed;
         bool Ok = true;
         uint64_t Off = 0, Align = 1;
-        const auto place = [&](const Type* Ft) {
+        const auto place = [&](const Type* Ft, const std::string* Name) {
             if (!Ft) { Ok = false; return; }
             const auto Sz = byteSizeOf(*Ft);
             if (!Sz) { Ok = false; return; }
             const uint64_t A = Packed ? 1 : byteAlignOf(*Ft);
             Align = std::max(Align, A);
-            Off   = roundUp(Off, A) + *Sz;
+            Off   = roundUp(Off, A);
+            // R4: the offsets fall out of the walk that computes the size, and
+            // are handed to whoever asked so that codegen can be CHECKED
+            // against them.  Only the total was ever compared before, and a
+            // record can be the right size with every field in the wrong place.
+            if (Offsets && Name) Offsets->emplace_back(*Name, Off);
+            Off += *Sz;
         };
 
         for (const auto& Fd : RD.Fields)
             for (size_t I = 0; I < Fd.Names.size(); ++I)
-                place(Fd.Type ? Fd.Type->ResolvedType.get() : nullptr);
+                place(Fd.Type ? Fd.Type->ResolvedType.get() : nullptr,
+                      &Fd.Names[I]);
 
         if (RD.Variant) {
             const auto& VP = *RD.Variant;
             if (!VP.TagField.empty() && VP.TagType)
-                place(VP.TagType->ResolvedType.get());
+                place(VP.TagType->ResolvedType.get(), &VP.TagField);
             uint64_t Size = 0, BlobAlign = 1;
+            const size_t FirstVariantEntry = Offsets ? Offsets->size() : 0;
             for (const auto& VC : VP.Cases)
                 Size = std::max(Size,
-                                layoutVariantCase(VC, Packed, 0, BlobAlign, Ok));
+                                layoutVariantCase(VC, Packed, 0, BlobAlign, Ok,
+                                                  Offsets));
             // Every alternative may be empty, and then there is nothing to
             // reserve: `case b: boolean of true: (); false: ()` is a record
             // with a tag and no more.
@@ -892,7 +977,13 @@ std::optional<uint64_t> Sema::byteSizeOf(const Type& T) {
                 const uint64_t A    = Packed ? 1
                                              : std::min<uint64_t>(BlobAlign, 8);
                 Align = std::max(Align, A);
-                Off   = roundUp(Off, A) + Blob;
+                Off   = roundUp(Off, A);
+                // Where the shared run begins is known only now, so the
+                // alternatives' offsets are shifted onto it.
+                if (Offsets)
+                    for (size_t I = FirstVariantEntry; I < Offsets->size(); ++I)
+                        (*Offsets)[I].second += Off;
+                Off  += Blob;
             }
         }
         if (!Ok) return std::nullopt;

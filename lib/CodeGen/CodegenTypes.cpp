@@ -581,6 +581,44 @@ void Codegen::Impl::checkSizeAgreement(const Type& T, llvm::Type* Built) {
         codegenICE("type '" + T.Name + "' is "
                    + llvm::Twine(*FromSema) + " bytes to Sema and "
                    + llvm::Twine(FromLayout) + " bytes as it was laid out");
+    checkFieldOffsetAgreement(T, Built);
+}
+
+// R4.  A record can be exactly the right size with every field in the wrong
+// place, and until now only the total was ever compared -- Sema's walk and
+// codegen's layout are two implementations of one algorithm, and Sema's own
+// comment says it mirrors codegen's.  This asks the question that would notice.
+void Codegen::Impl::checkFieldOffsetAgreement(const Type& T, llvm::Type* Built) {
+    auto* st = llvm::dyn_cast_or_null<llvm::StructType>(Built);
+    if (!st || T.Kind != TypeKind::Record || !T.RecordDecl) return;
+    if (st->isOpaque() || !st->isSized()) return;
+
+    Sema::FieldOffsets Want;
+    if (!Sema::byteSizeOf(T, &Want)) return;
+
+    const auto* L = layoutOfRecord(T);
+    if (!L) return;
+    const auto* SL = mod->getDataLayout().getStructLayout(st);
+
+    for (const auto& [Name, Offset] : Want) {
+        auto It = L->Fields.find(toLower(Name));
+        if (It == L->Fields.end()) continue;
+        const auto& P = It->second;
+        if (P.Index >= st->getNumElements()) continue;
+        // A field inside a variant is placed at an offset within the shared
+        // run, so its absolute position is where the run starts plus that.
+        // Sema now reports these too, which matters: the one layout
+        // disagreement anybody has actually found -- over whether a TAGLESS
+        // selector reserves storage for a tag that does not exist -- was in a
+        // variant part, and comparing only the fixed fields would have been
+        // green through it.
+        const uint64_t Got = SL->getElementOffset(P.Index)
+                           + (P.InVariant ? P.Offset : 0);
+        if (Got != Offset)
+            codegenICE("field '" + Name + "' of type '" + T.Name + "' is at "
+                       + llvm::Twine(Offset) + " to Sema and at "
+                       + llvm::Twine(Got) + " as it was laid out");
+    }
 }
 
 llvm::Type* Codegen::Impl::llvmTypeOfSemaType(const Type& T) {

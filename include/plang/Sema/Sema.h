@@ -75,7 +75,12 @@ public:
     ///
     /// Nothing is returned for a conformant array or an undiscriminated
     /// schema, whose extent is not known until they are passed or allocated.
-    [[nodiscard]] static std::optional<uint64_t> byteSizeOf(const Type& T);
+    /// Byte offsets of a record's FIXED fields (and its tag), in declaration
+    /// order.  R4: these come out of the same walk that computes the size, so
+    /// there is no second implementation of the layout to disagree with.
+    using FieldOffsets = std::vector<std::pair<std::string, uint64_t>>;
+    [[nodiscard]] static std::optional<uint64_t> byteSizeOf(
+        const Type& T, FieldOffsets* Offsets = nullptr);
 
     /// What \p T must be aligned to.  Natural alignment, which is what plang
     /// already emits and what FPC uses by default; see byteSizeOf.
@@ -84,7 +89,8 @@ public:
 private:
     /// How far one alternative of a variant part reaches; see the definition.
     static uint64_t layoutVariantCase(const VariantCase& VC, bool Packed,
-                                      uint64_t Base, uint64_t& Align, bool& Ok);
+                                      uint64_t Base, uint64_t& Align, bool& Ok,
+                                      FieldOffsets* Offsets = nullptr);
 public:
 
 private:
@@ -320,6 +326,11 @@ private:
     // cannot mistake "no value" for a bound.  Consults ActiveSchemaBindings_ so
     // schema discriminant names are recognized.
     [[nodiscard]] std::optional<int64_t> constBound(const ExprNode& E) const;
+    /// EP §6.4.7 R3: \p E as arithmetic over discriminant indices with every
+    /// other leaf folded here, in the scope the declaration was written in.
+    /// Nothing in the result names anything.
+    [[nodiscard]] std::optional<Type::ExtentForm> buildExtentForm(
+        const ExprNode& E, const std::vector<std::string>& Discs) const;
     /// The body of constBound.  Call constBound, which also records the answer
     /// on the node for codegen to use instead of folding it a second time.
     [[nodiscard]] std::optional<int64_t> constBoundImpl(const ExprNode& E) const;

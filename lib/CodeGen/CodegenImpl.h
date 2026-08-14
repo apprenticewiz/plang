@@ -786,6 +786,8 @@ struct Codegen::Impl {
     llvm::Type* llvmTypeOfSemaTypeImpl(const Type& T);
     /// Checks Sema's byteSizeOf against the layout; see the definition.
     void checkSizeAgreement(const Type& T, llvm::Type* Built);
+    /// Every fixed field's offset against Sema's; see the definition.
+    void checkFieldOffsetAgreement(const Type& T, llvm::Type* Built);
 
     // ====================================================================
     // Alloca helpers
@@ -1155,6 +1157,9 @@ struct Codegen::Impl {
     void emitSchemaDiscMatch(const SchemaRef& dst, const SchemaRef& src);
     /// Bounds of an array-bodied schema, computed from `ref`'s discriminants.
     std::pair<llvm::Value*, llvm::Value*> schemaArrayBounds(const SchemaRef& ref);
+    /// R3: a closed extent form evaluated against an object's discriminants.
+    llvm::Value* emitExtentForm(const plang::Type::ExtentForm& F,
+                                const std::vector<llvm::Value*>& discs);
     /// LLVM type of the schema body's storage: the element type for an array
     /// body, the whole body otherwise.
     llvm::Type* schemaStorageType(const SchemaRef& ref);
