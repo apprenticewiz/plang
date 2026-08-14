@@ -3374,3 +3374,48 @@ TEST(EP7Schema, ANilSchemaPointerRaisesRatherThanCrashing) {
     EXPECT_EQ(R.Stdout, "before\n");
     EXPECT_NE(R.Stderr.find("nil"), std::string::npos) << R.Stderr;
 }
+
+TEST(EP7Schema, ASchemaBodyIsSizedInTheScopeItWasWrittenIn) {
+    // EP §6.4.7.  A schema body's bound expressions are written where the
+    // schema is DECLARED, and the only names in scope there are its own
+    // discriminants and compile-time constants.  new() re-emits those
+    // expressions where the ALLOCATION happens, and that put the allocating
+    // procedure's own variables in front of the names the body meant: a
+    // `const k` used in a bound was captured by any unrelated `var k` at the
+    // call site, which sized the object from a run-time variable.
+    //
+    // The two programs differ only in the SPELLING of a local variable in a
+    // procedure that has nothing to do with the type.  Before the fix the
+    // first one aborted inside glibc with a corrupted heap and the second was
+    // correct, which is as clear a statement of the defect as it gets.
+    const char* Shadowing =
+        "program p(output);\n"
+        "const k = 3;\n"
+        "type t(n: integer) = array[1..n+k] of integer;\n"
+        "var q: ^t; i: integer;\n"
+        "procedure alloc;\n"
+        "var k: integer;\n"
+        "begin k := 1; new(q, 4) end;\n"
+        "begin alloc;\n"
+        "  for i := 1 to 7 do q^[i] := i * 10;\n"
+        "  for i := 1 to 7 do write(q^[i]:1, ' ');\n"
+        "  writeln end.\n";
+    // Identical but for the local's name.
+    std::string Distinct = Shadowing;
+    for (const std::string From : {"var k: integer;", "begin k := 1;"}) {
+        const std::string To = From == "var k: integer;" ? "var kk: integer;"
+                                                         : "begin kk := 1;";
+        Distinct.replace(Distinct.find(From), From.size(), To);
+    }
+
+    auto A = compileAndRun(Shadowing, kEP);
+    auto B = compileAndRun(Distinct,  kEP);
+
+    ASSERT_EQ(B.ExitCode, 0) << B.Stderr;
+    EXPECT_EQ(B.Stdout, "10 20 30 40 50 60 70 \n");
+    EXPECT_EQ(A.ExitCode, 0) << "a local variable sharing a spelling with a "
+                                "constant used in the schema body changed how "
+                                "the object was sized: " << A.Stderr;
+    EXPECT_EQ(A.Stdout, B.Stdout)
+        << "the object's layout depended on the name of an unrelated local";
+}

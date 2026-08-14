@@ -169,8 +169,15 @@ Codegen::Impl::schemaArrayBounds(const SchemaRef& ref) {
         builder.CreateStore(ref.discs[i], slot);
         defVar(def->discNames[i], slot, i64Ty);
     }
-    auto* lo = toI64(emitExpr(*atn->Low));
-    auto* hi = toI64(emitExpr(*atn->High));
+    // The bounds are emitted with only the discriminants visible.  Without
+    // this the allocating procedure's own variables shadowed the constants the
+    // body was written against.
+    llvm::Value *lo = nullptr, *hi = nullptr;
+    {
+        DeclarationScopeOnly declOnly(*this);
+        lo = toI64(emitExpr(*atn->Low));
+        hi = toI64(emitExpr(*atn->High));
+    }
     popScope();
     if (!lo || !hi)
         codegenICE("schema '" + ref.semaTy->SchemaName
