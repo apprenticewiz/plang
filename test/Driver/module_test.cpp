@@ -3488,6 +3488,34 @@ TEST(Schema, AVaryingStringIntoACharArrayChecksItsLength) {
     EXPECT_EQ(Ok.Stdout, "[abcd]\n");
 }
 
+TEST(Schema, PackAndUnpackCheckTheBoundsTheObjectHas) {
+    // ISO §6.7.5.4.  The bounds of a schema array are not in its type -- Sema
+    // holds the probe's -- so the check on the starting index was made against
+    // "1..-2": one minus the width of z, taken off a probe upper bound of 1.
+    // A bound that describes nothing, refusing a legal program.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type t(n: integer) = record a: array[1..n] of char end;\n"
+        "var q: ^t; z: packed array[1..4] of char; i: integer;\n"
+        "begin new(q, 10);\n"
+        "      for i := 1 to 10 do q^.a[i] := chr(ord('a') + i - 1);\n"
+        "      pack(q^.a, 3, z); writeln('[', z, ']');\n"
+        "      unpack(z, q^.a, 6);\n"
+        "      for i := 1 to 10 do write(q^.a[i]); writeln end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "[cdef]\nabcdecdefj\n");
+
+    // And the check still refuses an index that really is out of range, now
+    // naming the bound the object actually has rather than the probe's.
+    auto Bad = compileAndRun(
+        "program p(output);\n"
+        "type t(n: integer) = record a: array[1..n] of char end;\n"
+        "var q: ^t; z: packed array[1..4] of char;\n"
+        "begin new(q, 10); pack(q^.a, 9, z) end.\n", kEP + " -frange-checks");
+    EXPECT_NE(Bad.ExitCode, 0);
+    EXPECT_NE(Bad.Stderr.find("1..7"), std::string::npos) << Bad.Stderr;
+}
+
 TEST(Schema, ANestedVariantSitsWhereBothWalksAgreeItDoes) {
     // The run-time size walk started each alternative at zero and added the
     // offset on afterwards, while the offset walk started at the offset.  Those

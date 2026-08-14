@@ -1001,6 +1001,34 @@ void Codegen::Impl::emitPackUnpack(const CallStmt& s, bool isPack) {
         if (!aPtr || !elemTy || !aLo || !aHi)
             codegenICE(what + " has a conformant array whose bounds did not "
                               "arrive with it");
+    } else if (auto path = schemaPathOf(aExpr);
+               path && llvm::isa_and_nonnull<ArrayTypeNode>(
+                           peelPackedNode(path->decl))) {
+        // EP §6.4.7: the bounds of a schema array are not in its type.  Sema
+        // holds the PROBE's, so reading them from the type checked
+        // `pack(q^.a, 3, z)` against "1..-2" -- one minus the width of z, off a
+        // probe upper bound of 1 -- and refused a legal program with a bound
+        // that describes nothing.  Re-emitted here against the discriminants
+        // the object carries, like every other extent in a schema body.
+        auto* at = llvm::cast<ArrayTypeNode>(peelPackedNode(path->decl));
+        bindSchemaDiscs(path->root);
+        auto  bounds = rtIndexBounds(*at);
+        auto* elemSz = rtSizeOfTypeNode(at->Element.get());
+        popScope();
+        if (!bounds)
+            codegenICE(what + " has a schema array whose bounds cannot be "
+                              "evaluated at run time");
+        // The transfer strides by a constant element size, so ask the layout
+        // walk whether this element has one -- rather than asking the node's
+        // annotation, which belongs to whichever instantiation was resolved
+        // last and is not this walk's to trust.  Loud rather than wrong.
+        if (!llvm::isa_and_nonnull<llvm::ConstantInt>(elemSz))
+            codegenICE(what + " on an array whose element size a discriminant "
+                              "fixes");
+        aPtr   = path->addr;
+        elemTy = llvmTypeOfNode(*at->Element);
+        aLo    = bounds->first;
+        aHi    = bounds->second;
     } else {
         const auto& aTy = aExpr.ResolvedType;
         if (!aTy || aTy->Kind != TypeKind::Array || !aTy->IndexType
