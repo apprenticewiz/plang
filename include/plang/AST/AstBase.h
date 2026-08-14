@@ -3,6 +3,7 @@
 #include "plang/Basic/Token.h"
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -134,6 +135,25 @@ struct ExprNode : Node {
     /// Semantic type assigned by Sema::checkExpr(). Null before Sema runs.
     /// Mutable so Sema can annotate nodes reached through const references.
     mutable std::shared_ptr<Type> ResolvedType;
+
+    /// R2: the ordinal value Sema folded for this expression, in the scope the
+    /// expression was WRITTEN in.
+    ///
+    /// CodeGen has a folder of its own, and it resolves identifiers against a
+    /// flat table holding whatever is innermost where the expression is being
+    /// LOWERED.  Those are different questions the moment a name is redeclared
+    /// between the two points, and the compiler was correct only for as long as
+    /// the two answers happened to agree.  Consulting this first is what makes
+    /// Sema's answer the answer; see docs/single-source-of-truth.md.
+    ///
+    /// Absent means Sema did not fold it -- NOT that it is zero.  Fabricating a
+    /// number is how a bound that did not fold became a one-element range that
+    /// every subscript then ran off the end of.
+    ///
+    /// Deliberately not set for a value folded against a schema's probe
+    /// binding: that is the extent of no instance, and recording it would hand
+    /// codegen the probe's answer for every one of them.
+    mutable std::optional<int64_t> ConstVal;
 protected:
     using Node::Node;
 };

@@ -633,6 +633,21 @@ void Sema::checkSetBaseRange(const Type& Base, SourceLocation Loc) {
 /// and index checks comparing against nonsense.  Absence is not a number, so
 /// it is no longer spelled as one.
 std::optional<int64_t> Sema::constBound(const ExprNode& E) const {
+    // Whether THIS fold read a schema discriminant, not whether anything
+    // earlier did.
+    const bool SavedUsed = SchemaBindingUsed_;
+    SchemaBindingUsed_   = false;
+    const auto V         = constBoundImpl(E);
+    const bool UsedProbe = SchemaBindingUsed_;
+    SchemaBindingUsed_   = SavedUsed || SchemaBindingUsed_;
+    // Recorded for codegen, except where the value came from a probe binding:
+    // a bound over a discriminant is a different constant in every instance,
+    // and the one folded here belongs to none of them.
+    if (V && !UsedProbe) E.ConstVal = V;
+    return V;
+}
+
+std::optional<int64_t> Sema::constBoundImpl(const ExprNode& E) const {
     if (auto* N = llvm::dyn_cast<IntLitExpr>(&E))  return N->Value;
     if (auto* N = llvm::dyn_cast<BoolLitExpr>(&E)) return N->Value ? 1 : 0;
     // ISO §6.1.7: a one-character string is a char-type constant, so it is an
