@@ -754,7 +754,11 @@ struct Codegen::Impl {
 
     /// The layout of \p rt, building it if this is the first time it is asked
     /// for.  Never null.
-    const RecordLayout& layoutOf(const RecordTypeNode& rt);
+    /// \p semaRec is the record type Sema resolved for THIS use, when there is
+    /// one; its field types win over re-reading the denoters.  See the
+    /// definition.
+    const RecordLayout& layoutOf(const RecordTypeNode& rt,
+                                 const Type* semaRec = nullptr);
 
     /// The layout of the record \p T, which is \p T's declaration laid out
     /// under the discriminants \p T was resolved with.  Null when T is not a

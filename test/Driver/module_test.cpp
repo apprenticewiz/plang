@@ -3962,19 +3962,14 @@ const SchemaShape kShapes[] = {
 
   // ---- shapes whose defects review 4 left open ----
 
-  { "nested-instantiation",                       // review-4 finding 1
+  { "nested-instantiation",                       // review-4 finding 1: FIXED
     "inner(m: integer) = array[1..m] of integer;",
     "record a: array[1..n] of integer; x: inner(n); k: integer end",
     "i: integer",
     "  for i := 1 to 4 do begin %s.a[i] := i; %s.x[i] := i * 100 end;\n"
     "  %s.k := 99;\n",
     "  writeln(%s.x[4]:1, ' ', %s.k:1);\n",
-    // Still differs: instance writes, schema-PARAMETER reads, and the
-    // parameter sees 0 0.  The pointer form and the parameter form are each
-    // self-consistent -- only crossing them shows it.  Static layout against
-    // the run-time walk, which is R4's to remove rather than another patch
-    // here; see docs/single-source-of-truth.md.
-    4, false },
+    4, true },
 
   { "tagless-variant", "",                        // review-4 finding 2: FIXED
     "record a: array[1..n] of integer;\n"

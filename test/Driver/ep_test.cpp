@@ -3772,3 +3772,44 @@ TEST(EP7Schema, ANestedProcedureKeepsACapturedSchemaFormalsDiscriminants) {
     EXPECT_EQ(R.Stdout, "relayed: [nine char]\n"
                         "a: 1 2 3 4 5 6 7 8 9 | s=[nine char]\n");
 }
+
+TEST(EP7Schema, DeclaringASchemaParameterDoesNotResizeAnInstanceOfIt) {
+    // R4.  The record arm of llvmTypeOfSemaType had the resolved type T in
+    // hand and passed only T.RecordDecl to the layout, which then re-read each
+    // field's DENOTER.  One declaration node serves every instantiation and
+    // carries whichever was resolved last -- so a program that mentions the
+    // schema undiscriminated ANYWHERE laid out every discriminated instance of
+    // it with the probe's field sizes:
+    //
+    //   without `procedure body(var v: t)`   { [4 x i64], [4 x i64], i64 }
+    //   with it                              { [4 x i64], [1 x i64], i64 }
+    //
+    // Merely DECLARING the parameter changed the layout of an unrelated
+    // variable.  The Sema-against-codegen offset check was green through it,
+    // because both sides were reading the same stale annotation: two answers
+    // agreeing is not the same as either being right.
+    //
+    // The two programs must agree, which is the whole assertion -- the second
+    // one only adds a procedure that the first does not have.
+    const char* Body =
+        "type inner(m: integer) = array[1..m] of integer;\n"
+        "     t(n: integer) = record a: array[1..n] of integer;\n"
+        "                            x: inner(n); k: integer end;\n";
+    auto Plain = compileAndRun(
+        std::string("program p(output);\n") + Body +
+        "var a: t(4); i: integer;\n"
+        "begin for i := 1 to 4 do begin a.a[i] := i; a.x[i] := i * 100 end;\n"
+        "  a.k := 99; writeln(a.x[4]:1, ' ', a.k:1) end.\n", kEP);
+    ASSERT_EQ(Plain.ExitCode, 0) << Plain.Stderr;
+    EXPECT_EQ(Plain.Stdout, "400 99\n");
+
+    auto WithParam = compileAndRun(
+        std::string("program p(output);\n") + Body +
+        "var a: t(4); i: integer;\n"
+        "procedure body(var v: t);\n"
+        "begin writeln(v.x[4]:1, ' ', v.k:1) end;\n"
+        "begin for i := 1 to 4 do begin a.a[i] := i; a.x[i] := i * 100 end;\n"
+        "  a.k := 99; body(a) end.\n", kEP);
+    ASSERT_EQ(WithParam.ExitCode, 0) << WithParam.Stderr;
+    EXPECT_EQ(WithParam.Stdout, Plain.Stdout);
+}

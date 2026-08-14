@@ -316,11 +316,11 @@ const Codegen::Impl::RecordLayout*
 Codegen::Impl::layoutOfRecord(const Type& T) {
     if (T.Kind != TypeKind::Record || !T.RecordDecl) return nullptr;
     SchemaBindingScope bind(*this, T);
-    return &layoutOf(*T.RecordDecl);
+    return &layoutOf(*T.RecordDecl, &T);
 }
 
 const Codegen::Impl::RecordLayout&
-Codegen::Impl::layoutOf(const RecordTypeNode& rt) {
+Codegen::Impl::layoutOf(const RecordTypeNode& rt, const Type* semaRec) {
     const auto key0 = std::pair{&rt, schemaCtx};
     if (auto it = recordLayouts.find(key0); it != recordLayouts.end())
         return it->second;
@@ -333,9 +333,33 @@ Codegen::Impl::layoutOf(const RecordTypeNode& rt) {
     // read, and a `packed` that packs nothing is a word the language has that
     // means nothing.
     const bool packed = rt.Packed;
+    // R4: a field's type comes from what SEMA resolved for THIS record, not
+    // from re-reading the field's denoter.  One declaration node serves every
+    // instantiation and carries whichever was resolved last, so a record
+    // holding `x: inner(n)` in a program that also mentions the schema
+    // undiscriminated was laid out with x at the PROBE's size -- the static
+    // struct came out { [4 x i64], [1 x i64], i64 } for t(4), and every field
+    // behind x sat at an offset the run-time walk disagreed with.
+    //
+    // The Sema-against-codegen offset check was green through it, because both
+    // sides were reading the same stale annotation.  Two answers agreeing is
+    // not the same as either being right.
+    const auto semaFieldTy = [&](const std::string& nm) -> llvm::Type* {
+        if (!semaRec) return nullptr;
+        for (const auto& F : semaRec->RecordFields)
+            if (eqCI(F.Name, nm) && F.Ty && !F.Ty->isError()
+                    && canLowerSemaType(*F.Ty))
+                return llvmTypeOfSemaType(*F.Ty);
+        return nullptr;
+    };
     for (const auto& fd : rt.Fields) {
-        llvm::Type* ft = llvmTypeOf(fd.Type.get(), nullptr);
+        llvm::Type* fromNode = nullptr;
         for (const auto& nm : fd.Names) {
+            llvm::Type* ft = semaFieldTy(nm);
+            if (!ft) {
+                if (!fromNode) fromNode = llvmTypeOf(fd.Type.get(), nullptr);
+                ft = fromNode;
+            }
             L.Fields[toLower(nm)] =
                 FieldPlace{static_cast<unsigned>(elems.size()), ft, false, 0};
             elems.push_back(ft);
@@ -673,7 +697,14 @@ llvm::Type* Codegen::Impl::llvmTypeOfSemaTypeImpl(const Type& T) {
             // struct than the one a variable of the same type is allocated.
             if (T.RecordDecl) {
                 SchemaBindingScope bind(*this, T);
-                return structTypeFor(*T.RecordDecl);
+                // R4: T goes with the node.  Dropping it here is what left the
+                // layout re-reading each field's DENOTER, and one declaration
+                // node carries whichever instantiation was resolved last -- so
+                // a program that mentions a schema undiscriminated ANYWHERE
+                // laid out every discriminated instance of it with the probe's
+                // field sizes.  Merely declaring `procedure b(var v: t)`
+                // changed the layout of an unrelated `var a: t(4)`.
+                return layoutOf(*T.RecordDecl, &T).Ty;
             }
             // Build struct from record fields, keyed by LLVM type pointer sequence.
             std::vector<llvm::Type*> fieldTypes;
