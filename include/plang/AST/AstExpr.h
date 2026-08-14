@@ -45,6 +45,21 @@ struct IdentExpr : ExprNode {
     static bool classof(const Node* n) { return n->Kind == NodeKind::IdentExpr; }
     IdentExpr() : ExprNode(NodeKind::IdentExpr) {}
     std::string Name;          /// identifier as written in the source (original casing)
+
+    /// R2: Sema found a declaration of this name, in the scope the name was
+    /// WRITTEN in.  ISO §6.2.2.10 gives the required identifiers -- eof, eoln,
+    /// integer, maxint -- to a region enclosing the program, so a program that
+    /// declares one of those names means its own, and codegen must not answer
+    /// from its own idea of what the name means.
+    ///
+    /// A flag and not the `const Symbol*` the plan first called for.  Symbols
+    /// live in SymbolTable::Scopes, a std::vector<Scope> whose popScope() pops
+    /// the vector and destroys every Symbol in that scope: a pointer stored
+    /// here would dangle the moment the declaring block closed.  That is the
+    /// same defect as the raw Type* in ~TypeContext, and worth not writing
+    /// twice.  Anything more than "was it declared" should be recorded as a
+    /// value too, or the symbol table given stable storage first.
+    mutable bool UserDeclared{false};
 };
 
 struct IndexExpr : ExprNode {

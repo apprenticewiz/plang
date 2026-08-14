@@ -45,15 +45,13 @@ llvm::Value* Codegen::Impl::emitExpr(const ExprNode& e) {
         {
             std::string lo = toLower(n->Name);
             // ISO §6.2.2.10: a program that declares the name means its own.
-            // The test used to be findVar and consts -- two of the several
-            // things a name can denote -- so a user-declared parameterless
-            // FUNCTION called eof was in neither and the builtin won.  Worse
-            // than a wrong answer: the builtin reads standard input, so a
-            // program whose own eof never touches a file HUNG on a terminal.
-            if ((lo == "eof" || lo == "eoln") && !findVar(n->Name)
-                    && !consts.count(lo)
-                    && !mod->getFunction(findMangledProc(n->Name))
-                    && !isImportedCallable(n->Name)) {
+            // Sema settled that in the scope the name was written in and says
+            // so on the node; codegen used to guess by asking which of its own
+            // tables held the spelling, and a user-declared parameterless
+            // FUNCTION called eof was in none of them.  The builtin won, and
+            // because the builtin reads standard input a program whose own eof
+            // never touches a file HUNG on a terminal.
+            if ((lo == "eof" || lo == "eoln") && !n->UserDeclared) {
                 auto* r = builder.CreateCall(
                     getRuntimeBoolFn(lo == "eof" ? "plang_eof_stdin"
                                                  : "plang_eoln_stdin"), {}, lo);
