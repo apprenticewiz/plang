@@ -1094,8 +1094,15 @@ void Codegen::Impl::emitWith(const WithStmt& s) {
         // storage, which is what the path knows and the kind does not.
         const bool isInstance =
             rec->ResolvedType->Kind == TypeKind::SchemaInstance;
+        // schemaPathOf EMITS the access path -- every subscript in it -- so its
+        // result is kept whatever happens next.  Discarding it and letting the
+        // static branch call emitLValue below emitted the path a SECOND time:
+        // `with q^.a[idx] do` called idx twice, bound the element the second
+        // call chose, and left a live range check on the first.  ISO §6.8.3.10
+        // says the record-variable is evaluated once.
+        std::optional<SchemaPath> path;
+        if (!isInstance) path = schemaPathOf(*rec);
         if (!isInstance) {
-            auto path = schemaPathOf(*rec);
             const RecordTypeNode* rt =
                 path ? llvm::dyn_cast_or_null<RecordTypeNode>(
                            peelPackedNode(path->decl))
@@ -1213,7 +1220,10 @@ void Codegen::Impl::emitWith(const WithStmt& s) {
             continue;
         }
 
-        auto* recPtr = emitLValue(*rec);
+        // Reuse the address schemaPathOf already emitted, when it produced one.
+        // Calling emitLValue here regardless is what evaluated the record
+        // variable a second time.
+        auto* recPtr = path ? path->addr : emitLValue(*rec);
         if (!recPtr) codegenICE("'with' on a record that has no address");
         if (rec->ResolvedType->Kind != TypeKind::Record)
             codegenICE("'with' on a non-record operand");

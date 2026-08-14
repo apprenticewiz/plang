@@ -3608,3 +3608,47 @@ TEST(EP7Schema, ASchemaInstantiatedInsideASchemaBodyIsNotSizedFromTheProbe) {
     ASSERT_EQ(Rec.ExitCode, 0) << Rec.Stderr;
     EXPECT_EQ(Rec.Stdout, "400 99\n");
 }
+
+TEST(EP7Schema, AConformantActualPassesItsRealBoundsWhenItIsASchemaInstance) {
+    // EP §6.4.9: a DISCRIMINATED schema is an ordinary fixed-size type, so
+    // `vec(5)` is an array wherever a conformant actual is wanted.  Sema's
+    // isConformable was widened to unwrap SchemaInstance and reach the array;
+    // the code that pushes the bounds was not, so its test failed and literal
+    // 0, 0 went across.  The callee saw an empty array and its loop ran no
+    // times -- and v0.1.5 REJECTED the call, so this branch turned a compile
+    // error into a silent wrong answer.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type vec(n: integer) = array[1..n] of integer;\n"
+        "var v: vec(5); i: integer;\n"
+        "function total(a: array[lo..hi: integer] of integer): integer;\n"
+        "var k, t: integer;\n"
+        "begin t := 0; for k := lo to hi do t := t + a[k]; total := t end;\n"
+        "begin for i := 1 to 5 do v[i] := i; writeln(total(v):1) end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "15\n");
+}
+
+TEST(EP7Schema, AWithRecordVariableIsEvaluatedOnce) {
+    // ISO §6.8.3.10: the record-variable of a with-statement is evaluated
+    // once.  schemaPathOf EMITS the access path -- every subscript in it -- and
+    // emitWith discarded that result when the component's denoter was not a
+    // record, then let the static branch call emitLValue and emit the whole
+    // path again.  A side-effecting subscript therefore ran twice, the
+    // statement bound the element the SECOND call chose, and a live range
+    // check on the first was left behind.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type inner = record x: integer end;\n"
+        "     t(n: integer) = record a: array[1..n] of inner end;\n"
+        "var q: ^t; i, calls: integer;\n"
+        "function idx: integer;\n"
+        "begin calls := calls + 1; idx := 2 end;\n"
+        "begin new(q, 5); calls := 0;\n"
+        "  for i := 1 to 5 do q^.a[i].x := i;\n"
+        "  with q^.a[idx] do x := 42;\n"
+        "  writeln('calls=', calls:1, ' a2=', q^.a[2].x:1) end.\n",
+        kEP + " -frange-checks");
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "calls=1 a2=42\n");
+}

@@ -135,18 +135,34 @@ void Codegen::Impl::pushConformantArgs(std::vector<llvm::Value*>& args,
                 fromConformant = true;
             }
         }
+        // EP §6.4.9: a DISCRIMINATED schema is an ordinary fixed-size type, so
+        // `vec(5)` is an array wherever a conformant actual is wanted.  Sema's
+        // isConformable was widened to unwrap SchemaInstance and reach the
+        // array; this was not, so the test below failed and the fallback
+        // pushed literal 0, 0.  The callee then saw an empty array and its
+        // loop ran no times -- and v0.1.5 REJECTED the call outright, so this
+        // branch turned a compile error into a silent wrong answer.
+        const auto unwrapSchema = [](const Type* T) {
+            while (T && T->Kind == TypeKind::SchemaInstance && T->SchemaBody)
+                T = T->SchemaBody.get();
+            return T;
+        };
         if (!fromConformant) {
             int64_t lo = 0, hi = 0;
-            if (dimTy && (dimTy->Kind == TypeKind::Array
-                          || dimTy->Kind == TypeKind::ConformantArray)
-                && dimTy->IndexType) {
-                lo = dimTy->IndexType->SubLo;
-                hi = dimTy->IndexType->SubHi;
+            const Type* d = unwrapSchema(dimTy);
+            if (d && (d->Kind == TypeKind::Array
+                      || d->Kind == TypeKind::ConformantArray)
+                && d->IndexType) {
+                lo = d->IndexType->SubLo;
+                hi = d->IndexType->SubHi;
             }
             args.push_back(llvm::ConstantInt::get(i64Ty, lo));
             args.push_back(llvm::ConstantInt::get(i64Ty, hi));
         }
-        if (dimTy && dimTy->ElemType) dimTy = dimTy->ElemType.get();
+        // The next dimension is reached through the body too, for the same
+        // reason: a schema instance has no ElemType of its own.
+        if (const Type* d = unwrapSchema(dimTy); d && d->ElemType)
+            dimTy = d->ElemType.get();
     }
 }
 
