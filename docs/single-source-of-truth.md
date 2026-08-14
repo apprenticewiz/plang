@@ -150,6 +150,35 @@ than after:
   perfect.  Two earlier versions of this harness did not cross, and real
   defects walked through both.
 
+## Where the phases actually got to
+
+**R1 and R2 are done** and their entries above are closed.
+
+**R4 is partly done.**  The gate landed (Sema's field offsets checked against
+codegen's on every record, fixed fields and variant fields alike), and one real
+fix followed from it: the record arm of `llvmTypeOfSemaType` had the resolved
+type in hand and passed only `RecordDecl` on, so the layout re-read each
+field's denoter — and merely *declaring* an undiscriminated schema parameter
+resized every discriminated instance of that schema.  **The offset gate was
+green through that**, because both sides read the same stale annotation.  Two
+answers agreeing is not the same as either being right, which is the argument
+for gates that compare what the compiler DOES through different routes rather
+than comparing two of its computations to each other.
+
+What remains of R4 is the thing itself: the static layout and the run-time walk
+are two implementations that now agree, rather than one.
+
+**R3 is partly done.**  Extents travel as closed forms over discriminant
+indices — array bounds, string capacities, and the actuals of a schema
+instantiated inside another schema's body.  Measured rather than assumed: with
+each fallback replaced by an internal error and the suite run, the **capacity**
+fallback was taken by no test and has been deleted; the **array-bound** fallback
+was taken by 45 and remains.  It remains because a schema instantiated inside
+another's body has its bounds resolved under the OUTER probe, so they are never
+forms over the outer names and the inner binding still needs the names in
+scope.  Giving those bodies their own forms is what would let
+`bindSchemaDiscs` stop binding names at all, and that is the next piece of R3.
+
 ## Order
 
 Some class A sites need no edit of their own: they reach a foreign node

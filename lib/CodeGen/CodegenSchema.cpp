@@ -602,9 +602,21 @@ llvm::Value* Codegen::Impl::rtSizeOfTypeNode(const TypeNode* tn) {
         return i64c(static_cast<int64_t>(
             mod->getDataLayout().getTypeAllocSize(llvmTypeOfNode(*d))));
     if (auto* st = llvm::dyn_cast<StringTypeNode>(d)) {
-        // R3: the capacity's closed form, then the expression.
+        // R3: the capacity's closed form.  The expression fallback that used
+        // to sit here is gone: replacing it with an internal error and running
+        // the suite showed it taken by NO test, while the array-bound fallback
+        // beside it is taken by 45 -- so this one was dead and that one is not.
+        //
+        // Deleting it rather than leaving it is the point of the phase.  What
+        // it did was re-emit the declaration's capacity expression at the use
+        // site, which is the defect this work exists to remove; leaving a
+        // second path that can still do it means the class is bypassed rather
+        // than gone.  A capacity that reaches here without a form is a hole in
+        // the compiler, and says so.
         auto* cap = extentOf(st->ExtentLow);
-        if (!cap) cap = toI64(emitExpr(*st->Capacity));
+        if (!cap)
+            codegenICE("a schema string capacity with no closed form to "
+                       "evaluate against the discriminants");
         if (!cap) codegenICE("a schema string capacity that cannot be evaluated");
         return alignUpV(builder.CreateAdd(i64c(8), cap, "str.size"), 8);
     }
