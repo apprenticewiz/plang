@@ -114,9 +114,10 @@ void Codegen::Impl::defVar(const std::string& name, llvm::Value* ptr, llvm::Type
 
 const Codegen::Impl::VarEntry* Codegen::Impl::findVar(const std::string& name) const {
     std::string key = toLower(name);
-    for (auto it = scopes.rbegin(); it != scopes.rend(); ++it) {
-        auto f = it->find(key);
-        if (f != it->end()) return &f->second;
+    // Down to varLookupFloor_ and no further; see DeclarationScopeOnly.
+    for (size_t i = scopes.size(); i-- > varLookupFloor_;) {
+        auto f = scopes[i].find(key);
+        if (f != scopes[i].end()) return &f->second;
     }
     return nullptr;
 }

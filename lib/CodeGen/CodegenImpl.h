@@ -581,6 +581,49 @@ struct Codegen::Impl {
     // ====================================================================
     // Symbol table
     // ====================================================================
+    /// findVar looks no further down than this.  EP §6.4.7: a schema body's
+    /// bound expressions are written where the schema is DECLARED, and the only
+    /// names in scope there are its own discriminants and compile-time
+    /// constants.  Re-emitting them at an ALLOCATION site put the allocating
+    /// procedure's locals in front of those names, so a `const k` used in a
+    /// body was captured by any unrelated `var k` at the new() -- which sized
+    /// the object from a run-time variable and corrupted the heap.
+    size_t varLookupFloor_{0};
+
+    /// Hide every enclosing variable scope for the duration, leaving only the
+    /// scope just pushed.  Constants are a separate table and stay visible,
+    /// which is precisely the set of names a schema body may legally use.
+    struct DeclarationScopeOnly {
+        Impl&                    I;
+        size_t                   Saved;
+        std::vector<std::string> Restored;
+        explicit DeclarationScopeOnly(Impl& Impl_) : I(Impl_), Saved(Impl_.varLookupFloor_) {
+            I.varLookupFloor_ = I.scopes.empty() ? 0 : I.scopes.size() - 1;
+            // Hiding the variable is not enough on its own.  defVar does not
+            // merely shadow a constant of the same spelling -- it REMOVES it
+            // from `consts` and parks it in shadowedConsts until the scope
+            // closes.  So with the variable hidden and the constant still
+            // parked, the body's name resolved to nothing at all and codegen
+            // emitted a reference to a global that never existed
+            // ("undefined symbol: pasg_k").  Put the parked constants back for
+            // the duration: they are what the declaration scope would have had.
+            // EVERY level, not just the ones above the floor: the variable that
+            // parked the constant lives in the scope we are hiding, which is
+            // below it.  Exactly one level can hold a given constant -- once
+            // erased, an inner defVar finds nothing left to park -- so there is
+            // no ambiguity about which saved value is the original.
+            for (const auto& Level : I.shadowedConsts)
+                for (const auto& [K, V] : Level)
+                    if (!I.consts.count(K)) { I.consts[K] = V; Restored.push_back(K); }
+        }
+        ~DeclarationScopeOnly() {
+            for (const auto& K : Restored) I.consts.erase(K);
+            I.varLookupFloor_ = Saved;
+        }
+        DeclarationScopeOnly(const DeclarationScopeOnly&)            = delete;
+        DeclarationScopeOnly& operator=(const DeclarationScopeOnly&) = delete;
+    };
+
     void pushScope() { scopes.emplace_back(); shadowedConsts.emplace_back(); }
     void popScope()  {
         // Put back any constant a variable in this scope was shadowing.
