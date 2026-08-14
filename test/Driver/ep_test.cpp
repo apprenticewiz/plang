@@ -3699,3 +3699,38 @@ TEST(EP7Schema, TheBodyIsAlignedForWhatItHoldsNotJustForTheHeader) {
         EXPECT_EQ(R.Stdout, " true\n") << O;
     }
 }
+
+TEST(EP7Schema, APointerMayNameASchemaDeclaredLaterInTheSamePart) {
+    // ISO §6.2.2.9 lets a pointer's domain type be declared later in the same
+    // type-definition-part, and a schema is a type like any other.  Sema filled
+    // in each schema's parameters and body node in declaration ORDER, so `^t`
+    // reached t while its body node was still null, took a silent error return,
+    // and the pointer carried an error pointee all the way to codegen -- which
+    // died with "array bounds did not fold" and no diagnostic before it.
+    //
+    // Swapping the two type definitions round made the identical program
+    // compile and run, which is the clearest statement of the defect.
+    auto Fwd = compileAndRun(
+        "program p(output);\n"
+        "type pl = ^t;\n"
+        "     t(n: integer) = array[1..n] of integer;\n"
+        "var a: pl; i: integer;\n"
+        "begin new(a, 3); for i := 1 to 3 do a^[i] := i;\n"
+        "  for i := 1 to 3 do write(a^[i]:1, ' '); writeln end.\n",
+        kEP + " -frange-checks");
+    ASSERT_EQ(Fwd.ExitCode, 0) << Fwd.Stderr;
+    EXPECT_EQ(Fwd.Stdout, "1 2 3 \n");
+
+    // The order that always worked, so that a fix to the first cannot be a
+    // regression in the second.
+    auto Rev = compileAndRun(
+        "program p(output);\n"
+        "type t(n: integer) = array[1..n] of integer;\n"
+        "     pl = ^t;\n"
+        "var a: pl; i: integer;\n"
+        "begin new(a, 3); for i := 1 to 3 do a^[i] := i;\n"
+        "  for i := 1 to 3 do write(a^[i]:1, ' '); writeln end.\n",
+        kEP + " -frange-checks");
+    ASSERT_EQ(Rev.ExitCode, 0) << Rev.Stderr;
+    EXPECT_EQ(Rev.Stdout, Fwd.Stdout);
+}

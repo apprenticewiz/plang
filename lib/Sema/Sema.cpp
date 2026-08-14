@@ -766,6 +766,40 @@ void Sema::checkBlock(const BlockNode& Block,
         }
     }
 
+    // Phase 3b(i) — Record every schema's parameters and BODY NODE before any
+    // type body is resolved.
+    //
+    // ISO §6.2.2.9 lets a pointer's domain type be declared later in the same
+    // type-definition-part, and `type pl = ^t; t(n: integer) = ...` did that
+    // with a schema.  Resolving in declaration order reached ^t while t's
+    // SchemaBodyNode was still null, resolveUndiscriminatedSchema took its
+    // silent error return, and the pointer kept an error pointee all the way
+    // to codegen -- which died with "array bounds did not fold" and no
+    // diagnostic before it.  Swapping the two type definitions round made the
+    // identical program compile and run.
+    //
+    // Nothing here resolves a body; it only records where each one is, which
+    // is all a pointer to it needs.
+    for (const auto& Td : Block.Types) {
+        if (Td.SchemaParams.empty()) continue;
+        Symbol* Existing = Symtab.lookupCurrent(Td.Name);
+        if (!Existing || Existing->Kind != SymbolKind::Schema) continue;
+        for (const auto& Spec : Td.SchemaParams) {
+            NamedTypeNode NtTmp;
+            NtTmp.Loc  = Td.Type->Loc;
+            NtTmp.Name = Spec.TypeName;
+            auto ParamTy = resolveNamed(NtTmp);
+            for (const auto& ParamName : Spec.Names) {
+                Symbol::SchemaParam P;
+                P.Name = ParamName;
+                P.Ty   = ParamTy;
+                Existing->SchemaDeclParams.push_back(std::move(P));
+            }
+        }
+        Existing->SchemaBodyNode = Td.Type.get();
+        Existing->DeclLoc        = Td.Type->Loc;
+    }
+
     // Phase 3b — Resolve type bodies; replace each stub pointer in the symbol table.
     // We do NOT mutate stubs in-place here so that enum-value symbols (which capture
     // the freshly-resolved shared_ptr) stay consistent.  Instead Phase 3c below
@@ -774,25 +808,7 @@ void Sema::checkBlock(const BlockNode& Block,
     // EP §6.4.7: For schema definitions, store discriminant specs and body node.
     for (const auto& Td : Block.Types) {
         if (!Td.SchemaParams.empty()) {
-            // Schema: resolve discriminant parameter types and record body pointer.
-            Symbol* Existing = Symtab.lookupCurrent(Td.Name);
-            if (Existing && Existing->Kind == SymbolKind::Schema) {
-                for (const auto& Spec : Td.SchemaParams) {
-                    // Resolve the declared ordinal type of these discriminants.
-                    NamedTypeNode NtTmp;
-                    NtTmp.Loc  = Td.Type->Loc;
-                    NtTmp.Name = Spec.TypeName;
-                    auto ParamTy = resolveNamed(NtTmp);
-                    for (const auto& ParamName : Spec.Names) {
-                        Symbol::SchemaParam P;
-                        P.Name = ParamName;
-                        P.Ty   = ParamTy;
-                        Existing->SchemaDeclParams.push_back(std::move(P));
-                    }
-                }
-                Existing->SchemaBodyNode = Td.Type.get();
-                Existing->DeclLoc        = Td.Type->Loc;
-            }
+            // Registered in 3b(i) above, before any body was resolved.
         } else {
             auto Resolved = resolveType(*Td.Type);
             nameNominalType(*Resolved, Td.Name);
