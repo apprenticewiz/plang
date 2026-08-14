@@ -1020,6 +1020,16 @@ void Codegen::Impl::storeInitialValue(llvm::Value* ptr, llvm::Type* ty,
 // The 'value' clause the denoter carries, reached through however many names
 // stand between the declaration and the type: `type k = integer value 3;
 // type j = k; var n: j` begins at 3 like every other variable of k does.
+// EP §6.4.7: the body denoter a schema instantiation stands for, or null when
+// this is not one.  Only a SchemaTypeNode -- `t(5)` -- is answered: an
+// UNDISCRIMINATED `^t` reaches its body through a NamedTypeNode and has no
+// static layout to initialize through, which is a separate piece of work.
+const TypeNode* Codegen::Impl::schemaInstanceBody(const TypeNode* tn) const {
+    auto* stn = llvm::dyn_cast_or_null<SchemaTypeNode>(tn);
+    if (!stn || !stn->ResolvedBody) return nullptr;
+    return schemaBodyNodeOf(*stn->ResolvedBody);
+}
+
 const ExprNode* Codegen::Impl::writtenInitialState(const TypeNode* tn,
                                                    const TypeNode** carrier) const {
     for (int hops = 0; tn && hops < 32; ++hops) {
@@ -1043,6 +1053,12 @@ bool Codegen::Impl::hasInitialState(const TypeNode* tn, int depth) const {
     if (!tn || depth > 16) return false;
     if (writtenInitialState(tn)) return true;
     const TypeNode* shape = denoterOf(tn);
+    // EP §6.4.7 with §6.6: `t(5)` is written as a schema instantiation, and
+    // what it denotes is the schema's body.  Neither this nor emitInitialState
+    // looked through one, so a `value` clause inside a schema body was dropped
+    // and `record k: integer value 9 end` began at zero in every instance.
+    if (const TypeNode* body = schemaInstanceBody(shape))
+        return hasInitialState(body, depth + 1);
     if (auto* rtn = llvm::dyn_cast_or_null<RecordTypeNode>(shape)) {
         for (const auto& fd : rtn->Fields)
             if (hasInitialState(fd.Type.get(), depth + 1)) return true;
@@ -1064,6 +1080,19 @@ void Codegen::Impl::emitInitialState(llvm::Value* ptr, llvm::Type* ty,
     }
 
     const TypeNode* shape = denoterOf(tn);
+    // See hasInitialState.  The body is laid out under THIS instantiation's
+    // discriminants: a body holding a `string(n)` has a different shape per
+    // instance, and initializing it through the unbound layout would write the
+    // fields at offsets belonging to no instance at all.
+    if (auto* stn = llvm::dyn_cast_or_null<SchemaTypeNode>(shape)) {
+        const TypeNode* body = schemaInstanceBody(stn);
+        if (!body) return;
+        if (stn->ResolvedBody && stn->ResolvedBody->SchemaBody) {
+            SchemaBindingScope bind(*this, *stn->ResolvedBody->SchemaBody);
+            emitInitialState(ptr, ty, body, depth + 1);
+        }
+        return;
+    }
     if (auto* rtn = llvm::dyn_cast_or_null<RecordTypeNode>(shape)) {
         const auto& L  = layoutOf(*rtn);
         auto*       st = L.Ty;

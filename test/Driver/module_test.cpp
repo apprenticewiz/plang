@@ -3488,6 +3488,59 @@ TEST(Schema, AVaryingStringIntoACharArrayChecksItsLength) {
     EXPECT_EQ(Ok.Stdout, "[abcd]\n");
 }
 
+TEST(Schema, AValueClauseInsideASchemaBodyIsNotDropped) {
+    // EP §6.4.7 with §6.6.  `t(5)` is written as a schema instantiation, and
+    // what it denotes is the schema's body -- which neither hasInitialState nor
+    // emitInitialState looked through, so every `value` clause inside a schema
+    // body was silently ignored and the field began at zero.
+    //
+    // The varying components are the point of the second half: the body is laid
+    // out under THIS instantiation's discriminants, and initializing it through
+    // the unbound layout would put the fields at offsets belonging to no
+    // instance at all.  s and a either side of k say whether that happened.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type t(n: integer) = record\n"
+        "       s: string(n); k: integer value 7;\n"
+        "       a: array[1..n] of integer end;\n"
+        "var v: t(20); i: integer;\n"
+        "begin writeln(v.k:1);\n"
+        "      v.s := 'hello'; for i := 1 to 20 do v.a[i] := i;\n"
+        "      writeln(v.s, ' ', v.k:1, ' ', v.a[20]:1) end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "7\nhello 7 20\n");
+}
+
+TEST(Schema, TheRunTimeLayoutSurvivesTheOptimizer) {
+    // Everything here is emitted as arithmetic over values rather than as
+    // constants in a type, and two of the pieces -- a dynamic alloca and the
+    // stacksave/stackrestore pair around it -- are exactly the shapes an
+    // optimizer is entitled to move.  The suite compiles at the default level
+    // only, so nothing else in it would notice.
+    const std::string Src =
+        "program p(output);\n"
+        "type t(n: integer) = record lead: integer; s: string(n);\n"
+        "       case tag: boolean of\n"
+        "         true:  (c: char;\n"
+        "                 case inner: boolean of\n"
+        "                    true: (d: real); false: (k: char));\n"
+        "         false: (z: integer) end;\n"
+        "var q: ^t; v: t(10); r: ^string; i: integer;\n"
+        "begin new(q, 10); q^.lead := 111; q^.s := 'ten chars!';\n"
+        "      q^.tag := true; q^.c := 'x';\n"
+        "      q^.inner := false; q^.k := 'K';\n"
+        "      v := q^;\n"
+        "      new(r, 300); r^ := '';\n"
+        "      for i := 1 to 300 do r^ := r^ + 'x';\n"
+        "      writeln('[', v.k, ']', v.lead:1, v.c, ' ',\n"
+        "              length(r^):1, ' ', length(trim(r^)):1) end.\n";
+    for (const char* O : {"-O0", "-O1", "-O2", "-O3"}) {
+        auto R = compileAndRun(Src, kEP + " " + O + " -frange-checks");
+        ASSERT_EQ(R.ExitCode, 0) << O << ": " << R.Stderr;
+        EXPECT_EQ(R.Stdout, "[K]111x 300 300\n") << O;
+    }
+}
+
 TEST(Schema, PackAndUnpackCheckTheBoundsTheObjectHas) {
     // ISO §6.7.5.4.  The bounds of a schema array are not in its type -- Sema
     // holds the probe's -- so the check on the starting index was made against

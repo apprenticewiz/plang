@@ -1323,6 +1323,8 @@ struct Codegen::Impl {
     const ExprNode* writtenInitialState(const TypeNode* tn,
                                         const TypeNode** carrier = nullptr) const;
     bool hasInitialState(const TypeNode* tn, int depth = 0) const;
+    /// The body denoter a schema instantiation `t(5)` stands for.
+    const TypeNode* schemaInstanceBody(const TypeNode* tn) const;
     /// EP §6.6: brings a variable of the denoter's type to the state such a
     /// variable begins in.
     void emitInitialState(llvm::Value* ptr, llvm::Type* ty,

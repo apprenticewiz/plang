@@ -8,6 +8,77 @@ version numbers follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 
 ## [Unreleased]
 
+### Added
+
+- **Undiscriminated schema types are implemented** (EP §6.4.4, §6.4.7).  A
+  schema is a family of types indexed by a tuple of discriminants.  Where they
+  are written out, `vec(4)`, the type is ordinary and always lowered like one.
+  Where they are not — a pointer `^vec`, a formal parameter `v: vec` — the
+  discriminants are only known at run time, and until now plang diagnosed the
+  declaration rather than compiling it.
+
+  They now travel with the value.  A schema formal parameter takes one extra
+  i64 argument per discriminant, the same shape as the conformant-array bounds
+  in §6.7.3.7; `new(p, d1..ds)` writes them into a header in front of the body,
+  so `p^` can recover them anywhere the pointer reaches.  Everything that needs
+  an extent — allocation, field offsets, array strides, index checks, string
+  capacities — re-emits the body's own bound expressions against those values.
+
+  The body may be a string, an array, or a record, including one with a variant
+  part, nested records, arrays of records, and components whose own extent a
+  discriminant fixes.  `with p^ do` opens it, `q^` may be assigned to and from
+  a discriminated instance of the same schema, and a schema array may be passed
+  to a conformant-array parameter, which receives its real bounds.
+
+  `string` itself is one of these (§6.4.3.3), so `^string` and `new(q, 300)`
+  work, and the capacity travels with the value rather than being guessed at.
+
+  What is still refused, with a diagnostic that says so: a body that reads a
+  discriminant without any extent, range or capacity of it saying so — there is
+  nothing there to compute a layout from — and `pack`/`unpack` on an array
+  whose element size a discriminant fixes.
+
+### Fixed
+
+- **A crash in the compiler no longer looks like a refusal to compile.**  llvm's
+  `ExecuteAndWait` answers -1 for a failure to run and -2 for a child killed by
+  a signal, and neither sets its `ExecFailed` flag.  The driver returned that
+  straight through, so *any* internal crash exited 254 with no output at all.
+  It is now reported and exits 1, like every other error.
+
+- **A discriminant is no longer assignable.**  It is a value the schematic
+  variable carries, not a component of it, but it is spelled like a field —
+  so `q^.n := 5`, `v.n := 5`, `r(q^.n)` as a var parameter, and `n := 5` inside
+  `with q^ do` were all accepted, and all four then killed code generation.
+  Reading one is unaffected; that is how a program learns its own extent.
+
+- **A string result no longer stops at 255 characters when its capacity is
+  fixed by a discriminant.**  A temporary needs a size, and 255 is the answer
+  for a capacity nobody knows — but here somebody knows it and simply does not
+  know it yet.  Concatenation, `substr` and `trim` sized their result by that
+  constant while telling the runtime the truth, so `q^ := q^ + 'x'` on a
+  capacity of 300 quietly stopped at 256.  The temporary is now allocated to
+  the same arithmetic, and released at the end of the statement so that one
+  inside a loop costs a fixed amount of stack rather than one piece per pass.
+
+- **Nested variant parts sat where only one of the two layout walks thought
+  they did.**  The run-time size walk measured each alternative from zero and
+  added the offset afterwards; the offset walk measured from the offset.  Those
+  agree only when the offset is already aligned to the widest field in the
+  part, which a nested run is not.  A field could sit four bytes from where an
+  ordinary read of it looked, so a whole-value copy between `q^` and a
+  discriminated instance silently changed it.  The two are now one walk.
+
+- **`pack` and `unpack` checked the starting index against the probe's
+  bounds**, which for `array[1..n]` and a four-element packed array came out as
+  `1..-2` — a range describing nothing, refusing a legal program.
+
+- Several defects in the same family, each fixed where the question was being
+  answered twice: `p^` for a record body reading past the discriminant header,
+  a nil check missing on one route to `p^`, an access path resolved twice per
+  assignment so a side-effecting subscript ran twice, and an over-capacity
+  string assignment that read past the end of a shorter allocation.
+
 ## [0.1.5] - 2026-08-12
 
 **Where 0.1.4 went.**  It was cut from the 0.1.3 lineage rather than from this
