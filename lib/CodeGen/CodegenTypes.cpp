@@ -124,6 +124,21 @@ const Codegen::Impl::VarEntry* Codegen::Impl::findVar(const std::string& name) c
 
 std::optional<std::pair<int64_t, int64_t>>
 Codegen::Impl::arrayIndexRange(const ArrayTypeNode& n) const {
+    // R1.  Sema folded these bounds in the scope they were WRITTEN in; folding
+    // them here folds them where the denoter is being LOWERED, against a
+    // constant table that holds whatever is innermost at that moment.  A record
+    // whose field is `array[1..n]` and whose layout is first computed inside a
+    // procedure declaring its own `n` came out sized for the stranger's n --
+    // caught, on a legal ISO 7185 program, as "takes 16 bytes as it is written
+    // and 80 bytes as Sema resolved it".
+    //
+    // Inside a schema instantiation the syntax is still the only answer: a
+    // bound over a discriminant is a constant per instance and not in the
+    // syntax, and Sema's annotation there is the probe's.  Same exemption the
+    // size-agreement guard makes.
+    if (schemaCtx.empty() && n.ResolvedType
+            && n.ResolvedType->Kind == TypeKind::Array && n.ResolvedType->IndexType)
+        if (auto R = ordinalRange(*n.ResolvedType->IndexType)) return R;
     if (n.Low && n.High) {
         const auto lo = tryEvalConstInt(*n.Low,  &consts);
         const auto hi = tryEvalConstInt(*n.High, &consts);
@@ -368,6 +383,22 @@ llvm::Type* Codegen::Impl::llvmTypeOfNode(const TypeNode& node) {
         // which is an internal error on a program fpc compiles and runs.
         if (node.ResolvedType && node.ResolvedType->Kind == TypeKind::Record
                 && node.ResolvedType->RecordDecl)
+            return llvmTypeOfSemaType(*node.ResolvedType);
+        // R1.  The two cases above are this rule applied one TypeKind at a
+        // time, each added when a spelling collision was traced back to here.
+        // A NamedTypeNode is nothing BUT a name, so there is no information in
+        // it that Sema did not already use: Sema bound the name in the scope it
+        // was written in and hung the answer on the node.  llvmTypeOfName below
+        // answers out of typeAliases, a flat table rebuilt per procedure and
+        // keyed by spelling, which can only agree by coincidence -- and when it
+        // disagrees it hands back a type of a different SIZE, which is how an
+        // inner procedure's homonym came to size an outer variable.
+        //
+        // Inside a schema instantiation the annotation is the last instance's
+        // and not this one's, so there the syntax is still the only answer;
+        // that is the same exemption the size-agreement guard already makes.
+        if (schemaCtx.empty() && node.ResolvedType && !node.ResolvedType->isError()
+                && canLowerSemaType(*node.ResolvedType))
             return llvmTypeOfSemaType(*node.ResolvedType);
         if (auto* t = llvmTypeOfName(n->Name)) return t;
         return llvmTypeOfNodeViaSema(node, "unknown type name '" + n->Name + "'");

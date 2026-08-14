@@ -2956,3 +2956,39 @@ TEST(Schema, AVariantRecordStillTakesItsTagsInNew) {
     ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
     EXPECT_EQ(R.Stdout, "r=5\n");
 }
+
+TEST(SeparateCompilation, AnExportedVariableIsSizedByItsInterfacesConstants) {
+    // The interface's `var` denoters are lowered after the module BODY's
+    // declarations have been registered, and codegen's constant table is flat:
+    // a constant the body declares for its own use displaced the interface's
+    // constant of the same spelling, and the exported array was sized from it.
+    //
+    // Sema never agreed -- the importer resolves tab against the interface --
+    // so this surfaced as "takes 16 bytes as it is written and 80 bytes as
+    // Sema resolved it", refusing a legal program rather than miscompiling it.
+    //
+    // Fixed by array bounds coming from Sema rather than being re-folded here,
+    // in CodegenTypes.cpp; no module-specific change.  The test is in this file
+    // because nothing else would notice if that stopped covering it.
+    auto R = compileTwoFiles(
+        "module M interface;\n"
+        "export M = (n, tab);\n"
+        "const n = 10;\n"
+        "var tab: array[1..n] of integer;\n"
+        "end.\n"
+        "module M;\n"
+        "const n = 2;\n"
+        "var scratch: array[1..n] of integer;\n"
+        "to begin do scratch[1] := 0;\n"
+        "end.\n",
+        "program p(output);\n"
+        "import M;\n"
+        "var i: integer;\n"
+        "begin\n"
+        "  for i := 1 to 10 do tab[i] := i * 7;\n"
+        "  writeln(tab[10]:1)\n"
+        "end.\n",
+        kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "70\n");
+}
