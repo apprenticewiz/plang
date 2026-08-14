@@ -152,8 +152,56 @@ void Codegen::Impl::emitSchemaDiscMatch(const SchemaRef& dst,
 // Extents
 // ---------------------------------------------------------------------------
 
+// R3: evaluate a closed extent form against the discriminants this object
+// carries.  There is no name in it to resolve, which is the whole point: the
+// older route re-emitted the DECLARATION's bound expressions here, at the
+// allocation site, where an unrelated local of the right spelling captured the
+// constant they were written against.
+llvm::Value* Codegen::Impl::emitExtentForm(const plang::Type::ExtentForm& F,
+                                           const std::vector<llvm::Value*>& discs) {
+    using Op = plang::Type::ExtentForm::Op;
+    const auto arg = [&](size_t I) { return emitExtentForm(F.Args[I], discs); };
+    switch (F.Kind) {
+    case Op::Const: return llvm::ConstantInt::get(i64Ty, F.Value, /*isSigned=*/true);
+    case Op::Disc:
+        if (F.Value < 0 || static_cast<size_t>(F.Value) >= discs.size())
+            codegenICE("schema extent names discriminant "
+                       + llvm::Twine(F.Value) + " of "
+                       + llvm::Twine(discs.size()));
+        return discs[static_cast<size_t>(F.Value)];
+    case Op::Neg: return builder.CreateNeg(arg(0), "ext.neg");
+    case Op::Add: return builder.CreateAdd(arg(0), arg(1), "ext.add");
+    case Op::Sub: return builder.CreateSub(arg(0), arg(1), "ext.sub");
+    case Op::Mul: return builder.CreateMul(arg(0), arg(1), "ext.mul");
+    case Op::Div: case Op::Mod: {
+        auto* L = arg(0);
+        auto* R = arg(1);
+        // A zero divisor in a bound is diagnosed where the expression is
+        // checked; guarding here keeps the emitted code from trapping if one
+        // ever reaches this far.
+        auto* Safe = builder.CreateSelect(
+            builder.CreateICmpEQ(R, llvm::ConstantInt::get(i64Ty, 0)), llvm::ConstantInt::get(i64Ty, 1), R, "ext.div.safe");
+        return F.Kind == Op::Div ? builder.CreateSDiv(L, Safe, "ext.div")
+                                 : builder.CreateSRem(L, Safe, "ext.mod");
+    }
+    case Op::Pow: {
+        // EP §6.8.3.2 with an integer base: a small loop rather than a call,
+        // and it folds away entirely when both sides are constants.
+        auto* fn = getExternFnN("plang_ipow", i64Ty, {i64Ty, i64Ty});
+        return builder.CreateCall(fn, {arg(0), arg(1)}, "ext.pow");
+    }
+    }
+    codegenICE("a schema extent form with no case");
+    return nullptr;
+}
+
 std::pair<llvm::Value*, llvm::Value*>
 Codegen::Impl::schemaArrayBounds(const SchemaRef& ref) {
+    // R3: the closed forms, where Sema could build them.
+    if (ref.semaTy && ref.semaTy->SchemaLowForm && ref.semaTy->SchemaHighForm)
+        return {emitExtentForm(*ref.semaTy->SchemaLowForm,  ref.discs),
+                emitExtentForm(*ref.semaTy->SchemaHighForm, ref.discs)};
+
     const SchemaDef* def = findSchemaDef(ref.semaTy->SchemaName);
     const ArrayTypeNode* atn = def ? arrayBodyOf(def->body) : nullptr;
     if (!atn)

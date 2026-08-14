@@ -567,6 +567,24 @@ std::shared_ptr<Type> Sema::resolveUndiscriminatedSchema(Symbol& Sym,
     for (const auto& P : Sym.SchemaDeclParams)
         T->SchemaDiscs.push_back({.Name = P.Name, .Ty = P.Ty});
 
+    // R3.  An array body's bounds as closed forms over the discriminant
+    // indices, folded here -- in the scope the schema was DECLARED in, which is
+    // the only scope in which its bounds mean anything.  Codegen evaluates
+    // these against the discriminants an object carries and never sees an
+    // identifier, so there is nothing left for an allocating procedure's
+    // locals to capture.
+    if (const TypeNode* BodyNode = Sym.SchemaBodyNode) {
+        const TypeNode* D = BodyNode;
+        while (auto* Pk = llvm::dyn_cast<PackedTypeNode>(D)) D = Pk->Inner.get();
+        if (auto* At = llvm::dyn_cast<ArrayTypeNode>(D); At && At->Low && At->High) {
+            std::vector<std::string> Names;
+            for (const auto& Dsc : T->SchemaDiscs) Names.push_back(Dsc.Name);
+            T->SchemaLowForm  = buildExtentForm(*At->Low,  Names);
+            T->SchemaHighForm = buildExtentForm(*At->High, Names);
+        }
+    }
+
+
     UndiscSchemaTypes_[Key] = T;
     return T;
 }
@@ -632,6 +650,56 @@ void Sema::checkSetBaseRange(const Type& Base, SourceLocation Loc) {
 /// array whose bounds were pointer bits: no diagnostic, a zero-element object,
 /// and index checks comparing against nonsense.  Absence is not a number, so
 /// it is no longer spelled as one.
+std::optional<Type::ExtentForm> Sema::buildExtentForm(
+        const ExprNode& E, const std::vector<std::string>& Discs) const {
+    using EF = Type::ExtentForm;
+
+    // A discriminant becomes its INDEX.  Checked before folding, because the
+    // body is resolved with the discriminants bound to a probe value and
+    // folding would quietly turn `n` into 1.
+    if (auto* Id = llvm::dyn_cast<IdentExpr>(&E))
+        for (size_t I = 0; I < Discs.size(); ++I)
+            if (eqCI(Discs[I], Id->Name))
+                return EF{EF::Op::Disc, static_cast<int64_t>(I), {}};
+
+    if (auto* U = llvm::dyn_cast<UnaryExpr>(&E)) {
+        if (U->Op == TokenKind::Plus) return buildExtentForm(*U->Operand, Discs);
+        if (U->Op == TokenKind::Minus)
+            if (auto A = buildExtentForm(*U->Operand, Discs))
+                return EF{EF::Op::Neg, 0, {*A}};
+    }
+
+    if (auto* B = llvm::dyn_cast<BinaryExpr>(&E)) {
+        const auto OpOf = [](TokenKind K) -> std::optional<EF::Op> {
+            switch (K) {
+            case TokenKind::Plus:  return EF::Op::Add;
+            case TokenKind::Minus: return EF::Op::Sub;
+            case TokenKind::Times: return EF::Op::Mul;
+            case TokenKind::Div:   return EF::Op::Div;
+            case TokenKind::Mod:   return EF::Op::Mod;
+            case TokenKind::Pow:   return EF::Op::Pow;
+            default:               return std::nullopt;
+            }
+        };
+        if (auto O = OpOf(B->Op)) {
+            auto L = buildExtentForm(*B->Left,  Discs);
+            auto R = buildExtentForm(*B->Right, Discs);
+            if (L && R) return EF{*O, 0, {*L, *R}};
+        }
+    }
+
+    // Any other leaf is folded HERE, where the declaration was written, and
+    // only if the fold did not read a discriminant -- a probe value is the
+    // extent of no instance, and baking one in would be worse than declining.
+    const bool SavedUsed = SchemaBindingUsed_;
+    SchemaBindingUsed_   = false;
+    const auto V         = constBound(E);
+    const bool UsedProbe = SchemaBindingUsed_;
+    SchemaBindingUsed_   = SavedUsed || SchemaBindingUsed_;
+    if (V && !UsedProbe) return EF{EF::Op::Const, *V, {}};
+    return std::nullopt;
+}
+
 std::optional<int64_t> Sema::constBound(const ExprNode& E) const {
     // Whether THIS fold read a schema discriminant, not whether anything
     // earlier did.

@@ -3527,3 +3527,43 @@ TEST(EP8Const, AStringCapacityIsFoldedInTheScopeItWasWrittenIn) {
     ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
     EXPECT_EQ(R.Stdout, "twenty chars exactly 999\n");
 }
+
+TEST(EP7Schema, AnExtentIsArithmeticOverDiscriminantsAndNothingElse) {
+    // R3.  A schema body's bounds are carried to codegen as a closed form over
+    // the discriminants BY INDEX, with every other leaf folded in the scope the
+    // schema was declared in.  The form contains no identifier, so there is
+    // nothing left for a procedure's locals to capture at the allocation site
+    // -- the defect 0.1.6 shipped a scope barrier to guard against.
+    //
+    // Non-trivial arithmetic on both bounds, over two discriminants and a named
+    // constant, so that the form is exercised rather than reduced to a literal:
+    // lo*2-1 = 3 and hi*hi+k = 12 for new(q, 2, 3).
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "const k = 3;\n"
+        "type v(lo, hi: integer) = array[lo*2 - 1 .. hi*hi + k] of integer;\n"
+        "var q: ^v; i: integer;\n"
+        "begin new(q, 2, 3);\n"
+        "  for i := 3 to 12 do q^[i] := i;\n"
+        "  writeln(q^[3]:1, ' ', q^[12]:1) end.\n", kEP + " -frange-checks");
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "3 12\n");
+
+    // The same shape with the constant shadowed by a local at the allocation
+    // site.  This is the 0.1.6 defect; it now cannot arise, because the form
+    // has no name in it to resolve here.
+    auto Shadowed = compileAndRun(
+        "program p(output);\n"
+        "const k = 3;\n"
+        "type v(n: integer) = array[1..n+k] of integer;\n"
+        "var q: ^v; i: integer;\n"
+        "procedure alloc;\n"
+        "var k: integer;\n"
+        "begin k := 1; new(q, 4) end;\n"
+        "begin alloc;\n"
+        "  for i := 1 to 7 do q^[i] := i * 10;\n"
+        "  for i := 1 to 7 do write(q^[i]:1, ' ');\n"
+        "  writeln end.\n", kEP);
+    ASSERT_EQ(Shadowed.ExitCode, 0) << Shadowed.Stderr;
+    EXPECT_EQ(Shadowed.Stdout, "10 20 30 40 50 60 70 \n");
+}

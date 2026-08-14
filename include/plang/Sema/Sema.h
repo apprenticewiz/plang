@@ -326,6 +326,11 @@ private:
     // cannot mistake "no value" for a bound.  Consults ActiveSchemaBindings_ so
     // schema discriminant names are recognized.
     [[nodiscard]] std::optional<int64_t> constBound(const ExprNode& E) const;
+    /// EP §6.4.7 R3: \p E as arithmetic over discriminant indices with every
+    /// other leaf folded here, in the scope the declaration was written in.
+    /// Nothing in the result names anything.
+    [[nodiscard]] std::optional<Type::ExtentForm> buildExtentForm(
+        const ExprNode& E, const std::vector<std::string>& Discs) const;
     /// The body of constBound.  Call constBound, which also records the answer
     /// on the node for codegen to use instead of folding it a second time.
     [[nodiscard]] std::optional<int64_t> constBoundImpl(const ExprNode& E) const;

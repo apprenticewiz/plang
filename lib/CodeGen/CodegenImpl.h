@@ -1157,6 +1157,9 @@ struct Codegen::Impl {
     void emitSchemaDiscMatch(const SchemaRef& dst, const SchemaRef& src);
     /// Bounds of an array-bodied schema, computed from `ref`'s discriminants.
     std::pair<llvm::Value*, llvm::Value*> schemaArrayBounds(const SchemaRef& ref);
+    /// R3: a closed extent form evaluated against an object's discriminants.
+    llvm::Value* emitExtentForm(const plang::Type::ExtentForm& F,
+                                const std::vector<llvm::Value*>& discs);
     /// LLVM type of the schema body's storage: the element type for an array
     /// body, the whole body otherwise.
     llvm::Type* schemaStorageType(const SchemaRef& ref);
