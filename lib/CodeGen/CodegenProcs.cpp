@@ -579,6 +579,7 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
         // straight past its parent's.
         std::set<std::string> Named;
         std::vector<std::string> ConformantCaptures;
+        std::vector<std::string> SchemaCaptures;
         for (size_t fi = 0; fi < outerVars.size(); ++fi) {
             const auto& [nm, ve] = outerVars[fi];
             auto* fidx    = llvm::ConstantInt::get(i32Ty, (unsigned)fi);
@@ -620,6 +621,15 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
                     nve.conformantDims    = ve.conformantDims;
                     ConformantCaptures.push_back(toLower(nm));
                 }
+                // EP §6.4.7: a schema formal is still one to a procedure nested
+                // inside the one that received it -- the same omission as the
+                // conformant case above, and with the same consequence.
+                if (ve.schemaTy) {
+                    auto& nve           = scopes.back()[toLower(nm)];
+                    nve.schemaTy        = ve.schemaTy;
+                    nve.schemaDiscNames = ve.schemaDiscNames;
+                    SchemaCaptures.push_back(toLower(nm));
+                }
                 Bound = scopes.back()[toLower(nm)];
             }
             outerVarNames.push_back(nm);
@@ -631,6 +641,16 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
         // Every capture is bound now, and nothing local has shadowed anything
         // yet, so this is where a captured conformant array's bounds are the
         // ones it was passed with.
+        // The discriminant cells are captures like any other, so their
+        // addresses are only right once every capture is bound.
+        for (const auto& SN : SchemaCaptures) {
+            auto& nve = scopes.back()[SN];
+            nve.schemaDiscs.clear();
+            for (const auto& DN : nve.schemaDiscNames)
+                if (const auto* D = findVar(DN))
+                    nve.schemaDiscs.push_back(
+                        builder.CreateLoad(i64Ty, D->ptr, "disc.captured"));
+        }
         for (const auto& CN : ConformantCaptures) {
             auto& nve = scopes.back()[CN];
             nve.conformantDimPtrs.clear();
@@ -713,6 +733,22 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
                 defVar(nm, bodyPtr, paramValTypes[flatIdx]);
                 auto& ve       = scopes.back()[toLower(nm)];
                 ve.schemaTy    = schemaTypes[ci];
+                // Spilled to cells, and named, so that a procedure nested
+                // inside this one can reach them: the static link carries
+                // addresses, and these values are this activation's arguments.
+                // Without it the nested binding kept no discriminants at all
+                // and laid the object out from the PROBE -- writing v.s at
+                // offset 8 instead of 72, straight through the array, exit 0
+                // and no diagnostic.  Every visible variable is captured, so
+                // naming them here is all it takes to carry them across.
+                for (size_t d = 0; d < discs.size(); ++d) {
+                    const std::string dn = nm + PlangScopeSep + "disc"
+                                         + std::to_string(d);
+                    auto* slot = createEntryAlloca(i64Ty, dn);
+                    builder.CreateStore(discs[d], slot);
+                    defVar(dn, slot, i64Ty);
+                    ve.schemaDiscNames.push_back(dn);
+                }
                 ve.schemaDiscs = std::move(discs);
                 flatIdx += 1 + schemaDiscCounts[ci];
                 continue;

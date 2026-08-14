@@ -3734,3 +3734,41 @@ TEST(EP7Schema, APointerMayNameASchemaDeclaredLaterInTheSamePart) {
     ASSERT_EQ(Rev.ExitCode, 0) << Rev.Stderr;
     EXPECT_EQ(Rev.Stdout, Fwd.Stdout);
 }
+
+TEST(EP7Schema, ANestedProcedureKeepsACapturedSchemaFormalsDiscriminants) {
+    // EP §6.4.7.  A procedure nested inside one that received a schema formal
+    // reaches it through the static link, which carries ADDRESSES -- and the
+    // discriminants are the OUTER procedure's own function arguments, so they
+    // mean nothing in the nested one.  The binding carried none, the object was
+    // laid out from the probe, and `v.s := 'x'` inside the nested procedure
+    // wrote the string at offset 8 instead of 72: straight through the array,
+    // exit 0, no diagnostic.
+    //
+    // They are spilled to named cells now.  Every visible variable is captured,
+    // so naming them is all it takes to carry them across.
+    //
+    // The relay is the second half: passing the captured formal ON to another
+    // schema-parameter procedure aborted code generation outright with
+    // "argument for a schema parameter is not schematic", because there were no
+    // discriminants to hand over.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type t(n: integer) = record a: array[1..n] of integer; s: string(n) end;\n"
+        "var q: ^t;\n"
+        "procedure show(var w: t);\n"
+        "begin writeln('relayed: [', w.s, ']') end;\n"
+        "procedure outer(var v: t);\n"
+        "var i: integer;\n"
+        "  procedure inner;\n"
+        "  begin v.s := 'nine char'; show(v) end;\n"
+        "begin\n"
+        "  for i := 1 to 9 do v.a[i] := i;\n"
+        "  inner;\n"
+        "  write('a: '); for i := 1 to 9 do write(v.a[i]:1, ' ');\n"
+        "  writeln('| s=[', v.s, ']')\n"
+        "end;\n"
+        "begin new(q, 9); outer(q^) end.\n", kEP + " -frange-checks");
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "relayed: [nine char]\n"
+                        "a: 1 2 3 4 5 6 7 8 9 | s=[nine char]\n");
+}

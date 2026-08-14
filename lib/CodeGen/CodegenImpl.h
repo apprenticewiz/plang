@@ -166,6 +166,12 @@ struct Codegen::Impl {
         // that stay live for the whole activation.
         const plang::Type*        schemaTy{nullptr};
         std::vector<llvm::Value*> schemaDiscs{};
+        /// The names those discriminants were spilled to in the declaring
+        /// procedure.  A nested procedure reaches an outer variable through a
+        /// static link, which carries ADDRESSES: schemaDiscs above are the
+        /// parent's own function arguments and mean nothing there, so a nested
+        /// binding reloads them from these cells instead.
+        std::vector<std::string> schemaDiscNames{};
         // ISO §6.6.3.1: set for a procedural or functional formal parameter.
         // ptr addresses a { ptr, ptr } cell holding the closure pair: where to
         // jump, and the frame the target reads its own outer variables
