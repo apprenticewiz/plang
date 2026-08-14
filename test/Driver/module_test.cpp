@@ -3488,6 +3488,48 @@ TEST(Schema, AVaryingStringIntoACharArrayChecksItsLength) {
     EXPECT_EQ(Ok.Stdout, "[abcd]\n");
 }
 
+TEST(Schema, ADiscriminantIsReadableAndNotWritable) {
+    // EP §6.4.7: a discriminant is a value the schematic variable carries, not
+    // a component of it.  It is spelled like a field and reads like one, so
+    // every way of writing to it was accepted by Sema and then killed codegen
+    // with "record has no field named 'n'" -- an internal error on four
+    // separate programs that should each have had a diagnostic.
+    struct { const char* what; const char* src; const char* wants; } Cases[] = {
+        {"assigned through a pointer",
+         "begin new(q, 4); q^.n := 5 end.\n",            "not an assignable"},
+        {"assigned on an instance",
+         "begin v.n := 5 end.\n",                        "not an assignable"},
+        {"passed as a var parameter",
+         "begin new(q, 4); r(q^.n) end.\n",              "requires a variable"},
+        {"assigned inside with",
+         "begin new(q, 4); with q^ do n := 99 end.\n",   "not an assignable"},
+    };
+    for (const auto& C : Cases) {
+        const std::string Src =
+            "program p(output);\n"
+            "type t(n: integer) = record a: array[1..n] of integer end;\n"
+            "var q: ^t; v: t(6);\n"
+            "procedure r(var x: integer); begin x := 77 end;\n"
+            + std::string(C.src);
+        auto R = compileAndRun(Src, kEP);
+        EXPECT_NE(R.ExitCode, 0) << C.what;
+        EXPECT_NE(R.Stderr.find(C.wants), std::string::npos)
+            << C.what << ": " << R.Stderr;
+    }
+
+    // Reading one is how a program learns how big its own value is, so the
+    // rule has to stop at writing.  All three spellings still read.
+    auto Ok = compileAndRun(
+        "program p(output);\n"
+        "type t(n: integer) = record a: array[1..n] of integer end;\n"
+        "var q: ^t; v: t(6);\n"
+        "begin new(q, 4);\n"
+        "      writeln(q^.n:1); writeln(v.n:1);\n"
+        "      with q^ do writeln(n:1) end.\n", kEP);
+    ASSERT_EQ(Ok.ExitCode, 0) << Ok.Stderr;
+    EXPECT_EQ(Ok.Stdout, "4\n6\n4\n");
+}
+
 TEST(Schema, APointerAndAnInstanceOfOneSchemaDoNotShareAnAnnotation) {
     // One declaration serves every instantiation and carries the annotation of
     // whichever Sema resolved LAST, so the run-time layout walk -- which used

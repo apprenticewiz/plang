@@ -1274,7 +1274,20 @@ bool Sema::isLValue(const ExprNode& E) const {
         return Sym->Kind == SymbolKind::Var || Sym->Kind == SymbolKind::VarParam;
     }
     if (auto* Ix  = llvm::dyn_cast<IndexExpr>(&E))  return isLValue(*Ix->Array);
-    if (auto* Fld = llvm::dyn_cast<FieldExpr>(&E))  return isLValue(*Fld->Record);
+    if (auto* Fld = llvm::dyn_cast<FieldExpr>(&E)) {
+        // EP §6.4.7: a discriminant is a value the schematic variable carries,
+        // not a component of it.  It is spelled like a field and reads like
+        // one, so `v.n` and `q^.n` were assignable and passable as var
+        // parameters -- and codegen, which knows the body has no such field,
+        // died on every one of them with "record has no field named 'n'".
+        // Writing to it would claim the storage is a size it is not.
+        if (const auto& RT = Fld->Record->ResolvedType;
+                RT && (RT->Kind == TypeKind::Schema
+                       || RT->Kind == TypeKind::SchemaInstance))
+            for (const auto& D : RT->SchemaDiscs)
+                if (eqCI(D.Name, Fld->Field)) return false;
+        return isLValue(*Fld->Record);
+    }
     if (llvm::dyn_cast<DerefExpr>(&E))               return true;
     // EP §6.5.6: a substring-variable is a variable, so a substring of a
     // variable may be assigned to.

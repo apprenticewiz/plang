@@ -161,6 +161,11 @@ bool Sema::isFunctionResultTarget(const ExprNode& Target) const {
 }
 
 void Sema::checkAssign(const AssignStmt& S) {
+    // The target is resolved before it is judged, because whether it is
+    // assignable can depend on what it turned out to be: `v.n` is a field in
+    // the syntax and a schema discriminant in the type, and only the second
+    // says it cannot be written to.
+    auto Dst = checkExpr(*S.Target);
     if (!isLValue(*S.Target)) {
         // ISO §6.6.3.1: a functional parameter reads like the function-result
         // variable of the enclosing function, so say which one it is rather
@@ -201,7 +206,6 @@ void Sema::checkAssign(const AssignStmt& S) {
         }
     }
 
-    auto Dst = checkExpr(*S.Target);
     auto Src = checkExpr(*S.Value);
 
     // EP §6.9.2.2: the value has to suit the type of the variable — except for
@@ -759,7 +763,12 @@ int Sema::pushWithScope(const WithStmt& S) {
             ++Count;
             for (const auto& D : T->SchemaDiscs) {
                 Symbol DS;
-                DS.Kind = SymbolKind::Var;
+                // Const, as the discriminated branch below already has it.
+                // Var here confused WHEN the value is known with WHETHER it may
+                // be written: it is not known until run time and it may never
+                // be written, and `with q^ do n := 99` was accepted because
+                // this said otherwise.
+                DS.Kind = SymbolKind::Const;
                 DS.Name = D.Name;
                 DS.Ty   = TyInt;
                 (void)Symtab.define(std::move(DS));
