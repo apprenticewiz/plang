@@ -4596,3 +4596,34 @@ TEST(Shadowing, AFileElementIsSizedByTheTypeItWasDeclaredWith) {
     ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
     EXPECT_EQ(R.Stdout, "5 10 15 20 25 30 35 40 45 50 \n");
 }
+
+TEST(Shadowing, ARecordLayoutIsFoldedInTheScopeItWasDeclaredIn) {
+    // `arrayIndexRange` folded a field's bounds against codegen's constant
+    // table, which holds whatever is innermost where the denoter is being
+    // LOWERED rather than where it was written.  A record whose layout is first
+    // computed inside a procedure declaring its own `n` was sized for the
+    // stranger's n -- and `recordLayouts` memoises on the declaration node, so
+    // that wrong layout then served every later use of the type.
+    //
+    // The declaration order is the whole test: with a global variable of `r`
+    // the layout is computed at file scope first and the memo is correct, which
+    // is why this needs a type used ONLY from procedures.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "const n = 10;\n"
+        "type r = record a: array[1..n] of integer; tail: integer end;\n"
+        "procedure inner;\n"
+        "const n = 2;\n"
+        "var l: r;\n"
+        "begin l.a[1] := 0 end;\n"
+        "procedure later;\n"
+        "var m: r; i: integer;\n"
+        "begin\n"
+        "  m.tail := 999;\n"
+        "  for i := 1 to 10 do m.a[i] := i;\n"
+        "  writeln(m.a[10]:1, ' ', m.tail:1)\n"
+        "end;\n"
+        "begin inner; later end.\n");
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "10 999\n");
+}
