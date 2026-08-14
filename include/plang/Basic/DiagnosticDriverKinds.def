@@ -29,6 +29,11 @@ DIAG(err_no_macos_sdk, Error,
      "with 'xcode-select --install', or set SDKROOT to override")
 DIAG(err_cannot_find_program, Error, "cannot find '%0': %1")
 DIAG(err_program_exec_failed, Error, "failed to execute '%0': %1")
+// A subprocess that died on a signal rather than exiting.  Without this the
+// driver returned llvm's -2 as its own status -- exit 254 and not one word of
+// output -- so a compiler crash looked like a compiler that had quietly
+// decided not to.  A silent failure is the one outcome worse than a loud one.
+DIAG(err_program_crashed, Error, "'%0' crashed: %1")
 DIAG(err_cannot_create_temp_file, Error, "cannot create temporary file: %0")
 
 // An argument beginning with '-' that no option in Options.def matches.  A

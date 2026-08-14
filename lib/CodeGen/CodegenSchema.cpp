@@ -446,6 +446,28 @@ llvm::Value* Codegen::Impl::alignUpV(llvm::Value* v, uint64_t align) {
     return builder.CreateAnd(sum, builder.CreateNot(mask), "align.up");
 }
 
+std::optional<std::pair<llvm::Value*, llvm::Value*>>
+Codegen::Impl::rtIndexBounds(const ArrayTypeNode& at) {
+    // Bounds written as expressions may read a discriminant, so they are
+    // emitted against whatever is bound now rather than folded.
+    if (at.Low && at.High) {
+        auto* lo = toI64(emitExpr(*at.Low));
+        auto* hi = toI64(emitExpr(*at.High));
+        if (!lo || !hi) return std::nullopt;
+        return std::pair{lo, hi};
+    }
+    // ISO §6.4.3.2: an index named by its ordinal type has no bound
+    // expressions at all -- `array[colour]` leaves Low and High null, and
+    // dereferencing them here is what crashed the compiler.  The extent is the
+    // whole of that type and cannot vary, so ask the same helper the static
+    // layout asks.  One question, one answer, and the two walks agree by
+    // construction rather than by my having written the arithmetic twice.
+    if (auto r = arrayIndexRange(at))
+        return std::pair<llvm::Value*, llvm::Value*>{i64c(r->first),
+                                                     i64c(r->second)};
+    return std::nullopt;
+}
+
 llvm::Value* Codegen::Impl::rtSizeOfTypeNode(const TypeNode* tn,
                                              bool knownVarying) {
     const TypeNode* d = peelPacked(tn);
@@ -467,11 +489,11 @@ llvm::Value* Codegen::Impl::rtSizeOfTypeNode(const TypeNode* tn,
         return alignUpV(builder.CreateAdd(i64c(8), cap, "str.size"), 8);
     }
     if (auto* at = llvm::dyn_cast<ArrayTypeNode>(d)) {
-        auto* lo = toI64(emitExpr(*at->Low));
-        auto* hi = toI64(emitExpr(*at->High));
-        if (!lo || !hi) codegenICE("a schema array bound that cannot be evaluated");
-        auto* count = builder.CreateAdd(builder.CreateSub(hi, lo), i64c(1),
-                                        "arr.count");
+        auto bounds = rtIndexBounds(*at);
+        if (!bounds) codegenICE("a schema array bound that cannot be evaluated");
+        auto* count = builder.CreateAdd(
+            builder.CreateSub(bounds->second, bounds->first), i64c(1),
+            "arr.count");
         count = builder.CreateSelect(
             builder.CreateICmpSLT(count, i64c(1)), i64c(1), count, "arr.count.min");
         auto* stride = alignUpV(rtSizeOfTypeNode(at->Element.get()),
@@ -660,8 +682,10 @@ Codegen::Impl::schemaPathOf(const ExprNode& e) {
         auto* at = llvm::dyn_cast_or_null<ArrayTypeNode>(peel(base->decl));
         if (!at) return std::nullopt;
         bindSchemaDiscs(base->root);
-        auto* lo     = toI64(emitExpr(*at->Low));
-        auto* hi     = toI64(emitExpr(*at->High));
+        auto bounds = rtIndexBounds(*at);
+        if (!bounds) { popScope(); return std::nullopt; }
+        auto* lo     = bounds->first;
+        auto* hi     = bounds->second;
         auto* stride = alignUpV(rtSizeOfTypeNode(at->Element.get()),
                                 rtAlignOfTypeNode(at->Element.get()));
         popScope();

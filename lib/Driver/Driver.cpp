@@ -510,6 +510,17 @@ int Driver::runTool(const std::string &Prog,
         diag(diag::err_program_exec_failed, {Prog, ErrMsg});
         return 1;
     }
+    // llvm answers -1 for a failure to run and -2 for a child killed by a
+    // signal, and NEITHER sets ExecFailed.  Returning that straight through
+    // made the driver exit 254 in silence whenever the compiler crashed --
+    // which is how a segfault in codegen came to look like a diagnostic-free
+    // refusal to compile.  Say what happened, and exit 1 like every other
+    // error, so a caller cannot read the crash as an ordinary rejection.
+    if (Rc < 0) {
+        diag(diag::err_program_crashed,
+             {Prog, ErrMsg.empty() ? "terminated by a signal" : ErrMsg});
+        return 1;
+    }
     return Rc;
 }
 

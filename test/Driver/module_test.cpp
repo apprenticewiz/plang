@@ -3487,3 +3487,46 @@ TEST(Schema, AVaryingStringIntoACharArrayChecksItsLength) {
     ASSERT_EQ(Ok.ExitCode, 0) << Ok.Stderr;
     EXPECT_EQ(Ok.Stdout, "[abcd]\n");
 }
+
+TEST(Schema, AnArrayIndexedByANamedTypeVariesWithItsElement) {
+    // ISO §6.4.3.2 lets the index be named by its type rather than written as a
+    // range, and that branch of array resolution returns early -- so
+    // `array[colour] of string(n)` kept the probe's element size and the record
+    // was laid out too small.  The named index cannot itself vary; the ELEMENT
+    // can, and that is what has to carry up.
+    //
+    // The fields either side of the array are the point of the test: they are
+    // where a stride the run-time walk and the static layout disagree about
+    // shows up as corruption rather than as a wrong string.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type colour = (red, green, blue);\n"
+        "     t(n: integer) = record\n"
+        "       lo: integer; a: array[colour] of string(n); hi: integer end;\n"
+        "var q: ^t; c: colour;\n"
+        "begin new(q, 12); q^.lo := 111; q^.hi := 222;\n"
+        "      q^.a[red] := 'scarlet'; q^.a[green] := 'emerald';\n"
+        "      q^.a[blue] := 'cobalt';\n"
+        "      for c := red to blue do writeln(q^.a[c]);\n"
+        "      writeln(q^.lo:1, ' ', q^.hi:1) end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "scarlet\nemerald\ncobalt\n111 222\n");
+}
+
+TEST(Schema, ANamedIndexIsTheOnlyVaryingFieldInItsRecord) {
+    // The same gap with nothing else in the record to mark it: the body was not
+    // marked varying at all and the schema was refused outright.  A named
+    // SUBRANGE index as well as an enumeration, since they reach the branch by
+    // different routes.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type digit = 1..4;\n"
+        "     t(n: integer) = record a: array[digit] of string(n) end;\n"
+        "var q: ^t; i: digit;\n"
+        "begin new(q, 9);\n"
+        "      for i := 1 to 4 do q^.a[i] := 'row';\n"
+        "      q^.a[3] := 'third';\n"
+        "      for i := 1 to 4 do writeln(i:1, ' ', q^.a[i]) end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "1 row\n2 row\n3 third\n4 row\n");
+}
