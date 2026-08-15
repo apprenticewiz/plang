@@ -107,6 +107,16 @@ private:
     /// types.  A type must be defined before it is used, so a name that is not
     /// in here is not a type.
     std::set<std::string>           TypeNames_;
+    /// Every name declared as a VARIABLE or a parameter, lowercased.
+    ///
+    /// `name[...]` is a typed set constructor when the name is a TYPE and an
+    /// array subscript when it is a variable, and the parser has to choose
+    /// before Sema has resolved anything.  It chose on TypeNames_ alone, so a
+    /// variable shadowing a type name -- ordinary ISO 7185, no EP needed --
+    /// had `g[i,j]` parsed as a set constructor and rejected.  Like TypeNames_
+    /// this is flat and has no scope chain; it decides only which of the two
+    /// SHAPES to build, and Sema resolves the name properly afterwards.
+    std::set<std::string>           VarNames_;
 
     // record-type → 'record' field-section* variant-part? 'end'
     // Called with Current pointing at 'record'; Packed is passed in from caller.

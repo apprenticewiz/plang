@@ -4010,6 +4010,51 @@ TEST(EPForIn, TheControlVariableShadowsAnOuterOneWithoutDefiningIt) {
               std::string::npos) << R.Stderr;
 }
 
+TEST(EPSetConstructor, OneElementAndOneRangeAreStillTypedSetConstructors) {
+    // EP §6.8.7: a typed set constructor written with exactly one element, or
+    // one range, is still a typed set constructor.  The parser took those two
+    // shapes as an array subscript and as a substring, so `cs['a']` and
+    // `cs['a'..'c']` were rejected with "type name 'cs' cannot be used as a
+    // value" -- Sema knowing exactly what was wrong and unable to do anything
+    // about the shape the parser had already committed to.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type cs = set of char;\n"
+        "var s: cs;\n"
+        "begin\n"
+        "  s := cs['a'];      if 'a' in s then writeln('one');\n"
+        "  s := cs['a'..'c']; if 'b' in s then writeln('range')\n"
+        "end.\n", kEP);
+    EXPECT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "one\nrange\n");
+}
+
+TEST(Shadowing, AVariableShadowingATypeNameIsStillSubscripted) {
+    // `name[...]` is a typed set constructor when the name is a TYPE and a
+    // subscript when it is a variable, and the parser must choose before Sema
+    // has resolved anything.  It chose on a flat set of every type name in the
+    // program, so a variable shadowing a type -- ordinary ISO 7185, no EP
+    // required -- had `g[i,j]` parsed as a set constructor, and the error came
+    // out as "'set literal' cannot be written".
+    //
+    // Compiled as EP, which is load-bearing: the typed-set-constructor branch
+    // is EP-only, so under -std=iso7185 the brackets are always a subscript and
+    // the bug does not arise.  The first version of this test omitted that and
+    // passed against the parent commit.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type g = array[1..2, 1..2] of integer;\n"
+        "procedure q;\n"
+        "var g: array[1..2, 1..2] of integer; i, j: integer;\n"
+        "begin\n"
+        "  for i := 1 to 2 do for j := 1 to 2 do g[i,j] := i*10+j;\n"
+        "  writeln(g[2,2]:1)\n"
+        "end;\n"
+        "begin q end.\n", kEP);
+    EXPECT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "22\n");
+}
+
 TEST(EP7Schema, DeclaringASchemaParameterDoesNotResizeAnInstanceOfIt) {
     // R4.  The record arm of llvmTypeOfSemaType had the resolved type T in
     // hand and passed only T.RecordDecl to the layout, which then re-read each

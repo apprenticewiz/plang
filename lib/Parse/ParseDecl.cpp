@@ -203,6 +203,7 @@ VarGroup Parser::parseVarGroup() {
     while (match(TokenKind::Comma)) {
         G.Names.push_back(expect(TokenKind::Identifier).Lexeme);
     }
+    for (const auto& N : G.Names) VarNames_.insert(toLower(N));
     expect(TokenKind::Colon);
     G.Type = parseTypeExpr();
     // EP §6.6: the initial-state-specifier of the variable's own denoter.  It
@@ -308,6 +309,7 @@ ParamGroup Parser::parseParamGroup() {
     while (match(TokenKind::Comma)) {
         G.Names.push_back(expect(TokenKind::Identifier).Lexeme);
     }
+    for (const auto& N : G.Names) VarNames_.insert(toLower(N));
     expect(TokenKind::Colon);
     // ISO §6.6.3.7: a conformant array schema is a parameter type and nothing
     // else — never a type definition, never a variable.  Both forms of it

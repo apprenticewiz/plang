@@ -305,7 +305,13 @@ Parser::parseStructuredValueOrIndex(std::string Name, Token Loc) {
         // ISO §6.5.3.2: a[i, j] abbreviates a[i][j].  Only a type name can
         // begin a structured value, so anything else subscripts a variable,
         // however many subscripts there are.
-        if (labels.size() > 1 && !TypeNames_.count(toLower(Name))) {
+        // A typed set constructor is written with a TYPE name; anything else
+        // subscripts a variable.  A name that is both -- a variable shadowing
+        // a type, ordinary ISO 7185 -- is the variable here, since that is the
+        // reading in which the brackets can mean what they say.
+        const std::string Lower = toLower(Name);
+        const bool NamesAType = TypeNames_.count(Lower) && !VarNames_.count(Lower);
+        if (labels.size() > 1 && !NamesAType) {
             std::unique_ptr<ExprNode> Expr = std::make_unique<IdentExpr>();
             Expr->Loc = Loc;
             static_cast<IdentExpr*>(Expr.get())->Name = Name;
@@ -317,6 +323,19 @@ Parser::parseStructuredValueOrIndex(std::string Name, Token Loc) {
                 Expr = std::move(Node);
             }
             return parsePostfix(std::move(Expr));
+        }
+        // EP §6.8.7: a typed set constructor with exactly ONE element or one
+        // range is still a typed set constructor.  These two arms took it as a
+        // subscript and as a substring, so `cs['a']` and `cs['a'..'c']` were
+        // rejected with "type name 'cs' cannot be used as a value" -- Sema
+        // knowing exactly what was wrong and unable to do anything about the
+        // shape the parser had already built.
+        if (labels.size() == 1 && NamesAType) {
+            auto Node      = std::make_unique<SetLiteralExpr>();
+            Node->Loc      = Loc;
+            Node->TypeName = Name;
+            Node->Elements.push_back(std::move(labels[0]));
+            return Node;
         }
         if (labels.size() == 1 && !firstIsRange) {
             // Single non-range item → plain array index (e.g. arr[i]).
