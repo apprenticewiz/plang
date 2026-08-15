@@ -577,6 +577,9 @@ Options Driver::parseArgs(int Argc, char *Argv[]) {
 
         } else if (Arg == "-g") {
             Opts.debug = true;
+            // Say so rather than let a debugger discover it.  plang has no
+            // DIBuilder, so the flag cannot do what it names.
+            diag(diag::warn_debug_not_implemented, {});
         } else if (Arg.starts_with("--target=")) {
             Opts.target = Arg.substr(9);
         } else if (Arg.starts_with("-fdiagnostics-language=") ||
@@ -908,7 +911,7 @@ int Driver::compile(const Options &Opts) {
     // Assembly mode: IR → .s.
     if (Opts.mode == OutputMode::Assembly) {
         std::vector<std::string> LLCArgs = {OOpt};
-        if (Opts.debug)              LLCArgs.push_back("-g");
+        // NOT forwarded to llc; see warn_debug_not_implemented.
         if (!LLCTriple.empty())    { LLCArgs.push_back("--mtriple"); LLCArgs.push_back(LLCTriple); }
         LLCArgs.push_back("-o"); LLCArgs.push_back(OutFile);
         LLCArgs.push_back(IrFile);
@@ -940,7 +943,9 @@ int Driver::compile(const Options &Opts) {
 
     {
         std::vector<std::string> LLCArgs = {"-filetype=obj", "-relocation-model=pic", OOpt};
-        if (Opts.debug)            LLCArgs.push_back("-g");
+        // NOT forwarded to llc: it has no -g, and debug info travels in the
+        // IR's metadata rather than as a code-generator flag.  See
+        // warn_debug_not_implemented.
         if (!LLCTriple.empty())  { LLCArgs.push_back("--mtriple"); LLCArgs.push_back(LLCTriple); }
         LLCArgs.push_back("-o"); LLCArgs.push_back(ObjFile);
         LLCArgs.push_back(IrFile);

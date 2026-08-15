@@ -3971,6 +3971,45 @@ TEST(EP7Schema, ASchemaWhoseBodyIsAStringIsAString) {
     EXPECT_EQ(R.Stdout, "eq\n[hi] len=2\n");
 }
 
+TEST(EPForIn, TheControlVariableHasAValueInsideTheLoop) {
+    // EP §6.9.3.9.3: for-in declares its control variable implicitly and the
+    // loop gives it a value on every iteration.  The definite-assignment
+    // analysis did not say so, so every read of it in the body was reported as
+    // a read of something never given a value -- on the one program shape the
+    // feature exists for.
+    // The outer declaration matters to this test.  The flow state is keyed by
+    // NAME and has no scopes, so the false warning only appeared where a
+    // variable of that spelling was being tracked -- without it, nothing was
+    // tracked and the bug did not show.  Verified: this fails against the
+    // parent commit and the version without `var c` does not.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "var c: char;\n"
+        "begin for c in ['a'..'c'] do write(c); writeln end.\n", kEP);
+    EXPECT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "abc\n");
+    EXPECT_EQ(R.Stderr.find("before it has been given a value"),
+              std::string::npos) << R.Stderr;
+}
+
+TEST(EPForIn, TheControlVariableShadowsAnOuterOneWithoutDefiningIt) {
+    // The control variable is a FRESH one for the body's duration, so its
+    // assignment must not escape: an outer variable of the same spelling is no
+    // more assigned after the loop than it was before, and reading it still
+    // warns.  Marking it assigned unconditionally would have traded a false
+    // positive for a false negative.
+    //
+    // This one passes against the parent commit too -- it guards the FIX from
+    // being over-applied rather than catching the original defect, which is
+    // what a guard is for.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "var c: char;\n"
+        "begin for c in ['a'..'c'] do write(c); writeln(c) end.\n", kEP);
+    EXPECT_NE(R.Stderr.find("before it has been given a value"),
+              std::string::npos) << R.Stderr;
+}
+
 TEST(EP7Schema, DeclaringASchemaParameterDoesNotResizeAnInstanceOfIt) {
     // R4.  The record arm of llvmTypeOfSemaType had the resolved type T in
     // hand and passed only T.RecordDecl to the layout, which then re-read each

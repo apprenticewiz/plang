@@ -47,3 +47,11 @@ DIAG(err_cannot_create_temp_file, Error, "cannot create temporary file: %0")
 // send a reader to a flag that does not exist.  A command line is syntax
 // and is not translated, even between two spellings of English.
 DIAG(warn_unrecognized_argument, Warning, "unrecognized argument '%0'")
+// plang emits no debug metadata -- there is no DIBuilder in lib/CodeGen -- so
+// -g cannot do what it says.  It used to be forwarded to llc, which has no such
+// option, and every -g compile failed with "llc: Unknown command line argument
+// '-g'".  Accepting it silently would be worse: a debugger would then open the
+// program and show nothing, with the compiler having said the option was fine.
+DIAG(warn_debug_not_implemented, Warning,
+     "'-g' is accepted but plang does not emit debug information yet, so the "
+     "program will have none")

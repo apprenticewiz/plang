@@ -316,9 +316,29 @@ void Sema::flowStmt(const StmtNode* S, FlowState& St) {
 
     if (auto* N = llvm::dyn_cast<ForInStmt>(S)) {
         flowRead(N->SetExpr.get(), St);
+        // EP §6.9.3.9.3: for-in declares its control variable implicitly, for
+        // the body only, and the loop gives it a value on every iteration.
+        // This arm did not say so, and the flow state is keyed by NAME with no
+        // scopes, so every read of the variable in the body was reported as a
+        // read of something never given a value -- on the one program shape the
+        // feature exists for.
+        //
+        // The variable is a FRESH one that shadows any outer variable of the
+        // same spelling for the body's duration, so unlike an ordinary for-loop
+        // its assignment must not survive the loop: whatever the outer one's
+        // state was, it is still that afterwards.
+        const std::string Key = toLower(N->Var);
+        const bool OuterAssigned = St.Assigned.count(Key) != 0;
+        const bool OuterUndef    = St.UndefAfterFor.count(Key) != 0;
+
         FlowState Body = St;
+        Body.Assigned.insert(Key);
+        Body.UndefAfterFor.erase(Key);
         flowStmt(N->Body.get(), Body);
+
         St.UndefAfterFor = unite(St.UndefAfterFor, Body.UndefAfterFor);
+        if (!OuterAssigned) St.Assigned.erase(Key);
+        if (!OuterUndef)    St.UndefAfterFor.erase(Key);
         return;
     }
 
