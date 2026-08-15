@@ -437,6 +437,17 @@ llvm::Type* Codegen::Impl::llvmTypeOfNode(const TypeNode& node) {
         if (schemaCtx.empty() && node.ResolvedType && !node.ResolvedType->isError()
                 && canLowerSemaType(*node.ResolvedType))
             return llvmTypeOfSemaType(*node.ResolvedType);
+        // Which declaration this name denotes, from Sema, recorded in the scope
+        // the name was WRITTEN in.  It is asked here and not only above because
+        // the branch above is skipped inside a schema instantiation -- there the
+        // node's resolved TYPE is the probe's and cannot be used, but the
+        // question "which declaration is this name" still has a correct answer
+        // and Sema still has it.  What stood here was llvmTypeOfName, which
+        // falls through to `typeAliases`: flat, keyed by spelling, populated at
+        // the USE site.  Measured at 0 disagreements across the suite once the
+        // Sema-side scope fixes landed -- so this is not a bug fix, it is
+        // removing the way one could arrive without anything saying so.
+        if (n->Denotes) return llvmTypeOfNode(*n->Denotes);
         if (auto* t = llvmTypeOfName(n->Name)) return t;
         return llvmTypeOfNodeViaSema(node, "unknown type name '" + n->Name + "'");
     }
