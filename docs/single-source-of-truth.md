@@ -170,14 +170,26 @@ are two implementations that now agree, rather than one.
 
 **R3 is partly done.**  Extents travel as closed forms over discriminant
 indices — array bounds, string capacities, and the actuals of a schema
-instantiated inside another schema's body.  Measured rather than assumed: with
-each fallback replaced by an internal error and the suite run, the **capacity**
-fallback was taken by no test and has been deleted; the **array-bound** fallback
-was taken by 45 and remains.  It remains because a schema instantiated inside
-another's body has its bounds resolved under the OUTER probe, so they are never
-forms over the outer names and the inner binding still needs the names in
-scope.  Giving those bodies their own forms is what would let
-`bindSchemaDiscs` stop binding names at all, and that is the next piece of R3.
+instantiated inside another schema's body — and **both** the capacity and the
+array-bound fallbacks are now deleted, so an extent arriving at a use site with
+no form is an internal error rather than a quiet re-resolution.
+
+The measurement is the reason this section can say that.  With each fallback
+replaced by an internal error and the suite run, the capacity fallback was taken
+by **no** test and the array-bound fallback by **45**.  The 45 were not, as this
+document previously claimed, nested instantiations resolved under the outer
+probe: the form-recording block sat *below* the `ArrayTypeNode` branch of
+`resolveTypeImpl`, and that branch returns, so **array bounds had never had
+forms at all**.  Moving the block above every branch took the number to 0.
+Recording it while resolving an instantiation and not only while probing is safe
+because a form is arithmetic over *indices* — `array[1..m]` is index 0 whether
+`m` is 1, 4 or 7.
+
+What remains of R3, again measured: `bindSchemaDiscs` still binds the
+discriminant **names**, and removing that binding fails **19 tests**.  Some
+other site still re-emits a declaration's expression at the use site — the
+record-field offsets and the subrange check named under R4 and class A are the
+candidates.  The binding goes when those are converted and the number is 0.
 
 ## Order
 
