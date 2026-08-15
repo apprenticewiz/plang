@@ -115,9 +115,14 @@ than it is.  They belong to the later phases:
   mirror of `Codegen::Impl::layoutVariantCase`, and **only total size is ever
   compared; field offsets are compared by nobody** (`CodegenTypes.cpp:218`,
   `CodegenSchema.cpp:570`).
-- **R5, resolve once** — an access path walked twice per statement, so a
-  side-effecting subscript runs twice (`CodegenSchema.cpp:725`,
-  `CodegenIO.cpp:286`).
+- **R5, resolve once — DONE.**  Worse than the audit said: with a counting
+  function in the subscript, `q^.a[next].s` walked its path **three** times in
+  a comparison, a write, a `length`, a whole-value assignment, a substring
+  assignment and a read.  `emitAssign` had already been fixed for exactly this,
+  which is *why* the others survived — the idiom `{emitStrAddr(x),
+  exprStrCapV(x)}` was copied to every site needing a pair, so fixing the one
+  somebody noticed left six.  They share `strAddrAndCap` now, and one test
+  covers all six shapes because a test per site would repeat the mistake.
 - **R6, facts inferred from representation** — `cap = 1` for a comparison
   operand that is not a literal (`CodegenExprs.cpp:415`); component width taken
   from whatever `emitExpr` happened to produce (`CodegenIO.cpp:64`).
