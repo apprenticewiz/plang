@@ -1172,6 +1172,10 @@ struct Codegen::Impl {
     /// Address and capacity of a string from one walk of its access path.
     std::pair<llvm::Value*, llvm::Value*> strAddrAndCap(const ExprNode& e);
     llvm::Value* strCapFromPath(const SchemaPath& path);
+    /// Descend into a nested schema instantiation; see the definition.
+    std::pair<SchemaRef, const TypeNode*>
+    descendIntoInstantiation(const SchemaRef& root, llvm::Value* addr,
+                             const TypeNode* decl);
     const TypeNode* fieldDenoterOf(const RecordTypeNode& rt, const std::string& field);
     const TypeNode* variantFieldDenoterOf(const VariantPart& vp, const std::string& field);
     static bool isRuntimeLaidOut(const ExprNode& e);

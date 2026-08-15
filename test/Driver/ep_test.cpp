@@ -3833,6 +3833,53 @@ TEST(EP7Schema, ADiscriminantShadowsAConstantOfTheSameSpelling) {
     EXPECT_EQ(R.Stdout, "q^[8]=8\n");
 }
 
+TEST(EP7Schema, AFieldSelectedThroughANestedInstantiationUsesTheRealLayout) {
+    // schemaPathOf descends into a nested schema instantiation to work out its
+    // discriminants from the enclosing ones -- but only in its INDEX arm.  The
+    // field arm saw a SchemaTypeNode where it wanted a record, gave up, and the
+    // whole access fell back to the probe layout: `q^.x.a[2]` trapped "array
+    // index 2 out of bounds 1..1" on a legal program, and `q^.x.k` was emitted
+    // at inner(1)'s offset, landing on `q^.x.a[2]`'s bytes.
+    //
+    // `q^[i][j]` was right the whole time, which is why this survived: the two
+    // arms were two copies of one descent and only one of them had it.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type inner(m: integer) = record a: array[1..m] of integer; k: integer end;\n"
+        "     outer(n: integer) = record x: inner(n); tail: integer end;\n"
+        "var q: ^outer;\n"
+        "begin new(q, 4); q^.x.a[2] := 20; q^.x.k := 77; q^.tail := 99;\n"
+        "  writeln('a2=', q^.x.a[2]:1, ' k=', q^.x.k:1, ' tail=', q^.tail:1) end.\n",
+        std::string(kEP) + " -frange-checks");
+    EXPECT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "a2=20 k=77 tail=99\n");
+}
+
+TEST(EP7Schema, ANestedInstantiationSmallerThanTheProbeStaysInsideItsAllocation) {
+    // The same defect with the probe layout LARGER than the real one, which is
+    // the silent direction: `array[1..10-k]` is nine elements at the probe's
+    // k=1 and two at k=8, so the field behind it was written past the end of a
+    // 40-byte allocation.
+    //
+    // BE CLEAR ABOUT WHAT THIS TEST DOES AND DOES NOT CATCH.  Measured against
+    // the parent commit: the plain run exits 0 and prints exactly the expected
+    // line, because the over-run lands in heap nothing else in the program
+    // reads.  Under test/tools/run-under-guardheap.sh the SAME binary is
+    // SIGSEGV (139).  So this case is here for the shape and for a wrong VALUE;
+    // the over-run itself is caught by guardheap and by nothing else in the
+    // suite, which is the argument for that tool existing.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type inner(k: integer) = record a: array[1..10-k] of integer; tag: integer end;\n"
+        "     outer(m: integer) = record x: inner(m); y: integer end;\n"
+        "var q: ^outer;\n"
+        "begin new(q, 8); q^.x.tag := 77; q^.y := 5; q^.x.a[2] := 3;\n"
+        "  writeln('y=', q^.y:1, ' tag=', q^.x.tag:1, ' a2=', q^.x.a[2]:1) end.\n",
+        std::string(kEP) + " -frange-checks");
+    EXPECT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "y=5 tag=77 a2=3\n");
+}
+
 TEST(EP7Schema, DeclaringASchemaParameterDoesNotResizeAnInstanceOfIt) {
     // R4.  The record arm of llvmTypeOfSemaType had the resolved type T in
     // hand and passed only T.RecordDecl to the layout, which then re-read each

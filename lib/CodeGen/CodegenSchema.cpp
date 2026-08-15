@@ -848,6 +848,35 @@ const TypeNode* peel(const TypeNode* tn) {
 }
 } // namespace
 
+/// R3: a component of a schema body may itself be a schema INSTANTIATION whose
+/// discriminants are arithmetic over the enclosing ones -- the standard's own
+/// `matrix(m,n) = array[1..m] of vector(n)`, and equally `outer(n) = record x:
+/// inner(n) ... end`.  Descends into it: evaluates that instantiation's
+/// discriminants from the outer ones and returns its BODY's denoter with a root
+/// carrying them, so everything below is measured against the instance rather
+/// than against the probe.
+///
+/// This was written into the index arm of schemaPathOf and not the field arm,
+/// so `q^[i][j]` was right and `q^.x.k` was wrong -- the field arm saw a
+/// SchemaTypeNode where it wanted a record, gave up, and the whole access fell
+/// back to the probe layout.  `q^.x.k` then landed on `q^.x.a[2]`'s bytes.  One
+/// descent, used by both, because two copies is how the arms came to disagree.
+std::pair<Codegen::Impl::SchemaRef, const TypeNode*>
+Codegen::Impl::descendIntoInstantiation(const SchemaRef& root, llvm::Value* addr,
+                                        const TypeNode* decl) {
+    const TypeNode* d = peel(decl);
+    if (auto* sn = llvm::dyn_cast_or_null<SchemaTypeNode>(d);
+            sn && !sn->ActualForms.empty() && sn->ResolvedBody) {
+        std::vector<llvm::Value*> inner;
+        inner.reserve(sn->ActualForms.size());
+        for (const auto& F : sn->ActualForms)
+            inner.push_back(emitExtentForm(F, root.discs));
+        if (const TypeNode* body = schemaBodyNodeOf(*sn->ResolvedBody))
+            return {SchemaRef{sn->ResolvedBody.get(), addr, inner}, peel(body)};
+    }
+    return {root, d};
+}
+
 std::optional<Codegen::Impl::SchemaPath>
 Codegen::Impl::schemaPathOf(const ExprNode& e) {
     // A `with`-bound component resumes the path it was bound from: it is an
@@ -870,14 +899,16 @@ Codegen::Impl::schemaPathOf(const ExprNode& e) {
     if (auto* fe = llvm::dyn_cast<FieldExpr>(&e)) {
         auto base = schemaPathOf(*fe->Record);
         if (!base) return std::nullopt;
-        auto* rt = llvm::dyn_cast_or_null<RecordTypeNode>(peel(base->decl));
+        auto [root, decl] =
+            descendIntoInstantiation(base->root, base->addr, base->decl);
+        auto* rt = llvm::dyn_cast_or_null<RecordTypeNode>(decl);
         if (!rt) return std::nullopt;
         auto* off = [&] {
-            RtDiscScope disc(*this, base->root.discs);
+            RtDiscScope disc(*this, root.discs);
             return rtFieldOffset(*rt, fe->Field);
         }();
         const TypeNode* fieldDecl = fieldDenoterOf(*rt, fe->Field);
-        return SchemaPath{base->root,
+        return SchemaPath{root,
                           builder.CreateGEP(i8Ty, base->addr, {off}, "path.fld"),
                           fieldDecl};
     }
@@ -892,19 +923,8 @@ Codegen::Impl::schemaPathOf(const ExprNode& e) {
         // instantiation's discriminants from the outer ones and carry on
         // inside it; the bounds and the stride are then its own, not the
         // probe's, which is what made the inner index check read 1..1.
-        SchemaRef       root = base->root;
-        const TypeNode* decl = peel(base->decl);
-        if (auto* sn = llvm::dyn_cast_or_null<SchemaTypeNode>(decl);
-                sn && !sn->ActualForms.empty() && sn->ResolvedBody) {
-            std::vector<llvm::Value*> inner;
-            inner.reserve(sn->ActualForms.size());
-            for (const auto& F : sn->ActualForms)
-                inner.push_back(emitExtentForm(F, base->root.discs));
-            if (const TypeNode* body = schemaBodyNodeOf(*sn->ResolvedBody)) {
-                decl = peel(body);
-                root = SchemaRef{sn->ResolvedBody.get(), base->addr, inner};
-            }
-        }
+        auto [root, decl] =
+            descendIntoInstantiation(base->root, base->addr, base->decl);
         auto* at = llvm::dyn_cast_or_null<ArrayTypeNode>(decl);
         if (!at) return std::nullopt;
         llvm::Value *lo = nullptr, *hi = nullptr, *stride = nullptr;
