@@ -554,6 +554,44 @@ std::shared_ptr<Type> Sema::resolveTypeImpl(const TypeNode& Node) {
         ProbeDiscNames_.clear();
         for (const auto& P : Sym->SchemaDeclParams)
             ProbeDiscNames_.push_back(P.Name);
+        // The instance's identity is settled before its body is resolved, so a
+        // body that names this very instantiation -- `record next: ^t(n) end`
+        // -- finds the type instead of resolving it again.  Through a POINTER
+        // that is legal (ISO §6.2.2.9: a domain type may be declared later, and
+        // a pointer needs no size from what it points at); the type is
+        // completed in place, so the pointer ends up pointing at the finished
+        // one.  Without the indirection the type contains itself and used to
+        // take the compiler's stack with it.
+        std::string Suffix = "(";
+        for (size_t I = 0; I < Discs.size(); ++I) {
+            if (I > 0) Suffix += ",";
+            Suffix += std::to_string(Discs[I].Value);
+        }
+        Suffix += ")";
+        const std::string InKey =
+            std::to_string(reinterpret_cast<uintptr_t>(Sym->SchemaBodyNode))
+            + Suffix;
+        if (auto It = SchemaInProgress_.find(InKey); It != SchemaInProgress_.end()) {
+            ProbeDiscNames_       = std::move(SavedFormNames);
+            ActiveSchemaBindings_ = std::move(SavedBindings);
+            if (InPointerDomain_ <= 0) {
+                error(N->Loc, diag::err_schema_recursive, {N->Name});
+                return TyErr;
+            }
+            return It->second;
+        }
+
+        auto T = std::make_shared<Type>();
+        T->Kind        = TypeKind::SchemaInstance;
+        T->Name        = N->Name + Suffix;
+        T->SchemaName  = N->Name;
+        T->SchemaDiscs = Discs;
+        SchemaInProgress_[InKey] = T;
+        struct Leave {
+            std::map<std::string, std::shared_ptr<Type>>& M; const std::string& K;
+            ~Leave() { M.erase(K); }
+        } LeaveGuard{SchemaInProgress_, InKey};
+
         // Standing in the scope the schema was DECLARED in, not the one the
         // instantiation is written in.  See SymbolTable::ScopeCeiling.
         std::shared_ptr<Type> Body;
@@ -565,17 +603,8 @@ std::shared_ptr<Type> Sema::resolveTypeImpl(const TypeNode& Node) {
         // Restore saved bindings.
         ActiveSchemaBindings_ = std::move(SavedBindings);
 
-        // Build the SchemaInstance type.
-        auto T = std::make_shared<Type>();
-        T->Kind       = TypeKind::SchemaInstance;
-        std::string Suffix = "(";
-        for (size_t I = 0; I < Discs.size(); ++I) {
-            if (I > 0) Suffix += ",";
-            Suffix += std::to_string(Discs[I].Value);
-        }
-        T->Name       = N->Name + Suffix + ")";
-        T->SchemaName = N->Name;
-        T->SchemaDiscs = Discs;
+        // Kind, Name, SchemaName and SchemaDiscs were filled above, before the
+        // body was resolved, so a self-reference could see them.
         T->SchemaBody  = Body;
         // Marked so that nothing folds against the probe's discriminants and
         // the run-time layout is used instead -- the same marker every other
@@ -697,6 +726,35 @@ std::shared_ptr<Type> Sema::resolveUndiscriminatedSchema(Symbol& Sym,
     if (auto It = UndiscSchemaTypes_.find(Key); It != UndiscSchemaTypes_.end())
         return It->second;
 
+    // A schema whose body names itself is resolving its own body already.
+    // Through a POINTER that is legal and ordinary -- ISO §6.2.2.9 lets a
+    // domain type be declared later, and a pointer needs no size from what it
+    // points at -- so the partly-built type is handed back and completed in
+    // place, which leaves the pointer pointing at the finished type.  Without
+    // the indirection the type contains itself, has no size, and used to take
+    // the compiler's stack with it.
+    if (auto It = SchemaInProgress_.find(Key); It != SchemaInProgress_.end()) {
+        if (InPointerDomain_ <= 0) {
+            error(N.Loc, diag::err_schema_recursive, {N.Name});
+            return TyErr;
+        }
+        return It->second;
+    }
+
+    // Registered BEFORE the body is resolved, which is the whole point.
+    auto T = std::make_shared<Type>();
+    T->Kind           = TypeKind::Schema;
+    T->Name           = N.Name;
+    T->SchemaName     = N.Name;
+    T->SchemaBodyNode = Sym.SchemaBodyNode;
+    for (const auto& P : Sym.SchemaDeclParams)
+        T->SchemaDiscs.push_back({.Name = P.Name, .Ty = P.Ty});
+    SchemaInProgress_[Key] = T;
+    struct Leave {
+        std::map<std::string, std::shared_ptr<Type>>& M; const std::string& K;
+        ~Leave() { M.erase(K); }
+    } LeaveGuard{SchemaInProgress_, Key};
+
     // Resolve the body with the discriminants bound to a probe value.  Element
     // and field types come out right; extents do not, so we watch whether any
     // bound actually read a discriminant.  If none did, the layout is fixed and
@@ -770,10 +828,6 @@ std::shared_ptr<Type> Sema::resolveUndiscriminatedSchema(Symbol& Sym,
     // storage, so the part is as wide as the widest of them -- a max taken at
     // run time, since an alternative's own size may depend on a discriminant.
 
-    auto T = std::make_shared<Type>();
-    T->Kind              = TypeKind::Schema;
-    T->Name              = N.Name;
-    T->SchemaName        = N.Name;
     T->SchemaBody        = Body;
     T->SchemaFixedLayout = !LayoutVaries;
     // The schema type itself says whether its body needs the run-time layout.
@@ -781,9 +835,8 @@ std::shared_ptr<Type> Sema::resolveUndiscriminatedSchema(Symbol& Sym,
     // schema looked fixed and every consumer that tests the deref's type --
     // the index stride among them -- took the probe path.
     T->ExtentVaries      = Body->ExtentVaries;
-    T->SchemaBodyNode    = Sym.SchemaBodyNode;
-    for (const auto& P : Sym.SchemaDeclParams)
-        T->SchemaDiscs.push_back({.Name = P.Name, .Ty = P.Ty});
+    // Name, SchemaName, SchemaBodyNode and SchemaDiscs were filled before the
+    // body was resolved, so a self-reference could see them.
 
     // R3.  An array body's bounds as closed forms over the discriminant
     // indices, folded here -- in the scope the schema was DECLARED in, which is

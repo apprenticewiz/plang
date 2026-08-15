@@ -574,6 +574,15 @@ void Sema::checkCallStmt(const CallStmt& S) {
                     // ISO §6.4.3.2: a packed array[1..n] of char is a string
                     // value, and §6.9.3.1 admits string values.
                     if (isCharStringType(*T)) break;
+                    // EP §6.4.3.3 makes `string` a schema, so a schema whose
+                    // BODY is a string denotes a string value as surely as
+                    // `string(10)` does: `type s(n: integer) = string(n);
+                    // var v: s(10)` was refused here for not being one.
+                    if ((T->Kind == TypeKind::Schema
+                         || T->Kind == TypeKind::SchemaInstance)
+                            && T->SchemaBody
+                            && T->SchemaBody->Kind == TypeKind::VarString)
+                        break;
                     error(Arg->Loc, diag::err_write_param_type, {T->Name});
                 }
             }

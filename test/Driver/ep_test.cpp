@@ -3922,6 +3922,55 @@ TEST(EP7Schema, AWholeValueCopyOfAnArrayOfVaryingStringsIsTheInstancesSize) {
     EXPECT_EQ(R.Stdout, "[abcd] k=2\n");
 }
 
+TEST(EP7Schema, ASchemaMayNameItselfThroughAPointer) {
+    // ISO §6.2.2.9 lets a pointer's domain type be declared later, which is
+    // what makes `record next: ^t(n) end` legal inside t's own body: a pointer
+    // needs no size from what it points at.  Sema resolved the body while
+    // resolving the body, and the COMPILER died -- SIGSEGV, no diagnostic.
+    //
+    // The instance's identity is settled before its body is resolved now, so
+    // the re-entry finds the type instead of building it again, and the type is
+    // completed in place so the pointer ends up pointing at the finished one.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type t(n: integer) = record next: ^t(n); k: integer end;\n"
+        "var v: t(4);\n"
+        "begin v.k := 7; v.next := nil; writeln(v.k:1) end.\n", kEP);
+    EXPECT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "7\n");
+}
+
+TEST(EP7Schema, ASchemaThatContainsItselfIsDiagnosedNotCrashed) {
+    // The same shape WITHOUT the indirection is genuinely infinite -- the type
+    // contains itself and has no size.  It has to be refused, and refused with
+    // a diagnostic rather than by exhausting the compiler's stack.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type t(n: integer) = record next: t(n); k: integer end;\n"
+        "var v: t(4);\n"
+        "begin v.k := 7; writeln(v.k:1) end.\n", kEP);
+    EXPECT_NE(R.ExitCode, 0);
+    EXPECT_NE(R.Stderr.find("contains itself"), std::string::npos) << R.Stderr;
+    EXPECT_EQ(R.Stderr.find("crashed"), std::string::npos) << R.Stderr;
+}
+
+TEST(EP7Schema, ASchemaWhoseBodyIsAStringIsAString) {
+    // EP §6.4.3.3 makes `string` a schema, so `type s(n: integer) = string(n)`
+    // declares strings.  A variable of s(10) is a SchemaInstance, and every
+    // string test in codegen asked only whether the Kind was VarString -- so
+    // the assignment stored a POINTER into it, the comparison reached an
+    // internal error, and writeln refused it as unwritable.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type s(n: integer) = string(n);\n"
+        "var v: s(10);\n"
+        "begin v := 'hi';\n"
+        "  if v = 'hi' then writeln('eq');\n"
+        "  writeln('[', v, '] len=', length(v):1) end.\n", kEP);
+    EXPECT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "eq\n[hi] len=2\n");
+}
+
 TEST(EP7Schema, DeclaringASchemaParameterDoesNotResizeAnInstanceOfIt) {
     // R4.  The record arm of llvmTypeOfSemaType had the resolved type T in
     // hand and passed only T.RecordDecl to the layout, which then re-read each

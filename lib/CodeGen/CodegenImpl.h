@@ -1104,14 +1104,34 @@ struct Codegen::Impl {
     // EP String helpers
     // ====================================================================
 
-    /// True if the expression's resolved type is EP string(N).
-    static bool exprIsVarStr(const ExprNode& e) {
-        return e.ResolvedType && e.ResolvedType->Kind == TypeKind::VarString;
+    /// The EP string(N) type an expression denotes, or null.
+    ///
+    /// Looks THROUGH a schema whose body is a string.  EP §6.4.3.3 makes
+    /// `string` a schema, so `type s(n: integer) = string(n); var v: s(10)`
+    /// declares a string as surely as `var v: string(10)` does -- but v's type
+    /// is a SchemaInstance, and asking only about Kind said no.  Codegen then
+    /// treated v as an opaque aggregate: an assignment stored a pointer into
+    /// it, and a comparison reached the internal error R6 put in the place
+    /// where a capacity comes from neither a type nor a literal.  (Which is
+    /// what surfaced this: the check was added for a case measured at zero, and
+    /// the first thing it caught was a real one.)
+    static const Type* varStrTypeOf(const ExprNode& e) {
+        const Type* T = e.ResolvedType.get();
+        if (!T) return nullptr;
+        if (T->Kind == TypeKind::VarString) return T;
+        if ((T->Kind == TypeKind::Schema || T->Kind == TypeKind::SchemaInstance)
+                && T->SchemaBody && T->SchemaBody->Kind == TypeKind::VarString)
+            return T->SchemaBody.get();
+        return nullptr;
     }
+
+    /// True if the expression's resolved type is EP string(N).
+    static bool exprIsVarStr(const ExprNode& e) { return varStrTypeOf(e); }
 
     /// Capacity of the expression's VarString type; 0 if not VarString.
     static int64_t exprStrCap(const ExprNode& e) {
-        return exprIsVarStr(e) ? e.ResolvedType->StrCapacity : 0;
+        const Type* T = varStrTypeOf(e);
+        return T ? T->StrCapacity : 0;
     }
 
     /// The same capacity as a value.  EP §6.4.3.3 makes `string` a schema whose
@@ -1129,9 +1149,11 @@ struct Codegen::Impl {
     /// capacity plang has -- every real capacity fits in it.  Use exprStrCapV
     /// wherever the capacity is a value the runtime is told, not a size.
     static int64_t exprStrCapStatic(const ExprNode& e) {
-        if (!exprIsVarStr(e)) return 0;
-        return e.ResolvedType->ExtentVaries ? PlangMaxStringCapacity
-                                            : e.ResolvedType->StrCapacity;
+        const Type* T = varStrTypeOf(e);
+        if (!T) return 0;
+        const bool varies = T->ExtentVaries
+                         || (e.ResolvedType && e.ResolvedType->ExtentVaries);
+        return varies ? PlangMaxStringCapacity : T->StrCapacity;
     }
 
     /// EP §6.4.7 run-time layout, for a schema body whose extent a discriminant

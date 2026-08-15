@@ -217,6 +217,14 @@ private:
     /// type, where resolveParamType already gives it the largest capacity so
     /// that an actual of any capacity is accepted.
     int InPointerDomain_{0};
+
+    /// Schema resolutions currently on the stack, by body node and
+    /// discriminants.  A schema whose body names itself resolves its own body
+    /// while resolving it; the partly-built type is registered here first so
+    /// the re-entry finds it instead of recursing.  It is completed in place,
+    /// so a pointer that took it while incomplete ends up pointing at the
+    /// finished type.
+    std::map<std::string, std::shared_ptr<Type>> SchemaInProgress_;
     /// True only while a schema body is being resolved against the PROBE
     /// binding, i.e. for a schema used without its discriminants.  An ordinary
     /// discriminated instantiation `t(300)` fills ActiveSchemaBindings_ too, and

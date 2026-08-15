@@ -99,6 +99,15 @@ DIAG(err_assign_mismatch, Error, "cannot assign '%0' to variable of type '%1'")
 // with the same fields and different packing have different layouts.  Saying
 // only that the types differ, when they are printed identically, sends the
 // reader looking at the field list where nothing is wrong.
+// ISO 7185 §6.2.2.9 lets a pointer's domain type be declared later, which is
+// what makes `record next: ^t(n) end` legal inside t's own body: a pointer
+// needs no size from what it points at.  Without the indirection the type
+// contains itself and has no size at all -- and Sema resolved its body while
+// resolving its body until the stack ran out, which is a compiler crash where a
+// diagnostic belongs.
+DIAG(err_schema_recursive, Error,
+     "schema '%0' contains itself; a schema may only name itself through a "
+     "pointer")
 DIAG(err_assign_mismatch_packed, Error,
      "cannot assign '%0' to a variable of type '%1': one is packed and the "
      "other is not")
