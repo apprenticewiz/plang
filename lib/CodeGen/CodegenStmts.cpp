@@ -844,30 +844,56 @@ void Codegen::Impl::emitCallStmt(const CallStmt& s) {
         // about how the declaration was written.  A pointer reached through a
         // type name has no PointerTypeNode to read, and the old fallback of
         // one pointer's worth silently under-allocated for anything larger.
-        int64_t         Bytes  = 0;
-        const TypeNode* domain = nullptr;
+        // R1, reopened by review 5.  Sema's answer was already here -- as the
+        // FALLBACK, reached only when the denoter route returned 0.  The
+        // denoter route walks `typeAliases` by SPELLING at the use site, so a
+        // pointer declared `var g: pt` in a program where a procedure declares
+        // its own `pt` allocated the INNER pt's domain: 16 bytes for a
+        // ten-element array, and glibc aborted on the corrupted heap.  Plain
+        // ISO 7185, and the shape the 0.1.5/0.1.6 corruptions had.
+        //
+        // The R1 rule went into llvmTypeOfNode's NamedTypeNode branch, which is
+        // why this survived it: the name is re-bound HERE, before any TypeNode
+        // is lowered, so llvmTypeOfNode is handed the inner declaration's base
+        // and answers correctly for the wrong type.  A site that resolves a
+        // name before reaching the rule is not covered by the rule.
+        int64_t            Bytes   = 0;
+        const TypeNode*    domain  = nullptr;
+        const plang::Type* pointee = nullptr;
+        if (const auto& pt = s.Args[0]->ResolvedType;
+                pt && pt->Kind == TypeKind::Pointer && pt->PointeeType)
+            pointee = pt->PointeeType.get();
+        if (pointee)
+            Bytes = (int64_t)mod->getDataLayout().getTypeAllocSize(
+                llvmTypeOfSemaType(*pointee));
+
+        // The domain DENOTER is still wanted, for the initial state below --
+        // Sema's Type records a RecordDecl and nothing more general, so a
+        // `value` clause on a non-record domain is only reachable through the
+        // node.  It is accepted only when it agrees with the size Sema gave:
+        // the same spelling walk that mis-sized the allocation also picked the
+        // wrong type's `value` clause, memcpying 400 bytes of one type's
+        // initial value into another's 4-byte allocation.  A disagreement means
+        // the denoter was re-resolved somewhere else, so it is not this
+        // variable's domain and its initial state is not this variable's.
         if (auto* id = llvm::dyn_cast<IdentExpr>(s.Args[0].get()))
             if (auto* ve = findVar(id->Name))
                 if (auto* ptn = llvm::dyn_cast_or_null<PointerTypeNode>(
                         denoterOf(ve->typeNode))) {
-                    domain = ptn->Base.get();
-                    auto* pointeeTy = llvmTypeOfNode(*domain);
-                    Bytes = (int64_t)mod->getDataLayout().getTypeAllocSize(pointeeTy);
+                    const TypeNode* d = ptn->Base.get();
+                    const auto dsz = (int64_t)mod->getDataLayout()
+                        .getTypeAllocSize(llvmTypeOfNode(*d));
+                    if (Bytes == 0 || dsz == Bytes) {
+                        domain = d;
+                        if (Bytes == 0) Bytes = dsz;
+                    }
                 }
-        if (Bytes == 0)
-            if (const auto& pt = s.Args[0]->ResolvedType;
-                    pt && pt->Kind == TypeKind::Pointer && pt->PointeeType)
-                Bytes = (int64_t)mod->getDataLayout().getTypeAllocSize(
-                    llvmTypeOfSemaType(*pt->PointeeType));
         // The domain type, for the initial state below.  Only the identifier
         // route set it, so `new(h.p)` and `new(a[1])` applied no initial state
         // at all: the size already fell back to Sema's type and this did not.
         // A record is what carries field `value` clauses, and Sema's type
         // knows the declaration it came from.
-        if (!domain)
-            if (const auto& pt = s.Args[0]->ResolvedType;
-                    pt && pt->Kind == TypeKind::Pointer && pt->PointeeType)
-                domain = pt->PointeeType->RecordDecl;
+        if (!domain && pointee) domain = pointee->RecordDecl;
         if (Bytes == 0)
             codegenICE("new() cannot determine the size of what '"
                        + std::string(s.Args[0]->ResolvedType

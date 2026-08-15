@@ -16,6 +16,16 @@ struct NamedTypeNode : TypeNode {
     /// whose values stand one for one for those of Name and on which no
     /// operation but parameter passing is allowed.
     bool Restricted{false};
+    /// The type-declaration denoter this name was resolved to, from Sema's
+    /// symbol table -- i.e. in the scope the name was WRITTEN in.
+    ///
+    /// CodeGen used to answer that question with a flat `typeAliases` map keyed
+    /// by spelling, which has no scope chain, so following a chain of type
+    /// names from a foreign declaration re-bound every hop in whatever
+    /// procedure was being lowered.  That is how an inner `ca` supplied the
+    /// `value` clause -- and its length -- for an outer type's variable, and
+    /// memcpy'd 400 bytes into a 4-byte allocation.
+    mutable const TypeNode* Denotes{nullptr};
 };
 
 /// ISO §6.4.3.2.  The index is written either as a range of bounds, which is

@@ -640,6 +640,9 @@ std::shared_ptr<Type> Sema::resolveNamedUnrestricted(const NamedTypeNode& N) {
         error(N.Loc, diag::err_undefined_type, {N.Name});
         return TyErr;
     }
+    // Which declaration this name denotes, recorded in the scope the name was
+    // WRITTEN in, so nothing downstream has to re-answer it by spelling.
+    N.Denotes = Sym->TypeDeclNode;
     // EP §6.4.7: a bare schema-name denotes a type only as a parameter-form or
     // a pointer domain-type, where the discriminants come from the actual
     // parameter or from new().  Anywhere else they have to be written out.

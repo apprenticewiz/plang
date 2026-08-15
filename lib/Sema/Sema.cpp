@@ -761,6 +761,7 @@ void Sema::checkBlock(const BlockNode& Block,
             S.Kind = SymbolKind::TypeAlias;
             S.Name = Td.Name;
             S.Ty   = Stub;
+            S.TypeDeclNode = Td.Type.get();
             if (!Symtab.define(S))
                 error(Td.Type->Loc, diag::err_duplicate_type_decl, {Td.Name});
         }

@@ -613,7 +613,24 @@ void Codegen::Impl::checkSizeAgreement(const Type& T, llvm::Type* Built) {
     // SchemaBindings marks a record that *is* an instantiation: it resolves
     // to a plain Record, but its field denoters still carry whichever
     // instantiation was resolved last.
-    if (!schemaCtx.empty() || !T.SchemaBindings.empty() || T.ExtentVaries) return;
+    if (!schemaCtx.empty() || !T.SchemaBindings.empty() || T.ExtentVaries) {
+        if (const char* Log = ::getenv("PLANG_SKIPGATE_LOG")) {
+            const auto FS = Sema::byteSizeOf(T);
+            if (FS && Built && Built->isSized()) {
+                const uint64_t FL =
+                    mod->getDataLayout().getTypeAllocSize(Built).getFixedValue();
+                if (FILE* F = ::fopen(Log, "a")) {
+                    ::fprintf(F, "%s|%s|ctx=%s|bind=%d|vary=%d|sema=%llu|layout=%llu\n",
+                              (*FS != FL ? "DISAGREE" : "agree"),
+                              T.Name.c_str(), schemaCtx.c_str(),
+                              (int)!T.SchemaBindings.empty(), (int)T.ExtentVaries,
+                              (unsigned long long)*FS, (unsigned long long)FL);
+                    ::fclose(F);
+                }
+            }
+        }
+        return;
+    }
     const auto FromSema = Sema::byteSizeOf(T);
     if (!FromSema || !Built || !Built->isSized()) return;
     const uint64_t FromLayout =

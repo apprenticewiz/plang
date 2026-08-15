@@ -4597,6 +4597,78 @@ TEST(Shadowing, AFileElementIsSizedByTheTypeItWasDeclaredWith) {
     EXPECT_EQ(R.Stdout, "5 10 15 20 25 30 35 40 45 50 \n");
 }
 
+TEST(Shadowing, NewAllocatesTheDomainOfThePointerTypeThatWasWritten) {
+    // Review 5, and the archetype this whole redesign is named for -- still
+    // live after R1, one hop away from where R1 looked.  new() resolves the
+    // POINTER type's name through denoterOf's flat, spelling-keyed table before
+    // any TypeNode is lowered, so llvmTypeOfNode's R1 rule is handed the inner
+    // declaration and answers correctly for the wrong type.  A site that
+    // resolves a name BEFORE reaching the rule is not covered by the rule.
+    //
+    // Sema's answer was in this function already, as the fallback reached only
+    // when the denoter route returned 0 -- the measured-correct path shadowed
+    // by the guess.  Plain ISO 7185: this allocated 16 bytes for a ten-element
+    // array and glibc aborted with "corrupted top size".
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type t  = array[1..10] of integer;\n"
+        "     pt = ^t;\n"
+        "var g: pt; i: integer;\n"
+        "procedure inner;\n"
+        "type t2 = array[1..2] of integer;\n"
+        "     pt = ^t2;\n"
+        "begin new(g) end;\n"
+        "begin\n"
+        "  inner;\n"
+        "  for i := 1 to 10 do g^[i] := i;\n"
+        "  writeln(g^[10])\n"
+        "end.\n");
+    EXPECT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "10\n");
+}
+
+TEST(Shadowing, AValueClauseComesFromTheTypeThatWasWrittenNotAHomonym) {
+    // EP §6.6.  writtenInitialState followed a chain of type names through the
+    // same flat spelling table, so every hop was re-bound in the procedure
+    // being lowered.  The node it landed on decided the initial VALUE and, via
+    // charStringLength/declaredStrCapacity, how many bytes to write -- so an
+    // inner homonym memcpy'd its own 400-byte initial value into an allocation
+    // sized by the outer type's 4, and glibc aborted.
+    //
+    // Sema records which declaration a type name denotes now, in the scope the
+    // name was written in, and this follows that instead.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type ca = packed array[1..4] of char value 'abcd';\n"
+        "     u  = ca;\n"
+        "     pu = ^u;\n"
+        "var p2: pu;\n"
+        "procedure inner;\n"
+        "type ca = packed array[1..400] of char value '" + std::string(400, 'Z') + "';\n"
+        "begin new(p2); writeln('[', p2^, ']') end;\n"
+        "begin inner end.\n", kEP);
+    EXPECT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "[abcd]\n");
+}
+
+TEST(Shadowing, AValueClauseIsNotSuppressedByAHomonymThatHasNone) {
+    // The same walk ran the other way: an inner homonym with NO value clause
+    // made hasInitialState answer false, and the initialization the type really
+    // has was dropped entirely.  Quietly -- the variable simply began at zero.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type base = integer value 7;\n"
+        "     u = base;\n"
+        "var g: u;\n"
+        "procedure inner;\n"
+        "type base = integer;\n"
+        "var l: u;\n"
+        "begin writeln('inner ', l:1) end;\n"
+        "begin writeln('outer ', g:1); inner end.\n", kEP);
+    EXPECT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "outer 7\ninner 7\n");
+}
+
 TEST(Shadowing, ARecordLayoutIsFoldedInTheScopeItWasDeclaredIn) {
     // `arrayIndexRange` folded a field's bounds against codegen's constant
     // table, which holds whatever is innermost where the denoter is being

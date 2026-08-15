@@ -1121,9 +1121,15 @@ const ExprNode* Codegen::Impl::writtenInitialState(const TypeNode* tn,
         }
         auto* named = llvm::dyn_cast<NamedTypeNode>(tn);
         if (!named) break;
-        auto it = typeAliases.find(toLower(named->Name));
-        if (it == typeAliases.end() || it->second == tn) break;
-        tn = it->second;
+        // Sema's answer, recorded where the name was written.  This walked
+        // `typeAliases` -- flat, keyed by spelling, no scope chain -- so every
+        // hop was re-bound in whatever procedure was being lowered: an inner
+        // `ca` supplied the value clause AND its length for an outer type's
+        // variable, memcpying 400 bytes into a 4-byte allocation.  It also ran
+        // the other way, dropping an initialization the type really has when
+        // the inner homonym had none.
+        if (!named->Denotes || named->Denotes == tn) break;
+        tn = named->Denotes;
     }
     return nullptr;
 }

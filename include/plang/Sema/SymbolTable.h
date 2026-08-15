@@ -57,6 +57,13 @@ struct Symbol {
     /// Declared type; used for Var, VarParam, Const, and EnumValue.
     std::shared_ptr<Type> Ty;
 
+    /// For a TypeAlias: the denoter the type was declared with.  A `value`
+    /// clause and `bindable` live on the DENOTER rather than on the Type, so
+    /// asking which declaration a type name denotes is a question only the
+    /// symbol table can answer correctly -- it has the scope chain that
+    /// CodeGen's spelling-keyed tables do not.
+    const TypeNode* TypeDeclNode{nullptr};
+
     // Proc / Function
     /// True if this symbol is a function (has a return value).
     bool IsFunction{false};
