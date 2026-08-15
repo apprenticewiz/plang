@@ -255,35 +255,11 @@ Codegen::Impl::schemaArrayBounds(const SchemaRef& ref) {
         return {emitExtentForm(*ref.semaTy->SchemaLowForm,  ref.discs),
                 emitExtentForm(*ref.semaTy->SchemaHighForm, ref.discs)};
 
-    const SchemaDef* def = findSchemaDef(ref.semaTy->SchemaName);
-    const ArrayTypeNode* atn = def ? arrayBodyOf(def->body) : nullptr;
-    if (!atn)
-        codegenICE("schema '" + ref.semaTy->SchemaName
-                   + "' has no array body to index");
-
-    // The bound expressions are written in terms of the formal discriminants,
-    // so bind those names to the run-time values and emit them as ordinary
-    // expressions.
-    pushScope();
-    for (size_t i = 0; i < def->discNames.size() && i < ref.discs.size(); ++i) {
-        auto* slot = createEntryAlloca(i64Ty, "disc." + def->discNames[i]);
-        builder.CreateStore(ref.discs[i], slot);
-        defVar(def->discNames[i], slot, i64Ty);
-    }
-    // The bounds are emitted with only the discriminants visible.  Without
-    // this the allocating procedure's own variables shadowed the constants the
-    // body was written against.
-    llvm::Value *lo = nullptr, *hi = nullptr;
-    {
-        DeclarationScopeOnly declOnly(*this);
-        lo = toI64(emitExpr(*atn->Low));
-        hi = toI64(emitExpr(*atn->High));
-    }
-    popScope();
-    if (!lo || !hi)
-        codegenICE("schema '" + ref.semaTy->SchemaName
-                   + "' has bounds that cannot be evaluated at run time");
-    return {lo, hi};
+    // Likewise: the top-level body's bounds come from the schema type's own
+    // forms above, or not at all.  Measured at 0 tests before removal.
+    codegenICE("schema '" + ref.semaTy->SchemaName
+               + "' has no closed form for its array bounds");
+    return {nullptr, nullptr};
 }
 
 llvm::Type* Codegen::Impl::schemaStorageType(const SchemaRef& ref) {
@@ -457,10 +433,16 @@ llvm::Value* Codegen::Impl::exprStrCapV(const ExprNode& e) {
 llvm::Value* Codegen::Impl::strCapFromPath(const SchemaPath& path) {
     auto* st = llvm::dyn_cast_or_null<StringTypeNode>(path.decl);
     if (!st) return nullptr;
-    bindSchemaDiscs(path.root);
-    auto* cap = toI64(emitExpr(*st->Capacity));
-    popScope();
-    return cap;
+    // The form first: it is arithmetic over the discriminants by index, with
+    // every other leaf already folded where the declaration was written, so
+    // there is no name in it for this procedure's scope to capture.
+    if (st->ExtentLow && !path.root.discs.empty())
+        if (auto* cap = emitExtentForm(*st->ExtentLow, path.root.discs))
+            return cap;
+    // No expression fallback: a capacity with no form would be re-resolved in
+    // whatever procedure is doing the access, which is the archetype this work
+    // exists to delete.  Measured at 0 tests before removal.
+    codegenICE("a schema string capacity with no closed form to evaluate");
 }
 
 // ---------------------------------------------------------------------------
