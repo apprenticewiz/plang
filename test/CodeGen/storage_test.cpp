@@ -217,6 +217,36 @@ TEST(Storage, ANestedVariantStartsAfterTheAlternativeThatHoldsIt) {
         "begin v.a := false; writeln(v.a) end.\n").empty());
 }
 
+TEST(Storage, AVariantPartIsAlignedForTheWidestThingInIt) {
+    // `set of char` is i256, which this data layout aligns to 16, and codegen
+    // emits set accesses with the alignment of the TYPE.  The blob a variant
+    // part reserves used to cap its cell at i64, so the run was 8-aligned and
+    // sat at offset 8 of an 8-aligned object -- and the compiler then promised
+    // LLVM `align 16` on every load and store of the set inside it.  An
+    // aligned vector access is within its rights to fault on that.
+    //
+    // Three implementations had to be taught this, which is the R4 point: the
+    // cap was written into Codegen::variantBlobType, into Sema's
+    // variantBlobBytes, and a THIRD time as an explicit min(BlobAlign, 8) in
+    // Sema::byteSizeOf.  The run-time walk was the only one that had it right,
+    // and nothing compared it to the other two until now.
+    const std::string Ir = irFor(
+        "program p(output);\n"
+        "type r = record\n"
+        "  case a: boolean of\n"
+        "    true:  (i: integer);\n"
+        "    false: (s: set of char)\n"
+        "end;\n"
+        "var v: r;\n"
+        "begin v.s := ['x']; if 'x' in v.s then writeln('yes') end.\n");
+    ASSERT_FALSE(Ir.empty());
+    // The cell carries the alignment, so the blob has to be made of something
+    // that wants 16 -- an i64 array would be a 16-byte promise on an 8-byte
+    // object however many elements it had.
+    EXPECT_NE(Ir.find("{ i1, [2 x i128] }"), std::string::npos) << Ir;
+    EXPECT_EQ(Ir.find("{ i1, [4 x i64] }"), std::string::npos) << Ir;
+}
+
 TEST(Storage, AVariantWithNothingInItsAlternativesReservesNothing) {
     // `case b: boolean of true: (); false: ()` is a record with a tag and no
     // more, and there is no blob to reserve or to align to.

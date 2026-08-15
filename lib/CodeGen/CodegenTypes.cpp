@@ -225,9 +225,19 @@ llvm::Type* Codegen::Impl::llvmTypeOfName(const std::string& name) {
 llvm::Type* Codegen::Impl::variantBlobType(uint64_t size, uint64_t align) {
     llvm::Type* cell = i8Ty;
     uint64_t    unit = 1;
-    if      (align >= 8) { cell = i64Ty;                        unit = 8; }
-    else if (align >= 4) { cell = i32Ty;                        unit = 4; }
-    else if (align >= 2) { cell = llvm::Type::getInt16Ty(ctx);  unit = 2; }
+    // The cell used to stop at i64, so a part holding anything that wants more
+    // got a blob that wanted 8 -- and the blob is what LLVM positions, so the
+    // member sat at an offset its own type does not permit.  `set of char` is
+    // i256, which this data layout aligns to 16, and codegen emits its loads
+    // and stores with the alignment of the TYPE: a record whose variant part
+    // held one produced `store i256 ..., align 16` into a blob at offset 8 of
+    // an 8-aligned global.  That is a promise to LLVM that the address is
+    // 16-aligned when nothing has made it so, and an aligned vector store is
+    // within its rights to fault on it.
+    if      (align >= 16) { cell = llvm::Type::getInt128Ty(ctx); unit = 16; }
+    else if (align >= 8)  { cell = i64Ty;                        unit = 8; }
+    else if (align >= 4)  { cell = i32Ty;                        unit = 4; }
+    else if (align >= 2)  { cell = llvm::Type::getInt16Ty(ctx);  unit = 2; }
     return llvm::ArrayType::get(cell, (size + unit - 1) / unit);
 }
 
@@ -646,6 +656,30 @@ void Codegen::Impl::checkFieldOffsetAgreement(const Type& T, llvm::Type* Built) 
             codegenICE("field '" + Name + "' of type '" + T.Name + "' is at "
                        + llvm::Twine(Offset) + " to Sema and at "
                        + llvm::Twine(Got) + " as it was laid out");
+
+        // R4: and the THIRD implementation.  Sema's walk and the static layout
+        // were compared above; the run-time walk in CodegenSchema is a separate
+        // traversal of the same declaration, and until now nothing compared it
+        // to either.  What covered it was the differential harness -- a
+        // behavioural test over the schema programs somebody thought to write.
+        //
+        // On a record with nothing varying, the walk's arithmetic is all
+        // constants and folds to a number without emitting an instruction, so
+        // the comparison is available on EVERY record the compiler lays out,
+        // not only on the ones a test exercises.  A result that does not fold
+        // is itself the finding: it means this walk thinks something varies
+        // that the static layout was certain did not.
+        auto* RtOff = rtFieldOffset(*T.RecordDecl, Name);
+        auto* RtC   = llvm::dyn_cast_or_null<llvm::ConstantInt>(RtOff);
+        if (!RtC)
+            codegenICE("field '" + Name + "' of type '" + T.Name + "' has no "
+                       "constant offset in the run-time walk, though the type "
+                       "does not vary");
+        if (RtC->getZExtValue() != Got)
+            codegenICE("field '" + Name + "' of type '" + T.Name + "' is at "
+                       + llvm::Twine(Got) + " as it was laid out and at "
+                       + llvm::Twine(RtC->getZExtValue())
+                       + " to the run-time walk");
     }
 }
 

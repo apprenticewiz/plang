@@ -1013,9 +1013,10 @@ uint64_t roundUp(uint64_t N, uint64_t A) { return A ? (N + A - 1) / A * A : N; }
 /// of alternative at alignment eight reserves sixteen.
 uint64_t variantBlobBytes(uint64_t Size, uint64_t Align) {
     uint64_t Unit = 1;
-    if      (Align >= 8) Unit = 8;
-    else if (Align >= 4) Unit = 4;
-    else if (Align >= 2) Unit = 2;
+    if      (Align >= 16) Unit = 16;
+    else if (Align >= 8)  Unit = 8;
+    else if (Align >= 4)  Unit = 4;
+    else if (Align >= 2)  Unit = 2;
     return roundUp(Size, Unit);
 }
 
@@ -1183,8 +1184,12 @@ std::optional<uint64_t> Sema::byteSizeOf(const Type& T, FieldOffsets* Offsets) {
             // with a tag and no more.
             if (Size > 0) {
                 const uint64_t Blob = variantBlobBytes(Size, Packed ? 1 : BlobAlign);
-                const uint64_t A    = Packed ? 1
-                                             : std::min<uint64_t>(BlobAlign, 8);
+                // Not clamped to 8.  It was, mirroring a cap in
+                // Codegen::variantBlobType that has gone: a part holding a
+                // `set of char` needs 16, and giving the run 8 put the set at
+                // an offset its own type forbids while codegen went on
+                // emitting `align 16` accesses to it.
+                const uint64_t A    = Packed ? 1 : BlobAlign;
                 Align = std::max(Align, A);
                 Off   = roundUp(Off, A);
                 // Where the shared run begins is known only now, so the

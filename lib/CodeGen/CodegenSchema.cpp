@@ -529,9 +529,16 @@ Codegen::Impl::rtIndexBounds(const ArrayTypeNode& at) {
     // forms at all -- and by none afterwards.  Deleting it is what stops a
     // bound being re-resolved at the use site rather than merely preferring
     // not to.
-    if (at.Low && at.High)
-        codegenICE("a schema array bound with no closed form to evaluate "
-                   "against the discriminants");
+    if (at.Low && at.High) {
+        // Only a bound inside a schema body needs a form.  Outside one there is
+        // nothing to vary and no discriminant to vary with, and the ordinary
+        // constant answer -- Sema's, via arrayIndexRange below -- is the
+        // answer.  Keeping the walk total on a fixed array is what lets it be
+        // run over an ordinary record and compared with the static layout.
+        if (rtDiscs_)
+            codegenICE("a schema array bound with no closed form to evaluate "
+                       "against the discriminants");
+    }
     // ISO §6.4.3.2: an index named by its ordinal type has no bound
     // expressions at all -- `array[colour]` leaves Low and High null, and
     // dereferencing them here is what crashed the compiler.  The extent is the
@@ -579,15 +586,27 @@ llvm::Value* Codegen::Impl::rtSizeOfTypeNode(const TypeNode* tn) {
         // than gone.  A capacity that reaches here without a form is a hole in
         // the compiler, and says so.
         auto* cap = extentOf(st->ExtentLow);
-        if (!cap)
-            codegenICE("a schema string capacity with no closed form to "
-                       "evaluate against the discriminants");
-        if (!cap) codegenICE("a schema string capacity that cannot be evaluated");
+        if (!cap) {
+            // Outside a schema body there is no form and nothing to vary, and
+            // the static size IS the answer -- which is what lets this walk be
+            // run over an ordinary record and checked against the static
+            // layout.  Inside one, a capacity with no form is a hole.
+            if (rtDiscs_)
+                codegenICE("a schema string capacity with no closed form to "
+                           "evaluate against the discriminants");
+            return i64c(static_cast<int64_t>(
+                mod->getDataLayout().getTypeAllocSize(llvmTypeOfNode(*d))));
+        }
         return alignUpV(builder.CreateAdd(i64c(8), cap, "str.size"), 8);
     }
     if (auto* at = llvm::dyn_cast<ArrayTypeNode>(d)) {
         auto bounds = rtIndexBounds(*at);
-        if (!bounds) codegenICE("a schema array bound that cannot be evaluated");
+        if (!bounds) {
+            if (rtDiscs_)
+                codegenICE("a schema array bound that cannot be evaluated");
+            return i64c(static_cast<int64_t>(
+                mod->getDataLayout().getTypeAllocSize(llvmTypeOfNode(*d))));
+        }
         auto* count = builder.CreateAdd(
             builder.CreateSub(bounds->second, bounds->first), i64c(1),
             "arr.count");
