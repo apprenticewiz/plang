@@ -168,28 +168,40 @@ than comparing two of its computations to each other.
 What remains of R4 is the thing itself: the static layout and the run-time walk
 are two implementations that now agree, rather than one.
 
-**R3 is partly done.**  Extents travel as closed forms over discriminant
-indices — array bounds, string capacities, and the actuals of a schema
-instantiated inside another schema's body — and **both** the capacity and the
-array-bound fallbacks are now deleted, so an extent arriving at a use site with
-no form is an internal error rather than a quiet re-resolution.
+**R3 is done.**  Every extent in a schema body — array bounds, string
+capacities, subrange bounds, the actuals of a nested instantiation, and the
+bounds handed to a conformant array parameter — is a closed form over the
+discriminants by *index*, with every other leaf folded in the scope the
+declaration was written in.  No fallback re-emits a declaration's expression at
+a use site; each was **measured at 0 tests and then deleted**, so an extent
+arriving without a form is an internal error rather than a quiet re-resolution.
+`bindSchemaDiscs`, which existed only to define the discriminant names so those
+expressions could be re-emitted, is gone.  What replaced it, `RtDiscScope`, only
+says which object's discriminants a form is evaluated against — and restores the
+previous set, which the old pair did not: one call site had grown a hand-written
+save/restore and the others had not.
 
-The measurement is the reason this section can say that.  With each fallback
-replaced by an internal error and the suite run, the capacity fallback was taken
-by **no** test and the array-bound fallback by **45**.  The 45 were not, as this
-document previously claimed, nested instantiations resolved under the outer
-probe: the form-recording block sat *below* the `ArrayTypeNode` branch of
-`resolveTypeImpl`, and that branch returns, so **array bounds had never had
-forms at all**.  Moving the block above every branch took the number to 0.
-Recording it while resolving an instantiation and not only while probing is safe
-because a form is arithmetic over *indices* — `array[1..m]` is index 0 whether
-`m` is 1, 4 or 7.
+Three things are worth carrying forward from how it went.
 
-What remains of R3, again measured: `bindSchemaDiscs` still binds the
-discriminant **names**, and removing that binding fails **19 tests**.  Some
-other site still re-emits a declaration's expression at the use site — the
-record-field offsets and the subrange check named under R4 and class A are the
-candidates.  The binding goes when those are converted and the number is 0.
+**The measurement found what reading had not.**  Replacing each fallback with an
+internal error and running the suite gave 0 for capacities and 45 for array
+bounds.  This document's earlier explanation of the 45 — nested instantiation
+resolved under the outer probe — was wrong.  The form-recording block sat below
+the `ArrayTypeNode` branch of `resolveTypeImpl`, and that branch returns, so
+array bounds had never had forms at all.
+
+**Reaching for the nearest available value is the same bug one level down.**
+The first attempt at the capacity site preferred the form via `extentOf`, which
+evaluates against the *ambient* discriminants, and failed 18 tests: a path's
+capacity has to be evaluated against the discriminants of that path's own root.
+Nearest-binding-of-a-name and nearest-set-of-discriminants are one mistake.
+
+**Two of the last sites converted were live defects**, not tidying.  A subrange
+`1..n*lim` was checked against a `var lim` in the assigning procedure, so a
+legal assignment trapped; a conformant array parameter was told `1..6` for a
+thirty-element actual because the bound was re-emitted in the caller's scope.
+Both are the 0.1.5 heap corruption in a different lowering — three lowerings of
+one defect, found by pulling on one thread rather than by three reviews.
 
 ## Order
 
@@ -207,9 +219,10 @@ test, because what covers it today is one condition in another file.
    places the plan turned out to be wrong: `ConstVal` is ordinal-only on
    purpose, and the identifier annotation is a flag rather than a `Symbol*`.
 3. **R4** — one `LayoutEngine`, with field offsets compared and not just sizes.
-4. **R3** — `ExtentForm`: a closed arithmetic form over discriminant *indices*
-   with every other leaf pre-folded, so CodeGen never re-resolves an identifier
-   in a schema body.  This deletes the archetype rather than guarding it.
+4. **R3 — done.**  `ExtentForm` is a closed arithmetic form over discriminant
+   *indices* with every other leaf pre-folded, and CodeGen no longer re-resolves
+   an identifier in a schema body anywhere.  The archetype is deleted rather
+   than guarded.
 5. **R5**, then **R6**.
 
 R3 is what the undiscriminated-schema branch needs before it can merge; its
