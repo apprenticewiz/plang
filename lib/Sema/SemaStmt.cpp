@@ -229,6 +229,11 @@ void Sema::checkAssign(const AssignStmt& S) {
             error(S.Loc, diag::err_restricted_assigned, {Dst->Name});
         else if (Src->isRestricted())
             error(S.Loc, diag::err_restricted_used, {Src->Name});
+        else if (Src->Kind == TypeKind::Record && Dst->Kind == TypeKind::Record
+                 && Src->Packed != Dst->Packed)
+            error(S.Loc, diag::err_assign_mismatch_packed, {Src->Name, Dst->Name});
+        else if (!Src->Name.empty() && Src->Name == Dst->Name)
+            error(S.Loc, diag::err_assign_mismatch_homonym, {Src->Name});
         else
             error(S.Loc, diag::err_assign_mismatch, {Src->Name, Dst->Name});
     }

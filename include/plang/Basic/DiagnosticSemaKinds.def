@@ -91,6 +91,20 @@ DIAG(err_param_type_mismatch, Error, "type mismatch for parameter '%0': expected
 DIAG(err_file_value_param, Error, "value parameter '%0' has a type containing a file component, which is not permitted")
 DIAG(err_lhs_not_lvalue, Error, "left-hand side of assignment is not an assignable variable")
 DIAG(err_assign_mismatch, Error, "cannot assign '%0' to variable of type '%1'")
+// ISO 7185 §6.4.1: a type is identified by its DECLARATION, not by its name, so
+// two declarations may share a spelling and be different types.  Reporting that
+// with err_assign_mismatch produces "cannot assign 'r' to variable of type 'r'",
+// which states the problem in a form that reads like a compiler bug.
+// ISO 7185 §6.4.3.1: `packed` is part of what a record type IS -- two records
+// with the same fields and different packing have different layouts.  Saying
+// only that the types differ, when they are printed identically, sends the
+// reader looking at the field list where nothing is wrong.
+DIAG(err_assign_mismatch_packed, Error,
+     "cannot assign '%0' to a variable of type '%1': one is packed and the "
+     "other is not")
+DIAG(err_assign_mismatch_homonym, Error,
+     "cannot assign '%0' to a variable of type '%0': these are two different "
+     "types that share a name")
 DIAG(err_if_not_boolean, Error, "condition of 'if' must be boolean, got '%0'")
 DIAG(err_while_not_boolean, Error, "condition of 'while' must be boolean, got '%0'")
 DIAG(err_for_var_undefined, Error, "undefined variable '%0' in for statement")

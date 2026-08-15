@@ -576,8 +576,12 @@ private:
     /// bounds are not part of the question: §6.4.6 c) and d) make a value
     /// outside the destination's interval an error to be reported when the
     /// assignment happens, not a type error.
+    /// \p Depth bounds the structural comparison of two records that share a
+    /// name without sharing a declaration; a record reachable from itself
+    /// through a pointer would otherwise recurse without end.
     [[nodiscard]] bool isAssignCompatible(const Type& Dst, const Type& Src,
-                                          bool ExactBounds = false) const;
+                                          bool ExactBounds = false,
+                                          int Depth = 0) const;
 
     /// ISO §6.6.3.8: "may an array of type Actual be passed to a conformant
     /// array parameter declared with schema Formal?"  A separate question from

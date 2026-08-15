@@ -4624,6 +4624,61 @@ TEST(Storage, APackedFieldDoesNotClaimAnAlignmentItCannotKeep) {
     }
 }
 
+TEST(Shadowing, TwoRecordsSharingANameAreNotTheSameType) {
+    // ISO §6.4.3.3 identifies a record type by its DECLARATION.  Sema compared
+    // NAMES, so a `record a: integer end` at program scope accepted a
+    // `record a, b, c: integer end` declared in a procedure and sharing the
+    // spelling: 24 bytes copied into 8, no diagnostic, exit 0.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type r = record a: integer end;\n"
+        "var g: r;\n"
+        "procedure inner;\n"
+        "type r = record a, b, c: integer end;\n"
+        "var l: r;\n"
+        "begin l.a := 1; l.b := 2; l.c := 3; g := l end;\n"
+        "begin inner; writeln(g.a:1) end.\n");
+    EXPECT_NE(R.ExitCode, 0);
+    // And the message has to say WHY, or it reads as a compiler bug: both
+    // types print as 'r'.
+    EXPECT_NE(R.Stderr.find("two different types that share a name"),
+              std::string::npos) << R.Stderr;
+}
+
+TEST(Shadowing, APackedRecordIsNotThePaddedRecordOfTheSameShape) {
+    // ISO §6.4.3.1: `packed` is part of what the type is.  The structural
+    // comparison for inline records ignored it, so a padded record could be
+    // stored into a packed one -- `b := a` printed 504403158265495552 for a
+    // field holding 7, because the fields are at different offsets.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "var a: record x: char; y: integer end;\n"
+        "    b: packed record x: char; y: integer end;\n"
+        "begin a.x := 'Q'; a.y := 7; b := a; writeln(b.x, ' ', b.y:1) end.\n");
+    EXPECT_NE(R.ExitCode, 0);
+    EXPECT_NE(R.Stderr.find("one is packed and the other is not"),
+              std::string::npos) << R.Stderr;
+}
+
+TEST(Shadowing, TwoEnumerationsSharingANameAreNotTheSameType) {
+    // ISO §6.4.2.3: each enumerated-type definition is a distinct type.  By
+    // name, `(mon,tue,wed,thu)` was assignable to a variable of
+    // `(red,green,blue)`, which put the ordinal 3 into a type whose largest is
+    // 2 -- and ord(g) then printed 3 for an enumeration with three values.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type e = (red, green, blue);\n"
+        "var g: e;\n"
+        "procedure inner;\n"
+        "type e = (mon, tue, wed, thu);\n"
+        "var l: e;\n"
+        "begin l := thu; g := l end;\n"
+        "begin inner; writeln(ord(g):1) end.\n");
+    EXPECT_NE(R.ExitCode, 0);
+    EXPECT_NE(R.Stderr.find("two different types that share a name"),
+              std::string::npos) << R.Stderr;
+}
+
 TEST(Shadowing, NewAllocatesTheDomainOfThePointerTypeThatWasWritten) {
     // Review 5, and the archetype this whole redesign is named for -- still
     // live after R1, one hop away from where R1 looked.  new() resolves the

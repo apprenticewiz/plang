@@ -1322,7 +1322,7 @@ bool Sema::isConformable(const Type& Formal, const Type& Actual) const {
 }
 
 bool Sema::isAssignCompatible(const Type& Dst, const Type& Src,
-                              bool ExactBounds) const {
+                              bool ExactBounds, int Depth) const {
     if (Dst.isError() || Src.isError())   return true;  // suppress cascades
 
     // EP §6.4.6 a): two types that are the same are assignment-compatible only
@@ -1331,6 +1331,15 @@ bool Sema::isAssignCompatible(const Type& Dst, const Type& Src,
     // restricted type, and a value of one is compatible with nothing: the
     // assignments it takes part in are the ones §6.9.2.2 and §6.7.3 name.
     if (Dst.isRestricted() || Src.isRestricted()) return false;
+
+    // The same type is the same type.  Also what stops a record reachable from
+    // itself through a pointer from recursing without end below.
+    //
+    // Below the restricted check on purpose: EP §6.4.6 a) makes a restricted
+    // type assignment-compatible with NOTHING, its own self included, and an
+    // identity shortcut above that answered `w := w` with yes and took the
+    // rule's own diagnostic with it.
+    if (&Dst == &Src) return true;
 
     // EP §6.4.7: SchemaInstance — compatible if same schema+discriminant values,
     // or fall through to body-type compatibility.
@@ -1381,10 +1390,19 @@ bool Sema::isAssignCompatible(const Type& Dst, const Type& Src,
             // ISO §6.4.2.3: each enumerated-type definition is a distinct
             // type, so two of them agree only when they are the same
             // declaration — by name, or by identity when written inline.
+            // ISO §6.4.2.3: each enumerated-type definition is a distinct
+            // type, so two of them agree only when they are the same
+            // declaration.  Comparing NAMES is not that -- two enumerations in
+            // different scopes may share a spelling and share nothing else, and
+            // `(mon,tue,wed,thu)` was assignable to a variable of
+            // `(red,green,blue)`, putting the ordinal 3 in a type whose largest
+            // is 2.  The value list is what distinguishes them, and it agrees
+            // for the same declaration reached through separate compilation,
+            // where the declaring node does not.
             case TypeKind::Enum:
                 if (isAnonymousNominal(Dst) || isAnonymousNominal(Src))
                     return &Dst == &Src;
-                return Dst.Name == Src.Name;
+                return Dst.Name == Src.Name && Dst.EnumValues == Src.EnumValues;
 
             // ISO §6.4.5 b): two subranges are compatible when they are
             // subranges of the one host type, whatever bounds each was written
@@ -1423,17 +1441,40 @@ bool Sema::isAssignCompatible(const Type& Dst, const Type& Src,
             // declaration.  A record written inline has no declared name; those
             // are compared structurally, which is what lets an inline
             // parameter type accept an inline variable of the same shape.
-            case TypeKind::Record:
-                if (!isAnonymousNominal(Dst) || !isAnonymousNominal(Src))
-                    return Dst.Name == Src.Name;
+            case TypeKind::Record: {
+                // A NAME is not an identity.  This compared spellings, so a
+                // `record a: integer end` at program scope accepted a
+                // `record a, b, c: integer end` declared in a procedure and
+                // sharing the name: 24 bytes copied into 8, quietly.
+                //
+                // The declaration is the identity (ISO §6.4.3.3), and where
+                // both sides have one it settles the question outright.  Where
+                // they do not -- separate compilation gives the same
+                // declaration a different node in each unit -- the shape has to
+                // answer instead, so the name is necessary but no longer
+                // sufficient.
+                if (!isAnonymousNominal(Dst) || !isAnonymousNominal(Src)) {
+                    if (Dst.Name != Src.Name) return false;
+                    if (Dst.RecordDecl && Src.RecordDecl
+                            && Dst.RecordDecl == Src.RecordDecl)
+                        return true;
+                }
+                if (Depth > 16) return true;   // give up rather than misjudge
+                // ISO §6.4.3.1: `packed` is part of what the type IS, and two
+                // records that differ in it have different layouts.  Ignoring
+                // it let a padded record be stored into a packed one --
+                // `b := a` printed 504403158265495552 for a field holding 7.
+                if (Dst.Packed != Src.Packed) return false;
                 if (Dst.RecordFields.size() != Src.RecordFields.size()) return false;
                 for (size_t I = 0; I < Dst.RecordFields.size(); ++I) {
                     if (!Dst.RecordFields[I].Ty || !Src.RecordFields[I].Ty) return false;
                     if (!isAssignCompatible(*Dst.RecordFields[I].Ty,
                                             *Src.RecordFields[I].Ty,
-                                            /*ExactBounds=*/true)) return false;
+                                            /*ExactBounds=*/true, Depth + 1))
+                        return false;
                 }
                 return true;
+            }
 
             // ISO §6.4.5 c): two set-types are compatible when their base-types
             // are, so the bounds of the base are not asked to agree.
