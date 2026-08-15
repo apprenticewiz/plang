@@ -165,8 +165,43 @@ answers agreeing is not the same as either being right, which is the argument
 for gates that compare what the compiler DOES through different routes rather
 than comparing two of its computations to each other.
 
-What remains of R4 is the thing itself: the static layout and the run-time walk
-are two implementations that now agree, rather than one.
+**What R4 has since done**, and what it found:
+
+- **A variant part's size and its field offsets are one walk.**  They were two
+  functions, so every fact about the layout had to be stated twice — that a
+  tagless selector reserves nothing, that only the outermost run is pre-aligned
+  — and both of those were bugs that had to be fixed twice, because the copy
+  that is not failing is not the copy anyone looks at.
+- **The run-time walk is now gated against the static layout on every record
+  the compiler lays out.**  On a record with nothing varying its arithmetic is
+  all constants and folds without emitting an instruction, so the check is free
+  and universal rather than sampled by whichever schema programs somebody
+  thought to write.  This needed the walk to be *total* on fixed denoters.
+- **It found a real under-alignment, present in every release.**  `set of char`
+  is `i256` and wants 16-byte alignment; the blob a variant part reserves
+  capped its cell at `i64`, so the run was 8-aligned while codegen emitted
+  `align 16` accesses into it — a promise to LLVM that an aligned vector store
+  may fault on.  It is in `iso7185pat.pas`, the standard's own acceptance test,
+  in `vra`'s `cset` alternative.  The cap was written down THREE times:
+  `Codegen::variantBlobType`, Sema's `variantBlobBytes`, and again as an
+  explicit `min(BlobAlign, 8)` in `Sema::byteSizeOf`.  Fixing one made the
+  other two disagree in turn, each caught by a different gate.
+- **One function now answers what the shared run must be aligned to**, where
+  the static layout used to accumulate it while the run-time walk computed it
+  separately.  That took a distinction rather than a deletion: the outer tag
+  bears on what the RECORD needs and not on what the run does, while a nested
+  tag lives inside the run and does count.
+
+Worth being exact about what "one engine" can mean here.  Within CodeGen the
+two walks are converging on shared pieces — one variant traversal, one
+run-alignment function — and the offset gate makes any remaining drift loud.
+**Sema's walk is deliberately not merged into them.**  Sema answers sizes
+without CodeGen by design, and an independent implementation that is checked on
+every record is a differential oracle rather than a duplicate; the failure mode
+this document warns about is two implementations that are *supposed* to be one
+and drift silently, which is what the gate removes.  The alignment bug is the
+evidence: the run-time walk had it right all along, and the only reason nobody
+knew is that nothing asked it.
 
 **R3 is done.**  Every extent in a schema body — array bounds, string
 capacities, subrange bounds, the actuals of a nested instantiation, and the
