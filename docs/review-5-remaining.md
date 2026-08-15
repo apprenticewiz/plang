@@ -41,14 +41,34 @@ What it needs is for every string operation to treat a schema whose body is a
 `length`, comparison and `substr`.  That is the real shape of this work.
 
 ## 2. A schema whose body is a discriminated schema cannot be subscripted
+   — attempted and BACKED OUT
 
     type vec(n: integer) = array[1..n] of integer;
          v2(n: integer)  = vec(n);
     var x: v2(4);  x[1] := 7;
 
-`error: subscript operator applied to non-array type 'vec(4)'`.  Sema does not
-look through a `SchemaInstance` body to the array underneath.  Related to 1: the
-same "look through the schema to what it really is" gap, in a different operator.
+`error: subscript operator applied to non-array type 'vec(4)'`.  The subscript
+check in SemaExpr looks through a schema body ONCE, and one hop from v2(4)
+lands on vec(4) -- still a SchemaInstance.
+
+**Looping instead of hopping once makes it compile and gets the bounds wrong.**
+The element type comes out right and `x[1] := 7` runs, but the index range
+becomes `0..3` where the declaration says `1..4`:
+
+    plang runtime: array index 4 out of bounds 0..3
+
+so `x[4]` traps on a legal program and `x[0]` -- outside the array -- would be
+accepted.  That is a memory-safety regression bought with a clean rejection, and
+strictly worse than the diagnostic it replaces, so it was reverted.
+
+The lower bound is being lost somewhere between the inner instantiation and the
+index check; the count survives and the origin does not.  Whoever picks this up
+should start by finding where `1..n` becomes `0..count-1` for a body reached
+through a second schema, and should keep the range check ON while testing --
+with `-fno-range-checks` this defect is silent.
+
+Same family as 1: "look through the schema to what it really is" is not one
+change but a property every operator has to have.
 
 ## 3. ISO 10206 import-part with more than one specification
 
