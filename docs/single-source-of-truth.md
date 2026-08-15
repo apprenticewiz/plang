@@ -123,9 +123,16 @@ than it is.  They belong to the later phases:
   exprStrCapV(x)}` was copied to every site needing a pair, so fixing the one
   somebody noticed left six.  They share `strAddrAndCap` now, and one test
   covers all six shapes because a test per site would repeat the mistake.
-- **R6, facts inferred from representation** — `cap = 1` for a comparison
-  operand that is not a literal (`CodegenExprs.cpp:415`); component width taken
-  from whatever `emitExpr` happened to produce (`CodegenIO.cpp:64`).
+- **R6, facts inferred from representation — DONE.**  How many bytes land in a
+  typed file is a fact about the file's *component type*; it was taken from
+  whatever `emitExpr` produced.  The **read** half of the same operation
+  already sized from the component type — the two halves of one operation
+  disagreed about where the width comes from, and the half nobody changed had
+  it right.  The other was the capacity a string comparison gives a non-string
+  operand.  Neither was a live bug: measured across 1,764 tests, the value's
+  width never differed from the component's and the capacity default was never
+  taken by a non-char non-literal.  What changed is that the fact now comes
+  from the type, and arriving there with the two disagreeing says so.
 
 ## Why the existing gates could not see any of this
 
@@ -263,7 +270,7 @@ test, because what covers it today is one condition in another file.
    *indices* with every other leaf pre-folded, and CodeGen no longer re-resolves
    an identifier in a schema body anywhere.  The archetype is deleted rather
    than guarded.
-5. **R5**, then **R6**.
+5. **R5 — done**, then **R6 — done**.
 
 R3 is what the undiscriminated-schema branch needs before it can merge; its
 run-time layout walk is a third AST walk written because there was no single
