@@ -243,7 +243,7 @@ llvm::Type* Codegen::Impl::variantBlobType(uint64_t size, uint64_t align) {
 
 uint64_t Codegen::Impl::layoutVariantCase(const VariantCase& vc, RecordLayout& L,
                                            bool packed, unsigned blobIdx,
-                                           uint64_t base, uint64_t& align) {
+                                           uint64_t base) {
     const auto& dl = mod->getDataLayout();
     uint64_t at = base;
 
@@ -251,7 +251,6 @@ uint64_t Codegen::Impl::layoutVariantCase(const VariantCase& vc, RecordLayout& L
         // ISO §6.4.3.1: a packed component is stored as economically as the
         // implementation can manage, which here means no padding in front of it.
         const uint64_t fa = packed ? 1 : dl.getABITypeAlign(ft).value();
-        align = std::max(align, fa);
         at = (at + fa - 1) / fa * fa;
         // A name used in two alternatives keeps its first placement; Sema has
         // already reported it, and inventing a second one would only confuse
@@ -273,8 +272,7 @@ uint64_t Codegen::Impl::layoutVariantCase(const VariantCase& vc, RecordLayout& L
             place(nv.TagField, llvmTypeOfNode(*nv.TagType));
         uint64_t end = at;
         for (const auto& inner : nv.Cases)
-            end = std::max(end, layoutVariantCase(inner, L, packed, blobIdx,
-                                                  at, align));
+            end = std::max(end, layoutVariantCase(inner, L, packed, blobIdx, at));
         at = end;
     }
     return at;
@@ -291,9 +289,14 @@ void Codegen::Impl::layoutVariantPart(const VariantPart& vp, RecordLayout& L,
     }
 
     const auto blobIdx = static_cast<unsigned>(elems.size());
-    uint64_t size = 0, align = 1;
+    // R4: one answer to "what does the shared run need aligning to".  This used
+    // to be accumulated here, field by field, while the run-time walk worked
+    // the same number out separately -- and a cap on it ended up written down
+    // in three places, none of which knew about the others.
+    uint64_t size = 0;
+    const uint64_t align = rtVariantRunAlign(vp);
     for (const auto& vc : vp.Cases)
-        size = std::max(size, layoutVariantCase(vc, L, packed, blobIdx, 0, align));
+        size = std::max(size, layoutVariantCase(vc, L, packed, blobIdx, 0));
     // Every alternative may be empty — `case b: boolean of true: (); false: ()`
     // is a record with a tag and nothing else — and then there is nothing to
     // reserve and no field that would have referred to it.

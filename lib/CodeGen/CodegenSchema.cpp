@@ -715,7 +715,7 @@ llvm::Value* Codegen::Impl::rtWalkVariant(const VariantPart& vp,
     // else -- so pre-aligning a nested run here put `k` four bytes past where
     // an ordinary read of it looked, and a whole-value copy between `q^` and a
     // discriminated instance quietly swapped a character for a space.
-    if (!nested) off = alignUpV(off, packed ? 1 : rtVariantAlign(vp));
+    if (!nested) off = alignUpV(off, packed ? 1 : rtVariantRunAlign(vp));
     // Walked from off rather than from zero and added on afterwards.  Those two
     // are the same number only when off is already aligned to the widest field
     // in the part, which is exactly what the pre-align used to guarantee and
@@ -740,19 +740,42 @@ llvm::Value* Codegen::Impl::rtWalkVariant(const VariantPart& vp,
     return widest;
 }
 
-uint64_t Codegen::Impl::rtVariantAlign(const VariantPart& vp) {
-    // The tag is a member of the part as much as any alternative's field is,
-    // and the size walk aligns to it, so leaving it out here made the two
-    // walks disagree for a variant whose tag is wider than its alternatives.
-    // A tag with no field name occupies nothing, so it constrains nothing.
-    uint64_t a = (vp.TagType && !vp.TagField.empty())
-                     ? rtAlignOfTypeNode(vp.TagType.get()) : 1;
+/// What the SHARED RUN of a variant part must be aligned to: the widest thing
+/// placed inside it, which is every alternative's fields and, for a nested
+/// part, its tag and its own run -- a nested tag lives inside the outer run
+/// rather than beside it.
+///
+/// Deliberately NOT the outer tag.  That is a member of the record and not of
+/// the run, and it sits ahead of the run in a slot of its own; counting it here
+/// would round the run's storage up to the tag's width for a variant whose tag
+/// is wider than any of its alternatives.  rtVariantAlign adds it back for the
+/// question the tag does bear on, which is what the whole record needs.
+///
+/// The static layout in CodegenTypes.cpp accumulated this same number for
+/// itself while placing fields.  It calls this instead: two implementations of
+/// one number is how a cap on it came to be written down three times, and the
+/// blob went 8-aligned around a member that needed 16.
+uint64_t Codegen::Impl::rtVariantRunAlign(const VariantPart& vp) {
+    uint64_t a = 1;
     for (const auto& vc : vp.Cases) {
         for (const auto& fd : vc.Fields)
             a = std::max(a, rtAlignOfTypeNode(fd.Type.get()));
-        if (vc.NestedVariant) a = std::max(a, rtVariantAlign(*vc.NestedVariant));
+        if (const auto* nv = vc.NestedVariant.get()) {
+            if (nv->TagType && !nv->TagField.empty())
+                a = std::max(a, rtAlignOfTypeNode(nv->TagType.get()));
+            a = std::max(a, rtVariantRunAlign(*nv));
+        }
     }
     return a;
+}
+
+/// What a record containing this part must be aligned to.  The tag counts here
+/// -- it is a member like any other -- and a tag with no field name occupies
+/// nothing, so it constrains nothing.
+uint64_t Codegen::Impl::rtVariantAlign(const VariantPart& vp) {
+    uint64_t a = (vp.TagType && !vp.TagField.empty())
+                     ? rtAlignOfTypeNode(vp.TagType.get()) : 1;
+    return std::max(a, rtVariantRunAlign(vp));
 }
 
 llvm::Value* Codegen::Impl::rtFieldOffset(const RecordTypeNode& rt,

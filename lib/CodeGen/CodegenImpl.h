@@ -793,7 +793,7 @@ struct Codegen::Impl {
     /// at \p blobIdx, recursing into a nested variant.  Returns the offset one
     /// past the last of them, and widens \p align to what they need.
     uint64_t layoutVariantCase(const VariantCase& vc, RecordLayout& L, bool packed,
-                               unsigned blobIdx, uint64_t base, uint64_t& align);
+                               unsigned blobIdx, uint64_t base);
 
     /// A type of at least \p size bytes and alignment \p align, to stand for
     /// the whole variant part.  A plain [n x i8] would be byte-aligned and
@@ -1140,6 +1140,9 @@ struct Codegen::Impl {
     llvm::Value* rtWalkVariant(const VariantPart& vp, llvm::Value* off,
                                bool packed, const std::string* stopAt,
                                bool* found, bool nested = false);
+    /// What the shared run of a variant part must be aligned to; see the
+    /// definition for why the outer tag is not part of the answer.
+    uint64_t     rtVariantRunAlign(const VariantPart& vp);
     uint64_t     rtVariantAlign(const VariantPart& vp);
 
     /// A component of a run-time-laid-out object: the enclosing schema whose
