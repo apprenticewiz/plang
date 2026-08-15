@@ -601,7 +601,7 @@ llvm::Value* Codegen::Impl::rtSizeOfTypeNode(const TypeNode* tn) {
         llvm::Value* off = rtWalkFields(rt->Fields, i64c(0), rt->Packed,
                                         /*stopAt=*/nullptr, nullptr);
         if (rt->Variant)
-            off = rtVariantSize(*rt->Variant, off, rt->Packed);
+            off = rtWalkVariant(*rt->Variant, off, rt->Packed, nullptr, nullptr);
         // A record is padded to its own alignment, as a struct is, so that an
         // array of them strides correctly.
         return alignUpV(off, rt->Packed ? 1 : rtAlignOfTypeNode(d));
@@ -665,19 +665,28 @@ llvm::Value* Codegen::Impl::rtWalkFields(const std::vector<FieldDecl>& fields,
 /// the part is as big as the largest of them -- a max taken at run time here,
 /// since an alternative's own size may depend on a discriminant.  The tag, if
 /// there is one, is an ordinary field ahead of that run.
-llvm::Value* Codegen::Impl::rtVariantSize(const VariantPart& vp,
+///
+/// One walk, with \p stopAt selecting between "how big is the part" and "where
+/// is this field in it", exactly as rtWalkFields already does for a fixed part.
+/// It was two functions, and every fact about the layout had to be stated in
+/// both: that a tagless selector reserves nothing, and that only the OUTERMOST
+/// run is pre-aligned.  Both of those were bugs, and both had to be fixed twice
+/// because the second copy is not what failed.  A size and an offset that
+/// disagree put a field outside the allocation, so they are one walk on
+/// purpose.
+llvm::Value* Codegen::Impl::rtWalkVariant(const VariantPart& vp,
                                           llvm::Value* off, bool packed,
+                                          const std::string* stopAt, bool* found,
                                           bool nested) {
     // ISO §6.4.3.3 makes the tag-field OPTIONAL: `case boolean of` selects on a
     // type with no field to store it in.  This gated on TagType alone while the
     // static layout gates on the field having a NAME, so a tagless selector
     // reserved eight bytes for a tag that does not exist and put every
-    // alternative that far past where an ordinary access looks.  Three lines
-    // below, the field-name match already tests TagField.empty(); the storage
-    // three lines above did not.
+    // alternative that far past where an ordinary access looks.
     if (vp.TagType && !vp.TagField.empty()) {
         const uint64_t a = packed ? 1 : rtAlignOfTypeNode(vp.TagType.get());
         off = alignUpV(off, a);
+        if (stopAt && eqCI(vp.TagField, *stopAt)) { *found = true; return off; }
         off = builder.CreateAdd(off, rtSizeOfTypeNode(vp.TagType.get()), "tag.off");
     }
     // Only the OUTERMOST run is pre-aligned, because in the static layout only
@@ -691,16 +700,23 @@ llvm::Value* Codegen::Impl::rtVariantSize(const VariantPart& vp,
     // Walked from off rather than from zero and added on afterwards.  Those two
     // are the same number only when off is already aligned to the widest field
     // in the part, which is exactly what the pre-align used to guarantee and
-    // what a nested run does not have.  rtVariantFieldOffset has always walked
-    // absolutely; now this does too, so the size and the offset are one walk
-    // and cannot drift apart again.
+    // what a nested run does not have.
     llvm::Value* widest = off;
     for (const auto& vc : vp.Cases) {
-        llvm::Value* sz = rtWalkFields(vc.Fields, off, packed, nullptr, nullptr);
-        if (vc.NestedVariant)
-            sz = rtVariantSize(*vc.NestedVariant, sz, packed, /*nested=*/true);
-        widest = builder.CreateSelect(builder.CreateICmpUGT(sz, widest),
-                                      sz, widest, "variant.max");
+        // One call, serving both readings: searching, this is the field's
+        // offset when it is here and the end of the alternative when it is not,
+        // which is the same number the size walk wants.  The search used to
+        // walk the alternative a SECOND time to get that end, emitting every
+        // field's size arithmetic twice.
+        llvm::Value* end = rtWalkFields(vc.Fields, off, packed, stopAt, found);
+        if (found && *found) return end;
+        if (vc.NestedVariant) {
+            end = rtWalkVariant(*vc.NestedVariant, end, packed, stopAt, found,
+                                /*nested=*/true);
+            if (found && *found) return end;
+        }
+        widest = builder.CreateSelect(builder.CreateICmpUGT(end, widest),
+                                      end, widest, "variant.max");
     }
     return widest;
 }
@@ -726,46 +742,10 @@ llvm::Value* Codegen::Impl::rtFieldOffset(const RecordTypeNode& rt,
     llvm::Value* off = rtWalkFields(rt.Fields, i64c(0), rt.Packed, &field, &found);
     if (found) return off;
     if (rt.Variant) {
-        if (auto* v = rtVariantFieldOffset(*rt.Variant, off, rt.Packed, field))
-            return v;
+        auto* v = rtWalkVariant(*rt.Variant, off, rt.Packed, &field, &found);
+        if (found) return v;
     }
     codegenICE("record has no field named '" + field + "'");
-    return nullptr;
-}
-
-/// The offset of \p field within a variant part, or null if it is not in one.
-/// Every alternative starts at the same place, which is what sharing storage
-/// means, so the alternative the field is in is the only one walked.
-llvm::Value* Codegen::Impl::rtVariantFieldOffset(const VariantPart& vp,
-                                                 llvm::Value* off, bool packed,
-                                                 const std::string& field,
-                                                 bool nested) {
-    // ISO §6.4.3.3 makes the tag-field OPTIONAL: `case boolean of` selects on a
-    // type with no field to store it in.  This gated on TagType alone while the
-    // static layout gates on the field having a NAME, so a tagless selector
-    // reserved eight bytes for a tag that does not exist and put every
-    // alternative that far past where an ordinary access looks.  Three lines
-    // below, the field-name match already tests TagField.empty(); the storage
-    // three lines above did not.
-    if (vp.TagType && !vp.TagField.empty()) {
-        const uint64_t a = packed ? 1 : rtAlignOfTypeNode(vp.TagType.get());
-        off = alignUpV(off, a);
-        if (!vp.TagField.empty() && eqCI(vp.TagField, field)) return off;
-        off = builder.CreateAdd(off, rtSizeOfTypeNode(vp.TagType.get()), "tag.off");
-    }
-    // Outermost only; see rtVariantSize.
-    if (!nested) off = alignUpV(off, packed ? 1 : rtVariantAlign(vp));
-    for (const auto& vc : vp.Cases) {
-        bool found = false;
-        llvm::Value* v = rtWalkFields(vc.Fields, off, packed, &field, &found);
-        if (found) return v;
-        if (vc.NestedVariant) {
-            llvm::Value* end = rtWalkFields(vc.Fields, off, packed, nullptr, nullptr);
-            if (auto* n = rtVariantFieldOffset(*vc.NestedVariant, end, packed,
-                                               field, /*nested=*/true))
-                return n;
-        }
-    }
     return nullptr;
 }
 
