@@ -1,7 +1,7 @@
 # Review 5: what is left, and what was learned trying
 
-Review 5 found 27 unique defects; 24 survived adversarial verification and 19
-are fixed.  This records the five still open, with what an attempt on each
+Review 5 found 27 unique defects; 24 survived adversarial verification and 20
+are fixed.  This records the four still open, with what an attempt on each
 actually cost, so the next person does not rediscover it.
 
 ## 1. A bare `string` as a VAR parameter — attempted and BACKED OUT
@@ -40,35 +40,25 @@ What it needs is for every string operation to treat a schema whose body is a
 (commit b187337), applied on the SEMA side to assignment compatibility, `+`,
 `length`, comparison and `substr`.  That is the real shape of this work.
 
-## 2. A schema whose body is a discriminated schema cannot be subscripted
-   — attempted and BACKED OUT
+## 2. A schema whose body is a discriminated schema — FIXED
 
-    type vec(n: integer) = array[1..n] of integer;
-         v2(n: integer)  = vec(n);
-    var x: v2(4);  x[1] := 7;
+Was: `type v2(n) = vec(n); var x: v2(4); x[1] := 7` rejected as a subscript of
+a non-array type 'vec(4)'.
 
-`error: subscript operator applied to non-array type 'vec(4)'`.  The subscript
-check in SemaExpr looks through a schema body ONCE, and one hop from v2(4)
-lands on vec(4) -- still a SchemaInstance.
+The cause was not the subscript check.  "Look through the schema to what it
+really is" is a LOOP, because EP §6.4.7 lets a body be another instantiation,
+and it was written as a STEP in a dozen places.  Each one then answered a
+question about `vec(4)` where the answer had to be about `array[1..4]`, and the
+consequences differed by site -- which is why they were found one at a time:
 
-**Looping instead of hopping once makes it compile and gets the bounds wrong.**
-The element type comes out right and `x[1] := 7` runs, but the index range
-becomes `0..3` where the declaration says `1..4`:
+- Sema's subscript check refused the program outright;
+- codegen's index path kept a lower bound of 0 and range-checked a 1..4 array
+  as 0..3, so `x[4]` trapped and `x[0]` -- outside the array -- did not.
 
-    plang runtime: array index 4 out of bounds 0..3
-
-so `x[4]` traps on a legal program and `x[0]` -- outside the array -- would be
-accepted.  That is a memory-safety regression bought with a clean rejection, and
-strictly worse than the diagnostic it replaces, so it was reverted.
-
-The lower bound is being lost somewhere between the inner instantiation and the
-index check; the count survives and the origin does not.  Whoever picks this up
-should start by finding where `1..n` becomes `0..count-1` for a body reached
-through a second schema, and should keep the range check ON while testing --
-with `-fno-range-checks` this defect is silent.
-
-Same family as 1: "look through the schema to what it really is" is not one
-change but a property every operator has to have.
+`schemaUnderlying()` in Sema/Type.h is now the one answer, and the peel sites
+call it.  The lesson is the one this file already recorded twice: the widening
+is wrong until every site has it, because the sites that are still narrow are
+the ones supplying the extents.
 
 ## 3. ISO 10206 import-part with more than one specification
 

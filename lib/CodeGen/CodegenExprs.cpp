@@ -1323,8 +1323,7 @@ llvm::Value* Codegen::Impl::emitIndexGEP(const IndexExpr& e) {
         // NON-ZERO bound never reached it.
         if (e.Array->ResolvedType) {
             const Type* T = e.Array->ResolvedType.get();
-            if (T->Kind == TypeKind::SchemaInstance && T->SchemaBody)
-                T = T->SchemaBody.get();
+            T = schemaUnderlying(T);
             if (T->Kind == TypeKind::Array && T->IndexType)
                 Low = T->IndexType->SubLo;
         }
@@ -1332,8 +1331,7 @@ llvm::Value* Codegen::Impl::emitIndexGEP(const IndexExpr& e) {
         // Nested indexing A[1][2], or anything else with no declaration to
         // read: use the Sema type for the element type and the lower bound.
         const Type* T = e.Array->ResolvedType.get();
-        if (T->Kind == TypeKind::SchemaInstance && T->SchemaBody)
-            T = T->SchemaBody.get();
+        T = schemaUnderlying(T);
         if (T->Kind == TypeKind::Array) {
             if (T->ElemType && !T->ElemType->isError())
                 elemTy = llvmTypeOfSemaType(*T->ElemType);
@@ -1395,8 +1393,7 @@ llvm::Value* Codegen::Impl::emitIndexLoad(const IndexExpr& e) {
     } else if (e.ResolvedType) {
         // Non-IdentExpr array (e.g. nested A[1][2]): use Sema-annotated element type.
         const Type* T = e.ResolvedType.get();
-        if (T->Kind == TypeKind::SchemaInstance && T->SchemaBody)
-            T = T->SchemaBody.get();
+        T = schemaUnderlying(T);
         if (!T->isError())
             elemTy = llvmTypeOfSemaType(*T);
     }

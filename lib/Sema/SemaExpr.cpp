@@ -259,7 +259,7 @@ std::shared_ptr<Type> Sema::checkIndex(const IndexExpr& E) {
             error(E.Loc, diag::err_subscript_non_array, {ArrTy->Name});
             return TyErr;
         }
-        ArrTy = ArrTy->SchemaBody;
+        ArrTy = schemaUnderlying(ArrTy);
     }
     if (Undiscriminated) {
         if (ArrTy->Kind != TypeKind::Array) {
@@ -322,7 +322,7 @@ std::shared_ptr<Type> Sema::checkField(const FieldExpr& E) {
             error(E.Loc, diag::err_schema_not_a_discriminant, {RecTy->Name, E.Field});
             return TyErr;
         }
-        RecTy = RecTy->SchemaBody;
+        RecTy = schemaUnderlying(RecTy);
     }
 
     if (RecTy->Kind != TypeKind::Record) {

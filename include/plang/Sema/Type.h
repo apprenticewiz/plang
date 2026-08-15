@@ -438,4 +438,41 @@ ordinalRange(const Type& T) {
     return Out;
 }
 
+/// What a schema type ultimately denotes: its body, and its body's body, for as
+/// many levels as there are.
+///
+/// EP §6.4.7 lets a schema's body be another schema's instantiation --
+/// `type vec(n: integer) = array[1..n] of integer; type v2(n: integer) = vec(n)`
+/// -- so "look through the schema to what it really is" is a LOOP and not a
+/// step.  It was written as a step in a dozen places, each of which then
+/// answered a question about `vec(4)` where the answer had to be about
+/// `array[1..4] of integer`.
+///
+/// The consequences were not uniform, which is why they were found one at a
+/// time: the subscript check refused a legal `x[1]` outright, while codegen's
+/// index path silently kept a lower bound of 0 and range-checked a `1..4` array
+/// as `0..3` -- so `x[4]` trapped and `x[0]`, outside the array, did not.
+///
+/// The hop bound is a backstop.  A schema that contains itself is refused where
+/// it is declared (err_schema_recursive), so a cycle cannot reach here.
+inline const Type* schemaUnderlying(const Type* T) {
+    for (int Hops = 0; T && Hops < 16; ++Hops) {
+        if (T->Kind != TypeKind::Schema && T->Kind != TypeKind::SchemaInstance)
+            break;
+        if (!T->SchemaBody) break;
+        T = T->SchemaBody.get();
+    }
+    return T;
+}
+
+inline std::shared_ptr<Type> schemaUnderlying(std::shared_ptr<Type> T) {
+    for (int Hops = 0; T && Hops < 16; ++Hops) {
+        if (T->Kind != TypeKind::Schema && T->Kind != TypeKind::SchemaInstance)
+            break;
+        if (!T->SchemaBody) break;
+        T = T->SchemaBody;
+    }
+    return T;
+}
+
 } // namespace plang

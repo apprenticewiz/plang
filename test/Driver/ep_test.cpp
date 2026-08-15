@@ -4055,6 +4055,49 @@ TEST(Shadowing, AVariableShadowingATypeNameIsStillSubscripted) {
     EXPECT_EQ(R.Stdout, "22\n");
 }
 
+TEST(EP7Schema, ASchemaWhoseBodyIsAnotherSchemaCanBeSubscripted) {
+    // EP §6.4.7 lets a schema's body be another schema's instantiation, so
+    // "look through the schema to what it really is" is a LOOP and not a step.
+    // It was written as a step in a dozen places, and the consequences differed
+    // by site -- which is why they were found one at a time.
+    //
+    // Sema's subscript check refused `x[1]` outright, as a subscript of a
+    // non-array type 'vec(4)'.  Fixing only that made it compile and left
+    // codegen's index path holding a lower bound of 0, so a 1..4 array was
+    // range-checked as 0..3: x[4] trapped on a legal program and x[0], outside
+    // the array, did not.  Both sites take the same peel now.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type vec(n: integer) = array[1..n] of integer;\n"
+        "     v2(n: integer)  = vec(n);\n"
+        "var x: v2(4); y: vec(4); i: integer;\n"
+        "begin\n"
+        "  for i := 1 to 4 do y[i] := i * 5;\n"
+        "  for i := 1 to 4 do x[i] := i * 5;\n"
+        "  writeln(y[1]:1, ' ', y[4]:1, ' ', x[1]:1, ' ', x[4]:1)\n"
+        "end.\n", std::string(kEP) + " -frange-checks");
+    EXPECT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "5 20 5 20\n");
+}
+
+TEST(EP7Schema, ANestedSchemaArrayIsRangeCheckedAgainstItsRealBounds) {
+    // The half-fixed state passed the test above's x[1] and x[4] only by
+    // accident of where the window landed.  What pins it is the BOUND: 0 is
+    // outside a 1..4 array and must trap, and the message must name 1..4.
+    // Under the shifted window x[0] was accepted -- a write outside the array
+    // with range checks ON.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type vec(n: integer) = array[1..n] of integer;\n"
+        "     v2(n: integer)  = vec(n);\n"
+        "var x: v2(4); i: integer;\n"
+        "begin i := 0; x[i] := 1; writeln('not reached') end.\n",
+        std::string(kEP) + " -frange-checks");
+    EXPECT_NE(R.ExitCode, 0);
+    EXPECT_NE(R.Stderr.find("out of bounds 1..4"), std::string::npos) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "");
+}
+
 TEST(EP7Schema, DeclaringASchemaParameterDoesNotResizeAnInstanceOfIt) {
     // R4.  The record arm of llvmTypeOfSemaType had the resolved type T in
     // hand and passed only T.RecordDecl to the layout, which then re-read each

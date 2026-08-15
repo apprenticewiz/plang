@@ -816,7 +816,7 @@ const ArrayTypeNode* Codegen::Impl::varyingArrayFieldOf(const FieldExpr& fe) {
     const Type* RecTy = fe.Record->ResolvedType.get();
     if (RecTy && (RecTy->Kind == TypeKind::Schema
                   || RecTy->Kind == TypeKind::SchemaInstance) && RecTy->SchemaBody)
-        RecTy = RecTy->SchemaBody.get();
+        RecTy = schemaUnderlying(RecTy);
     if (!RecTy || RecTy->Kind != TypeKind::Record || !RecTy->RecordDecl)
         return nullptr;
     for (const auto& fd : RecTy->RecordDecl->Fields) {

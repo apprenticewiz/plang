@@ -147,8 +147,7 @@ void Codegen::Impl::pushConformantArgs(std::vector<llvm::Value*>& args,
         // loop ran no times -- and v0.1.5 REJECTED the call outright, so this
         // branch turned a compile error into a silent wrong answer.
         const auto unwrapSchema = [](const Type* T) {
-            while (T && T->Kind == TypeKind::SchemaInstance && T->SchemaBody)
-                T = T->SchemaBody.get();
+            T = schemaUnderlying(T);
             return T;
         };
         if (!fromConformant) {
