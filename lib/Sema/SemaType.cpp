@@ -167,6 +167,24 @@ void Sema::walkVariantFields(const VariantPart& Vp, Type& T) {
 }
 
 std::shared_ptr<Type> Sema::resolveTypeImpl(const TypeNode& Node) {
+    // Gated on having the NAMES, not on the probe being active.  A form is
+    // arithmetic over discriminant INDICES, so it is the same form for every
+    // instantiation -- `array[1..m]` is index 0 whether m is 1, 4 or 7 -- and
+    // recording it while resolving an instantiation is therefore safe and is
+    // what gives a nested schema's body forms of its own.
+    if (!ProbeDiscNames_.empty()) {
+        if (auto* Sn = llvm::dyn_cast<StringTypeNode>(&Node); Sn && Sn->Capacity)
+            Node.ExtentLow = buildExtentForm(*Sn->Capacity, ProbeDiscNames_);
+        if (auto* An = llvm::dyn_cast<ArrayTypeNode>(&Node); An && An->Low && An->High) {
+            Node.ExtentLow  = buildExtentForm(*An->Low,  ProbeDiscNames_);
+            Node.ExtentHigh = buildExtentForm(*An->High, ProbeDiscNames_);
+        }
+        if (auto* Rn = llvm::dyn_cast<SubrangeTypeNode>(&Node); Rn && Rn->Low && Rn->High) {
+            Node.ExtentLow  = buildExtentForm(*Rn->Low,  ProbeDiscNames_);
+            Node.ExtentHigh = buildExtentForm(*Rn->High, ProbeDiscNames_);
+        }
+    }
+
     if (auto* N = llvm::dyn_cast<NamedTypeNode>(&Node)) {
         return resolveNamed(*N);
     }
@@ -235,18 +253,6 @@ std::shared_ptr<Type> Sema::resolveTypeImpl(const TypeNode& Node) {
     // R3: a denoter written inside a schema body records its extents as closed
     // forms over the discriminant indices.  Built here, where the declaration
     // is, so that codegen never re-emits the expression anywhere else.
-    if (ProbeBindingsActive_ && !ProbeDiscNames_.empty()) {
-        if (auto* Sn = llvm::dyn_cast<StringTypeNode>(&Node); Sn && Sn->Capacity)
-            Node.ExtentLow = buildExtentForm(*Sn->Capacity, ProbeDiscNames_);
-        if (auto* An = llvm::dyn_cast<ArrayTypeNode>(&Node); An && An->Low && An->High) {
-            Node.ExtentLow  = buildExtentForm(*An->Low,  ProbeDiscNames_);
-            Node.ExtentHigh = buildExtentForm(*An->High, ProbeDiscNames_);
-        }
-        if (auto* Rn = llvm::dyn_cast<SubrangeTypeNode>(&Node); Rn && Rn->Low && Rn->High) {
-            Node.ExtentLow  = buildExtentForm(*Rn->Low,  ProbeDiscNames_);
-            Node.ExtentHigh = buildExtentForm(*Rn->High, ProbeDiscNames_);
-        }
-    }
 
     if (auto* N = llvm::dyn_cast<SubrangeTypeNode>(&Node)) {
         auto Lo = checkExpr(*N->Low);
@@ -539,8 +545,17 @@ std::shared_ptr<Type> Sema::resolveTypeImpl(const TypeNode& Node) {
             ActiveSchemaBindings_ = std::move(SavedBindings);
             return TyErr;
         }
-        // Resolve the schema body with discriminants bound.
+        // Resolve the schema body with discriminants bound.  The names in
+        // force for form-building are this schema's own, so its body records
+        // extents over ITS indices -- which is what lets the run-time walk
+        // evaluate them from discriminants worked out at the outer level,
+        // instead of needing the inner names bound in scope.
+        auto SavedFormNames = ProbeDiscNames_;
+        ProbeDiscNames_.clear();
+        for (const auto& P : Sym->SchemaDeclParams)
+            ProbeDiscNames_.push_back(P.Name);
         auto Body = resolveType(*Sym->SchemaBodyNode);
+        ProbeDiscNames_ = std::move(SavedFormNames);
         // Restore saved bindings.
         ActiveSchemaBindings_ = std::move(SavedBindings);
 

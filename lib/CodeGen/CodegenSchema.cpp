@@ -561,12 +561,15 @@ Codegen::Impl::rtIndexBounds(const ArrayTypeNode& at) {
     if (auto* lo = extentOf(at.ExtentLow))
         if (auto* hi = extentOf(at.ExtentHigh))
             return std::pair{lo, hi};
-    if (at.Low && at.High) {
-        auto* lo = toI64(emitExpr(*at.Low));
-        auto* hi = toI64(emitExpr(*at.High));
-        if (!lo || !hi) return std::nullopt;
-        return std::pair{lo, hi};
-    }
+    // The expression fallback that used to sit here is gone.  It was taken by
+    // 45 tests until the form-recording block was moved above the ArrayTypeNode
+    // branch that had been returning before it -- array bounds had never had
+    // forms at all -- and by none afterwards.  Deleting it is what stops a
+    // bound being re-resolved at the use site rather than merely preferring
+    // not to.
+    if (at.Low && at.High)
+        codegenICE("a schema array bound with no closed form to evaluate "
+                   "against the discriminants");
     // ISO §6.4.3.2: an index named by its ordinal type has no bound
     // expressions at all -- `array[colour]` leaves Low and High null, and
     // dereferencing them here is what crashed the compiler.  The extent is the
