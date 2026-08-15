@@ -3370,6 +3370,70 @@ TEST(Schema, AnAccessPathIsWalkedOncePerAssignment) {
     EXPECT_EQ(R.Stdout, "next called 1 time(s); [hi]\n");
 }
 
+TEST(Schema, AnAccessPathIsWalkedOncePerRead) {
+    // The same defect as AnAccessPathIsWalkedOncePerAssignment, one statement
+    // kind along.  emitReadArg takes the address with emitLValue and then asks
+    // exprStrCapV for the capacity, which resolves the path from scratch --
+    // so every subscript on the way to the string is emitted twice and a
+    // side-effecting one runs twice.  ISO §6.9.1 evaluates each variable-access
+    // of a read once.
+    auto R = compileAndRun(
+        "program p(input, output);\n"
+        "type t(n: integer) = record a: array[1..n] of record s: string(n) end end;\n"
+        "var q: ^t; calls: integer;\n"
+        "function next: integer;\n"
+        "begin calls := calls + 1; next := 1 end;\n"
+        "begin\n"
+        "  calls := 0; new(q, 8);\n"
+        "  read(q^.a[next].s);\n"
+        "  writeln('next called ', calls:1, ' time(s); [', q^.a[1].s, ']');\n"
+        "  dispose(q)\n"
+        "end.\n", kEP, "hello\n");
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "next called 1 time(s); [hello]\n");
+}
+
+TEST(Schema, EveryUseOfAVaryingStringWalksItsPathOnce) {
+    // R5.  ISO §6.8.2.2 and §6.9.1 evaluate a variable-access once.  A string
+    // whose capacity a discriminant fixes needs both an address and a capacity,
+    // and the idiom for getting them -- emitStrAddr(x) beside exprStrCapV(x) --
+    // starts from the expression twice and walks the whole path twice.  With a
+    // counting function in the subscript, `q^.a[next].s` called it THREE times
+    // in a comparison, a write, a length, a whole-value assignment and a
+    // substring assignment, and in a read.
+    //
+    // One test for all six, because they were six copies of one idiom: fixing
+    // the one somebody noticed is what left the other five.
+    auto R = compileAndRun(
+        "program p(input, output);\n"
+        "type t(n: integer) = record a: array[1..n] of record s: string(n) end end;\n"
+        "var q: ^t; calls: integer; b: boolean; k: integer; z: string(8);\n"
+        "function next: integer;\n"
+        "begin calls := calls + 1; next := 1 end;\n"
+        "begin\n"
+        "  new(q, 8);\n"
+        "  q^.a[1].s := 'hi';\n"
+        "  calls := 0; b := q^.a[next].s = 'hi';   writeln('compare ', calls:1);\n"
+        "  calls := 0; writeln(q^.a[next].s);      writeln('write   ', calls:1);\n"
+        "  calls := 0; k := length(q^.a[next].s);  writeln('length  ', calls:1);\n"
+        "  calls := 0; z := q^.a[next].s;          writeln('rhs     ', calls:1);\n"
+        "  calls := 0; q^.a[next].s[1..2] := 'ab'; writeln('substr  ', calls:1);\n"
+        "  calls := 0; read(q^.a[next].s);         writeln('read    ', calls:1);\n"
+        "  writeln('[', q^.a[1].s, '] b=', b, ' k=', k:1, ' z=[', z, ']');\n"
+        "  dispose(q)\n"
+        "end.\n", kEP, "hello\n");
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout,
+              "compare 1\n"
+              "hi\n"
+              "write   1\n"
+              "length  1\n"
+              "rhs     1\n"
+              "substr  1\n"
+              "read    1\n"
+              "[hello] b=true k=2 z=[hi]\n");
+}
+
 TEST(Schema, ASchemaArrayConformsAndPassesItsRealBounds) {
     // Two halves.  Sema refused a schema-bodied array as a conformant actual at
     // all, which made the one way to write a procedure over an undiscriminated

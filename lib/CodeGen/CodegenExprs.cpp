@@ -341,7 +341,7 @@ llvm::Value* Codegen::Impl::emitBinary(const BinaryExpr& e) {
         // rather than the probe's one character.  What each operand is declared
         // to hold is told to the runtime separately, as a value.
         auto strOperand = [&](const ExprNode& x) -> std::pair<llvm::Value*, llvm::Value*> {
-            if (exprIsVarStr(x)) return {emitStrAddr(x), exprStrCapV(x)};
+            if (exprIsVarStr(x)) return strAddrAndCap(x);
             auto* v   = emitExpr(x);
             auto* tmp = createEntryAlloca(strStructType(1), "str.chr");
             if (v && v->getType()->isIntegerTy(8)) emitStrFromChar(tmp, 1, v);
@@ -412,8 +412,7 @@ llvm::Value* Codegen::Impl::emitBinary(const BinaryExpr& e) {
                 e.Op == TokenKind::GreaterThan     ? "plang_str_gt" : "plang_str_ge";
             // Convert each operand to a (ptr, cap) pair, wrapping literals in a temp.
             auto toStrPtr = [&](const ExprNode& expr) -> std::pair<llvm::Value*, llvm::Value*> {
-                if (exprIsVarStr(expr))
-                    return {emitStrAddr(expr), exprStrCapV(expr)};
+                if (exprIsVarStr(expr)) return strAddrAndCap(expr);
                 if (exprIsCharStr(expr))
                     return {emitCharStrAsStr(expr), i64c(exprCharStrLen(expr))};
                 // String literal or char — wrap in a temporary VarString.
@@ -898,8 +897,7 @@ llvm::Value* Codegen::Impl::emitCallExpr(const CallExpr& e) {
     auto getStrArgPtr = [&](int idx) -> std::pair<llvm::Value*, llvm::Value*> {
         if (e.Args.size() <= (size_t)idx) return {nullptr, nullptr};
         const auto& arg = *e.Args[idx];
-        if (exprIsVarStr(arg))
-            return {emitStrAddr(arg), exprStrCapV(arg)};
+        if (exprIsVarStr(arg)) return strAddrAndCap(arg);
         // String literal — create a temp VarString.
         if (auto* sl = llvm::dyn_cast<StringLitExpr>(&arg)) {
             int64_t cap = (int64_t)sl->Value.size();

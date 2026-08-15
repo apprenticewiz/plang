@@ -273,12 +273,13 @@ void Codegen::Impl::emitAssign(const AssignStmt& s) {
     // the rest of the string as it was, so it cannot go through the ordinary
     // string store, which would replace the whole value.
     if (auto* sub = llvm::dyn_cast<SubstringExpr>(s.Target.get())) {
-        auto* dst = emitLValue(*sub->Str);
+        // R5: address and capacity from ONE walk of the destination's access
+        // path, or every subscript on the way to it is emitted twice.
+        auto [dst, dstCap] = strAddrAndCap(*sub->Str);
         if (!dst) codegenICE("assignment to a substring of a non-addressable string");
         // Sizing a temporary needs a constant; what the runtime is told about
         // the destination is the capacity it really has.
         const int64_t cap = exprStrCapStatic(*sub->Str);
-        auto* dstCap      = exprStrCapV(*sub->Str);
         auto* low  = toI64(emitExpr(*sub->Low));
         auto* high = toI64(emitExpr(*sub->High));
         auto* n    = builder.CreateAdd(

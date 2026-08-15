@@ -75,10 +75,13 @@ void Codegen::Impl::emitWriteArgs(
         // until a terminator the array does not have.
         if (exprIsVarStr(*argExpr) || exprIsCharStr(*argExpr)) {
             const bool chars = exprIsCharStr(*argExpr);
-            auto* sptr = chars ? emitCharStrAsStr(*argExpr) : emitStrAddr(*argExpr);
+            // R5: one walk for both, or the subscripts on the way to the
+            // string are emitted twice.
+            auto [strP, strC] = chars ? std::pair<llvm::Value*, llvm::Value*>{}
+                                      : strAddrAndCap(*argExpr);
+            auto* sptr = chars ? emitCharStrAsStr(*argExpr) : strP;
             if (!sptr) continue;
-            auto* capV = chars ? i64c(exprCharStrLen(*argExpr))
-                               : exprStrCapV(*argExpr);
+            auto* capV = chars ? i64c(exprCharStrLen(*argExpr)) : strC;
             if (fp) {
                 // string(N) is not null-terminated, so it needs its own writer
                 // rather than the char* one the generic path would pick.  A
@@ -281,8 +284,20 @@ std::string Codegen::Impl::readFnSuffix(llvm::Type* ty) {
 /// Reads one variable from fp (or stdin when fp is null).  Does not touch the
 /// line terminator, so callers compose readln as "read each, then skip line".
 void Codegen::Impl::emitReadArg(const ExprNode& arg, llvm::Value* fp) {
+    // R5, and the same defect emitAssign already carried: a string whose
+    // capacity a discriminant fixes needs an address AND a capacity, and
+    // emitLValue and exprStrCapV each resolve the access path from scratch.
+    // Every subscript on the way to the string was emitted more than once, so
+    // `read(q^.a[next].s)` called `next` three times.  ISO §6.9.1 evaluates
+    // each variable-access of a read once.  One walk, both answers.
+    llvm::Value* addr = nullptr;
+    llvm::Value* cap  = nullptr;
+    if (exprIsVarStr(arg) && arg.ResolvedType->ExtentVaries)
+        if (auto path = schemaPathOf(arg))
+            if (auto* c = strCapFromPath(*path)) { addr = path->addr; cap = c; }
+
     // Returning quietly would leave the variable out of the read entirely.
-    auto* addr = emitLValue(arg);
+    if (!addr) addr = emitLValue(arg);
     if (!addr) codegenICE("read/readln target is not an assignable variable");
 
     // string(N) is a { i64, [N x i8] } struct, so it needs the string reader;
@@ -290,7 +305,7 @@ void Codegen::Impl::emitReadArg(const ExprNode& arg, llvm::Value* fp) {
     if (exprIsVarStr(arg)) {
         // How much may be stored, so folding the probe here truncated the
         // input to one character for a discriminant-sized string.
-        auto* cap = exprStrCapV(arg);
+        if (!cap) cap = exprStrCapV(arg);
         if (fp)
             builder.CreateCall(
                 getExternFnN("plang_str_read_file", llvm::Type::getVoidTy(ctx),

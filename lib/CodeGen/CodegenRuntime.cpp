@@ -639,11 +639,18 @@ void Codegen::Impl::emitStrStore(llvm::Value* dst, llvm::Value* capDst,
         emitStrAssign(dst, capDst, emitCharStrAsStr(src), i64c(n));
         return;
     }
-    auto* rhs = emitExpr(src); // VarString → ptr; char → i8; other → ptr (cstr)
+    // R5: the source's address and its capacity from ONE walk.  Taking the
+    // value and then asking for the capacity resolved the access path twice,
+    // so `z := q^.a[next].s` ran `next` more than once.
+    if (exprIsVarStr(src)) {
+        auto [sp, sc] = strAddrAndCap(src);
+        if (!sp) codegenICE("string assignment from an unlowerable expression");
+        emitStrAssign(dst, capDst, sp, sc);
+        return;
+    }
+    auto* rhs = emitExpr(src); // char → i8; other → ptr (cstr)
     if (!rhs) codegenICE("string assignment from an unlowerable expression");
-    if (exprIsVarStr(src))
-        emitStrAssign(dst, capDst, rhs, exprStrCapV(src));
-    else if (rhs->getType()->isIntegerTy(8))
+    if (rhs->getType()->isIntegerTy(8))
         emitStrFromChar(dst, capDst, rhs);
     else
         emitStrFromCStr(dst, capDst, rhs);

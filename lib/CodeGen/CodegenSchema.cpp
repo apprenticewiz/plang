@@ -406,6 +406,27 @@ llvm::Value* Codegen::Impl::exprStrCapV(const ExprNode& e) {
     return i64c(exprStrCap(e));
 }
 
+/// R5: the address AND the capacity of a string from ONE walk of its access
+/// path.  ISO §6.8.2.2 and §6.9.1 evaluate a variable-access once, and the
+/// idiom this replaces -- `{emitStrAddr(x), exprStrCapV(x)}` -- resolves it
+/// twice, because each of those starts from the expression and walks down.
+/// Measured on `q^.a[next].s` with a counting `next`: comparison, write,
+/// length, whole-value assignment and substring assignment each called it
+/// THREE times.
+///
+/// The fallback is not a second walk.  A string whose capacity does not vary
+/// answers exprStrCapV from a constant without touching the path at all, so
+/// only the varying case ever had two to collapse.
+std::pair<llvm::Value*, llvm::Value*>
+Codegen::Impl::strAddrAndCap(const ExprNode& e) {
+    if (exprIsVarStr(e) && e.ResolvedType && e.ResolvedType->ExtentVaries)
+        if (auto path = schemaPathOf(e))
+            if (auto* cap = strCapFromPath(*path))
+                return {path->addr, cap};
+    auto* addr = emitStrAddr(e);
+    return {addr, exprStrCapV(e)};
+}
+
 /// The capacity of an already-resolved path, so a caller that has one need not
 /// resolve it again.  Resolving twice re-emits every subscript along the way,
 /// which for `q^.a[next].s := v` called `next` once for the address and once

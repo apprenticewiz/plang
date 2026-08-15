@@ -1169,6 +1169,8 @@ struct Codegen::Impl {
         const TypeNode* decl{nullptr};
     };
     std::optional<SchemaPath> schemaPathOf(const ExprNode& e);
+    /// Address and capacity of a string from one walk of its access path.
+    std::pair<llvm::Value*, llvm::Value*> strAddrAndCap(const ExprNode& e);
     llvm::Value* strCapFromPath(const SchemaPath& path);
     const TypeNode* fieldDenoterOf(const RecordTypeNode& rt, const std::string& field);
     const TypeNode* variantFieldDenoterOf(const VariantPart& vp, const std::string& field);
