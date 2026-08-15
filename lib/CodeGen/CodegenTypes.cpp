@@ -334,7 +334,7 @@ Codegen::Impl::layoutOfRecord(const Type& T) {
 
 const Codegen::Impl::RecordLayout&
 Codegen::Impl::layoutOf(const RecordTypeNode& rt, const Type* semaRec) {
-    const auto key0 = std::pair{&rt, schemaCtx};
+    const auto key0 = std::tuple{&rt, schemaCtx, semaRec};
     if (auto it = recordLayouts.find(key0); it != recordLayouts.end())
         return it->second;
 

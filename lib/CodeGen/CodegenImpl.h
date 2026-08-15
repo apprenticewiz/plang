@@ -237,7 +237,22 @@ struct Codegen::Impl {
     /// the declaration.  The declaration alone is not enough for a record in a
     /// schema body, where one of them lays out differently in each
     /// instantiation, so the discriminants in force go into the key too.
-    std::map<std::pair<const RecordTypeNode*, std::string>, RecordLayout>
+    ///
+    /// And the SEMA RECORD, because since R4 the field types come from what
+    /// Sema resolved for THIS record rather than from re-reading the field
+    /// denoters -- so it is an input to the layout, and an input that is not in
+    /// the key is an input the memo ignores.  Measured before it was added: 5
+    /// tests took a hit whose layout had been computed for a different Sema
+    /// record, and in all 5 the two agreed.  That is the arrangement this work
+    /// exists to remove.  Agreement reached by luck of which programs anyone
+    /// wrote is not a property of the compiler, and the next record where they
+    /// differ gets the first one's field offsets with no diagnostic.
+    ///
+    /// It costs nothing in emitted code: structTypes still dedups the
+    /// llvm::StructType by its element list, so two records that really do lay
+    /// out identically go on sharing one.
+    std::map<std::tuple<const RecordTypeNode*, std::string, const Type*>,
+             RecordLayout>
         recordLayouts;
 
     /// The discriminants a layout is currently being worked out under, written
