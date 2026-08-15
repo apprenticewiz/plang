@@ -57,6 +57,10 @@ struct Symbol {
     /// Declared type; used for Var, VarParam, Const, and EnumValue.
     std::shared_ptr<Type> Ty;
 
+    /// How many scopes were open when this symbol was defined.  A schema's body
+    /// is resolved standing in that many, so it binds where it was written.
+    size_t ScopeDepth{0};
+
     /// For a TypeAlias: the denoter the type was declared with.  A `value`
     /// clause and `bindable` live on the DENOTER rather than on the Type, so
     /// asking which declaration a type name denotes is a question only the
@@ -172,6 +176,31 @@ public:
 
     /// Look up Name case-insensitively starting at the innermost scope.
     /// Returns nullptr if not found anywhere.
+    /// ISO 10206 §6.2.2: an identifier occurrence denotes the declaration whose
+    /// region encloses THAT OCCURRENCE.  A schema's body is written where the
+    /// schema is declared, but it is RESOLVED once per instantiation, wherever
+    /// the instantiation happens to be written -- so without this the body's
+    /// names were bound in the instantiating procedure's scope.  A local
+    /// `const k = 1` beside `var h: v(2)` resized a body declared against a
+    /// program-scope `k = 10`, and a local `type e = char` changed what the
+    /// body's elements were.
+    ///
+    /// Standing in the declaring scope is what the rule asks for, and this is
+    /// how: lookup stops at \p Depth scopes, so the instantiation site's own
+    /// declarations are not visible while the body is resolved.  The schema's
+    /// discriminants are not in the symbol table at all -- they travel in
+    /// ActiveSchemaBindings_ -- so they stay visible.
+    struct ScopeCeiling {
+        SymbolTable& T;
+        size_t       Saved;
+        ScopeCeiling(SymbolTable& T, size_t Depth) : T(T), Saved(T.Ceiling) {
+            T.Ceiling = Depth;
+        }
+        ~ScopeCeiling() { T.Ceiling = Saved; }
+    };
+    /// How many scopes are currently open; a symbol records this when defined.
+    [[nodiscard]] size_t depth() const { return Scopes.size(); }
+
     [[nodiscard]] Symbol*       lookup(const std::string& Name);
     [[nodiscard]] const Symbol* lookup(const std::string& Name) const;
 
@@ -207,6 +236,8 @@ private:
         bool IsBlock{true};                              // see pushScope
     };
     std::vector<Scope> Scopes;
+    /// How many scopes lookup may see, or 0 for all of them.  See ScopeCeiling.
+    size_t Ceiling{0};
 };
 
 } // namespace plang

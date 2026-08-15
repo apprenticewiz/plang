@@ -34,15 +34,19 @@ bool SymbolTable::define(Symbol Sym) {
     auto Key = lower(Sym.Name);
     auto& CurScope = Scopes.back();
     if (CurScope.Symbols.count(Key)) return false;
+    Sym.ScopeDepth = Scopes.size();
     CurScope.Symbols.emplace(Key, std::move(Sym));
     return true;
 }
 
 const Symbol* SymbolTable::lookup(const std::string& Name) const {
     auto Key = lower(Name);
-    for (auto It = Scopes.rbegin(); It != Scopes.rend(); ++It) {
-        auto Found = It->Symbols.find(Key);
-        if (Found != It->Symbols.end()) return &Found->second;
+    // Under a ScopeCeiling only the outermost Ceiling scopes are visible, so a
+    // denoter resolves where it was WRITTEN rather than where it is being used.
+    const size_t Visible = Ceiling ? std::min(Ceiling, Scopes.size()) : Scopes.size();
+    for (size_t I = Visible; I-- > 0; ) {
+        auto Found = Scopes[I].Symbols.find(Key);
+        if (Found != Scopes[I].Symbols.end()) return &Found->second;
     }
     return nullptr;
 }

@@ -3773,6 +3773,66 @@ TEST(EP7Schema, ANestedProcedureKeepsACapturedSchemaFormalsDiscriminants) {
                         "a: 1 2 3 4 5 6 7 8 9 | s=[nine char]\n");
 }
 
+TEST(EP7Schema, ASchemaBodyBindsItsNamesWhereTheBodyWasWritten) {
+    // ISO 10206 §6.2.2: an identifier occurrence denotes the declaration whose
+    // region encloses THAT OCCURRENCE.  The body's occurrence of `k` is in the
+    // program-level schema declaration, so it is the program's k = 10 in every
+    // instantiation.  Sema resolved the body once per instantiation, in the
+    // scope the INSTANTIATION was written in, so a local `k = 1` beside
+    // `var h: v(2)` made the object two elements instead of twenty.  With
+    // range checks the legal h[20] trapped; without them it wrote ~72 bytes
+    // past an 8-byte local and exited 0.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "const k = 10;\n"
+        "type v(n: integer) = array[1..n*k] of integer;\n"
+        "procedure alloc;\n"
+        "const k = 1;\n"
+        "var h: v(2);\n"
+        "begin h[20] := 42; writeln(h[20]:1) end;\n"
+        "begin alloc end.\n", std::string(kEP) + " -frange-checks");
+    EXPECT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "42\n");
+}
+
+TEST(EP7Schema, ASchemaBodysComponentTypeIsTheOneInScopeWhereItWasWritten) {
+    // The same rule for a TYPE name rather than a constant: the body's `e` is
+    // the program's `e = integer`.  Binding it in the instantiating procedure
+    // made the elements char, and the compiler rejected a legal assignment
+    // with "cannot assign 'integer' to variable of type 'char'".
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type e = integer;\n"
+        "     v(n: integer) = array[1..n] of e;\n"
+        "procedure alloc;\n"
+        "type e = char;\n"
+        "var h: v(3);\n"
+        "begin h[1] := 42; writeln(h[1]:1) end;\n"
+        "begin alloc end.\n", kEP);
+    EXPECT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "42\n");
+}
+
+TEST(EP7Schema, ADiscriminantShadowsAConstantOfTheSameSpelling) {
+    // A schema's formal discriminants are declared by the schema, whose region
+    // encloses its body, so inside the body `n` is the discriminant and not the
+    // `const n = 3` outside it.  The folder asked the symbol table first, so
+    // every t was three elements long whatever new() was told: new(q, 8)
+    // allocated 24 bytes, eight stores ran off it, and glibc aborted.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "const n = 3;\n"
+        "type t(n: integer) = array[1..n] of integer;\n"
+        "var q: ^t; i: integer;\n"
+        "begin\n"
+        "  new(q, 8);\n"
+        "  for i := 1 to 8 do q^[i] := i;\n"
+        "  writeln('q^[8]=', q^[8]:1)\n"
+        "end.\n", std::string(kEP) + " -frange-checks");
+    EXPECT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "q^[8]=8\n");
+}
+
 TEST(EP7Schema, DeclaringASchemaParameterDoesNotResizeAnInstanceOfIt) {
     // R4.  The record arm of llvmTypeOfSemaType had the resolved type T in
     // hand and passed only T.RecordDecl to the layout, which then re-read each

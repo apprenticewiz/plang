@@ -554,7 +554,13 @@ std::shared_ptr<Type> Sema::resolveTypeImpl(const TypeNode& Node) {
         ProbeDiscNames_.clear();
         for (const auto& P : Sym->SchemaDeclParams)
             ProbeDiscNames_.push_back(P.Name);
-        auto Body = resolveType(*Sym->SchemaBodyNode);
+        // Standing in the scope the schema was DECLARED in, not the one the
+        // instantiation is written in.  See SymbolTable::ScopeCeiling.
+        std::shared_ptr<Type> Body;
+        {
+            SymbolTable::ScopeCeiling Stand(Symtab, Sym->ScopeDepth);
+            Body = resolveType(*Sym->SchemaBodyNode);
+        }
         ProbeDiscNames_ = std::move(SavedFormNames);
         // Restore saved bindings.
         ActiveSchemaBindings_ = std::move(SavedBindings);
@@ -936,16 +942,21 @@ std::optional<int64_t> Sema::constBoundImpl(const ExprNode& E) const {
         if (N->Value.size() == 1)
             return static_cast<int64_t>(static_cast<unsigned char>(N->Value[0]));
     if (auto* N = llvm::dyn_cast<IdentExpr>(&E)) {
-        if (const Symbol* Sym = Symtab.lookup(N->Name)) {
-            if (Sym->Kind == SymbolKind::EnumValue) return Sym->OrdinalValue;
-            if (Sym->Kind == SymbolKind::Const && Sym->HasConstOrdinal)
-                return Sym->ConstOrdinal;
-        }
-        // Schema discriminants stand in for constants inside a schema body.
+        // A schema's formal discriminants are declared by the schema, and the
+        // schema's region encloses its body, so inside the body a discriminant
+        // SHADOWS anything of the same spelling outside it (ISO 10206 §6.2.2).
+        // This was asked second, so a `const n = 3` beside `type t(n: integer)
+        // = array[1..n] of integer` beat the discriminant: every t was three
+        // elements long whatever new() was told, and the heap went with it.
         auto It = ActiveSchemaBindings_.find(toLower(N->Name));
         if (It != ActiveSchemaBindings_.end()) {
             SchemaBindingUsed_ = true;
             return It->second;
+        }
+        if (const Symbol* Sym = Symtab.lookup(N->Name)) {
+            if (Sym->Kind == SymbolKind::EnumValue) return Sym->OrdinalValue;
+            if (Sym->Kind == SymbolKind::Const && Sym->HasConstOrdinal)
+                return Sym->ConstOrdinal;
         }
     }
     if (auto* N = llvm::dyn_cast<UnaryExpr>(&E)) {
