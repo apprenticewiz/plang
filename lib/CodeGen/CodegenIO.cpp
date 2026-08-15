@@ -61,7 +61,27 @@ void Codegen::Impl::emitWriteArgs(
             // Store the value to a temporary alloca so we can pass its address.
             auto* tmp = createEntryAlloca(val->getType(), "bin.wr.tmp");
             builder.CreateStore(val, tmp);
-            int64_t esz = (int64_t)mod->getDataLayout().getTypeAllocSize(val->getType());
+            // R6: how many bytes land in the file is a fact about the FILE's
+            // COMPONENT TYPE, not about whatever emitExpr happened to produce.
+            // Taking it from the value made the file's shape depend on how the
+            // expression was lowered, which is the same class as sizing an
+            // object from a name: right whenever the two agree and unnoticed
+            // when they stop.  Measured before the change: no test in the suite
+            // had them differ -- so this is not a bug fix, it is removing the
+            // way one could arrive without anything saying so.
+            auto* compTy = getFileElemType(*args[0]);
+            if (!compTy)
+                codegenICE("a binary typed file with no component type to size "
+                           "its writes by");
+            const auto& dl  = mod->getDataLayout();
+            const int64_t esz = (int64_t)dl.getTypeAllocSize(compTy);
+            // The temporary holds the VALUE, so writing the component's width
+            // out of it is only sound while the two are the same size.  They
+            // are, everywhere the suite reaches; if they ever stop, this says
+            // so rather than reading past the temporary.
+            if (dl.getTypeAllocSize(val->getType()) != dl.getTypeAllocSize(compTy))
+                codegenICE("a value written to a typed file is not the width of "
+                           "the file's component");
             builder.CreateCall(
                 getExternFnN("plang_write_binary", llvm::Type::getVoidTy(ctx),
                              {ptrTy, ptrTy, i64Ty}),

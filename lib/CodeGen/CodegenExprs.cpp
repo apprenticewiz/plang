@@ -423,8 +423,18 @@ llvm::Value* Codegen::Impl::emitBinary(const BinaryExpr& e) {
                 auto* tmp = createEntryAlloca(strStructType(cap), "str.cmp.tmp");
                 if (val && val->getType()->isIntegerTy(8))
                     emitStrFromChar(tmp, cap, val);
-                else if (val)
+                else if (val) {
+                    // R6: the capacity above is 1 unless the operand is a
+                    // literal whose length we can read.  A char is genuinely
+                    // one, and a literal brings its own; anything else reaching
+                    // here would be compared at a capacity nobody derived from
+                    // its TYPE -- truncated to one character, silently, in a
+                    // comparison.  Measured at 0 tests, so it says so instead.
+                    if (!llvm::isa<StringLitExpr>(&expr))
+                        codegenICE("a string comparison operand whose capacity "
+                                   "comes from neither its type nor a literal");
                     emitStrFromCStr(tmp, cap, val);
+                }
                 return {tmp, i64c(cap)};
             };
             auto [la, capL] = toStrPtr(*e.Left);
