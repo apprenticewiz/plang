@@ -187,24 +187,6 @@ const TypeNode* Codegen::Impl::schemaBodyNodeOf(const plang::Type& T) const {
     return def ? def->body : nullptr;
 }
 
-void Codegen::Impl::bindSchemaDiscs(const SchemaRef& ref) {
-    // R3: the values a closed extent form is evaluated against.  The names
-    // bound below are only for the older route, which re-emits the
-    // declaration's expressions; a form needs no names at all.
-    rtDiscs_ = &ref.discs;
-    // The body's bound and capacity expressions are written in terms of the
-    // formal discriminant names, so they are bound as ordinary variables and
-    // the expressions re-emitted.  The caller pops the scope.
-    pushScope();
-    const SchemaDef* def = findSchemaDef(ref.semaTy->SchemaName);
-    if (!def) return;
-    for (size_t i = 0; i < def->discNames.size() && i < ref.discs.size(); ++i) {
-        auto* slot = createEntryAlloca(i64Ty, "disc." + def->discNames[i]);
-        builder.CreateStore(ref.discs[i], slot);
-        defVar(def->discNames[i], slot, i64Ty);
-    }
-}
-
 // R3: evaluate a closed extent form against the discriminants this object
 // carries.  There is no name in it to resolve, which is the whole point: the
 // older route re-emitted the DECLARATION's bound expressions here, at the
@@ -319,10 +301,8 @@ llvm::Value* Codegen::Impl::schemaBodySize(const plang::Type& schema,
     if (body->ExtentVaries && (body->Kind != TypeKind::Array || elemVaries)) {
         if (const TypeNode* bodyNode = schemaBodyNodeOf(schema); bodyNode) {
             SchemaRef ref{&schema, nullptr, discs};
-            bindSchemaDiscs(ref);
-            auto* sz = rtSizeOfTypeNode(bodyNode);
-            popScope();
-            return sz;
+            RtDiscScope disc(*this, ref.discs);
+            return rtSizeOfTypeNode(bodyNode);
         }
     }
 
@@ -651,13 +631,8 @@ llvm::Value* Codegen::Impl::rtSizeOfTypeNode(const TypeNode* tn) {
             // body happens while the OUTER probe is in force, so its bounds are
             // never forms over the outer names -- which is why binding, rather
             // than only swapping the values, is what this needs.
-            const auto* saved = rtDiscs_;
-            SchemaRef iref{sn->ResolvedBody.get(), nullptr, inner};
-            bindSchemaDiscs(iref);
-            auto* sz = rtSizeOfTypeNode(body);
-            popScope();
-            rtDiscs_ = saved;
-            return sz;
+            RtDiscScope disc(*this, inner);
+            return rtSizeOfTypeNode(body);
         }
     }
     if (nodeExtentVaries(d))
@@ -854,9 +829,10 @@ Codegen::Impl::schemaPathOf(const ExprNode& e) {
         if (!base) return std::nullopt;
         auto* rt = llvm::dyn_cast_or_null<RecordTypeNode>(peel(base->decl));
         if (!rt) return std::nullopt;
-        bindSchemaDiscs(base->root);
-        auto* off = rtFieldOffset(*rt, fe->Field);
-        popScope();
+        auto* off = [&] {
+            RtDiscScope disc(*this, base->root.discs);
+            return rtFieldOffset(*rt, fe->Field);
+        }();
         const TypeNode* fieldDecl = fieldDenoterOf(*rt, fe->Field);
         return SchemaPath{base->root,
                           builder.CreateGEP(i8Ty, base->addr, {off}, "path.fld"),
@@ -888,14 +864,16 @@ Codegen::Impl::schemaPathOf(const ExprNode& e) {
         }
         auto* at = llvm::dyn_cast_or_null<ArrayTypeNode>(decl);
         if (!at) return std::nullopt;
-        bindSchemaDiscs(root);
-        auto bounds = rtIndexBounds(*at);
-        if (!bounds) { popScope(); return std::nullopt; }
-        auto* lo     = bounds->first;
-        auto* hi     = bounds->second;
-        auto* stride = alignUpV(rtSizeOfTypeNode(at->Element.get()),
-                                rtAlignOfTypeNode(at->Element.get()));
-        popScope();
+        llvm::Value *lo = nullptr, *hi = nullptr, *stride = nullptr;
+        {
+            RtDiscScope disc(*this, root.discs);
+            auto bounds = rtIndexBounds(*at);
+            if (!bounds) return std::nullopt;
+            lo     = bounds->first;
+            hi     = bounds->second;
+            stride = alignUpV(rtSizeOfTypeNode(at->Element.get()),
+                              rtAlignOfTypeNode(at->Element.get()));
+        }
         auto* idx = toI64(emitExpr(*ie->Index));
         emitRangeCheckDyn(idx, lo, hi, /*isIndex=*/true, ie->Loc);
         auto* off = builder.CreateMul(builder.CreateSub(idx, lo), stride,

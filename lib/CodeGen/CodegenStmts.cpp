@@ -356,10 +356,14 @@ void Codegen::Impl::emitAssign(const AssignStmt& s) {
                 while (auto* pk = llvm::dyn_cast_or_null<PackedTypeNode>(d))
                     d = pk->Inner.get();
                 if (auto* sr = llvm::dyn_cast_or_null<SubrangeTypeNode>(d)) {
-                    bindSchemaDiscs(path->root);
-                    auto* lo = toI64(emitExpr(*sr->Low));
-                    auto* hi = toI64(emitExpr(*sr->High));
-                    popScope();
+                    // R3: the form, against THIS object's discriminants.  The
+                    // bounds used to be re-emitted here as expressions, which
+                    // resolved the declaration's names in the assigning
+                    // procedure -- so a `const n` in the bound was answered by
+                    // any unrelated `var n` in scope at the assignment.
+                    auto b = boundsOfDenoter(*sr, path->root);
+                    auto* lo = b ? b->first  : nullptr;
+                    auto* hi = b ? b->second : nullptr;
                     if (lo && hi) {
                         emitRangeCheckDyn(rhs, lo, hi, /*isIndex=*/false, s.Loc);
                         checked = true;
@@ -1021,10 +1025,9 @@ void Codegen::Impl::emitPackUnpack(const CallStmt& s, bool isPack) {
         // that describes nothing.  Re-emitted here against the discriminants
         // the object carries, like every other extent in a schema body.
         auto* at = llvm::cast<ArrayTypeNode>(peelPackedNode(path->decl));
-        bindSchemaDiscs(path->root);
+        RtDiscScope disc(*this, path->root.discs);
         auto  bounds = rtIndexBounds(*at);
         auto* elemSz = rtSizeOfTypeNode(at->Element.get());
-        popScope();
         if (!bounds)
             codegenICE(what + " has a schema array whose bounds cannot be "
                               "evaluated at run time");
@@ -1127,9 +1130,10 @@ void Codegen::Impl::emitWith(const WithStmt& s) {
                         isBody ? rec->ResolvedType->SchemaBody->RecordFields
                                : rec->ResolvedType->RecordFields;
                     for (const auto& F : fields) {
-                        bindSchemaDiscs(path->root);
-                        auto* off = rtFieldOffset(*rt, F.Name);
-                        popScope();
+                        auto* off = [&] {
+                            RtDiscScope disc(*this, path->root.discs);
+                            return rtFieldOffset(*rt, F.Name);
+                        }();
                         auto* fp = builder.CreateGEP(i8Ty, path->addr, {off},
                                                      "with.fld");
                         defVar(F.Name, fp,
@@ -1145,9 +1149,14 @@ void Codegen::Impl::emitWith(const WithStmt& s) {
                                 && F.Ty->ExtentVaries)
                             if (auto* st = llvm::dyn_cast_or_null<StringTypeNode>(
                                     fieldDenoterOf(*rt, F.Name))) {
-                                bindSchemaDiscs(path->root);
-                                auto* cap = toI64(emitExpr(*st->Capacity));
-                                popScope();
+                                // R3: the form, not the declaration's
+                                // expression re-emitted in the with-statement's
+                                // scope.
+                                if (!st->ExtentLow)
+                                    codegenICE("a with over a schema string "
+                                               "field with no capacity form");
+                                auto* cap = emitExtentForm(*st->ExtentLow,
+                                                           path->root.discs);
                                 setVarStrCap(F.Name, cap);
                             }
                     }

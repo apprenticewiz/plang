@@ -1120,9 +1120,10 @@ struct Codegen::Impl {
     }
 
     /// EP §6.4.7 run-time layout, for a schema body whose extent a discriminant
-    /// fixes.  Call with the discriminants bound in the current scope (see
-    /// bindSchemaDiscs): the bound and capacity expressions are re-emitted
-    /// against them.  A subtree that reads no discriminant folds to a constant.
+    /// fixes.  Call under an RtDiscScope for the object being laid out: every
+    /// extent in the body is a closed form over the discriminants BY INDEX, and
+    /// is evaluated against that object's.  A subtree that reads no
+    /// discriminant folds to a constant.
     uint64_t     rtAlignOfTypeNode(const TypeNode* tn);
     llvm::Value* rtSizeOfTypeNode(const TypeNode* tn);
     /// The index bounds of \p at as run-time values.  The only place that
@@ -1155,7 +1156,6 @@ struct Codegen::Impl {
     const TypeNode* variantFieldDenoterOf(const VariantPart& vp, const std::string& field);
     static bool isRuntimeLaidOut(const ExprNode& e);
     llvm::Value* alignUpV(llvm::Value* v, uint64_t align);
-    void bindSchemaDiscs(const SchemaRef& ref);
     const ArrayTypeNode* varyingArrayFieldOf(const FieldExpr& fe);
 
     /// True if the expression is an ISO §6.4.3.2 string-type: a
@@ -1306,12 +1306,50 @@ struct Codegen::Impl {
     llvm::Value* emitExtentForm(const plang::ExtentForm& F,
                                 const std::vector<llvm::Value*>& discs);
     /// The discriminants the run-time layout walk is working against, set by
-    /// bindSchemaDiscs.  The walk is always entered between a bind and its
-    /// popScope, so this is live exactly where a form may be evaluated.
+    /// RtDiscScope.  The walk is always entered under one, so this is live
+    /// exactly where a form may be evaluated.
     const std::vector<llvm::Value*>* rtDiscs_{nullptr};
     /// A denoter's extent as a value, from its closed form when it has one.
+    ///
+    /// Against the AMBIENT discriminants: correct only inside the run-time
+    /// layout walk, which is entered between a bind and its popScope.  A site
+    /// holding a particular object's path wants boundsOfDenoter() instead --
+    /// evaluating that object's extent against whichever discriminants happen
+    /// to be ambient is the same error as resolving its name in whichever
+    /// scope happens to be innermost, one level down.
     llvm::Value* extentOf(const std::optional<plang::ExtentForm>& F) {
         return (F && rtDiscs_) ? emitExtentForm(*F, *rtDiscs_) : nullptr;
+    }
+    /// R3: makes an object's discriminants the ones extent forms are evaluated
+    /// against, for as long as the guard lives.
+    ///
+    /// This replaced a bindSchemaDiscs()/popScope() pair that also defined the
+    /// discriminant NAMES as ordinary variables, so the declaration's extent
+    /// expressions could be re-emitted at the use site.  Nothing re-emits them
+    /// any more -- every extent is a closed form -- so there are no names to
+    /// define and no scope to push.  It restores the PREVIOUS discriminants
+    /// rather than clearing them, which the old pair did not do: one call site
+    /// had grown a hand-written save/restore around it and the others had not,
+    /// so a nested walk left the outer one pointing at the inner object's.
+    struct RtDiscScope {
+        Impl& I;
+        const std::vector<llvm::Value*>* Prev;
+        RtDiscScope(Impl& I, const std::vector<llvm::Value*>& D)
+            : I(I), Prev(I.rtDiscs_) { I.rtDiscs_ = &D; }
+        ~RtDiscScope() { I.rtDiscs_ = Prev; }
+    };
+    /// R3: a denoter's low and high extents evaluated against the discriminants
+    /// of the object it was reached through, so no identifier in it is ever
+    /// resolved in the procedure doing the access.  Absent when Sema recorded
+    /// no form, which outside a schema body is the ordinary case.
+    std::optional<std::pair<llvm::Value*, llvm::Value*>>
+    boundsOfDenoter(const TypeNode& D, const SchemaRef& Root) {
+        if (!D.ExtentLow || !D.ExtentHigh || Root.discs.empty())
+            return std::nullopt;
+        auto* lo = emitExtentForm(*D.ExtentLow,  Root.discs);
+        auto* hi = emitExtentForm(*D.ExtentHigh, Root.discs);
+        if (!lo || !hi) return std::nullopt;
+        return std::pair{lo, hi};
     }
     /// LLVM type of the schema body's storage: the element type for an array
     /// body, the whole body otherwise.

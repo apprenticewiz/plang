@@ -1334,6 +1334,60 @@ TEST(Schema, ADiscriminantMayFixARangeRatherThanAnExtent) {
     EXPECT_EQ(R.Stderr.find("outside the range"), std::string::npos) << R.Stderr;
 }
 
+TEST(Schema, ASubrangeBoundIsCheckedAgainstTheConstantItWasWrittenWith) {
+    // The bound `1..n*lim` mixes a discriminant with a constant of the
+    // enclosing scope.  It used to be re-emitted as an EXPRESSION at the
+    // assignment, which resolved `lim` in the procedure doing the assigning --
+    // so an unrelated local of that spelling answered for the constant and the
+    // object was range-checked against a bound nobody wrote.  Here the local
+    // says 3 and the constant says 100, and 50 is in range only under the
+    // constant.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "const lim = 100;\n"
+        "type box(n: integer) = record k: 1..n*lim; m: integer end;\n"
+        "var q: ^box;\n"
+        "procedure touch;\n"
+        "var lim: integer;\n"
+        "begin\n"
+        "  lim := 3;\n"
+        "  q^.k := 50; q^.m := lim\n"
+        "end;\n"
+        "begin\n"
+        "  new(q, 2);\n"
+        "  touch;\n"
+        "  writeln('k=', q^.k:1, ' m=', q^.m:1)\n"
+        "end.\n", kEP);
+    EXPECT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "k=50 m=3\n");
+}
+
+TEST(Schema, AConformantArrayIsToldTheBoundsTheActualActuallyHas) {
+    // Same shape, one lowering along: the bounds handed to a conformant array
+    // parameter came from re-emitting the actual's declaration in the CALLER's
+    // scope.  A local named like the constant in the bound therefore decided
+    // how large the callee believed the array to be -- and the callee indexes
+    // it.  The form is arithmetic over the discriminant by index with `hi`
+    // already folded where the type was declared, so the caller cannot reach
+    // it.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "const hi = 10;\n"
+        "type vec(n: integer) = array[1..n*hi] of integer;\n"
+        "var v: ^vec;\n"
+        "procedure show(var a: array[lo..h: integer] of integer);\n"
+        "begin\n"
+        "  writeln('bounds ', lo:1, '..', h:1);\n"
+        "  a[h] := 9; writeln('last=', a[h]:1)\n"
+        "end;\n"
+        "procedure caller;\n"
+        "var hi: integer;\n"
+        "begin hi := 2; show(v^) end;\n"
+        "begin new(v, 3); caller end.\n", kEP);
+    EXPECT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "bounds 1..30\nlast=9\n");
+}
+
 TEST(Schema, AFixedRecordBodyIsStillAUsableDomainType) {
     // The opposite direction: a record body that does not read a discriminant
     // has a fixed layout and is accepted, so the check has not widened into

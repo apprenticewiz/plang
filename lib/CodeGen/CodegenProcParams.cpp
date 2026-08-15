@@ -86,10 +86,14 @@ void Codegen::Impl::pushConformantArgs(std::vector<llvm::Value*>& args,
                 d = pk->Inner.get();
             if (auto* at = llvm::dyn_cast_or_null<ArrayTypeNode>(d);
                     at && at->Low && at->High) {
-                bindSchemaDiscs(argPath->root);
-                auto* lo = toI64(emitExpr(*at->Low));
-                auto* hi = toI64(emitExpr(*at->High));
-                popScope();
+                // R3: the bounds a conformant array parameter is told about
+                // come from the form, evaluated against the discriminants of
+                // the actual being passed -- not re-emitted in the CALLER's
+                // scope, where the declaration's names mean whatever the
+                // caller happens to have declared.
+                auto b = boundsOfDenoter(*at, argPath->root);
+                auto* lo = b ? b->first  : nullptr;
+                auto* hi = b ? b->second : nullptr;
                 if (lo && hi) {
                     args.push_back(lo);
                     args.push_back(hi);
