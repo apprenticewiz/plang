@@ -4597,6 +4597,33 @@ TEST(Shadowing, AFileElementIsSizedByTheTypeItWasDeclaredWith) {
     EXPECT_EQ(R.Stdout, "5 10 15 20 25 30 35 40 45 50 \n");
 }
 
+TEST(Storage, APackedFieldDoesNotClaimAnAlignmentItCannotKeep) {
+    // ISO §6.4.3.1: plang packs a `packed record`, so its fields sit at byte
+    // offsets that need not satisfy their own types' alignment.  IRBuilder
+    // attaches the ABI alignment of the VALUE TYPE when none is given, so a
+    // `set of char` (i256, ABI align 16) at offset 1 was stored with
+    // `align 16` -- a promise about an address nothing had made true.
+    //
+    // At -O0 the backend used scalar moves and it ran; from -O1 it emits
+    // `movaps` and SIGSEGVs.  The suite is -O0 by default, so 1,764 green tests
+    // did not see it, and the project's own acceptance program crashed at -O2
+    // after 935 of its 1,211 lines.
+    //
+    // Same class as the variant blob R4 fixed, opposite remedy: there the
+    // promise was made true, here it must not be made, because `packed` means
+    // the field really is at an odd offset.
+    for (const char* opt : {"-O0", "-O1", "-O2", "-O3"}) {
+        auto R = compileAndRun(
+            "program p(output);\n"
+            "type pr = packed record c: char; cs: set of char; k: integer end;\n"
+            "var g: pr;\n"
+            "begin g.c := 'A'; g.cs := ['a'..'z']; g.k := 5;\n"
+            "  writeln(g.c, ' ', ('m' in g.cs), ' ', g.k:1) end.\n", opt);
+        EXPECT_EQ(R.ExitCode, 0) << opt << ": " << R.Stderr;
+        EXPECT_EQ(R.Stdout, "A true 5\n") << opt;
+    }
+}
+
 TEST(Shadowing, NewAllocatesTheDomainOfThePointerTypeThatWasWritten) {
     // Review 5, and the archetype this whole redesign is named for -- still
     // live after R1, one hop away from where R1 looked.  new() resolves the

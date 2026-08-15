@@ -309,6 +309,36 @@ void Codegen::Impl::emitAssign(const AssignStmt& s) {
                 return;
             }
 
+    // EP §6.4.7: a whole-value copy of a COMPONENT whose extent a discriminant
+    // fixes is as big as the INSTANCE says, not as big as the probe's type
+    // says.  Falling through to the ordinary typed store took dstTy from the
+    // probe-resolved annotation, so
+    //
+    //     type r(lo: integer) = record a: array[lo..3] of integer; k: integer end;
+    //     new(p, 3); new(q, 3);  q^.a := p^.a
+    //
+    // loaded and stored [3 x i64] -- the probe's lo=1 -- into a one-element
+    // array, writing 8 bytes past a 24-byte allocation and over-reading the
+    // source by 16.  glibc aborts.  With the probe count SMALLER it silently
+    // under-copies instead, which no value oracle sees.
+    //
+    // The whole-object case above already memcpy'd a run-time size; this is the
+    // same statement one component down, and it had no branch of its own.
+    if (const auto& tt = s.Target->ResolvedType;
+            tt && tt->ExtentVaries
+            && (tt->Kind == TypeKind::Array || tt->Kind == TypeKind::Record))
+        if (auto dpath = schemaPathOf(*s.Target))
+            if (auto spath = schemaPathOf(*s.Value)) {
+                llvm::Value* sz = nullptr;
+                {
+                    RtDiscScope disc(*this, dpath->root.discs);
+                    sz = rtSizeOfTypeNode(dpath->decl);
+                }
+                builder.CreateMemCpy(dpath->addr, llvm::MaybeAlign(),
+                                     spath->addr, llvm::MaybeAlign(), sz);
+                return;
+            }
+
     auto* addr = emitLValue(*s.Target);
     if (!addr) codegenICE("assignment to a non-addressable target");
 
@@ -401,7 +431,10 @@ void Codegen::Impl::emitAssign(const AssignStmt& s) {
             && rhs->getType()->getIntegerBitWidth() > dstTy->getIntegerBitWidth())
         rhs = builder.CreateTrunc(rhs, dstTy, "narrow");
 
-    builder.CreateStore(rhs, addr);
+    auto* st = builder.CreateStore(rhs, addr);
+    // A field of a packed record is at a byte offset that need not satisfy its
+    // own type's alignment; see packedAccessAlign.
+    if (auto A = packedAccessAlign(*s.Target)) st->setAlignment(*A);
 }
 
 void Codegen::Impl::emitIf(const IfStmt& s) {

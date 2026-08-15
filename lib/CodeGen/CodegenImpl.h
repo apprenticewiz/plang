@@ -1587,6 +1587,9 @@ struct Codegen::Impl {
     /// field is not the type of the struct element it shares with the others.
     llvm::Type* fieldLlvmType(const FieldExpr& e);
     llvm::Value* emitFieldGEP(const FieldExpr& e);
+    /// Alignment a load/store through this expression may claim; see the
+    /// definition.  nullopt means the value type's ABI alignment is honest.
+    std::optional<llvm::Align> packedAccessAlign(const ExprNode& e);
     llvm::Value* emitFieldLoad(const FieldExpr& e);
     llvm::Value* emitDerefLoad(const DerefExpr& e);
     /// EP §6.8.7: emit a typed value constructor (array/record/set).

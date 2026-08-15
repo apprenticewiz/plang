@@ -3880,6 +3880,48 @@ TEST(EP7Schema, ANestedInstantiationSmallerThanTheProbeStaysInsideItsAllocation)
     EXPECT_EQ(R.Stdout, "y=5 tag=77 a2=3\n");
 }
 
+TEST(EP7Schema, AWholeValueCopyOfAVaryingComponentIsTheInstancesSize) {
+    // `array[lo..3]` is three elements at the probe's lo=1 and one at lo=3.
+    // A whole-value copy of the component fell through to the ordinary typed
+    // store, whose type came from the probe-resolved annotation, so it loaded
+    // and stored [3 x i64] into a one-element array: 8 bytes past a 24-byte
+    // allocation and a 16-byte over-read of the source.  glibc aborts.
+    //
+    // The whole-OBJECT case already memcpy'd a run-time size; this is the same
+    // statement one component down and had no branch of its own.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type r(lo: integer) = record a: array[lo..3] of integer; k: integer end;\n"
+        "var p1, q1: ^r;\n"
+        "begin\n"
+        "  new(p1, 3); new(q1, 3);\n"
+        "  p1^.a[3] := 111; p1^.k := 1;\n"
+        "  q1^.a[3] := 222; q1^.k := 2;\n"
+        "  q1^.a := p1^.a;\n"
+        "  writeln('a3=', q1^.a[3]:1, ' k=', q1^.k:1)\n"
+        "end.\n", kEP);
+    EXPECT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "a3=111 k=2\n");
+}
+
+TEST(EP7Schema, AWholeValueCopyOfAnArrayOfVaryingStringsIsTheInstancesSize) {
+    // The same defect with a varying ELEMENT rather than a varying bound: the
+    // probe element is string(1) and the real one is string(4), so the copy
+    // was sized from the wrong one in the other direction.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type r(n: integer) = record a: array[1..3] of string(n); k: integer end;\n"
+        "var p1, q1: ^r;\n"
+        "begin\n"
+        "  new(p1, 4); new(q1, 4);\n"
+        "  p1^.a[2] := 'abcd'; p1^.k := 1; q1^.k := 2;\n"
+        "  q1^.a := p1^.a;\n"
+        "  writeln('[', q1^.a[2], '] k=', q1^.k:1)\n"
+        "end.\n", kEP);
+    EXPECT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "[abcd] k=2\n");
+}
+
 TEST(EP7Schema, DeclaringASchemaParameterDoesNotResizeAnInstanceOfIt) {
     // R4.  The record arm of llvmTypeOfSemaType had the resolved type T in
     // hand and passed only T.RecordDecl to the layout, which then re-read each

@@ -1591,6 +1591,37 @@ llvm::Value* Codegen::Impl::emitFieldGEP(const FieldExpr& e) {
     return builder.CreateGEP(st, recPtr, {zero, fidx}, "field.ptr");
 }
 
+/// The alignment a load or store through \p e may honestly claim, or nullopt
+/// to let IRBuilder use the value type's ABI alignment.
+///
+/// ISO §6.4.3.1: a packed record is stored as economically as the
+/// implementation can manage, and plang packs it -- layoutOf builds an LLVM
+/// struct with packed=true, whose fields sit at byte offsets that need not
+/// satisfy their own types' alignment.  IRBuilder attaches the ABI alignment of
+/// the VALUE TYPE when none is given, so `g.cs := ['a'..'z']` on a
+/// `packed record c: char; cs: set of char; ...` emitted
+///
+///     store i256 %set, ptr %field.ptr, align 16
+///
+/// about an address at offset 1.  At -O0 the backend happened to use scalar
+/// moves and the program ran; from -O1 it emits `movaps` and the program dies.
+/// The project's own acceptance program crashes this way at -O2 -- it is only
+/// ever run at -O0.
+///
+/// Same class as the variant blob R4 fixed: a promise to LLVM about an address
+/// that nothing has made true.  The blob was fixed by making the promise true;
+/// here the promise must simply not be made, because `packed` means the field
+/// really is at an odd offset.
+std::optional<llvm::Align> Codegen::Impl::packedAccessAlign(const ExprNode& e) {
+    auto* fe = llvm::dyn_cast<FieldExpr>(&e);
+    if (!fe) return std::nullopt;
+    const Type* RecTy = recordTypeOf(*fe->Record);
+    if (!RecTy) return std::nullopt;
+    const bool packed = RecTy->Packed
+                     || (RecTy->RecordDecl && RecTy->RecordDecl->Packed);
+    return packed ? std::optional{llvm::Align(1)} : std::nullopt;
+}
+
 llvm::Value* Codegen::Impl::emitFieldLoad(const FieldExpr& e) {
     // EP §6.8.4: a schema-discriminant, constant for a discriminated instance
     // and carried with the value for an undiscriminated one.
@@ -1623,7 +1654,9 @@ llvm::Value* Codegen::Impl::emitFieldLoad(const FieldExpr& e) {
     auto* ptr = emitFieldGEP(e);
     if (!ptr) codegenICE("field access '" + e.Field + "' on a non-record operand");
 
-    return builder.CreateLoad(fieldLlvmType(e), ptr, "field");
+    auto* ld = builder.CreateLoad(fieldLlvmType(e), ptr, "field");
+    if (auto A = packedAccessAlign(e)) ld->setAlignment(*A);
+    return ld;
 }
 
 llvm::Value* Codegen::Impl::emitDerefLoad(const DerefExpr& e) {
