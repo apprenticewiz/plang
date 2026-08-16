@@ -352,6 +352,45 @@ inline TwoFileResult compileTwoFiles(const std::string& ModSrc,
     return R;
 }
 
+/// Two modules and a program that imports both, for the cases where one module
+/// cannot show the thing being tested -- an import-part naming more than one
+/// interface, chiefly.
+inline TwoFileResult compileThreeFiles(const std::string& ModASrc,
+                                       const std::string& ModBSrc,
+                                       const std::string& ProgSrc,
+                                       const std::string& ExtraFlags = "") {
+    CaseDir C;
+    C.write("moda.pas", ModASrc);
+    C.write("modb.pas", ModBSrc);
+    C.write("prog.pas", ProgSrc);
+    TwoFileResult R;
+
+    for (const char* M : {"moda", "modb"}) {
+        const std::string Name(M);
+        const int Rc = std::system(("cd " + C.path() + " && " + PLANG_PATH
+                                    + " " + ExtraFlags + " -c " + Name + ".pas -o "
+                                    + Name + ".o 2>" + Name + ".err").c_str());
+        R.Stderr += C.read(Name + ".err");
+        if (Rc != 0) { R.ExitCode = Rc; return R; }
+    }
+    {
+        const int Rc = std::system(("cd " + C.path() + " && " + PLANG_PATH
+                                    + " " + ExtraFlags + " -I. prog.pas moda.o modb.o"
+                                    + " -o prog 2>prog.err").c_str());
+        R.Stderr += C.read("prog.err");
+        if (Rc != 0) { R.ExitCode = Rc; return R; }
+    }
+    R.Stdout = runCmd("cd " + C.path()
+                      + " && ./prog < /dev/null 2>run.err; echo \"exit:$?\"");
+    R.ExitCode = 0;
+    if (const auto Pos = R.Stdout.rfind("exit:"); Pos != std::string::npos) {
+        R.ExitCode = std::atoi(R.Stdout.c_str() + Pos + 5);
+        R.Stdout.erase(Pos);
+    }
+    R.Stderr += C.read("run.err");
+    return R;
+}
+
 /// Runs an already-built binary with a standard input that stays open and
 /// never produces anything, which is what a terminal at a fresh prompt looks
 /// like to a program that tries to read.  compileAndRun redirects from

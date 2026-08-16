@@ -290,6 +290,82 @@ TEST(ModuleBodyChecking, AValidModuleReportsNoDiagnostics) {
 // Separate compilation tests — PMI write/read cycle and multi-file builds
 // ---------------------------------------------------------------------------
 
+// ISO 10206 §6.11.3:
+//   import-part = [ 'import' import-specification ';' { import-specification ';' } ]
+// The KEYWORD APPEARS ONCE and introduces a list, each specification ended by
+// its own semicolon.  plang required 'import' before every one, so the
+// standard spelling was a syntax error and only the repeated form parsed.
+TEST(SeparateCompilation, OneImportKeywordIntroducesAListOfSpecifications) {
+    auto R = compileThreeFiles(
+        "module Alpha;\n"
+        "function AlphaVal: integer;\n"
+        "begin AlphaVal := 10 end;\n"
+        "end.\n",
+        "module Beta;\n"
+        "function BetaVal: integer;\n"
+        "begin BetaVal := 32 end;\n"
+        "end.\n",
+        "program p(output);\n"
+        "import Alpha; Beta;\n"
+        "begin writeln(AlphaVal + BetaVal) end.\n",
+        "-std=iso10206");
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "42\n");
+}
+
+// Each specification in the list carries its own access-qualifier and
+// import-qualifier, which is what the grammar says: the qualifiers belong to
+// the import-specification, not to the import-part.
+TEST(SeparateCompilation, EachSpecificationInTheListKeepsItsOwnQualifiers) {
+    const std::string A =
+        "module Alpha;\n"
+        "function AlphaVal: integer;\n"
+        "begin AlphaVal := 10 end;\n"
+        "end.\n";
+    const std::string B =
+        "module Beta;\n"
+        "function BetaVal: integer;\n"
+        "begin BetaVal := 32 end;\n"
+        "end.\n";
+
+    auto Qual = compileThreeFiles(A, B,
+        "program p(output);\n"
+        "import Alpha qualified; Beta only (BetaVal);\n"
+        "begin writeln(Alpha.AlphaVal + BetaVal) end.\n",
+        "-std=iso10206");
+    ASSERT_EQ(Qual.ExitCode, 0) << Qual.Stderr;
+    EXPECT_EQ(Qual.Stdout, "42\n");
+
+    auto Rename = compileThreeFiles(A, B,
+        "program p(output);\n"
+        "import Alpha (AlphaVal => A1); Beta;\n"
+        "begin writeln(A1 + BetaVal) end.\n",
+        "-std=iso10206");
+    ASSERT_EQ(Rename.ExitCode, 0) << Rename.Stderr;
+    EXPECT_EQ(Rename.Stdout, "42\n");
+}
+
+// The repeated-keyword spelling is plang's extension and keeps working; it
+// costs nothing and programs have been written against it.  It is the
+// extension, though, not the rule.
+TEST(SeparateCompilation, TheRepeatedImportKeywordStillParses) {
+    auto R = compileThreeFiles(
+        "module Alpha;\n"
+        "function AlphaVal: integer;\n"
+        "begin AlphaVal := 10 end;\n"
+        "end.\n",
+        "module Beta;\n"
+        "function BetaVal: integer;\n"
+        "begin BetaVal := 32 end;\n"
+        "end.\n",
+        "program p(output);\n"
+        "import Alpha; import Beta;\n"
+        "begin writeln(AlphaVal + BetaVal) end.\n",
+        "-std=iso10206");
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "42\n");
+}
+
 // Basic PMI round-trip: compile a module with a function, import it.
 TEST(SeparateCompilation, PMIRoundtripBasicFunction) {
     auto R = compileTwoFiles(

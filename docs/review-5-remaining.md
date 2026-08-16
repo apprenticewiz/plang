@@ -1,7 +1,7 @@
 # Review 5: what is left, and what was learned trying
 
-Review 5 found 27 unique defects; 24 survived adversarial verification and 22
-are fixed.  This records the two still open, with what an attempt on each
+Review 5 found 27 unique defects; 24 survived adversarial verification and 23
+are fixed.  This records the one still open, with what an attempt on each
 actually cost, so the next person does not rediscover it.
 
 ## 1. A bare `string` as a VAR parameter — FIXED
@@ -48,10 +48,27 @@ call it.  The lesson is the one this file already recorded twice: the widening
 is wrong until every site has it, because the sites that are still narrow are
 the ones supplying the extents.
 
-## 3. ISO 10206 import-part with more than one specification
+## 3. ISO 10206 import-part with more than one specification — FIXED
 
-`import a, b;` is rejected; only `import a; import b;` parses.  Unverified by me
-beyond the finder's report and the verification pass.
+Read from the standard rather than from the finding, and the finding's repro was
+wrong.  ISO 10206 §6.11.3:
+
+    import-part = [ `import' import-specification `;' { import-specification `;' } ] .
+    import-specification = interface-identifier [ access-qualifier ] [ import-qualifier ] .
+
+The keyword appears ONCE and introduces a list, each specification ended by its
+own semicolon — `import A; B;`.  The separator is `;`, not the `,` the finding
+used; `import A, B;` is not Pascal and is still a syntax error.  plang required
+`import` before every specification, so the standard spelling did not parse and
+only the repeated form did.
+
+The list ends at the first token that is not an identifier, which is
+unambiguous: every declaration-part that may follow, and the statement part,
+begins with a reserved word.  The qualifiers belong to the specification and not
+to the part, so `import A qualified; B only (X);` works per specification.
+
+The repeated-keyword form is kept as plang's extension — it costs nothing and
+programs have been written against it — but it is the extension, not the rule.
 
 ## 4. The probe's discriminant value of 1 in diagnostics — FIXED
 

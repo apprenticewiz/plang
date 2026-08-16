@@ -275,7 +275,8 @@ void Parser::parseExportRename(ExportItem& Item) {
 }
 
 // EP §6.11.3:
-//   import-part          → { 'import' import-specification ';' }
+//   import-part          → [ 'import' import-specification ';'
+//                            { import-specification ';' } ]     ISO 10206 §6.11.3
 //   import-specification → interface-identifier ['qualified'] [import-qualifier]
 //   import-qualifier     → ['only'] '(' import-clause { ',' import-clause } ')'
 //   import-clause        → identifier ['=>' identifier]
@@ -285,10 +286,25 @@ void Parser::parseExportRename(ExportItem& Item) {
 // the older plang spelling of 'only'.
 std::vector<ImportClause> Parser::parseImportClauses() {
     std::vector<ImportClause> Clauses;
+    // ISO 10206 §6.11.3 writes the import-part as
+    //
+    //   [ 'import' import-specification ';' { import-specification ';' } ]
+    //
+    // so the KEYWORD APPEARS ONCE and introduces a list, each specification
+    // ended by its own semicolon:  `import a; b; c;`.  This required 'import'
+    // before every one, so the standard spelling was a syntax error and only
+    // the repeated form parsed.  The repeated form is kept -- it costs nothing
+    // and programs have been written against it -- but it is the extension
+    // here, not the rule.
+    //
+    // The list ends at the first token that is not an identifier, which is
+    // unambiguous: every declaration-part that may follow, and the statement
+    // part, begins with a reserved word.
     while (check(TokenKind::Import)) {
+        advance(); // consume 'import'
+      do {
         ImportClause Clause;
         Clause.Loc = Current;
-        advance(); // consume 'import'
         Clause.ModuleName = expect(TokenKind::Identifier).Lexeme;
 
         bool More = true;
@@ -318,6 +334,7 @@ std::vector<ImportClause> Parser::parseImportClauses() {
 
         expect(TokenKind::Semicolon);
         Clauses.push_back(std::move(Clause));
+      } while (check(TokenKind::Identifier));
     }
     return Clauses;
 }
