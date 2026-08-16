@@ -346,7 +346,8 @@ private:
     [[nodiscard]] std::shared_ptr<Type> resolveNamedUnrestricted(const NamedTypeNode& N);
     /// resolveType for a formal-parameter type-denoter, where EP §6.7.3.1
     /// admits a bare schema-name as the parameter-form.
-    [[nodiscard]] std::shared_ptr<Type> resolveParamType(const TypeNode& Node) {
+    [[nodiscard]] std::shared_ptr<Type> resolveParamType(const TypeNode& Node,
+                                                         bool IsVar = false) {
         AllowSchemaScope Guard(AllowUndiscriminatedSchema_);
         auto T = resolveType(Node);
         // EP §6.7.3.1 also admits a bare `string`, which accepts an actual
@@ -354,7 +355,14 @@ private:
         // terms of a capacity, so give it the largest one rather than leaving
         // it as the capacity-less string that only a literal ever has.
         if (T && T->Kind == TypeKind::String) {
-            T = Ctx_.getVarString(PlangMaxStringCapacity);
+            // A VALUE parameter is a copy, so the widest capacity plang has
+            // holds any actual.  A VAR parameter is not a copy: ISO §6.6.3.3
+            // requires its actual to be of the parameter's OWN type, so a
+            // formal of one fixed capacity matches nothing at all and
+            // `procedure p(var s: string)` rejected every actual.  A capacity
+            // that arrives with the actual is EP §6.4.3.3's string schema.
+            T = IsVar ? stringSchemaType()
+                      : Ctx_.getVarString(PlangMaxStringCapacity);
             Node.ResolvedType = T; // codegen lowers the denoter from this
         }
         return T;

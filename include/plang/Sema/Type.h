@@ -475,4 +475,20 @@ inline std::shared_ptr<Type> schemaUnderlying(std::shared_ptr<Type> T) {
     return T;
 }
 
+/// True when a type denotes an EP string(N), looking through a schema whose body
+/// is one.
+///
+/// EP §6.4.3.3 makes `string` a schema, so `type s(n: integer) = string(n)` and
+/// a bare `string` parameter both denote strings without having Kind
+/// VarString.  Every operator that asked the Kind directly therefore refused
+/// them -- assignment, '+', comparison, length, substr -- and the lesson from
+/// schemaUnderlying applies here too: widening one operator and not the rest
+/// leaves the narrow ones supplying the answers, which is worse than widening
+/// none.
+inline bool isVarStringLike(const Type* T) {
+    const Type* U = schemaUnderlying(T);
+    return U && U->Kind == TypeKind::VarString;
+}
+inline bool isVarStringLike(const Type& T) { return isVarStringLike(&T); }
+
 } // namespace plang

@@ -1,44 +1,32 @@
 # Review 5: what is left, and what was learned trying
 
-Review 5 found 27 unique defects; 24 survived adversarial verification and 20
-are fixed.  This records the four still open, with what an attempt on each
+Review 5 found 27 unique defects; 24 survived adversarial verification and 21
+are fixed.  This records the three still open, with what an attempt on each
 actually cost, so the next person does not rediscover it.
 
-## 1. A bare `string` as a VAR parameter — attempted and BACKED OUT
+## 1. A bare `string` as a VAR parameter — FIXED
 
-`procedure p(var s: string)` rejects every actual:
+Was: `procedure p(var s: string)` rejected every actual with
 `expected 'string(255)', got 'string(10)'`.
 
-EP §6.7.3.1 admits a bare `string` as a parameter form, and §6.4.3.3 makes
-`string` a schema whose one discriminant is the capacity.  As a VALUE parameter
-this already works — the actual is copied into the widest capacity plang has,
-and `UndiscriminatedString.*` covers it.  A VAR parameter cannot be copied:
-ISO §6.6.3.3 requires the actual to be of the parameter's own type, so a formal
-of one fixed capacity matches nothing.
+Two earlier attempts were reverted, and the reason is the point.  Making it
+COMPILE takes three small changes.  Making it WORK takes widening every string
+operator at once, because the ones left narrow are the ones that then supply the
+answers:
 
-**A three-line Sema fix makes it compile and gives the wrong impression.**
-Routing a var-parameter's bare `string` to `stringSchemaType()`, accepting a
-`VarString` actual against a string-schema formal, and teaching `schemaActual`
-to pass the capacity as the discriminant is enough to make
+- the predicate `isVarStringLike` (Sema/Type.h) — but widening the predicate and
+  not the capacity ACCESSOR beside it compared `v := 'hi'` against the
+  instance's own StrCapacity of 0 and rejected it as not fitting a `string(0)`;
+- assignment must take the string path rather than the whole-schema copy, or
+  `s := 'zz'` is "assignment between schematic variables that codegen cannot
+  locate";
+- `exprStrCapV` must recover the capacity for a FORMAL and not only for `q^` —
+  it travels in the same place, as the discriminant beside the pointer — or the
+  formal carries the probe's `string(1)` and even `s := 'zz'` raises.
 
-    procedure show(var s: string); begin writeln('[', s, ']') end;
-
-work.  It is not enough for the feature.  Inside the procedure the formal's type
-is `Schema`, not `VarString`, so:
-
-- `s := 'zz'` reaches `codegenICE("assignment between schematic variables that
-  codegen cannot locate")`
-- `s + '!'` is `error: operator '+' requires numeric operands, got 'string' and
-  'char'`
-
-which are the two things a var parameter exists to do.  That state is WORSE than
-the rejection: a clean diagnostic became an internal error.  The attempt was
-reverted for that reason, not because it was hard.
-
-What it needs is for every string operation to treat a schema whose body is a
-`VarString` as a string — the same widening `varStrTypeOf` did in CodeGen
-(commit b187337), applied on the SEMA side to assignment compatibility, `+`,
-`length`, comparison and `substr`.  That is the real shape of this work.
+The capacity now travels with the actual, so one procedure body is bounded
+differently per call: eight characters fit a `string(10)` and raise on a
+`string(4)`.
 
 ## 2. A schema whose body is a discriminated schema — FIXED
 

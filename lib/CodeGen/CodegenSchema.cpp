@@ -125,8 +125,20 @@ Codegen::Impl::schemaActual(const ExprNode& arg, unsigned discCount) {
         return {ref->data, ref->discs};
     }
 
-    // A discriminated instance knows them at compile time.
+    // EP §6.4.3.3: a string(n) IS an instance of the `string` schema, and its
+    // one discriminant is the capacity -- a constant here.  This is what lets
+    // `procedure p(var s: string)` take a string of any capacity.
     const plang::Type* T = arg.ResolvedType.get();
+    if (T && T->Kind == TypeKind::VarString && discCount == 1) {
+        auto* data = emitLValue(arg);
+        if (!data) codegenICE("string argument for a schema parameter is not "
+                              "addressable");
+        return {data, {llvm::ConstantInt::get(i64Ty,
+                           static_cast<uint64_t>(exprStrCap(arg)),
+                           /*isSigned=*/true)}};
+    }
+
+    // A discriminated instance knows them at compile time.
     if (!T || T->Kind != TypeKind::SchemaInstance
             || T->SchemaDiscs.size() != discCount)
         codegenICE("argument for a schema parameter is not schematic");
@@ -374,14 +386,21 @@ llvm::Value* Codegen::Impl::exprStrCapV(const ExprNode& e) {
         if (const auto* ve = findVar(id->Name); ve && ve->strCapV)
             return ve->strCapV;
 
-    // `q^` for a ^string: EP §6.4.3.3 makes the schema's one discriminant the
-    // capacity, and it has no written declaration to walk.
-    if (llvm::isa<DerefExpr>(&e))
-        if (auto ref = schemaRefOf(e);
-                ref && ref->semaTy && ref->semaTy->SchemaBody
-                && ref->semaTy->SchemaBody->Kind == TypeKind::VarString
-                && ref->discs.size() == 1)
-            return ref->discs[0];
+    // A schema whose body is a string: EP §6.4.3.3 makes its one discriminant
+    // the capacity, and there is no written declaration to walk for it.
+    //
+    // This required a DerefExpr, so it answered for `q^` and not for a
+    // `var s: string` formal -- whose capacity travels in exactly the same
+    // place, as the discriminant beside the pointer.  The formal fell through
+    // to the probe's string(1), and `s := 'zz'` raised "string of length 2
+    // assigned to a string(1)" against an actual with room for ten.
+    // schemaRefOf answers for a formal parameter as readily as for a
+    // dereference; asking it for both is the whole change.
+    if (auto ref = schemaRefOf(e);
+            ref && ref->semaTy && ref->semaTy->SchemaBody
+            && ref->semaTy->SchemaBody->Kind == TypeKind::VarString
+            && ref->discs.size() == 1)
+        return ref->discs[0];
 
     // Anywhere else: the capacity is the expression the component was DECLARED
     // with, re-emitted against the discriminants its object carries.  Asked of

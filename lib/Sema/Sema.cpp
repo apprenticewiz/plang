@@ -1017,7 +1017,7 @@ void Sema::checkProcSignature(const ProcDecl& Proc) {
     // Resolve parameter types and return type.
     std::vector<Type::Param> ResolvedParams;
     for (const auto& Pg : H.Params) {
-        auto T = resolveParamType(*Pg.Type);
+        auto T = resolveParamType(*Pg.Type, Pg.IsVar);
         for (const auto& Nm : Pg.Names) {
             ResolvedParams.push_back({ Pg.IsVar, Nm, T });
         }
@@ -1174,7 +1174,7 @@ void Sema::checkProcBody(const ProcDecl& Proc) {
 
     // Define parameters in the function's own scope.
     for (const auto& Pg : H.Params) {
-        auto T = resolveParamType(*Pg.Type);
+        auto T = resolveParamType(*Pg.Type, Pg.IsVar);
         for (const auto& Nm : Pg.Names) {
             Symbol S;
             S.Kind        = Pg.IsVar ? SymbolKind::VarParam : SymbolKind::Var;

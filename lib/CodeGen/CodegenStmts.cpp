@@ -243,10 +243,19 @@ void Codegen::Impl::emitAssign(const AssignStmt& s) {
         auto isInstance = [](const plang::Type* T) {
             return T && T->Kind == TypeKind::SchemaInstance; };
 
+        // A schema whose body is a STRING is a string, and assigning to one is
+        // a string store rather than a whole-body copy: the target may be a
+        // `var s: string` formal, whose capacity arrives with the actual, and
+        // the value may be a literal that is not schematic at all.  Sending it
+        // here produced "assignment between schematic variables that codegen
+        // cannot locate" for `s := 'zz'` -- the string branch further down is
+        // the one that can do it.
+        const bool targetIsString = exprIsVarStr(*s.Target);
+
         // Two discriminated instances are ordinary values with a static layout
         // and keep the ordinary path; this is only for a pair where at least
         // one side knows its discriminants no earlier than run time.
-        if (isSchema(tt) || (isInstance(tt) && isSchema(vt))) {
+        if (!targetIsString && (isSchema(tt) || (isInstance(tt) && isSchema(vt)))) {
             if (!isSchema(vt) && !isInstance(vt))
                 codegenICE("assignment between schematic variables that codegen "
                            "cannot locate");

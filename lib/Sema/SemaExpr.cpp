@@ -151,7 +151,7 @@ std::shared_ptr<Type> Sema::checkExpr(const ExprNode& E) {
         T = checkExpr(*N->Str);
         (void)checkExpr(*N->Low);
         (void)checkExpr(*N->High);
-        if (T->Kind != TypeKind::VarString)
+        if (!isVarStringLike(T.get()))
             error(E.Loc, diag::err_substring_non_varstring);
     }
     else {
@@ -272,7 +272,7 @@ std::shared_ptr<Type> Sema::checkIndex(const IndexExpr& E) {
     }
     // EP §6.5.3.2: a string has char components selectable by index, numbered
     // from 1 up to its current length.
-    if (ArrTy->Kind == TypeKind::VarString) {
+    if (isVarStringLike(ArrTy.get())) {
         if (!IdxTy->isError() && !IdxTy->isOrdinal())
             error(E.Loc, diag::err_index_not_ordinal, {IdxTy->Name});
         return TyChar;
@@ -387,11 +387,11 @@ std::shared_ptr<Type> Sema::checkBinary(const BinaryExpr& E) {
     switch (E.Op) {
         case TokenKind::Plus:
             // EP §6.8.3.6: string concatenation.
-            if (Lt->Kind == TypeKind::VarString || Rt->Kind == TypeKind::VarString
+            if (isVarStringLike(Lt.get()) || isVarStringLike(Rt.get())
                 || Lt->Kind == TypeKind::String  || Rt->Kind == TypeKind::String
-                || (Lt->Kind == TypeKind::Char && (Rt->Kind == TypeKind::VarString
+                || (Lt->Kind == TypeKind::Char && (isVarStringLike(Rt.get())
                                                  || Rt->Kind == TypeKind::String))
-                || (Rt->Kind == TypeKind::Char && (Lt->Kind == TypeKind::VarString
+                || (Rt->Kind == TypeKind::Char && (isVarStringLike(Lt.get())
                                                  || Lt->Kind == TypeKind::String))
                 // EP §6.8.3.2: a char is a string-compatible operand of '+', so
                 // two of them concatenate rather than failing as non-numeric.
@@ -403,7 +403,7 @@ std::shared_ptr<Type> Sema::checkBinary(const BinaryExpr& E) {
                     // so it is treated the way an unbounded string is: the
                     // result of a concatenation is a temporary, and the widest
                     // one plang has is the honest bound for it.
-                    if (T->Kind == TypeKind::VarString)
+                    if (isVarStringLike(T.get()))
                         return T->ExtentVaries ? PlangMaxStringCapacity
                                                : T->StrCapacity;
                     if (T->Kind == TypeKind::Char)      return 1;
@@ -515,7 +515,7 @@ std::shared_ptr<Type> Sema::checkBinary(const BinaryExpr& E) {
             // ISO §6.4.3.2 makes a packed array[1..n] of char a string value,
             // and §6.7.2.5 lets string values be compared.
             auto isStringLike = [](const Type& T) {
-                return T.Kind == TypeKind::String || T.Kind == TypeKind::VarString
+                return T.Kind == TypeKind::String || isVarStringLike(&T)
                     || T.Kind == TypeKind::Char   || isCharStringType(T);
             };
             // ISO §6.7.2.5: sets support = <> <= >= only; '<' and '>' are not
@@ -739,7 +739,7 @@ std::shared_ptr<Type> Sema::checkCallExpr(const CallExpr& E) {
         if ((Lo == "substr" || Lo == "trim") && !E.Args.empty()) {
             auto ArgTy = checkExpr(*E.Args[0]);
             for (size_t I = 1; I < E.Args.size(); ++I) (void)checkExpr(*E.Args[I]);
-            return (ArgTy->Kind == TypeKind::VarString) ? ArgTy : TyStr;
+            return isVarStringLike(ArgTy.get()) ? ArgTy : TyStr;
         }
         // EP §6.7.6.2: math functions extended to complex — return complex when
         // the argument is complex, real otherwise.
@@ -1341,6 +1341,15 @@ bool Sema::isAssignCompatible(const Type& Dst, const Type& Src,
     // rule's own diagnostic with it.
     if (&Dst == &Src) return true;
 
+    // EP §6.4.3.3 makes `string` a schema whose one discriminant is the
+    // capacity, so every string(n) IS an instance of it.  That is what a
+    // `var s: string` formal accepts, and what isVarStringLike above cannot
+    // settle on its own: this is the SCHEMA against a plain VarString, not two
+    // strings.
+    if (isVarStringLike(&Dst) && isVarStringLike(&Src)
+            && (Dst.Kind == TypeKind::Schema || Src.Kind == TypeKind::Schema))
+        return true;
+
     // EP §6.4.7: SchemaInstance — compatible if same schema+discriminant values,
     // or fall through to body-type compatibility.
     if (Dst.Kind == TypeKind::SchemaInstance && Src.Kind == TypeKind::SchemaInstance) {
@@ -1511,13 +1520,13 @@ bool Sema::isAssignCompatible(const Type& Dst, const Type& Src,
 
     // EP §6.4.5–6.4.6: string compatibility rules.
     // VarString(M) ← VarString(N): always allowed (truncation at runtime if N>M)
-    if (Dst.Kind == TypeKind::VarString && Src.Kind == TypeKind::VarString) return true;
+    if (isVarStringLike(&Dst) && isVarStringLike(&Src)) return true;
     // VarString(N) ← char
-    if (Dst.Kind == TypeKind::VarString && Src.Kind == TypeKind::Char)   return true;
+    if (isVarStringLike(&Dst) && Src.Kind == TypeKind::Char)   return true;
     // VarString(N) ← plain string literal / String
-    if (Dst.Kind == TypeKind::VarString && Src.Kind == TypeKind::String)  return true;
+    if (isVarStringLike(&Dst) && Src.Kind == TypeKind::String)  return true;
     // String (7185) ← VarString: allow for passing to legacy write/writeln
-    if (Dst.Kind == TypeKind::String && Src.Kind == TypeKind::VarString)  return true;
+    if (Dst.Kind == TypeKind::String && isVarStringLike(&Src))  return true;
 
     // ISO §6.4.3.2: a string-type takes a string value of exactly its own
     // length.  A literal arrives as String or, in EP, as VarString carrying
@@ -1534,7 +1543,7 @@ bool Sema::isAssignCompatible(const Type& Dst, const Type& Src,
                 || Src.StrCapacity == charStringLength(Dst);
     }
     // A string-type is a string value, so it goes where one is expected.
-    if (Dst.Kind == TypeKind::VarString && isCharStringType(Src))
+    if (isVarStringLike(&Dst) && isCharStringType(Src))
         return true;
     return false;
 }

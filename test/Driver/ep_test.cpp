@@ -4098,6 +4098,60 @@ TEST(EP7Schema, ANestedSchemaArrayIsRangeCheckedAgainstItsRealBounds) {
     EXPECT_EQ(R.Stdout, "");
 }
 
+TEST(UndiscriminatedString, AVarParameterTakesAStringOfAnyCapacity) {
+    // EP §6.7.3.1 admits a bare `string` as a parameter form, and §6.4.3.3
+    // makes `string` a schema whose one discriminant is the capacity.  As a
+    // VALUE parameter this already worked -- the actual is copied into the
+    // widest capacity plang has.  A VAR parameter cannot be copied: ISO
+    // §6.6.3.3 requires the actual to be of the parameter's OWN type, so a
+    // formal of one fixed capacity matched nothing and every actual was
+    // rejected with "expected 'string(255)', got 'string(10)'".
+    //
+    // Every string operator has to be widened for this, not just the one that
+    // makes it compile -- see the two reverted attempts recorded in
+    // docs/review-5-remaining.md.  So this exercises all of them.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "procedure work(var s: string);\n"
+        "begin\n"
+        "  writeln('in [', s, '] len=', length(s):1);\n"
+        "  if s = 'hi' then writeln('  eq');\n"
+        "  writeln('  sub [', substr(s, 1, 2), ']');\n"
+        "  s := 'zz'\n"
+        "end;\n"
+        "var a: string(10); b: string(4);\n"
+        "begin\n"
+        "  a := 'hi'; b := 'hi';\n"
+        "  work(a); work(b);\n"
+        "  writeln('out [', a, '] [', b, ']')\n"
+        "end.\n", kEP);
+    EXPECT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout,
+              "in [hi] len=2\n  eq\n  sub [hi]\n"
+              "in [hi] len=2\n  eq\n  sub [hi]\n"
+              "out [zz] [zz]\n");
+}
+
+TEST(UndiscriminatedString, AVarParameterUsesTheActualsOwnCapacity) {
+    // The capacity travels with the actual, so the SAME procedure body is
+    // bounded differently per call: eight characters fit a string(10) and not
+    // a string(4).  Without this the formal carried the probe's string(1) and
+    // even `s := 'zz'` raised.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "procedure fill(var s: string);\n"
+        "begin s := 'abcdefgh' end;\n"
+        "var a: string(10); b: string(4);\n"
+        "begin\n"
+        "  fill(a); writeln('a=[', a, ']');\n"
+        "  fill(b); writeln('b=[', b, ']')\n"
+        "end.\n", kEP);
+    EXPECT_NE(R.ExitCode, 0);
+    EXPECT_EQ(R.Stdout, "a=[abcdefgh]\n");
+    EXPECT_NE(R.Stderr.find("string of length 8 assigned to a string(4)"),
+              std::string::npos) << R.Stderr;
+}
+
 TEST(EP7Schema, DeclaringASchemaParameterDoesNotResizeAnInstanceOfIt) {
     // R4.  The record arm of llvmTypeOfSemaType had the resolved type T in
     // hand and passed only T.RecordDecl to the layout, which then re-read each

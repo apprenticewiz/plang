@@ -283,16 +283,22 @@ void Sema::checkStringCapacity(const Type& Dst, const ExprNode& Src) {
         return;
     }
 
-    if (Dst.Kind != TypeKind::VarString) return;
+    if (!isVarStringLike(&Dst)) return;
+    // The capacity lives on the string itself, which for `type s(n) = string(n);
+    // var v: s(10)` is the schema's BODY and not the instance.  Widening the
+    // test above without widening this read compared against the instance's
+    // own StrCapacity of 0 and rejected `v := 'hi'` for not fitting a
+    // string(0) -- the same half-widening this file's history keeps producing.
+    const Type& DstStr = *schemaUnderlying(&Dst);
     // EP §6.4.7: a capacity fixed by a discriminant is not known here.  The
     // recorded one is the probe's, so comparing against it would reject
     // `p^.s := 'twelve chars'` for not fitting a string(1).  Whether it fits is
     // a run-time question, and codegen asks it against the capacity the object
     // carries.
-    if (Dst.ExtentVaries) return;
-    if (Len > Dst.StrCapacity)
+    if (Dst.ExtentVaries || DstStr.ExtentVaries) return;
+    if (Len > DstStr.StrCapacity)
         error(Src.Loc, diag::err_string_too_long,
-              {std::to_string(Len), std::to_string(Dst.StrCapacity)});
+              {std::to_string(Len), std::to_string(DstStr.StrCapacity)});
 }
 
 void Sema::checkIf(const IfStmt& S) {
