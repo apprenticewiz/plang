@@ -4309,6 +4309,26 @@ TEST(EP7Schema, WithOverANestedInstantiationBindsTheInstancesLayout) {
     EXPECT_EQ(R.Stdout, "[abcdefghijklmnopqrst] 12345 4242\n");
 }
 
+TEST(EP7Schema, AnUndiscriminatedSchemaWhoseBodyIsAnotherSchemaHasFields) {
+    // A field of an undiscriminated schema formal was looked for one level
+    // down, so a schema whose body is another schema instantiation --
+    // `B(n) = A(n)` -- had no fields at all: `var x: B` rejected `x.id` as
+    // "schema 'B' has no discriminant 'id'", though `var x: A` with the same
+    // body worked.  Sema's guard and codegen's field lookup both peeled only
+    // one SchemaBody hop; both had to widen to schemaUnderlying together, or
+    // Sema accepts what codegen cannot lay out.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type A(k: integer) = record a: array[1..k] of integer; id: integer end;\n"
+        "     B(n: integer) = A(n);\n"
+        "procedure showB(var x: B);\n"
+        "begin x.id := 42; x.a[3] := 7; writeln(x.id:1, ' ', x.a[3]:1) end;\n"
+        "var y: B(6);\n"
+        "begin showB(y) end.\n", kEP);
+    EXPECT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "42 7\n");
+}
+
 TEST(EP7Schema, TwoSchemasSharingANameAreNotTheSameType) {
     // Records and enumerations were given declaration identity in ed2af47;
     // schemas were the one kind left comparing SPELLINGS.  So two `vec(3)`

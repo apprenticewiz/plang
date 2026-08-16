@@ -1405,9 +1405,7 @@ llvm::Value* Codegen::Impl::emitIndexLoad(const IndexExpr& e) {
 static const Type* recordTypeOf(const ExprNode& recExpr) {
     const Type* T = recExpr.ResolvedType.get();
     if (!T) return nullptr;
-    if ((T->Kind == TypeKind::SchemaInstance || T->Kind == TypeKind::Schema)
-            && T->SchemaBody)
-        T = T->SchemaBody.get();
+    T = schemaUnderlying(T);
     return T->Kind == TypeKind::Record ? T : nullptr;
 }
 
@@ -1439,11 +1437,13 @@ static std::optional<unsigned> fieldStructIndex(const ExprNode& recExpr,
 llvm::StructType* Codegen::Impl::resolveRecordStructType(const FieldExpr& e) {
     // EP §6.4.7: a schematic record body has a fixed layout (Sema rejects the
     // varying non-array case), so the struct comes straight from the body type.
+    // The body may itself be another schema instantiation, so the underlying
+    // record is the one to lower, not the immediate body.
     if (e.Record->ResolvedType
             && e.Record->ResolvedType->Kind == TypeKind::Schema
             && e.Record->ResolvedType->SchemaBody)
         return llvm::dyn_cast<llvm::StructType>(
-                   llvmTypeOfSemaType(*e.Record->ResolvedType->SchemaBody));
+                   llvmTypeOfSemaType(*schemaUnderlying(e.Record->ResolvedType->SchemaBody)));
 
     // Case 1: r.field — r is a direct record variable.
     if (auto* id = llvm::dyn_cast<IdentExpr>(e.Record.get()))

@@ -183,7 +183,7 @@ purpose: a body that is itself an instantiation is legal EP, so a single hop is
 right only where the immediate body is what is wanted.
 
 **One of these is already a confirmed defect**, found by this sweep and not by a
-review:
+review — FIXED:
 
     type A(k: integer) = record a: array[1..k] of integer; id: integer end;
          B(n: integer) = A(n);
@@ -194,6 +194,15 @@ review:
 A field of an undiscriminated schema formal is looked for one level down, so a
 schema whose body is another schema has no fields at all.  `var x: A`, whose
 body IS the record, works — the failure is the nesting.  Rejects-valid.
+
+Both halves moved together, as §4 below said they had to: the Sema guard in
+`checkField` (SemaExpr.cpp) now tests `schemaUnderlying(SchemaBody)->Kind`
+instead of the immediate body's, and codegen's `recordTypeOf` and
+`resolveRecordStructType` (CodegenExprs.cpp) call `schemaUnderlying` instead of
+one hop.  Regression test:
+`EP7Schema.AnUndiscriminatedSchemaWhoseBodyIsAnotherSchemaHasFields`
+(test/Driver/ep_test.cpp) — mutation-tested against the pre-fix code, per the
+lesson two sections up.
 
 ## 3. Questions asked of the KIND that belong to the STORAGE
 
@@ -208,7 +217,7 @@ the kind does not.
 `isVarStringLike` was needed by assignment, `+`, `length`, comparison AND substr
 together.  The same question applies to any predicate added for one operator.
 
-### Why that one needs both halves at once — an attempt, reverted
+### Why that one needs both halves at once — an attempt, reverted, then landed
 
 The Sema guard tests the IMMEDIATE body's kind where it should test the
 underlying one.  Correcting just that makes the program compile and then die in
@@ -230,3 +239,6 @@ Both halves have to move together:
 That pairing is the shape of the remaining schema work, not a detail of this one
 defect: Sema decides a program is legal and CodeGen must be able to lay it out,
 and widening either alone turns a diagnostic into an internal error.
+
+Both halves moved together on the next attempt — see item 2 above, where it is
+recorded as FIXED.

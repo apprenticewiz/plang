@@ -317,8 +317,12 @@ std::shared_ptr<Type> Sema::checkField(const FieldExpr& E) {
         }
         // Without the discriminants the body's field offsets are only known
         // when the layout is fixed; resolveUndiscriminatedSchema has already
-        // rejected the varying non-array case, so this is safe.
-        if (Undiscriminated && RecTy->SchemaBody->Kind != TypeKind::Record) {
+        // rejected the varying non-array case, so this is safe.  The body may
+        // itself be another schema instantiation (EP §6.4.7 lets it) — a
+        // schema whose body is a schema whose body is the record still has
+        // its fields, so the question is asked of the record schemaUnderlying
+        // reaches, not the immediate body.
+        if (Undiscriminated && schemaUnderlying(RecTy->SchemaBody)->Kind != TypeKind::Record) {
             error(E.Loc, diag::err_schema_not_a_discriminant, {RecTy->Name, E.Field});
             return TyErr;
         }
