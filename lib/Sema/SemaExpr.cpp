@@ -782,6 +782,19 @@ std::shared_ptr<Type> Sema::checkSetLit(const SetLiteralExpr& E) {
         return T;
     }
 
+    // EP §6.8.7: a TYPED set constructor names its type, and ISO §6.7.1 requires
+    // its members to be of that type's base type.  This ignored E.TypeName
+    // outright and derived the type from the ELEMENTS, so `cs['x', 300]` for a
+    // `set of col` was accepted and produced the empty set -- while the untyped
+    // `['x']` in the same context IS caught, so the two spellings of one
+    // construct disagreed about whether the program was legal.
+    std::shared_ptr<Type> Named;
+    if (!E.TypeName.empty())
+        if (const Symbol* Sym = Symtab.lookup(E.TypeName))
+            if (Sym->Kind == SymbolKind::TypeAlias && Sym->Ty
+                    && Sym->Ty->Kind == TypeKind::Set)
+                Named = Sym->Ty;
+
     std::shared_ptr<Type> BaseType;
     for (const auto& Elem : E.Elements) {
         std::shared_ptr<Type> Et;
@@ -796,9 +809,15 @@ std::shared_ptr<Type> Sema::checkSetLit(const SetLiteralExpr& E) {
             if (!Et->isOrdinal()) {
                 error(Elem->Loc, diag::err_set_elem_not_ordinal, {Et->Name});
             }
+            if (Named && Named->ElemType && !Named->ElemType->isError()
+                    && !isAssignCompatible(*Named->ElemType, *Et))
+                error(Elem->Loc, diag::err_assign_mismatch,
+                      {Et->Name, Named->ElemType->Name});
             if (!BaseType) BaseType = Et;
         }
     }
+    // A named constructor IS that type, whatever its elements happened to be.
+    if (Named) return Named;
 
     auto T = std::make_shared<Type>();
     T->Kind     = TypeKind::Set;
@@ -911,7 +930,26 @@ std::shared_ptr<Type> Sema::checkStructuredValue(const StructuredValueExpr& E) {
         auto elemTy = T->ElemType;
         for (const auto& arm : E.Arms) {
             if (!arm.IsOtherwise) {
-                for (const auto& lbl : arm.Labels) (void)checkExpr(*lbl);
+                for (const auto& lbl : arm.Labels) {
+                    auto lblTy = checkExpr(*lbl);
+                    // EP §6.8.7.2: the labels SELECT components, so one outside
+                    // the index type selects nothing and its value is dropped.
+                    // `arr[1:1; 2:2; 5:555; -1:888]` for an array[1..4]
+                    // compiled clean and emitted four stores; the other four
+                    // component values vanished without a word.
+                    if (!T->IndexType || T->IndexType->isError()) continue;
+                    if (!lblTy->isError()
+                            && !isAssignCompatible(*T->IndexType, *lblTy)) {
+                        error(lbl->Loc, diag::err_assign_mismatch,
+                              {lblTy->Name, T->IndexType->Name});
+                        continue;
+                    }
+                    if (auto V = constBound(*lbl))
+                        if (*V < T->IndexType->SubLo || *V > T->IndexType->SubHi)
+                            error(lbl->Loc,
+                                  diag::err_constructor_label_out_of_range,
+                                  {std::to_string(*V), T->IndexType->Name});
+                }
             }
             if (arm.Value) {
                 // A component-value of an element is written bare too, and
@@ -947,8 +985,19 @@ std::shared_ptr<Type> Sema::checkStructuredValue(const StructuredValueExpr& E) {
             }
             if (arm.Value) {
                 if (Named) ExpectedValueType_ = Named->Ty;
-                (void)checkExpr(*arm.Value);
+                auto valTy = checkExpr(*arm.Value);
                 ExpectedValueType_ = nullptr;
+                // The result was DISCARDED here, so a component value of any
+                // type at all was accepted and then stored at the field's
+                // address: `outer[n: iv; m: 9]` with `iv` a 64-byte record and
+                // `n` an integer emitted a 64-byte store into an 8-byte field
+                // and took the stack with it.  The array arm above has always
+                // asked this question.
+                if (Named && Named->Ty && !Named->Ty->isError()
+                        && !valTy->isError()
+                        && !isAssignCompatible(*Named->Ty, *valTy))
+                    error(arm.Value->Loc, diag::err_assign_mismatch,
+                          {valTy->Name, Named->Ty->Name});
                 if (Named) adoptSetType(*arm.Value, Named->Ty);
             }
         }
@@ -956,9 +1005,19 @@ std::shared_ptr<Type> Sema::checkStructuredValue(const StructuredValueExpr& E) {
     }
 
     if (T->Kind == TypeKind::Set) {
-        // Typed set constructor — treat each arm's labels as set elements.
+        // Typed set constructor — each arm's labels are set elements, and
+        // ISO §6.7.1 requires them to be of the set's base type.  Nothing asked,
+        // so `cs['x', 300]` for a `set of col` compiled and produced the empty
+        // set -- the untyped form `['x']` in the same context IS caught, so the
+        // two spellings of one construct disagreed about whether it was legal.
         for (const auto& arm : E.Arms) {
-            for (const auto& lbl : arm.Labels) (void)checkExpr(*lbl);
+            for (const auto& lbl : arm.Labels) {
+                auto lblTy = checkExpr(*lbl);
+                if (T->ElemType && !T->ElemType->isError() && !lblTy->isError()
+                        && !isAssignCompatible(*T->ElemType, *lblTy))
+                    error(lbl->Loc, diag::err_assign_mismatch,
+                          {lblTy->Name, T->ElemType->Name});
+            }
             if (arm.Value) (void)checkExpr(*arm.Value);
         }
         return T;

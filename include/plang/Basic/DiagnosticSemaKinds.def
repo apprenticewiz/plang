@@ -108,6 +108,12 @@ DIAG(err_assign_mismatch, Error, "cannot assign '%0' to variable of type '%1'")
 DIAG(err_schema_recursive, Error,
      "schema '%0' contains itself; a schema may only name itself through a "
      "pointer")
+// EP §6.8.7.2: an array-value's case-constant-list selects components of the
+// array, so a label outside the index type selects nothing.  Such an arm was
+// silently discarded -- the value written in the program simply did not appear.
+DIAG(err_constructor_label_out_of_range, Error,
+     "index %0 is outside the array's index type %1, so this component value "
+     "would be discarded")
 DIAG(err_assign_mismatch_packed, Error,
      "cannot assign '%0' to a variable of type '%1': one is packed and the "
      "other is not")

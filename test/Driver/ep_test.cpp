@@ -4333,6 +4333,62 @@ TEST(EP7Schema, TwoSchemasSharingANameAreNotTheSameType) {
               std::string::npos) << R.Stderr;
 }
 
+// EP §6.8.7 structured value constructors were implemented for the cases that
+// work and never given their checking.  Three findings, one cause.
+TEST(EPConstructor, ARecordComponentValueMustFitItsField) {
+    // The record arm discarded checkExpr's result, so a component value of any
+    // type was accepted and then stored at the field's address: a 64-byte
+    // record into an 8-byte integer field, which took the stack with it.  The
+    // ARRAY arm three lines above had always asked this question.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type inner = record a,b,c,d,e,f,g,h: integer end;\n"
+        "     outer = record n: integer; m: integer end;\n"
+        "var o: outer; iv: inner;\n"
+        "begin iv.a := 1; o := outer[n: iv; m: 9]; writeln(o.n:1) end.\n", kEP);
+    EXPECT_NE(R.ExitCode, 0);
+    EXPECT_NE(R.Stderr.find("cannot assign 'inner'"), std::string::npos) << R.Stderr;
+}
+
+TEST(EPConstructor, AnArrayLabelMustSelectAComponentThatExists) {
+    // The labels SELECT components, so one outside the index type selects
+    // nothing: `arr[... 5: 555; -1: 888]` for an array[1..4] compiled clean and
+    // emitted four stores, and the other component values vanished silently.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type arr = array[1..4] of integer;\n"
+        "var a: arr;\n"
+        "begin a := arr[1: 1; 2: 2; 3: 3; 4: 4; 5: 555]; writeln(a[1]:1) end.\n", kEP);
+    EXPECT_NE(R.ExitCode, 0);
+    EXPECT_NE(R.Stderr.find("outside the array's index type"),
+              std::string::npos) << R.Stderr;
+}
+
+TEST(EPConstructor, ATypedSetConstructorsMembersMustBeItsBaseType) {
+    // checkSetLit ignored the constructor's TYPE NAME and derived the type from
+    // its ELEMENTS, so `cs['x', 300]` for a `set of col` was accepted and
+    // produced the empty set -- while the untyped `['x']` in the same context
+    // IS caught, so the two spellings of one construct disagreed about whether
+    // the program was legal.
+    auto Bad = compileAndRun(
+        "program p(output);\n"
+        "type col = (red, green, blue); cs = set of col;\n"
+        "var s: cs;\n"
+        "begin s := cs['x', 300]; writeln(red in s) end.\n", kEP);
+    EXPECT_NE(Bad.ExitCode, 0);
+    EXPECT_NE(Bad.Stderr.find("cannot assign 'char'"), std::string::npos) << Bad.Stderr;
+
+    // And the legal ones still work, including a range.
+    auto Ok = compileAndRun(
+        "program p(output);\n"
+        "type col = (red, green, blue); cs = set of col; chs = set of char;\n"
+        "var s: cs; c: chs;\n"
+        "begin s := cs[red, blue]; c := chs['a'..'c'];\n"
+        "  writeln(red in s, ' ', green in s, ' ', ('b' in c)) end.\n", kEP);
+    EXPECT_EQ(Ok.ExitCode, 0) << Ok.Stderr;
+    EXPECT_EQ(Ok.Stdout, "true false true\n");
+}
+
 TEST(EP7Schema, DeclaringASchemaParameterDoesNotResizeAnInstanceOfIt) {
     // R4.  The record arm of llvmTypeOfSemaType had the resolved type T in
     // hand and passed only T.RecordDecl to the layout, which then re-read each
