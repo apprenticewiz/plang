@@ -160,7 +160,7 @@ applied once.
 So "where else is this question asked?" is a step, not an afterthought.  A first
 pass, by rule:
 
-## 1. `denoterOf` callers — a spelling walk over a possibly-foreign node
+## 1. `denoterOf` callers — a spelling walk over a possibly-foreign node — SWEPT
 
     lib/CodeGen/CodegenExprs.cpp:1311, 1767, 1770
     lib/CodeGen/CodegenStmts.cpp:931
@@ -169,6 +169,39 @@ Each needs the question asked of it: is the node it walks written HERE, or
 reached from another scope?  The second kind must follow
 `NamedTypeNode::Denotes` instead, as `writtenInitialState` and
 `initialStateShapeOf` now do.
+
+- `CodegenExprs.cpp:1767,1770` (`emitStructuredValue`'s own `shape` lookup) —
+  FIXED.  `denoter` is reached by recursing into a FOREIGN declaration exactly
+  as `initialStateShapeOf`'s own comment describes — a record's
+  `fd.Type.get()` (`fieldDenoter`), an array's `atn->Element.get()` — so an
+  untyped nested component-value, `var r: rec value [f: [1:10; 2:20; 3:30]]`,
+  took its shape from whatever the LOWERING PROCEDURE's own homonym `comp`
+  happened to be, not from `rec`'s real field type.  A procedure with an
+  unrelated local `type comp = record ...`  turned the array literal into
+  `LLVM ERROR: plang codegen: array constructor has no array declaration...`
+  — an abort, not a diagnostic.  Fixed by switching both calls from
+  `denoterOf` to `initialStateShapeOf`, which already exists for this exact
+  pattern and follows `NamedTypeNode::Denotes` (recorded by Sema in the scope
+  the name was actually written in) instead of `typeAliases` (flat, keyed by
+  spelling, rebuilt per procedure).  Test:
+  `EPConstructor.AnUnnamedNestedComponentValueIsShapedByTheFieldsOwnDeclaration`.
+- `CodegenExprs.cpp:1311` (`emitIndex`'s array-alias lower bound) — CHECKED,
+  left alone.  `ntn` here is the indexed variable's OWN declared type node,
+  not a foreign field/element recursion, and whatever wrong `Low` this branch
+  computes is unconditionally overwritten a few lines down by the
+  Sema-type-based answer (`T = schemaUnderlying(e.Array->ResolvedType.get())`)
+  whenever `e.Array->ResolvedType` is set — which it is for every expression
+  that reaches this point with a declaration to read.  Narrower than the
+  emitStructuredValue case and not reproduced; left as a candidate rather than
+  a confirmed fix.
+- `CodegenStmts.cpp:931` (`new(p)`'s domain-denoter lookup, for `p`'s `value`
+  clause) — CHECKED, left alone.  Already guarded by a size-agreement check
+  the surrounding comment documents on purpose: the resolved denoter's size is
+  compared against Sema's own answer, and a mismatch is treated as "the
+  denoter was re-resolved somewhere else" and discarded.  A same-size
+  collision could still slip through silently, but that is narrower than the
+  emitStructuredValue case (which had no such check at all) and not
+  reproduced.
 
 ## 2. One-level `SchemaBody` peels — should they loop? — SWEPT
 

@@ -1764,10 +1764,23 @@ llvm::Value* Codegen::Impl::emitStructuredValue(const StructuredValueExpr& e,
     // EP §6.8.7.1: written with a type name, that name says which declaration
     // gives the bounds and the fields; written without one — as a
     // component-value is — the denoter it stands for was handed in.
-    const TypeNode* shape = denoterOf(denoter);
+    //
+    // `denoter` is reached by recursing into a FOREIGN declaration -- a
+    // record's `fd.Type.get()` (fieldDenoter), an array's `atn->Element.get()`
+    // -- so the names in it were written in that declaration's scope and not
+    // in the procedure being lowered.  denoterOf walks `typeAliases`: flat,
+    // keyed by spelling, rebuilt per procedure, so a homonym in the procedure
+    // being lowered supplied the shape instead: a `comp` field typed as an
+    // array by its own declaration, read through a nested procedure with its
+    // own unrelated `comp`, cast the wrong TypeNode to ArrayTypeNode and
+    // ICE'd ("array constructor has no array declaration").  initialStateShapeOf
+    // is the sibling fix already applied to this same foreign-node pattern
+    // (see its own comment) -- it follows NamedTypeNode::Denotes, which Sema
+    // recorded in the scope the name was actually written in.
+    const TypeNode* shape = initialStateShapeOf(denoter);
     if (!e.TypeName.empty())
         if (auto it = typeAliases.find(toLower(e.TypeName)); it != typeAliases.end())
-            shape = denoterOf(it->second);
+            shape = initialStateShapeOf(it->second);
 
     // ---- Set constructor with type prefix: emit as bitmask ----
     if (e.ResolvedType->Kind == TypeKind::Set) {

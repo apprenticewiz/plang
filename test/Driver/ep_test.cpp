@@ -4465,6 +4465,30 @@ TEST(EPConstructor, ATypedSetConstructorsMembersMustBeItsBaseType) {
     EXPECT_EQ(Ok.Stdout, "true false true\n");
 }
 
+TEST(EPConstructor, AnUnnamedNestedComponentValueIsShapedByTheFieldsOwnDeclaration) {
+    // An untyped nested component-value -- `[f: [1:10; ...]]`, with no
+    // TypeName on the inner array -- gets its shape from the FIELD's own
+    // declared denoter, reached by recursing into `rec`'s declaration
+    // (fieldDenoter) rather than from anything written in the procedure being
+    // lowered.  emitStructuredValue resolved that foreign TypeNode with
+    // denoterOf, which walks typeAliases -- flat, keyed by spelling, rebuilt
+    // per procedure -- so an unrelated local `comp` in `outer` (a record, not
+    // `rec`'s array field type of the same name) supplied the shape instead:
+    // "array constructor has no array declaration to take its bounds and
+    // element type from", an LLVM ERROR abort rather than a diagnostic.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type comp = array[1..3] of integer;\n"
+        "     rec = record f: comp end;\n"
+        "procedure outer;\n"
+        "type comp = record z: integer end;\n"
+        "var r: rec value [f: [1:10; 2:20; 3:30]];\n"
+        "begin writeln(r.f[1]:1, ' ', r.f[2]:1, ' ', r.f[3]:1) end;\n"
+        "begin outer end.\n", kEP);
+    EXPECT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "10 20 30\n");
+}
+
 TEST(EPProtected, EveryWayOfWritingToAProtectedParameterIsRefused) {
     // EP §6.7.3.1.  The check walked nested INDEX expressions only, and ran
     // from the assignment statement alone -- so of the four ways a program
