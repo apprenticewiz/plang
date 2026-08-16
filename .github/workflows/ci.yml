@@ -262,6 +262,70 @@ jobs:
           # grep above cannot pass for some reason unrelated to the catalog.
           ! plang bad.pas -o bad 2>&1 | grep -q '\[!'
 
+  optimized:
+    name: emitted programs at -O1/-O2/-O3
+    runs-on: ubuntu-latest
+
+    # The suite compiles the programs it runs at -O0, and so does the
+    # acceptance test.  A defect that only the optimizer acts on is therefore
+    # invisible to all 1,795 of them.
+    #
+    # That is not hypothetical.  A `packed record` field was emitted with the
+    # alignment of its own type rather than the record's, so a `set of char` at
+    # an odd offset produced `store i256 ..., align 16` -- true at -O0, where
+    # the backend used scalar moves, and fatal from -O1, where it emits
+    # `movaps`.  iso7185pat.pas, the project's own acceptance program, died at
+    # -O2 after 935 of its 1,211 lines and had done since the beginning.
+    #
+    # PLANG_TEST_EXTRA_FLAGS changes what the tests tell plang to do, not how
+    # plang itself is built, so one build serves all three levels.
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install LLVM and lld
+        run: |
+          sudo apt-get update
+          wget -qO llvm.sh https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh "$LLVM_VERSION"
+          sudo apt-get install -y \
+            "llvm-$LLVM_VERSION" \
+            "llvm-$LLVM_VERSION-dev" \
+            "lld-$LLVM_VERSION"
+
+      - name: Put llc and ld.lld on PATH under their unversioned names
+        run: |
+          sudo ln -sf "/usr/bin/llc-$LLVM_VERSION"    /usr/local/bin/llc
+          sudo ln -sf "/usr/bin/ld.lld-$LLVM_VERSION" /usr/local/bin/ld.lld
+
+      - name: Install build dependencies
+        run: sudo apt-get install -y ninja-build libgtest-dev
+
+      - name: Configure
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DPLANG_ENABLE_TESTS=ON \
+            -DLLVM_DIR="/usr/lib/llvm-$LLVM_VERSION/lib/cmake/llvm"
+
+      - name: Build
+        run: cmake --build build -j"$(nproc)"
+
+      - name: Test with emitted programs at -O1
+        run: ctest --test-dir build -j"$(nproc)" --output-on-failure
+        env:
+          PLANG_TEST_EXTRA_FLAGS: -O1
+
+      - name: Test with emitted programs at -O2
+        run: ctest --test-dir build -j"$(nproc)" --output-on-failure
+        env:
+          PLANG_TEST_EXTRA_FLAGS: -O2
+
+      - name: Test with emitted programs at -O3
+        run: ctest --test-dir build -j"$(nproc)" --output-on-failure
+        env:
+          PLANG_TEST_EXTRA_FLAGS: -O3
+
   sanitizers:
     name: asan + ubsan
     runs-on: ubuntu-latest
