@@ -207,3 +207,26 @@ the kind does not.
 
 `isVarStringLike` was needed by assignment, `+`, `length`, comparison AND substr
 together.  The same question applies to any predicate added for one operator.
+
+### Why that one needs both halves at once — an attempt, reverted
+
+The Sema guard tests the IMMEDIATE body's kind where it should test the
+underlying one.  Correcting just that makes the program compile and then die in
+codegen:
+
+    LLVM ERROR: plang codegen: record has no field named 'id'
+
+because the field LOOKUP peels one level too.  Sema accepting what codegen
+aborts on is strictly worse than the clean rejection it replaces, so the attempt
+was reverted — as two earlier attempts recorded above were, for the same reason.
+
+Both halves have to move together:
+
+    lib/Sema/SemaExpr.cpp   the `Undiscriminated && SchemaBody->Kind != Record`
+                            guard — use schemaUnderlying(SchemaBody)
+    lib/CodeGen             the field lookup resolving a name against the body's
+                            RecordFields, which needs the same widening
+
+That pairing is the shape of the remaining schema work, not a detail of this one
+defect: Sema decides a program is legal and CodeGen must be able to lay it out,
+and widening either alone turns a diagnostic into an internal error.
