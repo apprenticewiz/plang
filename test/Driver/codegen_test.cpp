@@ -4679,6 +4679,57 @@ TEST(Shadowing, TwoEnumerationsSharingANameAreNotTheSameType) {
               std::string::npos) << R.Stderr;
 }
 
+TEST(Shadowing, AnInitialStateComesFromTheComponentTypeThatWasWritten) {
+    // The `value`-clause walk was fixed once, in writtenInitialState, which
+    // follows the chain of type NAMES.  The descent beside it -- the one that
+    // recurses into a record's fields and an array's elements to find whether
+    // any COMPONENT has an initial state -- still used denoterOf, which walks
+    // the flat, spelling-keyed typeAliases rebuilt per procedure.
+    //
+    // So a homonym in the procedure being lowered supplied the shape, and the
+    // record branch then called layoutOf on the WRONG record and GEP'd the real
+    // object with its offsets: a `value` clause seven fields deep in an inner
+    // `inner` wrote 999 at offset 56 of a 16-byte allocation.
+    //
+    // BE CLEAR WHAT THIS TEST CATCHES.  Measured against the parent commit: it
+    // PASSES there.  The over-run lands in heap nothing else reads, so the
+    // program exits 0 printing exactly this line; only
+    // test/tools/run-under-guardheap.sh reports it (SIGSEGV vs clean).  This
+    // case is here for the shape and for a wrong VALUE; the over-run itself is
+    // caught by guardheap and by nothing else in the suite.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type inner = record k: integer end;\n"
+        "     outer = record a: inner; b: integer end;\n"
+        "     po = ^outer;\n"
+        "var g: po;\n"
+        "procedure q;\n"
+        "type inner = record p1,p2,p3,p4,p5,p6,p7: integer;\n"
+        "                    p8: integer value 999 end;\n"
+        "begin new(g); g^.b := 5; writeln('b=', g^.b:1) end;\n"
+        "begin q end.\n", kEP);
+    EXPECT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "b=5\n");
+}
+
+TEST(Shadowing, AnInitialStateIsNotDroppedByAHomonymWithoutOne) {
+    // The same walk in the other direction, and this one is silent: an inner
+    // homonym with no `value` clause made hasInitialState answer false, so the
+    // initialization the type really has was never emitted and the field began
+    // at zero.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type inner = record k: integer value 9; j: integer end;\n"
+        "     outer = record a: inner; b: integer end;\n"
+        "procedure q;\n"
+        "type inner = record k: integer; j: integer end;\n"
+        "var g: outer;\n"
+        "begin writeln('k=', g.a.k:1) end;\n"
+        "begin q end.\n", kEP);
+    EXPECT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "k=9\n");
+}
+
 TEST(Shadowing, NewAllocatesTheDomainOfThePointerTypeThatWasWritten) {
     // Review 5, and the archetype this whole redesign is named for -- still
     // live after R1, one hop away from where R1 looked.  new() resolves the

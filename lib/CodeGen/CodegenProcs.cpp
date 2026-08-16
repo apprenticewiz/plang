@@ -1137,10 +1137,35 @@ const ExprNode* Codegen::Impl::writtenInitialState(const TypeNode* tn,
 // EP §6.6: a structured type begins in the state its components begin in, so
 // a record with one initialized field has an initial state of its own even
 // though nothing was written beside the record.
+/// The shape a denoter has, resolving a type NAME the way Sema resolved it.
+///
+/// Both callers reach their argument by recursing into a FOREIGN declaration --
+/// a record's `fd.Type.get()`, an array's `atn->Element.get()` -- so the names
+/// in it were written in that declaration's scope and not in the procedure
+/// being lowered.  They used denoterOf, which walks `typeAliases`: flat, keyed
+/// by spelling, rebuilt per procedure.  A homonym in the procedure therefore
+/// supplied the shape, and the record branch below then called layoutOf on the
+/// WRONG record and GEP'd the real object with its offsets -- a `value` clause
+/// seven fields deep in an inner homonym wrote 999 at offset 56 of a 16-byte
+/// allocation.  It runs the other way too, dropping an initialization the type
+/// really has, which is silent.
+///
+/// The sibling writtenInitialState was fixed for exactly this and follows
+/// NamedTypeNode::Denotes; this is the descent beside it, which was not.
+const TypeNode* Codegen::Impl::initialStateShapeOf(const TypeNode* tn) const {
+    for (int hops = 0; tn && hops < 32; ++hops) {
+        auto* named = llvm::dyn_cast<NamedTypeNode>(tn);
+        if (!named) return tn;
+        if (!named->Denotes || named->Denotes == tn) return tn;
+        tn = named->Denotes;
+    }
+    return tn;
+}
+
 bool Codegen::Impl::hasInitialState(const TypeNode* tn, int depth) const {
     if (!tn || depth > 16) return false;
     if (writtenInitialState(tn)) return true;
-    const TypeNode* shape = denoterOf(tn);
+    const TypeNode* shape = initialStateShapeOf(tn);
     // EP §6.4.7 with §6.6: `t(5)` is written as a schema instantiation, and
     // what it denotes is the schema's body.  Neither this nor emitInitialState
     // looked through one, so a `value` clause inside a schema body was dropped
@@ -1167,7 +1192,7 @@ void Codegen::Impl::emitInitialState(llvm::Value* ptr, llvm::Type* ty,
         return;
     }
 
-    const TypeNode* shape = denoterOf(tn);
+    const TypeNode* shape = initialStateShapeOf(tn);
     // See hasInitialState.  The body is laid out under THIS instantiation's
     // discriminants: a body holding a `string(n)` has a different shape per
     // instance, and initializing it through the unbound layout would write the

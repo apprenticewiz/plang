@@ -1478,6 +1478,9 @@ struct Codegen::Impl {
     /// with; `carrier` receives the denoter that bears it.
     const ExprNode* writtenInitialState(const TypeNode* tn,
                                         const TypeNode** carrier = nullptr) const;
+    /// The shape of a denoter, resolving type names as Sema did; see the
+    /// definition for why denoterOf is the wrong question here.
+    const TypeNode* initialStateShapeOf(const TypeNode* tn) const;
     bool hasInitialState(const TypeNode* tn, int depth = 0) const;
     /// The body denoter a schema instantiation `t(5)` stands for.
     const TypeNode* schemaInstanceBody(const TypeNode* tn) const;
