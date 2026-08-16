@@ -1021,6 +1021,30 @@ TEST(EP6ConformantArray, MultiDimAssignmentThroughAVarParameter) {
     EXPECT_EQ(R.Stdout, "5 6 7 105 106 107 \n");
 }
 
+TEST(EP6ConformantArray, ASchemaInstanceElementTypeIndexesWithTheRightBounds) {
+    // `a[lo][2]` indexes past the conformant dimension into the STATIC
+    // element type -- here `row = vec(3)`, a schema instantiation, not a bare
+    // array.  The check gating the lower-bound adjustment asked only
+    // `at->Kind == Array`, so a SchemaInstance element fell to the untyped
+    // i64 GEP below: no lower-bound subtraction, and an element stride of 8
+    // bytes instead of the array's own 24, which together landed the write
+    // one whole element past where it belongs.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type vec(n: integer) = array[1..n] of integer;\n"
+        "     row = vec(3);\n"
+        "procedure fill(var a: array[lo..hi: integer] of row);\n"
+        "begin a[lo][2] := 99 end;\n"
+        "var m: array[1..2] of row; i, j: integer;\n"
+        "begin\n"
+        "  for i := 1 to 2 do for j := 1 to 3 do m[i][j] := 0;\n"
+        "  fill(m);\n"
+        "  writeln(m[1][1]:1, ' ', m[1][2]:1, ' ', m[1][3]:1)\n"
+        "end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "0 99 0\n");
+}
+
 TEST(EP6ConformantArray, MultiDimRowWidthComesFromTheActual) {
     // Two actuals of different widths reach the same routine; the row stride
     // has to come from the bounds passed with each of them.

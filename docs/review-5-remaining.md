@@ -281,7 +281,7 @@ one hop.  Regression test:
 (test/Driver/ep_test.cpp) — mutation-tested against the pre-fix code, per the
 lesson two sections up.
 
-## 3. Questions asked of the KIND that belong to the STORAGE — SWEPT, nothing found
+## 3. Questions asked of the KIND that belong to the STORAGE — SWEPT, one defect found
 
 Two defects had this shape and both were memory corruption: the whole-value copy
 branch asked for Array-or-Record and missed SchemaInstance, and `with` skipped
@@ -308,11 +308,19 @@ and a function-call RHS can't reach a `value`-clause at all, since variables
 (Phase 4) are lowered before procedures (Phase 5) register any symbols,
 likewise confirmed.  Checked, not a defect.
 
-One candidate remains speculative and unreproduced: `CodegenExprs.cpp:1188`'s
-per-dimension `Kind == TypeKind::Array` test in conformant-array multi-dimension
-indexing does not call `schemaUnderlying` for a dimension whose element is
-itself a nested schema instantiation.  Left as a candidate for whoever next
-touches conformant-array indexing; not attempted here.
+The one candidate left speculative was pursued further and confirmed —
+FIXED.  `CodegenExprs.cpp`'s per-dimension `Kind == TypeKind::Array` test in
+conformant-array indexing, past the conformant dimensions and into the STATIC
+element type, missed a schema instantiation there: `row = vec(3)` for
+`vec(n) = array[1..n] of integer`.  `a[lo][2]` for a
+`var a: array[lo..hi: integer] of row` fell to the untyped i64 GEP fallback —
+no lower-bound subtraction AND an 8-byte stride instead of the array's own
+24 — and landed the write one whole element past where it belongs (`m[1][3]`
+got the value meant for `m[1][2]`), silently, exit 0.  Fixed by resolving the
+element's Sema type through `schemaUnderlying` before the `Kind` test, the
+same widening as every other site in §2.  Test:
+`EP6ConformantArray.ASchemaInstanceElementTypeIndexesWithTheRightBounds`,
+mutation-tested against the pre-fix code.
 
 ## 4. Checks that exist for one construct and not its neighbours — SWEPT, three defects found
 

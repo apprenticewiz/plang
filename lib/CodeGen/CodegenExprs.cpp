@@ -1194,6 +1194,13 @@ llvm::Value* Codegen::Impl::emitConformantElemPtr(const IndexExpr& e) {
     for (size_t d = nflat; d < subs.size(); ++d) {
         const Type* at = (d < arrs.size() && arrs[d]) ? arrs[d]->ResolvedType.get()
                                                       : nullptr;
+        // The element type of a conformant array's own element may itself be
+        // a schema instantiation -- `row = vec(3)` -- and the bounds and
+        // stride belong to what it underlies to, not to the immediate Kind.
+        // Without this, `a[lo][2]` for such a `row` fell to the untyped i64
+        // GEP below with no lower-bound adjustment: wrong element type AND
+        // wrong offset, landing the write one element past where it belongs.
+        if (at) at = schemaUnderlying(at);
         auto* idx = toI64(emitExpr(*subs[d]));
         if (at && at->Kind == TypeKind::Array) {
             if (at->IndexType && at->IndexType->SubLo != 0)
