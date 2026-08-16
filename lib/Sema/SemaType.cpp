@@ -70,12 +70,35 @@ std::string describeBound(const Type& T, int64_t V) {
 std::optional<std::pair<int64_t, int64_t>>
 Sema::foldBounds(const ExprNode& Low, const ExprNode& High,
                  const Type& Base, DiagID LowID, DiagID HighID) {
+    // Whether THESE bounds read a discriminant, which decides whether the
+    // numbers below are this program's or the probe's.
+    const bool SavedUsed = SchemaBindingUsed_;
+    SchemaBindingUsed_   = false;
     const auto Lo = constBound(Low);
     const auto Hi = constBound(High);
+    const bool UsedDisc = SchemaBindingUsed_;
+    SchemaBindingUsed_  = SavedUsed || SchemaBindingUsed_;
+
     if (!Lo) error(Low.Loc,  LowID);
     if (!Hi) error(High.Loc, HighID);
     if (!Lo || !Hi) return std::nullopt;
     if (*Lo > *Hi) {
+        // A schema body is resolved once with its discriminants bound to 1, to
+        // get its element and field TYPES; its extents are the probe's and are
+        // marked ExtentVaries so nothing uses them.  Diagnosing them was the
+        // one thing that did use them, and it rejected legal programs:
+        // `array[2..n]` folds to 2..1 at the probe, `array[1..n-1]` to 1..0,
+        // and the message quoted bounds the user never wrote.
+        //
+        // Only when the bound READ a discriminant.  `array[5..2]` is empty in
+        // every instantiation and is still refused here -- being wrong about
+        // the probe's numbers is not a reason to stop checking constant ones.
+        //
+        // The real bounds are checked where they are real: each instantiation
+        // resolves the body again with its own values, and t(1) for a body of
+        // `array[2..n]` is refused there.
+        if (ProbeBindingsActive_ && UsedDisc)
+            return std::pair{*Lo, *Lo};   // a shape for the probe, not an extent
         error(Low.Loc, diag::err_bound_range_inverted,
               {describeBound(Base, *Lo), describeBound(Base, *Hi)});
         return std::nullopt;

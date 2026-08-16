@@ -4152,6 +4152,57 @@ TEST(UndiscriminatedString, AVarParameterUsesTheActualsOwnCapacity) {
               std::string::npos) << R.Stderr;
 }
 
+TEST(EP7Schema, TheProbesDiscriminantDoesNotDiagnoseTheProgram) {
+    // A schema body is resolved once with its discriminants bound to 1, to get
+    // its element and field TYPES; its extents are the probe's and are marked
+    // ExtentVaries so nothing uses them.  Diagnosing them was the one thing
+    // that did, and it rejected legal programs: `array[2..n]` folds to 2..1 at
+    // the probe, `array[1..n-1]` to 1..0, and the message quoted bounds the
+    // program never wrote.
+    for (const char* body : {"record a: array[2..n] of integer end",
+                             "record a: array[1..n-1] of integer end"}) {
+        auto R = compileAndRun(
+            "program p(output);\n"
+            "type t(n: integer) = " + std::string(body) + ";\n"
+            "var q: ^t;\n"
+            "begin new(q, 5); q^.a[2] := 7; writeln(q^.a[2]:1) end.\n",
+            std::string(kEP) + " -frange-checks");
+        EXPECT_EQ(R.ExitCode, 0) << body << ": " << R.Stderr;
+        EXPECT_EQ(R.Stdout, "7\n") << body;
+    }
+}
+
+TEST(EP7Schema, AnEmptyRangeIsStillRefusedWhereItIsReallyEmpty) {
+    // The suppression above is narrow on purpose, and these hold the line.
+    // Both pass against the parent commit too: this guards the FIX from being
+    // over-applied rather than catching the original defect, which is what a
+    // guard is for.  Widening the suppression to every inverted bound would
+    // pass the test above and silently accept an array with no elements.
+    //
+    // A bound that reads NO discriminant is the same in every instantiation,
+    // so the probe's numbers are the program's and `array[5..2]` is still
+    // refused inside a schema body.  And a bound that does read one is checked
+    // where it is real: t(1) for a body of `array[2..n]` is 2..1 in that
+    // instantiation and refused there, with the instantiation's own values.
+    auto Const = compileAndRun(
+        "program p(output);\n"
+        "type t(n: integer) = record a: array[5..2] of integer end;\n"
+        "var q: ^t;\n"
+        "begin new(q, 9); writeln('no') end.\n", kEP);
+    EXPECT_NE(Const.ExitCode, 0);
+    EXPECT_NE(Const.Stderr.find("lower bound 5 exceeds upper bound 2"),
+              std::string::npos) << Const.Stderr;
+
+    auto Inst = compileAndRun(
+        "program p(output);\n"
+        "type t(n: integer) = array[2..n] of integer;\n"
+        "var v: t(1);\n"
+        "begin v[2] := 1; writeln('no') end.\n", kEP);
+    EXPECT_NE(Inst.ExitCode, 0);
+    EXPECT_NE(Inst.Stderr.find("lower bound 2 exceeds upper bound 1"),
+              std::string::npos) << Inst.Stderr;
+}
+
 TEST(EP7Schema, DeclaringASchemaParameterDoesNotResizeAnInstanceOfIt) {
     // R4.  The record arm of llvmTypeOfSemaType had the resolved type T in
     // hand and passed only T.RecordDecl to the layout, which then re-read each

@@ -1,7 +1,7 @@
 # Review 5: what is left, and what was learned trying
 
-Review 5 found 27 unique defects; 24 survived adversarial verification and 21
-are fixed.  This records the three still open, with what an attempt on each
+Review 5 found 27 unique defects; 24 survived adversarial verification and 22
+are fixed.  This records the two still open, with what an attempt on each
 actually cost, so the next person does not rediscover it.
 
 ## 1. A bare `string` as a VAR parameter — FIXED
@@ -53,12 +53,24 @@ the ones supplying the extents.
 `import a, b;` is rejected; only `import a; import b;` parses.  Unverified by me
 beyond the finder's report and the verification pass.
 
-## 4. The probe's discriminant value of 1 reaches user diagnostics
+## 4. The probe's discriminant value of 1 in diagnostics — FIXED
 
-A schema body is resolved once with its discriminants bound to 1, and that 1
-escapes into messages, rejecting legal programs whose body is only degenerate at
-1.  R3 removed the probe from the extents that CodeGen uses; it is still what
-Sema DIAGNOSES against.
+A schema body is resolved once with its discriminants bound to 1, to get its
+element and field TYPES.  Its extents are the probe's and are marked
+`ExtentVaries` so nothing uses them — except the bound check, which diagnosed
+them and rejected legal programs:
+
+    type t(n: integer) = record a: array[2..n] of integer end;   { 2..1 }
+    type t(n: integer) = array[1..n-1] of integer;               { 1..0 }
+
+with a message quoting bounds the program never wrote.
+
+`foldBounds` now suppresses the inverted-bound error when the probe is active
+AND the bound actually READ a discriminant.  Narrow on purpose: `array[5..2]`
+inside a schema body reads none, is empty in every instantiation, and is still
+refused; and a bound that does read one is checked where it is real, since each
+instantiation resolves the body again with its own values — `t(1)` for a body of
+`array[2..n]` is refused there, quoting that instantiation's numbers.
 
 ## 5. `chr`/`succ`/`pred` unchecked — REFUTED, listed so it is not re-filed
 
