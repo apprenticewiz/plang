@@ -745,11 +745,19 @@ std::shared_ptr<Type> Sema::checkCallExpr(const CallExpr& E) {
             }
             return ArgTy;
         }
-        // EP §6.7.6.7: substr/trim return the same string capacity as their input.
+        // EP §6.7.6.7: substr/trim return the same string capacity as their
+        // input.  ISO §6.4.3.2's other string shape -- a packed array[1..n] of
+        // char -- is string-like too (isCharStringType), and was missing here:
+        // it type-checked into the generic TyStr fallback instead of a
+        // capacity of its own, and codegen had no case for it at all, so
+        // `substr(charArr, 1, 3)` link-failed on an undefined runtime symbol.
         if ((Lo == "substr" || Lo == "trim") && !E.Args.empty()) {
             auto ArgTy = checkExpr(*E.Args[0]);
             for (size_t I = 1; I < E.Args.size(); ++I) (void)checkExpr(*E.Args[I]);
-            return isVarStringLike(ArgTy.get()) ? ArgTy : TyStr;
+            if (isVarStringLike(ArgTy.get())) return ArgTy;
+            if (!ArgTy->isError() && isCharStringType(*ArgTy))
+                return Ctx_.getVarString(charStringLength(*ArgTy));
+            return TyStr;
         }
         // EP §6.7.6.2: math functions extended to complex — return complex when
         // the argument is complex, real otherwise.

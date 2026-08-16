@@ -908,6 +908,15 @@ llvm::Value* Codegen::Impl::emitCallExpr(const CallExpr& e) {
         if (e.Args.size() <= (size_t)idx) return {nullptr, nullptr};
         const auto& arg = *e.Args[idx];
         if (exprIsVarStr(arg)) return strAddrAndCap(arg);
+        // ISO §6.4.3.2's other string shape — a packed array[1..n] of char —
+        // is the sibling comparison already widens for (exprIsStringLike,
+        // above); length/substr/trim/index only asked exprIsVarStr and fell
+        // through to a raw-strlen fallback that read the whole array as an
+        // i64-sized value and passed it where a pointer was wanted, an LLVM
+        // IR verifier failure, or (for substr/trim/index) to a runtime symbol
+        // codegen never emits.
+        if (exprIsCharStr(arg))
+            return {emitCharStrAsStr(arg), i64c(exprCharStrLen(arg))};
         // String literal — create a temp VarString.
         if (auto* sl = llvm::dyn_cast<StringLitExpr>(&arg)) {
             int64_t cap = (int64_t)sl->Value.size();
@@ -922,6 +931,7 @@ llvm::Value* Codegen::Impl::emitCallExpr(const CallExpr& e) {
         if (e.Args.size() <= (size_t)idx) return 0;
         const auto& arg = *e.Args[idx];
         if (exprIsVarStr(arg)) return exprStrCapStatic(arg);
+        if (exprIsCharStr(arg)) return exprCharStrLen(arg);
         if (auto* sl = llvm::dyn_cast<StringLitExpr>(&arg))
             return (int64_t)sl->Value.size();
         return 0;

@@ -281,7 +281,7 @@ one hop.  Regression test:
 (test/Driver/ep_test.cpp) — mutation-tested against the pre-fix code, per the
 lesson two sections up.
 
-## 3. Questions asked of the KIND that belong to the STORAGE
+## 3. Questions asked of the KIND that belong to the STORAGE — SWEPT, nothing found
 
 Two defects had this shape and both were memory corruption: the whole-value copy
 branch asked for Array-or-Record and missed SchemaInstance, and `with` skipped
@@ -289,10 +289,72 @@ the access path for any SchemaInstance.  Any remaining `Kind == TypeKind::...`
 test that decides *how something is laid out* is a candidate; the path knows and
 the kind does not.
 
-## 4. Checks that exist for one construct and not its neighbours
+Swept every layout-deciding `Kind ==` check in `lib/CodeGen/*.cpp`.  Everything
+that can plausibly reach a schema-instance component already calls
+`schemaUnderlying()` (the prior sibling-sweep fixes, §2 above, widened exactly
+these sites).  One looked like the exact bug shape --
+`CodegenProcs.cpp:1091-1094`'s `storeInitialValue` `isAggregate` test
+(`Array || Record`, missing `SchemaInstance`) -- and was tried against three
+repros (an identifier and a field-access RHS for a `value`-initialized
+schema-instance variable).  All three produced correct output, not corruption:
+`emitExpr` for an aggregate-typed `IdentExpr`/`FieldExpr` always returns the
+loaded VALUE (LLVM permits loading a whole struct/array into an SSA register),
+never a pointer, so the existing no-op coercion plus a plain store already
+copies correctly regardless of the missing `Kind` case.  The only RHS shape
+that could reach that branch as a pointer -- a structured-value constructor --
+is already refused for a schema-instance target at Sema
+(`checkStructuredValue`, `err_constructor_not_aggregate`), confirmed by test;
+and a function-call RHS can't reach a `value`-clause at all, since variables
+(Phase 4) are lowered before procedures (Phase 5) register any symbols,
+likewise confirmed.  Checked, not a defect.
+
+One candidate remains speculative and unreproduced: `CodegenExprs.cpp:1188`'s
+per-dimension `Kind == TypeKind::Array` test in conformant-array multi-dimension
+indexing does not call `schemaUnderlying` for a dimension whose element is
+itself a nested schema instantiation.  Left as a candidate for whoever next
+touches conformant-array indexing; not attempted here.
+
+## 4. Checks that exist for one construct and not its neighbours — SWEPT, three defects found
 
 `isVarStringLike` was needed by assignment, `+`, `length`, comparison AND substr
 together.  The same question applies to any predicate added for one operator.
+
+ISO §6.4.3.2's OTHER string shape, `packed array[1..n] of char`
+(`isCharStringType`, `Type.h`), has the identical requirement and was missing it
+in three of its siblings.  Assignment and comparison already widen for it
+(`exprIsStringLike` includes `exprIsCharStr`); `read`/`write` do too.
+`length`/`substr`/`trim`/`index` did not, asking only `exprIsVarStr` — FIXED:
+
+- `CodegenExprs.cpp`'s `getStrArgPtr` (feeds all four builtins) and
+  `strArgCapStatic` (feeds substr/trim's result sizing) now check
+  `exprIsCharStr` and build the temporary VarString the same way the
+  comparison operators already do (`emitCharStrAsStr`).  Before the fix,
+  `length(a)` for a char-string `a` fell to a `strlen(ptr)` fallback that
+  loaded the whole fixed-size array as an LLVM value where a pointer was
+  wanted — an LLVM IR verifier abort, not a diagnostic — and
+  `substr`/`trim`/`index` link-failed on a runtime symbol codegen never
+  emitted a definition for.
+- `SemaExpr.cpp`'s substr/trim return-type rule (`isVarStringLike(ArgTy) ?
+  ArgTy : TyStr`) now also recognizes `isCharStringType`, returning a
+  `string(n)` of the array's own length instead of falling through to the
+  generic 255-capacity placeholder.
+- `exprStrCapV` (`CodegenSchema.cpp`) now answers a char-string's own length
+  instead of 0 — needed because substr/trim's capacity-forwarding case
+  recurses into it on the argument, and 0 would have capped a chained
+  `substr(substr(charArr, ...), ...)` at zero characters.
+
+Test: `CharStringType.WorksWithLengthSubstrTrimAndIndexLikeAnEPString`
+(test/Driver/codegen_test.cpp) — mutation-tested against the pre-fix code (the
+LLVM IR verifier failure reproduces exactly).
+
+One further gap was found and NOT fixed: `+` concatenation
+(`SemaExpr.cpp`, the `Plus` case) also omits `isCharStringType`, so
+`charArrA + charArrB` is rejected as non-numeric where the same two operands
+already compare equal.  Left alone: `isCharStringType`'s own doc comment
+enumerates exactly the powers ISO §6.4.3.2 gives the type — "written, compared,
+and assigned a string literal" — and concatenation is not among them, so this
+reads as a deliberate scope limit rather than a missed sibling.  Flagged here
+in case a closer reading of §6.8.3.6 says otherwise.
 
 ### Why that one needs both halves at once — an attempt, reverted, then landed
 

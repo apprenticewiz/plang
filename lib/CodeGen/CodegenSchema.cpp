@@ -380,6 +380,11 @@ void Codegen::Impl::emitNewSchema(const ExprNode& ptrArg,
 }
 
 llvm::Value* Codegen::Impl::exprStrCapV(const ExprNode& e) {
+    // ISO §6.4.3.2's other string shape, `packed array[1..n] of char`, has a
+    // capacity too -- exprStrCap answers 0 for it, being VarString-only, so a
+    // substr/trim chained off a char-string argument (below) capped its
+    // result at zero characters instead of n.
+    if (exprIsCharStr(e)) return i64c(exprCharStrLen(e));
     if (!exprIsVarStr(e) || !e.ResolvedType->ExtentVaries)
         return i64c(exprStrCap(e));
 

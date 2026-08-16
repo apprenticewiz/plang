@@ -3410,6 +3410,29 @@ TEST(CharStringType, GoesWhereAnEPStringIsExpected) {
     EXPECT_EQ(R.Stdout, "hello!\ntrue\n");
 }
 
+TEST(CharStringType, WorksWithLengthSubstrTrimAndIndexLikeAnEPString) {
+    // isVarStringLike has a documented sibling requirement: every string
+    // operator has to widen for EP string(n) together, or the narrow ones
+    // supply wrong answers.  ISO §6.4.3.2's OTHER string shape had the same
+    // requirement and was missing it here: assignment and comparison already
+    // accepted a packed array[1..n] of char (the test above), but
+    // length/substr/trim/index only asked exprIsVarStr.  length fell to a
+    // strlen(ptr) fallback that loaded the whole array as an LLVM value and
+    // passed it where a pointer was wanted -- an LLVM IR verifier failure.
+    // substr/trim/index type-checked (substr/trim) or arity-checked (index)
+    // clean and then link-failed on a runtime symbol codegen never emits.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "var a: packed array[1..5] of char;\n"
+        "begin a := 'hello';\n"
+        "  writeln(length(a):1);\n"
+        "  writeln(substr(a, 2, 3));\n"
+        "  writeln(index(a, 'll'):1);\n"
+        "  writeln('[', trim(a), ']') end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "5\nell\n3\n[hello]\n");
+}
+
 // ISO §6.8.2.3: a procedure-statement names a procedure.  A required function
 // written as one used to reach codegen, which called a runtime routine that
 // does not exist, or one with the wrong arguments and no diagnostic at all.
