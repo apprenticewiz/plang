@@ -382,6 +382,19 @@ void Codegen::Impl::emitReadArg(const ExprNode& arg, llvm::Value* fp) {
     if (convert)
         builder.CreateStore(
             coerceToType(builder.CreateLoad(readTy, dest, "rd.val"), ty), addr);
+
+    // ISO §6.9.1 makes read(f, v) into `v := f^`, so §6.4.6's requirement that
+    // the value lie within a subrange's interval applies here exactly as it
+    // does to an assignment written out.  Nothing checked it, so `read(d)` for
+    // `d: 1..9` accepted 99 and left the variable holding a value its type
+    // cannot represent -- which every later use then trusts: an array indexed
+    // by it, a case selector, a `for` bound.
+    if (const auto& rt = arg.ResolvedType;
+            rt && rt->Kind == TypeKind::Subrange && rt->SubLo != rt->SubHi) {
+        auto* got = builder.CreateLoad(ty, addr, "rd.chk");
+        emitRangeCheck(toI64(got), rt->SubLo, rt->SubHi,
+                       /*isIndex=*/false, arg.Loc);
+    }
 }
 
 /// Advances past the rest of the current line on fp (or stdin).

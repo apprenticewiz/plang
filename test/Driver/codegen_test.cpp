@@ -4770,6 +4770,37 @@ TEST(Storage, ARecordsFieldsAreDistinctAcrossItsVariants) {
               std::string::npos) << SameOffset.Stderr;
 }
 
+TEST(Storage, ReadIntoASubrangeChecksItsRange) {
+    // ISO §6.9.1 makes read(f, v) into `v := f^`, so §6.4.6's requirement that
+    // the value lie within a subrange's interval applies exactly as it does to
+    // an assignment written out.  Nothing checked it, so `read(d)` for
+    // `d: 1..9` accepted 99 and left the variable holding a value its type
+    // cannot represent -- which everything downstream then trusts: an array
+    // indexed by it, a case selector, a `for` bound.
+    auto Ok = compileAndRun(
+        "program p(output);\n"
+        "var d: 1..9;\n"
+        "begin read(d); writeln('d=', d:1) end.\n", "-frange-checks", "5\n");
+    EXPECT_EQ(Ok.ExitCode, 0) << Ok.Stderr;
+    EXPECT_EQ(Ok.Stdout, "d=5\n");
+
+    auto Bad = compileAndRun(
+        "program p(output);\n"
+        "var d: 1..9;\n"
+        "begin read(d); writeln('d=', d:1) end.\n", "-frange-checks", "99\n");
+    EXPECT_NE(Bad.ExitCode, 0);
+    EXPECT_NE(Bad.Stderr.find("out of range 1..9"), std::string::npos) << Bad.Stderr;
+
+    // Gated by the flag, like every other range check: -fno-range-checks is a
+    // statement about what the program pays for, not about what is legal.
+    auto Off = compileAndRun(
+        "program p(output);\n"
+        "var d: 1..9;\n"
+        "begin read(d); writeln('d=', d:1) end.\n", "-fno-range-checks", "99\n");
+    EXPECT_EQ(Off.ExitCode, 0) << Off.Stderr;
+    EXPECT_EQ(Off.Stdout, "d=99\n");
+}
+
 TEST(Shadowing, NewAllocatesTheDomainOfThePointerTypeThatWasWritten) {
     // Review 5, and the archetype this whole redesign is named for -- still
     // live after R1, one hop away from where R1 looked.  new() resolves the
