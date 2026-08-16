@@ -595,6 +595,11 @@ private:
     /// \p Depth bounds the structural comparison of two records that share a
     /// name without sharing a declaration; a record reachable from itself
     /// through a pointer would otherwise recurse without end.
+    /// EP §6.7.3.1 / §6.11.2: diagnose writing through a protected parameter or
+    /// a protected imported variable, whatever access path is written on top of
+    /// it.  Called wherever a variable is WRITTEN, not only in an assignment.
+    void checkNotProtected(const ExprNode& Target, SourceLocation Loc);
+
     [[nodiscard]] bool isAssignCompatible(const Type& Dst, const Type& Src,
                                           bool ExactBounds = false,
                                           int Depth = 0) const;

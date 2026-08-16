@@ -4389,6 +4389,49 @@ TEST(EPConstructor, ATypedSetConstructorsMembersMustBeItsBaseType) {
     EXPECT_EQ(Ok.Stdout, "true false true\n");
 }
 
+TEST(EPProtected, EveryWayOfWritingToAProtectedParameterIsRefused) {
+    // EP §6.7.3.1.  The check walked nested INDEX expressions only, and ran
+    // from the assignment statement alone -- so of the four ways a program
+    // writes to a variable, one was caught:
+    //
+    //   arr[1] := 7   caught      (an index path)
+    //   r.f := 5      NOT caught  (a field path reaches the same storage)
+    //   read(r.f)     NOT caught  (§6.9.1 makes read into an assignment)
+    //   bumpI(r.f)    NOT caught  (a var-parameter actual is written by callee)
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type rec = record f: integer end;\n"
+        "var g: rec; a: array[1..3] of integer;\n"
+        "procedure bumpI(var x: integer); begin x := 99 end;\n"
+        "procedure q(protected r: rec; protected arr: array[1..3] of integer);\n"
+        "begin\n"
+        "  r.f := 5;\n"
+        "  bumpI(r.f);\n"
+        "  read(r.f);\n"
+        "  arr[1] := 7\n"
+        "end;\n"
+        "begin g.f := 1; q(g, a); writeln(g.f:1) end.\n", kEP);
+    EXPECT_NE(R.ExitCode, 0);
+    size_t n = 0, at = 0;
+    while ((at = R.Stderr.find("protected parameter", at)) != std::string::npos) { ++n; ++at; }
+    EXPECT_EQ(n, 4u) << "all four writes must be refused:\n" << R.Stderr;
+}
+
+TEST(EPProtected, DereferencingAProtectedPointerIsStillAllowed) {
+    // The walk stops at a dereference on purpose: `p^ := x` through a protected
+    // pointer modifies what p points AT, not p, and §6.7.3.1 protects the
+    // parameter rather than the object it reaches.  Without this the fix would
+    // have refused a legal program.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type ip = ^integer;\n"
+        "var q: ip;\n"
+        "procedure setit(protected r: ip); begin r^ := 42 end;\n"
+        "begin new(q); q^ := 1; setit(q); writeln(q^:1) end.\n", kEP);
+    EXPECT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "42\n");
+}
+
 TEST(EP7Schema, DeclaringASchemaParameterDoesNotResizeAnInstanceOfIt) {
     // R4.  The record arm of llvmTypeOfSemaType had the resolved type T in
     // hand and passed only T.RecordDecl to the layout, which then re-read each

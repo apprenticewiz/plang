@@ -188,23 +188,7 @@ void Sema::checkAssign(const AssignStmt& S) {
 
     // EP §6.7.3.1: detect assignment to a protected parameter.
     // Also covers A[i] := ... where A is a protected conformant array param.
-    {
-        // Walk nested index expressions to find the base identifier.
-        const ExprNode* base = S.Target.get();
-        while (auto* Ix = llvm::dyn_cast<IndexExpr>(base))
-            base = Ix->Array.get();
-        if (auto* Id = llvm::dyn_cast<IdentExpr>(base)) {
-            Symbol* Sym = Symtab.lookup(Id->Name);
-            // EP §6.11.2: a variable exported 'protected' is protected in the
-            // same way, but for a different reason, and saying "parameter"
-            // about a module's variable would only mislead.
-            if (Sym && Sym->IsProtected)
-                error(S.Loc, Sym->Module.empty()
-                                 ? diag::err_protected_param_assigned
-                                 : diag::err_protected_import_assigned,
-                      {Id->Name});
-        }
-    }
+    checkNotProtected(*S.Target, S.Loc);
 
     auto Src = checkExpr(*S.Value);
 
@@ -463,6 +447,38 @@ void Sema::checkRepeat(const RepeatStmt& S) {
 /// A typed (non-text) file reads a whole component of its own type, whatever
 /// that is, so this only constrains what is read from a textfile -- which is
 /// every read whose first argument is not a typed file.
+/// EP §6.7.3.1 / §6.11.2: writing through a protected parameter or a protected
+/// imported variable, whatever access path is written on top of it.
+///
+/// This walked nested INDEX expressions only, so `arr[1] := 7` was caught and
+/// `r.f := 5` was not -- a field selection reaches the same storage by a
+/// different spelling.  And it was called from the assignment statement alone,
+/// so the two other ways a program writes to a variable went unasked: passing
+/// it as a var-parameter actual, and naming it as a read target.  Both modify
+/// it as surely as an assignment does.
+///
+/// A dereference deliberately stops the walk: `p^ := x` through a protected
+/// pointer modifies what p points AT, not p, and §6.7.3.1 protects the
+/// parameter rather than the object it reaches.
+void Sema::checkNotProtected(const ExprNode& Target, SourceLocation Loc) {
+    const ExprNode* Base = &Target;
+    for (;;) {
+        if (auto* Ix = llvm::dyn_cast<IndexExpr>(Base)) { Base = Ix->Array.get(); continue; }
+        if (auto* Fe = llvm::dyn_cast<FieldExpr>(Base)) { Base = Fe->Record.get(); continue; }
+        break;
+    }
+    auto* Id = llvm::dyn_cast<IdentExpr>(Base);
+    if (!Id) return;
+    Symbol* Sym = Symtab.lookup(Id->Name);
+    if (!Sym || !Sym->IsProtected) return;
+    // EP §6.11.2: a variable exported 'protected' is protected in the same way,
+    // but for a different reason, and saying "parameter" about a module's
+    // variable would only mislead.
+    error(Loc, Sym->Module.empty() ? diag::err_protected_param_assigned
+                                   : diag::err_protected_import_assigned,
+          {Id->Name});
+}
+
 void Sema::checkReadParamType(const Type& T, SourceLocation Loc) {
     const Type* Base = &T;
     while (Base->Kind == TypeKind::Subrange && Base->SubBase)
@@ -623,6 +639,10 @@ void Sema::checkCallStmt(const CallStmt& S) {
                     error(S.Args[I]->Loc, diag::err_restricted_used, {T.Name});
                 else if (!(HasFile && I == 0) && FromText && !T.isError())
                     checkReadParamType(T, S.Args[I]->Loc);
+                    // read(v) assigns to v -- §6.9.1 makes it `v := f^` -- so a
+                    // protected variable may no more be read into than
+                    // assigned to.
+                    checkNotProtected(*S.Args[I], S.Args[I]->Loc);
             }
         }
 

@@ -1226,6 +1226,10 @@ void Sema::checkCallArgs(const Symbol& Sym, SourceLocation CallLoc,
             if (!isAssignCompatible(*Param.Ty, *At))
                 error(ArgNode.Loc, diag::err_schema_arg_not_schematic,
                       {Param.Name, Param.Ty->Name, At->Name});
+            // A var-parameter actual is written to by the callee as surely
+            // as an assignment writes to it, so a protected one may not be
+            // passed.  EP §6.7.3.1.
+            if (Param.IsVar) checkNotProtected(ArgNode, ArgNode.Loc);
             if (Param.IsVar && !isLValue(ArgNode)) {
                 auto IdxStr = std::to_string(Idx + 1);
                 error(ArgNode.Loc, diag::err_var_param_needs_lvalue,
@@ -1260,6 +1264,10 @@ void Sema::checkCallArgs(const Symbol& Sym, SourceLocation CallLoc,
                 }
             }
             // Conformant var params still require an lvalue.
+            // A var-parameter actual is written to by the callee as surely
+            // as an assignment writes to it, so a protected one may not be
+            // passed.  EP §6.7.3.1.
+            if (Param.IsVar) checkNotProtected(ArgNode, ArgNode.Loc);
             if (Param.IsVar && !isLValue(ArgNode)) {
                 auto IdxStr = std::to_string(Idx + 1);
                 error(ArgNode.Loc, diag::err_var_param_needs_lvalue,
@@ -1278,6 +1286,10 @@ void Sema::checkCallArgs(const Symbol& Sym, SourceLocation CallLoc,
             // the same type — one may be the underlying type of the other, so
             // that a variable of the restricted type can be passed to a
             // formal of the type it restricts, and the other way about.
+            // A var-parameter actual is written to by the callee as surely as
+            // an assignment writes to it, so a protected one may not be passed.
+            // EP §6.7.3.1.
+            checkNotProtected(ArgNode, ArgNode.Loc);
             bool typeOk = isIdenticalType(At, Param.Ty)
                        || (At && Param.Ty && schemaInstMatch(*At, *Param.Ty))
                        || (At && At->isRestricted()
