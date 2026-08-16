@@ -802,13 +802,17 @@ struct Codegen::Impl {
     /// an ordinary element — it is there whichever variant is active — and the
     /// alternatives share the one element appended after it.
     void layoutVariantPart(const VariantPart& vp, RecordLayout& L, bool packed,
-                           std::vector<llvm::Type*>& elems);
+                           std::vector<llvm::Type*>& elems,
+                           const Type* semaRec);
 
     /// Place one alternative's fields from byte \p base of the variant element
     /// at \p blobIdx, recursing into a nested variant.  Returns the offset one
     /// past the last of them, and widens \p align to what they need.
+    /// The type Sema resolved for a field of \p semaRec; see the definition.
+    llvm::Type* semaFieldType(const Type* semaRec, const std::string& nm);
     uint64_t layoutVariantCase(const VariantCase& vc, RecordLayout& L, bool packed,
-                               unsigned blobIdx, uint64_t base);
+                               unsigned blobIdx, uint64_t base,
+                               const Type* semaRec);
 
     /// A type of at least \p size bytes and alignment \p align, to stand for
     /// the whole variant part.  A plain [n x i8] would be byte-aligned and

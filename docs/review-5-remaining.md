@@ -1,8 +1,16 @@
 # Review 5: what is left, and what was learned trying
 
-Review 5 found 27 unique defects; 24 survived adversarial verification and 23
-are fixed.  This records the one still open, with what an attempt on each
-actually cost, so the next person does not rediscover it.
+Review 5 found 27 unique defects; 24 survived adversarial verification and **all
+24 are fixed**.  This records what an attempt on the awkward ones actually cost,
+so the next person does not rediscover it, and the three findings the
+verification pass refuted so they are not re-filed.
+
+An accounting note, since this file got it wrong for a while: it claimed one
+defect was still open while every section below was marked FIXED or REFUTED.
+The discrepancy was real and the file was the thing at fault -- the open defect
+was `CodegenTypes.cpp:263`, which never got a section here because it never got
+an attempt.  It is §6 now.  A running count kept by hand drifts; the sections
+are the record.
 
 ## 1. A bare `string` as a VAR parameter — FIXED
 
@@ -88,6 +96,29 @@ inside a schema body reads none, is empty in every instantiation, and is still
 refused; and a bound that does read one is checked where it is real, since each
 instantiation resolves the body again with its own values — `t(1)` for a body of
 `array[2..n]` is refused there, quoting that instantiation's numbers.
+
+## 6. A variant field laid out from a stale annotation — FIXED
+
+R4 gave a record's FIXED fields the type Sema resolved for that record, and
+stopped there.  A variant alternative's fields went on reading their own
+denoter — and one declaration node serves every instantiation, carrying
+whichever Sema resolved LAST.
+
+    type inner(m: integer) = record a: array[1..m] of integer end;
+         outer(n: integer) = record k: integer;
+            case tag: boolean of true: (x: inner(n); y: integer);
+                                 false: (z: integer) end;
+    var big: outer(6); small: outer(2);
+
+`outer(6)` was laid out with `outer(2)`'s offsets: writing `big.x.a[6]` landed
+on `big.k`, and reading it back gave k's value.  Both instantiations have to be
+in the program for it to show, and the one declared *last* is the one whose
+layout the other gets.
+
+`semaFieldType()` is now one lookup serving both parts of the record.  Sema's
+`RecordFields` is flattened — §6.4.3.3 lets a variant field be selected by name
+like any other, so every alternative's fields are in that list — which is what
+makes one lookup enough.
 
 ## 5. `chr`/`succ`/`pred` unchecked — REFUTED, listed so it is not re-filed
 

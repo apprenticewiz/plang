@@ -4203,6 +4203,36 @@ TEST(EP7Schema, AnEmptyRangeIsStillRefusedWhereItIsReallyEmpty) {
               std::string::npos) << Inst.Stderr;
 }
 
+TEST(EP7Schema, AVariantFieldIsLaidOutForTheInstanceItBelongsTo) {
+    // R4 gave a record's FIXED fields the type Sema resolved for that record,
+    // and stopped there.  A variant alternative's fields went on reading their
+    // own denoter -- and one declaration node serves every instantiation,
+    // carrying whichever Sema resolved LAST.
+    //
+    // So `outer(6)` was laid out with `outer(2)`'s field offsets: writing
+    // big.x.a[6] landed on big.k, and reading it back gave k's value.  Both
+    // instantiations must be in the program for this to show, and the one
+    // declared LAST is the one whose layout the other gets.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type inner(m: integer) = record a: array[1..m] of integer end;\n"
+        "     outer(n: integer) = record\n"
+        "        k: integer;\n"
+        "        case tag: boolean of\n"
+        "          true:  (x: inner(n); y: integer);\n"
+        "          false: (z: integer)\n"
+        "     end;\n"
+        "var big: outer(6); small: outer(2);\n"
+        "begin\n"
+        "  big.k := 1; big.tag := true; big.y := 77; big.x.a[6] := 66;\n"
+        "  small.k := 2; small.tag := true; small.y := 88; small.x.a[2] := 22;\n"
+        "  writeln('big ', big.k:1, ' ', big.y:1, ' ', big.x.a[6]:1);\n"
+        "  writeln('small ', small.k:1, ' ', small.y:1, ' ', small.x.a[2]:1)\n"
+        "end.\n", std::string(kEP) + " -frange-checks");
+    EXPECT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "big 1 77 66\nsmall 2 88 22\n");
+}
+
 TEST(EP7Schema, DeclaringASchemaParameterDoesNotResizeAnInstanceOfIt) {
     // R4.  The record arm of llvmTypeOfSemaType had the resolved type T in
     // hand and passed only T.RecordDecl to the layout, which then re-read each

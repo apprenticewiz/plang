@@ -241,9 +241,31 @@ llvm::Type* Codegen::Impl::variantBlobType(uint64_t size, uint64_t align) {
     return llvm::ArrayType::get(cell, (size + unit - 1) / unit);
 }
 
+/// The type Sema resolved for \p nm in THIS record, or null.
+///
+/// R4 gave the fixed fields this and stopped there.  A variant alternative's
+/// fields kept reading their own denoter, and one declaration node serves every
+/// instantiation, so a record whose alternative holds a nested schema
+/// instantiation was laid out for whichever instantiation Sema resolved LAST:
+/// `outer(6)` got `outer(2)`'s field offsets, and its own field aliased another.
+///
+/// Sema's RecordFields is flattened -- §6.4.3.3 lets a variant field be
+/// selected by name like any other, so every alternative's fields are in that
+/// list -- which is why one lookup serves both parts of the record.
+llvm::Type* Codegen::Impl::semaFieldType(const Type* semaRec,
+                                         const std::string& nm) {
+    if (!semaRec) return nullptr;
+    for (const auto& F : semaRec->RecordFields)
+        if (eqCI(F.Name, nm) && F.Ty && !F.Ty->isError()
+                && canLowerSemaType(*F.Ty))
+            return llvmTypeOfSemaType(*F.Ty);
+    return nullptr;
+}
+
 uint64_t Codegen::Impl::layoutVariantCase(const VariantCase& vc, RecordLayout& L,
                                            bool packed, unsigned blobIdx,
-                                           uint64_t base) {
+                                           uint64_t base,
+                                           const Type* semaRec) {
     const auto& dl = mod->getDataLayout();
     uint64_t at = base;
 
@@ -260,19 +282,30 @@ uint64_t Codegen::Impl::layoutVariantCase(const VariantCase& vc, RecordLayout& L
     };
 
     for (const auto& fd : vc.Fields) {
-        llvm::Type* ft = llvmTypeOf(fd.Type.get(), nullptr);
-        for (const auto& nm : fd.Names) place(nm, ft);
+        llvm::Type* fromNode = nullptr;
+        for (const auto& nm : fd.Names) {
+            llvm::Type* ft = semaFieldType(semaRec, nm);
+            if (!ft) {
+                if (!fromNode) fromNode = llvmTypeOf(fd.Type.get(), nullptr);
+                ft = fromNode;
+            }
+            place(nm, ft);
+        }
     }
 
     // A nested variant follows this alternative's own fields, and its
     // alternatives in turn share the storage after them.
     if (vc.NestedVariant) {
         const auto& nv = *vc.NestedVariant;
-        if (!nv.TagField.empty() && nv.TagType)
-            place(nv.TagField, llvmTypeOfNode(*nv.TagType));
+        if (!nv.TagField.empty() && nv.TagType) {
+            llvm::Type* tt = semaFieldType(semaRec, nv.TagField);
+            place(nv.TagField, tt ? tt : llvmTypeOfNode(*nv.TagType));
+        }
         uint64_t end = at;
         for (const auto& inner : nv.Cases)
-            end = std::max(end, layoutVariantCase(inner, L, packed, blobIdx, at));
+            end = std::max(end,
+                           layoutVariantCase(inner, L, packed, blobIdx, at,
+                                             semaRec));
         at = end;
     }
     return at;
@@ -280,9 +313,11 @@ uint64_t Codegen::Impl::layoutVariantCase(const VariantCase& vc, RecordLayout& L
 
 void Codegen::Impl::layoutVariantPart(const VariantPart& vp, RecordLayout& L,
                                        bool packed,
-                                       std::vector<llvm::Type*>& elems) {
+                                       std::vector<llvm::Type*>& elems,
+                                       const Type* semaRec) {
     if (!vp.TagField.empty() && vp.TagType) {
-        llvm::Type* tt = llvmTypeOfNode(*vp.TagType);
+        llvm::Type* tt = semaFieldType(semaRec, vp.TagField);
+        if (!tt) tt = llvmTypeOfNode(*vp.TagType);
         L.Fields[toLower(vp.TagField)] =
             FieldPlace{static_cast<unsigned>(elems.size()), tt, false, 0};
         elems.push_back(tt);
@@ -296,7 +331,8 @@ void Codegen::Impl::layoutVariantPart(const VariantPart& vp, RecordLayout& L,
     uint64_t size = 0;
     const uint64_t align = rtVariantRunAlign(vp);
     for (const auto& vc : vp.Cases)
-        size = std::max(size, layoutVariantCase(vc, L, packed, blobIdx, 0));
+        size = std::max(size,
+                        layoutVariantCase(vc, L, packed, blobIdx, 0, semaRec));
     // Every alternative may be empty — `case b: boolean of true: (); false: ()`
     // is a record with a tag and nothing else — and then there is nothing to
     // reserve and no field that would have referred to it.
@@ -358,12 +394,7 @@ Codegen::Impl::layoutOf(const RecordTypeNode& rt, const Type* semaRec) {
     // sides were reading the same stale annotation.  Two answers agreeing is
     // not the same as either being right.
     const auto semaFieldTy = [&](const std::string& nm) -> llvm::Type* {
-        if (!semaRec) return nullptr;
-        for (const auto& F : semaRec->RecordFields)
-            if (eqCI(F.Name, nm) && F.Ty && !F.Ty->isError()
-                    && canLowerSemaType(*F.Ty))
-                return llvmTypeOfSemaType(*F.Ty);
-        return nullptr;
+        return semaFieldType(semaRec, nm);
     };
     for (const auto& fd : rt.Fields) {
         llvm::Type* fromNode = nullptr;
@@ -378,7 +409,7 @@ Codegen::Impl::layoutOf(const RecordTypeNode& rt, const Type* semaRec) {
             elems.push_back(ft);
         }
     }
-    if (rt.Variant) layoutVariantPart(*rt.Variant, L, packed, elems);
+    if (rt.Variant) layoutVariantPart(*rt.Variant, L, packed, elems, semaRec);
 
     // Two records laid out the same way share one struct type.  The names are
     // not part of the key: they are what the layout is for, and the struct only
