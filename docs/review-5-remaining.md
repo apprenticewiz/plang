@@ -140,3 +140,70 @@ passed against the parent commit and tested nothing: two `for..in` cases missing
 the outer declaration that makes the flow state track the name, and a parser
 case missing `kEP` when the branch under test is EP-only.  Reading them did not
 show it; reverting `lib/` and re-running did.
+
+---
+
+# The sibling sweep
+
+Nearly every defect fixed in reviews 5 and 6 was a **sibling**: a place where a
+rule the codebase already has was not applied.  Not scattered bugs — one rule,
+applied once.
+
+    the array constructor arm checked its component values | the record arm beside it did not
+    the fixed part rejected duplicate field names          | the variant part did not
+    writtenInitialState followed Denotes                   | the descent 7 lines away used denoterOf
+    the protected check walked index paths                 | not field paths, and only from assignment
+    records and enums got declaration identity             | schemas kept comparing spellings
+    R4 typed fixed fields from Sema                        | variant fields kept the stale annotation
+    schemaUnderlying made the peel a loop                  | descendIntoInstantiation stayed a step
+
+So "where else is this question asked?" is a step, not an afterthought.  A first
+pass, by rule:
+
+## 1. `denoterOf` callers — a spelling walk over a possibly-foreign node
+
+    lib/CodeGen/CodegenExprs.cpp:1311, 1767, 1770
+    lib/CodeGen/CodegenStmts.cpp:931
+
+Each needs the question asked of it: is the node it walks written HERE, or
+reached from another scope?  The second kind must follow
+`NamedTypeNode::Denotes` instead, as `writtenInitialState` and
+`initialStateShapeOf` now do.
+
+## 2. One-level `SchemaBody` peels — should they loop?
+
+    lib/CodeGen/CodegenSchema.cpp:260, 270      storage type, body size
+    lib/CodeGen/CodegenExprs.cpp:1410
+    lib/CodeGen/CodegenStmts.cpp:1273
+    lib/CodeGen/CodegenProcs.cpp:372
+    lib/Sema/SemaExpr.cpp:361, 1253
+
+`schemaUnderlying()` exists for exactly this.  Each site needs deciding on
+purpose: a body that is itself an instantiation is legal EP, so a single hop is
+right only where the immediate body is what is wanted.
+
+**One of these is already a confirmed defect**, found by this sweep and not by a
+review:
+
+    type A(k: integer) = record a: array[1..k] of integer; id: integer end;
+         B(n: integer) = A(n);
+    procedure showB(var x: B); begin writeln(x.id) end;
+
+    error: schema 'B' has no discriminant 'id'
+
+A field of an undiscriminated schema formal is looked for one level down, so a
+schema whose body is another schema has no fields at all.  `var x: A`, whose
+body IS the record, works — the failure is the nesting.  Rejects-valid.
+
+## 3. Questions asked of the KIND that belong to the STORAGE
+
+Two defects had this shape and both were memory corruption: the whole-value copy
+branch asked for Array-or-Record and missed SchemaInstance, and `with` skipped
+the access path for any SchemaInstance.  Any remaining `Kind == TypeKind::...`
+test that decides *how something is laid out* is a candidate; the path knows and
+the kind does not.
+
+## 4. Checks that exist for one construct and not its neighbours
+
+`isVarStringLike` was needed by assignment, `+`, `length`, comparison AND substr
+together.  The same question applies to any predicate added for one operator.
