@@ -359,10 +359,16 @@ std::shared_ptr<Type> Sema::checkDeref(const DerefExpr& E) {
         // Only a string body, and deliberately: a record body keeps the schema
         // type because that is what carries the discriminants as pseudo-fields
         // and what a schema parameter is matched against, so handing back the
-        // bare record loses `q^.id` and makes `bump(q^)` the wrong type.
-        if (Pointee->Kind == TypeKind::Schema && Pointee->SchemaBody
-                && Pointee->SchemaBody->Kind == TypeKind::VarString)
-            return Pointee->SchemaBody;
+        // bare record loses `q^.id` and makes `bump(q^)` the wrong type.  The
+        // body may itself be another schema instantiation (EP §6.4.7), so the
+        // question is asked of what it underlies to, not of the immediate hop
+        // -- `C(n) = B(n)` for `B(m) = string(m)` is a string body too, one
+        // level further down.
+        if (Pointee->Kind == TypeKind::Schema && Pointee->SchemaBody) {
+            auto Underlying = schemaUnderlying(Pointee->SchemaBody);
+            if (Underlying->Kind == TypeKind::VarString)
+                return Underlying;
+        }
         return Pointee;
     }
     if (PtrTy->Kind == TypeKind::File) {
@@ -1248,13 +1254,17 @@ void Sema::checkCallArgs(const Symbol& Sym, SourceLocation CallLoc,
             // EP §6.4.7: a schema whose body is an array IS an array for this
             // purpose -- `p^` for a `^vec` conforms to the same formals a
             // declared array does, and refusing it made the one way to write a
-            // procedure over an undiscriminated schema unavailable.
+            // procedure over an undiscriminated schema unavailable.  The body
+            // may itself be another schema instantiation, so the question is
+            // asked of what it underlies to -- `B(n) = A(n)` for an array `A`
+            // is an array too, one level further down.
             const Type* Actual = At.get();
-            if ((Actual->Kind == TypeKind::Schema
-                 || Actual->Kind == TypeKind::SchemaInstance)
-                    && Actual->SchemaBody
-                    && Actual->SchemaBody->Kind == TypeKind::Array)
-                Actual = Actual->SchemaBody.get();
+            if (Actual->Kind == TypeKind::Schema
+                    || Actual->Kind == TypeKind::SchemaInstance) {
+                const Type* Underlying = schemaUnderlying(Actual);
+                if (Underlying->Kind == TypeKind::Array)
+                    Actual = Underlying;
+            }
             if (!isConformable(*Param.Ty, *Actual)) {
                 if (Actual->Kind != TypeKind::Array
                         && Actual->Kind != TypeKind::ConformantArray) {

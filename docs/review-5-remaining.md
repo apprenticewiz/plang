@@ -170,7 +170,7 @@ reached from another scope?  The second kind must follow
 `NamedTypeNode::Denotes` instead, as `writtenInitialState` and
 `initialStateShapeOf` now do.
 
-## 2. One-level `SchemaBody` peels — should they loop?
+## 2. One-level `SchemaBody` peels — should they loop? — SWEPT
 
     lib/CodeGen/CodegenSchema.cpp:260, 270      storage type, body size
     lib/CodeGen/CodegenExprs.cpp:1410
@@ -181,6 +181,50 @@ reached from another scope?  The second kind must follow
 `schemaUnderlying()` exists for exactly this.  Each site needs deciding on
 purpose: a body that is itself an instantiation is legal EP, so a single hop is
 right only where the immediate body is what is wanted.
+
+Every site above is now resolved:
+
+- `CodegenSchema.cpp:260,270` (`schemaStorageType`, `schemaBodySize`) — FIXED.
+  `q^` for `C(n) = B(n)`, `B(m) = string(m)` sized its `new(q, 20)` allocation
+  from the probe's `string(1)` and every capacity check after it saw 1, not 20.
+  Test: `EP7Schema.APointerToASchemaOfASchemaOfAStringReadsAndSizesAsAString`.
+  (Sema's own one-hop for the same case — `checkDeref` returning the schema
+  type instead of the string when the body is nested — is the reason the
+  program reached codegen at all; fixed alongside, in `SemaExpr.cpp`, not at
+  line 361.)
+- `CodegenExprs.cpp:1410` (`recordTypeOf`) — FIXED, together with the
+  confirmed defect below; see there.
+- `CodegenStmts.cpp:1273` (`emitWith`'s static branch) — FIXED, and its Sema
+  counterpart in `pushWithScope` (`SemaStmt.cpp`, two sites — undiscriminated
+  and discriminated) needed the same widening or the names were never bound.
+  `with x do id := 5` for a declared `x: B(6)` raised "undefined identifier
+  'id'".  Test:
+  `EP7Schema.WithOverASchemaOfASchemaBindsTheUnderlyingRecordsFields`.
+- `CodegenProcs.cpp:372` — CHECKED, not a defect.  The one-hop `valTy` this
+  computes is only ever consulted through `ve->type`, and when the body is a
+  further schema instantiation, `llvmTypeOfSemaType`'s own `SchemaInstance`
+  case already recurses — so `ve->type` lands on the real LLVM array type, and
+  the generic `isa<ArrayType>(ve->type)` fallback in the index path unwraps it
+  correctly regardless.  Confirmed with a two- and a three-level chain
+  (`array of record`), both indexing correctly through a `var` schema
+  parameter.  Left alone on purpose: the doc's own rule is that a single hop
+  is right where the immediate body is what is wanted, and here something
+  downstream already does the widening, so adding a second one would be the
+  redundant kind, not the correcting kind.
+- `SemaExpr.cpp:361` (deref, EP §6.4.7 VarString case) — FIXED.  Same
+  `C(n) = B(n)` case as above at the Sema level: `q^` came back typed as the
+  schema `C` rather than the string, so `writeln(q^)` was refused as
+  unwritable.
+- `SemaExpr.cpp:1253` (conformant-array actual matching) — FIXED.  `B(n) =
+  A(n)` for an array `A` failed "conformant array parameter 'arr' requires an
+  array argument, got 'B(5)'" — passing a nested-schema array where a
+  directly-schema'd one already worked.  Test:
+  `EP7Schema.ASchemaOfASchemaOfAnArrayConformsToAConformantArrayParam`.
+
+Five real defects, all found by trying the sibling sweep's own question against
+each listed site and constructing the two- or three-level nesting each site's
+existing single hop couldn't reach.  All fixed, all mutation-tested against the
+pre-fix code (each regression test confirmed to fail on the parent commit).
 
 **One of these is already a confirmed defect**, found by this sweep and not by a
 review — FIXED:

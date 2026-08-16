@@ -798,7 +798,7 @@ int Sema::pushWithScope(const WithStmt& S) {
         // into ActiveSchemaBindings_, which exists for compile-time folding and
         // has no answer here.
         if (T->Kind == TypeKind::Schema && T->SchemaBody
-                && T->SchemaBody->Kind == TypeKind::Record) {
+                && schemaUnderlying(T->SchemaBody)->Kind == TypeKind::Record) {
             Symtab.pushScope(/*IsBlock=*/false);
             ++Count;
             for (const auto& D : T->SchemaDiscs) {
@@ -813,7 +813,10 @@ int Sema::pushWithScope(const WithStmt& S) {
                 DS.Ty   = TyInt;
                 (void)Symtab.define(std::move(DS));
             }
-            for (const auto& F : T->SchemaBody->RecordFields) {
+            // The body may itself be another schema instantiation (EP §6.4.7),
+            // so the fields are the ones schemaUnderlying reaches, not the
+            // immediate body's.
+            for (const auto& F : schemaUnderlying(T->SchemaBody)->RecordFields) {
                 Symbol FS;
                 FS.Kind = SymbolKind::Var;
                 FS.Name = F.Name;
@@ -835,9 +838,11 @@ int Sema::pushWithScope(const WithStmt& S) {
                 DS.Ty   = TyInt;
                 (void)Symtab.define(std::move(DS));
             }
-            // If the underlying body is a record, also expose its fields.
-            if (T->SchemaBody && T->SchemaBody->Kind == TypeKind::Record) {
-                for (const auto& F : T->SchemaBody->RecordFields) {
+            // If the underlying body is a record, also expose its fields.  The
+            // body may itself be another schema instantiation, so this is
+            // asked of schemaUnderlying, not the immediate SchemaBody.
+            if (T->SchemaBody && schemaUnderlying(T->SchemaBody)->Kind == TypeKind::Record) {
+                for (const auto& F : schemaUnderlying(T->SchemaBody)->RecordFields) {
                     Symbol FS;
                     FS.Kind = SymbolKind::Var;
                     FS.Name = F.Name;

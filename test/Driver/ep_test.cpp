@@ -4329,6 +4329,62 @@ TEST(EP7Schema, AnUndiscriminatedSchemaWhoseBodyIsAnotherSchemaHasFields) {
     EXPECT_EQ(R.Stdout, "42 7\n");
 }
 
+TEST(EP7Schema, APointerToASchemaOfASchemaOfAStringReadsAndSizesAsAString) {
+    // `C(n) = B(n)` for `B(m) = string(m)`: `q^` for a `^C` first failed in
+    // Sema, which special-cased only a DIRECT string body -- `q^` came back
+    // typed as the schema `C`, and `writeln(q^)` was refused as not a
+    // writable type.  Fixed to look through with schemaUnderlying, it then
+    // failed in codegen: schemaBodySize and exprStrCapV also matched only the
+    // immediate body's kind, so `new(q, 20)` sized the allocation from the
+    // probe's string(1) and every capacity check after it saw 1, not 20.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type B(m: integer) = string(m);\n"
+        "     C(n: integer) = B(n);\n"
+        "var q: ^C;\n"
+        "begin new(q, 20); q^ := 'abcdefghijklmnopqrst';\n"
+        "  writeln('[', q^, '] ', length(q^):1) end.\n", kEP);
+    EXPECT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "[abcdefghijklmnopqrst] 20\n");
+}
+
+TEST(EP7Schema, WithOverASchemaOfASchemaBindsTheUnderlyingRecordsFields) {
+    // `with` on a declared `var x: B(6)` for `B(n) = A(n)` -- a fixed-layout
+    // instance, so it takes the static branch rather than the run-time path --
+    // matched only the immediate SchemaBody's kind in both Sema's
+    // pushWithScope and codegen's emitWith.  Sema had no name `id` or `a` to
+    // bind at all: "undefined identifier 'id'".  Same question as the field
+    // and pointer-dereference cases above, same fix.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type A(k: integer) = record a: array[1..k] of integer; id: integer end;\n"
+        "     B(n: integer) = A(n);\n"
+        "var x: B(6);\n"
+        "begin with x do begin id := 5; a[3] := 9 end;\n"
+        "  writeln(x.id:1, ' ', x.a[3]:1) end.\n", kEP);
+    EXPECT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "5 9\n");
+}
+
+TEST(EP7Schema, ASchemaOfASchemaOfAnArrayConformsToAConformantArrayParam) {
+    // The conformant-array match special-cased only a schema whose IMMEDIATE
+    // body is an array, so `B(n) = A(n)` for an array `A` was rejected --
+    // "conformant array parameter 'arr' requires an array argument, got
+    // 'B(5)'" -- though `var y: A(5)` passed to the same formal works.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type A(k: integer) = array[1..k] of integer;\n"
+        "     B(n: integer) = A(n);\n"
+        "procedure sumIt(var arr: array[lo..hi: integer] of integer; var total: integer);\n"
+        "var i: integer;\n"
+        "begin total := 0; for i := lo to hi do total := total + arr[i] end;\n"
+        "var y: B(5); i: integer; s: integer;\n"
+        "begin for i := 1 to 5 do y[i] := i;\n"
+        "  sumIt(y, s); writeln(s:1) end.\n", kEP);
+    EXPECT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "15\n");
+}
+
 TEST(EP7Schema, TwoSchemasSharingANameAreNotTheSameType) {
     // Records and enumerations were given declaration identity in ed2af47;
     // schemas were the one kind left comparing SPELLINGS.  So two `vec(3)`

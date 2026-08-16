@@ -1269,8 +1269,12 @@ void Codegen::Impl::emitWith(const WithStmt& s) {
                     alloca);
                 defVar(D.Name, alloca, i64Ty);
             }
-            // If body is a record, expose its fields via GEP.
-            auto* body = rec->ResolvedType->SchemaBody.get();
+            // If body is a record, expose its fields via GEP.  The body may
+            // itself be another schema instantiation (EP §6.4.7), so this
+            // asks schemaUnderlying, not the immediate SchemaBody.
+            const plang::Type* body = rec->ResolvedType->SchemaBody
+                                     ? schemaUnderlying(rec->ResolvedType->SchemaBody.get())
+                                     : nullptr;
             if (body && body->Kind == TypeKind::Record) {
                 auto* recPtr = emitLValue(*rec);
                 if (!recPtr) codegenICE("'with' on a schema instance without an address");

@@ -257,9 +257,9 @@ Codegen::Impl::schemaArrayBounds(const SchemaRef& ref) {
 }
 
 llvm::Type* Codegen::Impl::schemaStorageType(const SchemaRef& ref) {
-    const plang::Type* body = ref.semaTy->SchemaBody.get();
-    if (!body || body->isError())
+    if (!ref.semaTy->SchemaBody || ref.semaTy->SchemaBody->isError())
         codegenICE("schema '" + ref.semaTy->SchemaName + "' has no resolved body");
+    const plang::Type* body = schemaUnderlying(ref.semaTy->SchemaBody.get());
     if (body->Kind == TypeKind::Array && body->ElemType)
         return llvmTypeOfSemaType(*body->ElemType);
     return llvmTypeOfSemaType(*body);
@@ -267,9 +267,12 @@ llvm::Type* Codegen::Impl::schemaStorageType(const SchemaRef& ref) {
 
 llvm::Value* Codegen::Impl::schemaBodySize(const plang::Type& schema,
                                            const std::vector<llvm::Value*>& discs) {
-    const plang::Type* body = schema.SchemaBody.get();
-    if (!body || body->isError())
+    if (!schema.SchemaBody || schema.SchemaBody->isError())
         codegenICE("schema '" + schema.SchemaName + "' has no resolved body");
+    // The body may itself be another schema instantiation (EP §6.4.7); the
+    // question below -- string capacity, array vs fixed extent -- is about
+    // what it ultimately denotes, not the immediate hop.
+    const plang::Type* body = schemaUnderlying(schema.SchemaBody.get());
 
     // EP §6.4.3.3's string schema has no declaration to walk -- it is not
     // written in the program -- and its one discriminant IS the capacity, so
@@ -395,10 +398,14 @@ llvm::Value* Codegen::Impl::exprStrCapV(const ExprNode& e) {
     // to the probe's string(1), and `s := 'zz'` raised "string of length 2
     // assigned to a string(1)" against an actual with room for ten.
     // schemaRefOf answers for a formal parameter as readily as for a
-    // dereference; asking it for both is the whole change.
+    // dereference; asking it for both is the whole change.  The body may
+    // itself be another schema instantiation (EP §6.4.7) whose own
+    // discriminant is bound to this one -- `C(n) = B(n)` for `B(m) =
+    // string(m)` -- so the underlying kind is what answers, not the
+    // immediate hop.
     if (auto ref = schemaRefOf(e);
             ref && ref->semaTy && ref->semaTy->SchemaBody
-            && ref->semaTy->SchemaBody->Kind == TypeKind::VarString
+            && schemaUnderlying(ref->semaTy->SchemaBody.get())->Kind == TypeKind::VarString
             && ref->discs.size() == 1)
         return ref->discs[0];
 
