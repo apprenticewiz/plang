@@ -38,7 +38,160 @@ version numbers follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html
   nothing there to compute a layout from — and `pack`/`unpack` on an array
   whose element size a discriminant fixes.
 
+### Changed
+
+- **Code generation asks semantic analysis instead of working things out
+  again.**  This is what 0.2.0 is for, and it is one cause rather than a
+  collection: CodeGen decided what something *was* by looking up a NAME, by
+  matching a SPELLING, or by reading a stale ANNOTATION, in places where Sema
+  had already decided.  Its tables — `typeAliases`, `consts`, `schemaDefs_`,
+  the scope stack used as a name oracle, and a constant folder of its own —
+  have **no scope chain**, so they answer for whatever is innermost at the
+  moment of lowering rather than where the declaration was written.
+
+  Two shipped heap corruptions came from that, and the audit behind
+  `docs/single-source-of-truth.md` found 35 sites.  The useful part of that
+  document is not the count but the partition: which of the 35 are the same
+  bug (a *foreign* denoter re-resolved here), which only look like it (a
+  locally-written name, where the flat table is right), and which are not
+  about names at all.
+
+  What that came to, in the order it landed:
+
+  - **Foreign nodes go through Sema.**  A denoter belonging to another scope is
+    lowered from the type Sema resolved for it, not by re-reading its syntax.
+  - **One constant folder.**  `ExprNode::ConstVal` carries the value Sema folded
+    *in the scope the expression was written in*, and codegen's folder asks for
+    it first.  Fabricated extents — a capacity of 255, a bound of 0 — are gone;
+    a bound that does not fold is an error rather than a number.
+  - **A schema extent is arithmetic, not an expression to re-run.**
+    `ExtentForm` is closed arithmetic over the discriminants *by index*, with
+    every other leaf folded where the declaration was written.  It contains no
+    identifier, so nothing in the procedure doing the allocating can capture
+    anything.  Every fallback that re-emitted a declaration's expression at a
+    use site was measured at zero uses and then deleted, and the function that
+    bound discriminant names for them no longer exists.
+  - **One layout.**  A variant part's size and its field offsets are one walk;
+    one function answers what its shared run must be aligned to; and the
+    run-time layout walk is now compared against the static layout on **every
+    record the compiler lays out**, not only on the schema programs somebody
+    thought to write.
+  - **A variable access is evaluated once.**  A string whose capacity a
+    discriminant fixes needs an address and a capacity, and getting them
+    resolved the access path twice — three times, measured — so a
+    side-effecting subscript ran repeatedly.
+  - **Widths come from types.**  How many bytes land in a typed file is a fact
+    about the file's component type, not about whatever the expression happened
+    to lower to.
+
+  Programs compile to byte-identical IR across the ISO 7185 conformance corpus
+  and the acceptance test, with one intended exception noted under Fixed.
+
 ### Fixed
+
+- **A `packed record` no longer promises an alignment it cannot keep.**  plang
+  packs `packed`, so fields sit at byte offsets that need not satisfy their own
+  types' alignment — but the loads and stores were emitted with the alignment
+  of the *value type*.  A `set of char` is `i256`, which this data layout aligns
+  to 16, so a field at offset 1 produced `store i256 ..., align 16`: a promise
+  about an address nothing had made true.  At `-O0` the backend used scalar
+  moves and it ran; from `-O1` it emits `movaps` and the program dies.
+
+  **The project's own acceptance program crashed this way at `-O2`**, after 935
+  of its 1,211 lines.  The suite runs at `-O0`, and the acceptance test is only
+  ever run at `-O0`.
+
+- **A variant part containing a wide member was under-aligned.**  The blob its
+  alternatives share capped its cell at `i64`, so a part holding a `set of char`
+  was 8-aligned around a member needing 16.  This is the one intended IR change
+  in this release: `iso7185pat.pas` now lays that record out as `[6 x i128]`
+  where it was `[11 x i64]`, and nothing else moves.
+
+- **`new()` allocated the wrong domain when the pointer's type was reached
+  through a name that a procedure re-declared.**  Plain ISO 7185 — glibc aborts
+  with "corrupted top size".  Sema's answer was already in that function, as a
+  fallback reached only when the guess returned zero.
+
+- **A type is identified by its declaration, not by its spelling.**  Two records
+  sharing a name were assignment-compatible, so a three-field record could be
+  copied into a one-field one — 24 bytes into 8, silently.  Same for two
+  enumerations, which let an ordinal of 3 into a type whose largest is 2; and
+  `packed` was ignored when comparing record shapes, so a padded record could be
+  stored into a packed one.  Two new diagnostics say which question failed,
+  since both types print identically.
+
+- **A schema body binds its names where the body was written.**  It was resolved
+  once per *instantiation*, in the scope the instantiation appeared in, so a
+  local `const k = 1` beside `var h: v(2)` resized a body declared against a
+  program-scope `k = 10`.  Likewise a local type of the same spelling changed
+  what the body's components were.  And a discriminant now shadows a constant of
+  its own name, where before `const n = 3` beside `type t(n: integer)` made
+  every `t` three elements long whatever `new()` was told.
+
+- **The `value` clause comes from the type that was written.**  Following a
+  chain of type names re-bound every hop in the procedure being lowered, so an
+  inner homonym supplied both the wrong initial value and its length — 400 bytes
+  into a 4-byte allocation — and, in the other direction, dropped an
+  initialization the type really has.
+
+- **A schema whose body is another schema behaves like what it wraps.**  Looking
+  through a schema is a loop, not a step, and was written as a step in a dozen
+  places: `type v2(n) = vec(n)` could not be subscripted at all, and fixing only
+  the check that refused it left a `1..4` array range-checked as `0..3`, so
+  `x[4]` trapped and `x[0]` — outside the array — did not.
+
+- **A field selected through a nested instantiation uses the instance's
+  layout.**  `schemaPathOf` descended into a nested schema in its index arm and
+  not its field arm, so `q^[i][j]` was right while `q^.x.k` was emitted at the
+  probe's offset and landed on another field's bytes.
+
+- **Crashes.**  A schema whose body names itself through a pointer — legal, and
+  the ordinary way to write a linked structure — sent Sema into unbounded
+  recursion and killed the compiler with no diagnostic.  Without the
+  indirection the type really does contain itself, and that is now refused with
+  a message naming the rule.  A schema whose body is a string is a string
+  everywhere now, rather than an opaque aggregate an assignment stored a pointer
+  into.
+
+- **Extended Pascal that did not parse or did not check.**  A bare `string` as a
+  **var** parameter now takes an actual of any capacity, which is the only way
+  to write a procedure that modifies one; the capacity travels with the actual,
+  so one body is bounded differently per call.  A typed set constructor with a
+  single element or a single range is one (`cs['a']`), and a variable shadowing
+  a type name is subscripted rather than read as a set.  An import-part is a
+  list — `import A; B;` — as §6.11.3 writes it.  `for c in s` no longer reports
+  its own control variable as never given a value.  And the probe value of 1
+  that schema bodies are resolved under stopped reaching diagnostics, where it
+  had been rejecting legal programs with bounds they never wrote.
+
+- **`-g` compiles.**  It was forwarded to `llc`, which has no such option, so
+  every `-g` build failed.  plang emits no debug information, and now says so
+  rather than accepting the flag silently.
+
+### How these were found, and what now guards them
+
+The suite was green through every one of the above.  Its oracle is a printed
+value, and a layout that is wrong but self-consistent prints the right one;
+AddressSanitizer instruments the compiler and never the program it emits.
+
+Four things exist because of that, and they belong before the fixes rather than
+after:
+
+- `test/tools/guardheap.c` butts every heap object against a guard page, so an
+  over-run faults at the write instead of landing in a neighbour.  Several
+  defects here printed correct output and exited 0 under a plain run.
+- `test/tools/irgate.sh` compares emitted IR against a known-good commit, which
+  compares what the compiler *did* rather than what one program observed.
+- The `SchemaDifferential` harness compiles one body through every lowering and
+  **crosses** writes against reads; two earlier versions did not cross, and real
+  defects walked through both.
+- Sema's layout, the static layout and the run-time walk are checked against
+  each other on every record.
+
+Each fix carries a test verified to fail without it.  Three tests written during
+this work passed against the parent commit and tested nothing — a missing
+declaration, a missing dialect flag — and were caught by that check rather than
+by reading them.
 
 - **A crash in the compiler no longer looks like a refusal to compile.**  llvm's
   `ExecuteAndWait` answers -1 for a failure to run and -2 for a child killed by
