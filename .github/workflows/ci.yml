@@ -302,11 +302,19 @@ jobs:
         run: sudo apt-get install -y ninja-build libgtest-dev
 
       - name: Configure
+        # plang requires C++23, and the runner image's default compiler is not
+        # new enough -- it has no <print>.  Every other job selects a compiler
+        # explicitly; this one did not, and failed at the build step for three
+        # commits.  The clang the LLVM install above already brought in is new
+        # enough on its own, which is what the sanitizers job relies on too.
         run: |
           cmake -S . -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DPLANG_ENABLE_TESTS=ON \
             -DLLVM_DIR="/usr/lib/llvm-$LLVM_VERSION/lib/cmake/llvm"
+        env:
+          CC: clang-22
+          CXX: clang++-22
 
       - name: Build
         run: cmake --build build -j"$(nproc)"
