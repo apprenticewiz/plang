@@ -1353,7 +1353,19 @@ bool Sema::isAssignCompatible(const Type& Dst, const Type& Src,
     // EP §6.4.7: SchemaInstance — compatible if same schema+discriminant values,
     // or fall through to body-type compatibility.
     if (Dst.Kind == TypeKind::SchemaInstance && Src.Kind == TypeKind::SchemaInstance) {
-        if (Dst.SchemaName == Src.SchemaName
+        // A NAME is not an identity -- the sentence this release is about, and
+        // schemas were the one kind still comparing spellings after records and
+        // enums were given declaration identity.  Two `vec(3)` from different
+        // declarations were "the same type", so a 30-element one was assigned
+        // into a 3-element one: 240 bytes into 24, and a segfault.
+        //
+        // Where both sides know their declaration it settles the question.
+        // Where one does not -- separate compilation gives the same schema a
+        // different node in each unit -- fall through to comparing the BODIES,
+        // which accepts an identical shape and rejects a different one.
+        const bool SameDecl = !Dst.SchemaBodyNode || !Src.SchemaBodyNode
+                           || Dst.SchemaBodyNode == Src.SchemaBodyNode;
+        if (Dst.SchemaName == Src.SchemaName && SameDecl
                 && Dst.SchemaDiscs.size() == Src.SchemaDiscs.size()) {
             bool same = true;
             for (size_t I = 0; I < Dst.SchemaDiscs.size(); ++I)
@@ -1369,8 +1381,12 @@ bool Sema::isAssignCompatible(const Type& Dst, const Type& Src,
     if (Dst.Kind == TypeKind::Schema || Src.Kind == TypeKind::Schema) {
         const Type& Sch   = Dst.Kind == TypeKind::Schema ? Dst : Src;
         const Type& Other = Dst.Kind == TypeKind::Schema ? Src : Dst;
+        // Same rule for an undiscriminated formal: it accepts instances of the
+        // schema it names, not of anything spelled alike.
         if (Other.Kind == TypeKind::Schema || Other.Kind == TypeKind::SchemaInstance)
-            return eqCI(Sch.SchemaName, Other.SchemaName);
+            return eqCI(Sch.SchemaName, Other.SchemaName)
+                && (!Sch.SchemaBodyNode || !Other.SchemaBodyNode
+                    || Sch.SchemaBodyNode == Other.SchemaBodyNode);
         // §6.7.3.3 requires both sides to be schematic; a plain array is not.
         return false;
     }

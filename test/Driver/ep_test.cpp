@@ -4309,6 +4309,30 @@ TEST(EP7Schema, WithOverANestedInstantiationBindsTheInstancesLayout) {
     EXPECT_EQ(R.Stdout, "[abcdefghijklmnopqrst] 12345 4242\n");
 }
 
+TEST(EP7Schema, TwoSchemasSharingANameAreNotTheSameType) {
+    // Records and enumerations were given declaration identity in ed2af47;
+    // schemas were the one kind left comparing SPELLINGS.  So two `vec(3)`
+    // from different declarations were the same type, and a 30-element one
+    // was assigned into a 3-element one -- 240 bytes into 24, segfault.
+    //
+    // A SchemaInstance did not even record which schema it instantiated: only
+    // the undiscriminated type carried SchemaBodyNode, so there was nothing
+    // but the name to compare by.  Both halves were needed; fixing the
+    // comparison alone changed nothing, because the field it compares was null.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type vec(n: integer) = array[1..n] of integer;\n"
+        "var g: vec(3); i: integer;\n"
+        "procedure q(var x: vec(3));\n"
+        "type vec(n: integer) = array[1..n*10] of integer;\n"
+        "var l: vec(3); j: integer;\n"
+        "begin for j := 1 to 30 do l[j] := 7000+j; x := l end;\n"
+        "begin for i := 1 to 3 do g[i] := i; q(g); writeln(g[1]:1) end.\n", kEP);
+    EXPECT_NE(R.ExitCode, 0);
+    EXPECT_NE(R.Stderr.find("two different types that share a name"),
+              std::string::npos) << R.Stderr;
+}
+
 TEST(EP7Schema, DeclaringASchemaParameterDoesNotResizeAnInstanceOfIt) {
     // R4.  The record arm of llvmTypeOfSemaType had the resolved type T in
     // hand and passed only T.RecordDecl to the layout, which then re-read each

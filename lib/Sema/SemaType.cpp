@@ -609,6 +609,11 @@ std::shared_ptr<Type> Sema::resolveTypeImpl(const TypeNode& Node) {
         T->Name        = N->Name + Suffix;
         T->SchemaName  = N->Name;
         T->SchemaDiscs = Discs;
+        // WHICH schema this is an instance of.  Only the undiscriminated type
+        // recorded it, so an instance had nothing but its NAME to be compared
+        // by -- and two `vec(3)` from different declarations were held to be
+        // the same type.
+        T->SchemaBodyNode = Sym->SchemaBodyNode;
         SchemaInProgress_[InKey] = T;
         struct Leave {
             std::map<std::string, std::shared_ptr<Type>>& M; const std::string& K;
