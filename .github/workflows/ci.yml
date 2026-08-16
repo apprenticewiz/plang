@@ -311,6 +311,13 @@ jobs:
       - name: Build
         run: cmake --build build -j"$(nproc)"
 
+      # The memory-safety gate is only worth its exit code if it can still tell
+      # a valid program from an over-run.  It could not, once: it faulted on
+      # any pointer it had not allocated, and was being used to decide whether
+      # real defects were real.
+      - name: Guard-page allocator self-test
+        run: bash test/tools/run-under-guardheap.sh --self-test
+
       - name: Test with emitted programs at -O1
         run: ctest --test-dir build -j"$(nproc)" --output-on-failure
         env:

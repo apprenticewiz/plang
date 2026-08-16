@@ -50,10 +50,34 @@ static void gh_init(void) {
 static int gh_is_boot(void *p) {
     return (char *)p >= gh_boot && (char *)p < gh_boot + sizeof gh_boot;
 }
+/* Is this page mapped?  msync reports ENOMEM for a range that is not, which is
+   the only way to ask without risking the fault we are trying to avoid. */
+static int gh_mapped(void *page) {
+    return msync(page, gh_page(), MS_ASYNC) == 0;
+}
+
+/* The header for a pointer we allocated, or NULL for one we did not.
+ *
+ * This read h->magic unconditionally, and that IS the fault it was meant to
+ * screen out: for a pointer this allocator never handed out -- one from the
+ * bootstrap arena's neighbours, a static buffer, or anything the real malloc
+ * placed at the start of a fresh mapping -- the page BEFORE it need not be
+ * mapped at all, and the magic check dereferenced it to find out.  So free()
+ * of a foreign pointer could take the program down, and the memory-safety gate
+ * reported SIGSEGV on a program that had done nothing wrong.
+ *
+ * A false alarm here is worse than no gate: it was used to decide whether real
+ * defects were real.
+ *
+ * The user pointer is right-aligned in the body so its last byte touches the
+ * guard page, and the body is a whole number of pages, so p always lies in the
+ * FIRST body page and the header is always exactly one page below it. */
 static struct gh_head *gh_head_of(void *p) {
     size_t pg = gh_page();
     uintptr_t page = (uintptr_t)p & ~(uintptr_t)(pg - 1);
-    struct gh_head *h = (struct gh_head *)(page - pg);
+    void *hp = (void *)(page - pg);
+    if (!gh_mapped(hp)) return NULL;
+    struct gh_head *h = (struct gh_head *)hp;
     return h->magic == GH_MAGIC ? h : NULL;
 }
 
