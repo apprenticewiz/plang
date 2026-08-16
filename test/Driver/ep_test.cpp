@@ -4432,6 +4432,31 @@ TEST(EPProtected, DereferencingAProtectedPointerIsStillAllowed) {
     EXPECT_EQ(R.Stdout, "42\n");
 }
 
+TEST(UndiscriminatedString, ABareStringVariableHoldsItsValue) {
+    // plang accepts a bare `string` as a variable, field, element or function
+    // result as an extension -- StandardGate covers it -- and resolved it to
+    // the capacity-less String, which codegen emits as a raw POINTER.  So the
+    // value went nowhere: `a := 'xy'; writeln(a)` printed nothing at all, and a
+    // function returning one printed a space.
+    //
+    // Refusing it instead would have been defensible under EP §6.4.3.3, where a
+    // bare schema-name denotes a type only as a pointer's domain or a
+    // parameter's -- but it is a documented extension that programs use, and
+    // the StandardGate case asserts it compiles.  Making it work is the smaller
+    // change than withdrawing it.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type r = record s: string end;\n"
+        "var a: string; b: array[1..2] of string; c: r;\n"
+        "function f: string; begin f := 'hi' end;\n"
+        "begin\n"
+        "  a := 'xy'; b[1] := 'zz'; c.s := 'qq';\n"
+        "  writeln('[', a, '][', b[1], '][', c.s, '][', f, ']')\n"
+        "end.\n", kEP);
+    EXPECT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "[xy][zz][qq][hi]\n");
+}
+
 TEST(EP7Schema, DeclaringASchemaParameterDoesNotResizeAnInstanceOfIt) {
     // R4.  The record arm of llvmTypeOfSemaType had the resolved type T in
     // hand and passed only T.RecordDecl to the layout, which then re-read each

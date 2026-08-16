@@ -702,6 +702,25 @@ std::shared_ptr<Type> Sema::resolveNamedUnrestricted(const NamedTypeNode& N) {
         // `new(p, 20)` for a `^string` with nowhere to put the 20.
         if (Lo == "string" && InPointerDomain_ > 0)
             return stringSchemaType();
+        // A bare `string` as a VARIABLE, field, element or function result.
+        // plang accepts this as an extension -- StandardGate covers it -- and
+        // lowered it as the capacity-less String, which codegen emits as a raw
+        // pointer: `var a: string; a := 'xy'; writeln(a)` stored a pointer and
+        // printed nothing at all.
+        //
+        // It gets a capacity here, the widest plang has, exactly as a value
+        // PARAMETER of bare `string` already did.  Refusing it instead would
+        // have been defensible under §6.4.3.3 -- a bare schema-name denotes a
+        // type only as a pointer's domain or a parameter's -- but it is a
+        // documented extension that programs use, and making it work is a
+        // smaller change than withdrawing it.
+        //
+        // Not in a parameter position: AllowUndiscriminatedSchema_ marks those,
+        // and resolveParamType needs TyStr back to choose between the string
+        // schema (var) and this same capacity (value).
+        if (Lo == "string" && InPointerDomain_ == 0
+                && AllowUndiscriminatedSchema_ == 0)
+            return Ctx_.getVarString(PlangMaxStringCapacity);
         return (Lo == "complex") ? TyComplex : TyStr;
     }
     // ISO 7185 §6.4.3.5: text is a predefined file type, and one type rather
