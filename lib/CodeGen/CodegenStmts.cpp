@@ -333,9 +333,16 @@ void Codegen::Impl::emitAssign(const AssignStmt& s) {
     //
     // The whole-object case above already memcpy'd a run-time size; this is the
     // same statement one component down, and it had no branch of its own.
+    // A component whose type is a schema INSTANTIATION -- `e: ent(n)` inside
+    // `t(n)` -- is as much a run-time-laid-out aggregate as an array or record
+    // is, and asking only for those two kinds sent `q^.e := p^.e` to the
+    // ordinary typed store, which copied the probe's ent(1): sixteen bytes of a
+    // nine-element record, silently, exit 0.
     if (const auto& tt = s.Target->ResolvedType;
             tt && tt->ExtentVaries
-            && (tt->Kind == TypeKind::Array || tt->Kind == TypeKind::Record))
+            && (tt->Kind == TypeKind::Array || tt->Kind == TypeKind::Record
+                || tt->Kind == TypeKind::SchemaInstance
+                || tt->Kind == TypeKind::Schema))
         if (auto dpath = schemaPathOf(*s.Target))
             if (auto spath = schemaPathOf(*s.Value)) {
                 llvm::Value* sz = nullptr;
@@ -1164,17 +1171,28 @@ void Codegen::Impl::emitWith(const WithStmt& s) {
         // "string of length 7 assigned to a string(1)" on legal code.
         // Whether there is a struct to GEP into is a question about the
         // storage, which is what the path knows and the kind does not.
-        const bool isInstance =
-            rec->ResolvedType->Kind == TypeKind::SchemaInstance;
+        // A SchemaInstance was treated as having a static layout and sent
+        // straight to the static branch.  That holds for one DECLARED as such
+        // -- `var v: ent(5)` -- and not for a COMPONENT of a run-time-laid-out
+        // object: `p^.e` for `t(n) = record e: ent(n) ... end` is an
+        // instantiation whose discriminants are values the object carries, and
+        // binding its fields statically bound them at the probe's offsets.
+        // `with p^.e do id := 12345` then wrote into the middle of the
+        // neighbouring string, silently, exit 0.
+        //
+        // The rule this file already states applies: whether there is a struct
+        // to GEP into is a question about the STORAGE, which the path knows and
+        // the kind does not.  So ask the path in every case and let it decide;
+        // a genuine `var v: ent(5)` has no schema ref, yields no path, and
+        // reaches the static branch exactly as before.
         // schemaPathOf EMITS the access path -- every subscript in it -- so its
         // result is kept whatever happens next.  Discarding it and letting the
         // static branch call emitLValue below emitted the path a SECOND time:
         // `with q^.a[idx] do` called idx twice, bound the element the second
         // call chose, and left a live range check on the first.  ISO §6.8.3.10
         // says the record-variable is evaluated once.
-        std::optional<SchemaPath> path;
-        if (!isInstance) path = schemaPathOf(*rec);
-        if (!isInstance) {
+        std::optional<SchemaPath> path = schemaPathOf(*rec);
+        {
             const RecordTypeNode* rt =
                 path ? llvm::dyn_cast_or_null<RecordTypeNode>(
                            peelPackedNode(path->decl))
@@ -1195,9 +1213,14 @@ void Codegen::Impl::emitWith(const WithStmt& s) {
                     }
                 }
                 {
-                    const auto& fields =
-                        isBody ? rec->ResolvedType->SchemaBody->RecordFields
-                               : rec->ResolvedType->RecordFields;
+                    // Whatever the type really is: a Schema keeps its fields
+                    // on its body, a SchemaInstance likewise, and a plain
+                    // record on itself.  Reading RecordFields off an INSTANCE
+                    // found an empty list, so `with p^.e do` bound nothing and
+                    // every name in the body became an undefined global.
+                    const plang::Type* fieldsFrom =
+                        schemaUnderlying(rec->ResolvedType.get());
+                    const auto& fields = fieldsFrom->RecordFields;
                     for (const auto& F : fields) {
                         auto* off = [&] {
                             RtDiscScope disc(*this, path->root.discs);

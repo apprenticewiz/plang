@@ -4233,6 +4233,82 @@ TEST(EP7Schema, AVariantFieldIsLaidOutForTheInstanceItBelongsTo) {
     EXPECT_EQ(R.Stdout, "big 1 77 66\nsmall 2 88 22\n");
 }
 
+// Review 6 found seven defects with one cause: a component whose type is a
+// nested schema INSTANTIATION was handled at the probe's discriminants wherever
+// it was touched.  These four are the ones this commit closes; each was its own
+// finding and none of them is a separate bug.
+TEST(EP7Schema, ANestedInstantiationChainIsDescendedToTheEnd) {
+    // descendIntoInstantiation peeled ONE level -- written as a step in the
+    // very commit that fixed a dozen other sites by making the same descent a
+    // loop.  B(n) = A(n*2+1) stopped at B, so b was indexed against the probe's
+    // 1..3 instead of 1..7.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type A(k: integer) = array[1..k] of integer;\n"
+        "     B(n: integer) = A(n*2+1);\n"
+        "     C(n: integer) = record b: B(n); t: integer end;\n"
+        "var q: ^C; i: integer;\n"
+        "begin new(q,3); q^.t := 1;\n"
+        "  for i := 1 to 7 do q^.b[i] := i;\n"
+        "  for i := 1 to 7 do write(q^.b[i]:1,' '); writeln('t=',q^.t:1) end.\n",
+        std::string(kEP) + " -frange-checks");
+    EXPECT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "1 2 3 4 5 6 7 t=1\n");
+}
+
+TEST(EP7Schema, AStringFieldOfANestedInstantiationHasTheInstancesCapacity) {
+    // The field's own denoter is an instantiation too, and the path was built
+    // without descending into it, so the capacity was the probe's string(1).
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type s(m: integer) = string(m);\n"
+        "     t(n: integer) = record f: s(n); tail: integer end;\n"
+        "var q: ^t;\n"
+        "begin new(q, 12); q^.tail := 5150; q^.f := 'abcdefghijkl';\n"
+        "  writeln('[', q^.f, '] ', length(q^.f):1, ' ', q^.tail:1) end.\n", kEP);
+    EXPECT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "[abcdefghijkl] 12 5150\n");
+}
+
+TEST(EP7Schema, AWholeValueCopyOfANestedInstantiationCopiesItsRealSize) {
+    // The copy branch asked only for Array or Record, and this component's type
+    // is a SchemaInstance, so it fell through to the ordinary typed store and
+    // copied the probe's ent(1) -- sixteen bytes of a nine-element record,
+    // silently, exit 0.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type ent(cap: integer) = record a: array[1..cap] of integer; id: integer end;\n"
+        "     t(n: integer) = record e: ent(n); tail: integer end;\n"
+        "var q, r: ^t; i: integer;\n"
+        "begin new(q, 9); new(r, 9); q^.tail := 1; r^.tail := 2;\n"
+        "  for i := 1 to 9 do q^.e.a[i] := i*4;\n"
+        "  q^.e.id := 77; r^.e := q^.e;\n"
+        "  writeln(r^.e.a[1]:1,' ',r^.e.a[9]:1,' ',r^.e.id:1,' ',r^.tail:1) end.\n",
+        std::string(kEP) + " -frange-checks");
+    EXPECT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "4 36 77 2\n");
+}
+
+TEST(EP7Schema, WithOverANestedInstantiationBindsTheInstancesLayout) {
+    // `with` skipped the access path whenever the type was a SchemaInstance, on
+    // the reasoning that an instantiation has a static layout.  True for a
+    // DECLARED `var v: ent(5)`, false for a component of a run-time-laid-out
+    // object -- so the fields were bound at the probe's offsets and
+    // `with p^.e do id := 12345` wrote into the middle of the neighbouring
+    // string, exit 0, no diagnostic.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type ent(cap: integer) = record name: string(cap); id: integer end;\n"
+        "     tbl(cap: integer) = record e: ent(cap); tail: integer end;\n"
+        "var q: ^tbl;\n"
+        "begin new(q, 20); q^.tail := 4242;\n"
+        "  q^.e.name := 'abcdefghijklmnopqrst'; q^.e.id := 99;\n"
+        "  with q^.e do id := 12345;\n"
+        "  writeln('[', q^.e.name, '] ', q^.e.id:1, ' ', q^.tail:1) end.\n", kEP);
+    EXPECT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "[abcdefghijklmnopqrst] 12345 4242\n");
+}
+
 TEST(EP7Schema, DeclaringASchemaParameterDoesNotResizeAnInstanceOfIt) {
     // R4.  The record arm of llvmTypeOfSemaType had the resolved type T in
     // hand and passed only T.RecordDecl to the layout, which then re-read each

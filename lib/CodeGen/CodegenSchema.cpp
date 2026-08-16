@@ -883,17 +883,29 @@ const TypeNode* peel(const TypeNode* tn) {
 std::pair<Codegen::Impl::SchemaRef, const TypeNode*>
 Codegen::Impl::descendIntoInstantiation(const SchemaRef& root, llvm::Value* addr,
                                         const TypeNode* decl) {
-    const TypeNode* d = peel(decl);
-    if (auto* sn = llvm::dyn_cast_or_null<SchemaTypeNode>(d);
-            sn && !sn->ActualForms.empty() && sn->ResolvedBody) {
+    // As many levels as there are.  This was written as a single step, in the
+    // commit that fixed a dozen OTHER sites by making the same descent a loop
+    // -- `type A(k) = array[1..k]; B(n) = A(n*2+1); C(n) = record b: B(n) end`
+    // stopped at B and indexed b against the probe's 1..3 instead of 1..7.
+    //
+    // Each level's discriminants are arithmetic over the level above it, so
+    // they are evaluated against the discriminants worked out so far rather
+    // than against the outermost object's.
+    SchemaRef       cur = root;
+    const TypeNode* d   = peel(decl);
+    for (int Hops = 0; Hops < 16; ++Hops) {
+        auto* sn = llvm::dyn_cast_or_null<SchemaTypeNode>(d);
+        if (!sn || sn->ActualForms.empty() || !sn->ResolvedBody) break;
+        const TypeNode* body = schemaBodyNodeOf(*sn->ResolvedBody);
+        if (!body) break;
         std::vector<llvm::Value*> inner;
         inner.reserve(sn->ActualForms.size());
         for (const auto& F : sn->ActualForms)
-            inner.push_back(emitExtentForm(F, root.discs));
-        if (const TypeNode* body = schemaBodyNodeOf(*sn->ResolvedBody))
-            return {SchemaRef{sn->ResolvedBody.get(), addr, inner}, peel(body)};
+            inner.push_back(emitExtentForm(F, cur.discs));
+        cur = SchemaRef{sn->ResolvedBody.get(), addr, inner};
+        d   = peel(body);
     }
-    return {root, d};
+    return {cur, d};
 }
 
 std::optional<Codegen::Impl::SchemaPath>
@@ -927,9 +939,15 @@ Codegen::Impl::schemaPathOf(const ExprNode& e) {
             return rtFieldOffset(*rt, fe->Field);
         }();
         const TypeNode* fieldDecl = fieldDenoterOf(*rt, fe->Field);
-        return SchemaPath{root,
-                          builder.CreateGEP(i8Ty, base->addr, {off}, "path.fld"),
-                          fieldDecl};
+        auto* fldAddr = builder.CreateGEP(i8Ty, base->addr, {off}, "path.fld");
+        // The FIELD's own denoter may be an instantiation too -- `e: ent(n)`
+        // inside `t(n)` -- so descend here, where the path is BUILT, rather
+        // than leaving each consumer to remember.  They did not remember: the
+        // capacity of a string field, a whole-value copy, `with`, and passing
+        // the component as a schema formal each took the probe's discriminants,
+        // as four separate defects with one cause.
+        auto [fRoot, fDecl] = descendIntoInstantiation(root, fldAddr, fieldDecl);
+        return SchemaPath{fRoot, fldAddr, fDecl};
     }
 
     if (auto* ie = llvm::dyn_cast<IndexExpr>(&e)) {
@@ -960,9 +978,11 @@ Codegen::Impl::schemaPathOf(const ExprNode& e) {
         emitRangeCheckDyn(idx, lo, hi, /*isIndex=*/true, ie->Loc);
         auto* off = builder.CreateMul(builder.CreateSub(idx, lo), stride,
                                       "path.idx");
-        return SchemaPath{root,
-                          builder.CreateGEP(i8Ty, base->addr, {off}, "path.elem"),
-                          at->Element.get()};
+        // Likewise an ELEMENT: `array[1..n] of ent(cap)`.
+        auto* elemAddr = builder.CreateGEP(i8Ty, base->addr, {off}, "path.elem");
+        auto [eRoot, eDecl] =
+            descendIntoInstantiation(root, elemAddr, at->Element.get());
+        return SchemaPath{eRoot, elemAddr, eDecl};
     }
 
     return std::nullopt;
