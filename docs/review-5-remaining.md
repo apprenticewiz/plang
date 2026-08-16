@@ -186,22 +186,29 @@ reached from another scope?  The second kind must follow
   spelling, rebuilt per procedure).  Test:
   `EPConstructor.AnUnnamedNestedComponentValueIsShapedByTheFieldsOwnDeclaration`.
 - `CodegenExprs.cpp:1311` (`emitIndex`'s array-alias lower bound) — CHECKED,
-  left alone.  `ntn` here is the indexed variable's OWN declared type node,
-  not a foreign field/element recursion, and whatever wrong `Low` this branch
-  computes is unconditionally overwritten a few lines down by the
-  Sema-type-based answer (`T = schemaUnderlying(e.Array->ResolvedType.get())`)
-  whenever `e.Array->ResolvedType` is set — which it is for every expression
-  that reaches this point with a declaration to read.  Narrower than the
-  emitStructuredValue case and not reproduced; left as a candidate rather than
-  a confirmed fix.
+  confirmed safe, left alone.  `ntn` here is the indexed variable's OWN
+  declared type node, not a foreign field/element recursion, and whatever
+  wrong `Low` this branch computes is UNCONDITIONALLY overwritten a few lines
+  down by the Sema-type-based answer (`T =
+  schemaUnderlying(e.Array->ResolvedType.get())`) whenever
+  `e.Array->ResolvedType` is set — which it structurally always is by the time
+  this branch runs, there being no path to it for an expression Sema rejected.
+  Not a guard that can be bypassed, unlike the next one — this is dead weight,
+  not a bug.
 - `CodegenStmts.cpp:931` (`new(p)`'s domain-denoter lookup, for `p`'s `value`
-  clause) — CHECKED, left alone.  Already guarded by a size-agreement check
-  the surrounding comment documents on purpose: the resolved denoter's size is
-  compared against Sema's own answer, and a mismatch is treated as "the
-  denoter was re-resolved somewhere else" and discarded.  A same-size
-  collision could still slip through silently, but that is narrower than the
-  emitStructuredValue case (which had no such check at all) and not
-  reproduced.
+  clause) — FIXED.  The size-agreement check the surrounding comment documents
+  on purpose (a mismatch discards the resolved denoter) does not catch a
+  SAME-SIZE collision, and one is easy to write: `g: pt` declared at module
+  scope, `new(g)` called from a procedure with its own local, unrelated `type
+  pt = ^inner_dom` whose domain happens to match the real domain's size.  The
+  size check agreed and `new(g)` applied `inner_dom`'s `value` clause to `g`'s
+  real, unrelated allocation.  Fixed the same way as the confirmed
+  `emitStructuredValue` defect above: switched from `denoterOf` (spelling,
+  rebuilt per procedure) to `initialStateShapeOf` (follows
+  `NamedTypeNode::Denotes`, recorded by Sema in the scope `pt` was actually
+  written in), which cannot be fooled by a homonym regardless of size.  Test:
+  `Shadowing.NewsValueClauseIsGuardedAgainstASameSizeHomonymToo`
+  (test/Driver/codegen_test.cpp), mutation-tested against the pre-fix code.
 
 ## 2. One-level `SchemaBody` peels — should they loop? — SWEPT
 

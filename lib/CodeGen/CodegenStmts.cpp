@@ -925,10 +925,23 @@ void Codegen::Impl::emitCallStmt(const CallStmt& s) {
         // initial value into another's 4-byte allocation.  A disagreement means
         // the denoter was re-resolved somewhere else, so it is not this
         // variable's domain and its initial state is not this variable's.
+        //
+        // The size-agreement check is not enough on its own: `ve->typeNode` is
+        // `g`'s OWN declaration, written wherever `g` was declared -- module
+        // scope, say -- and not in the procedure calling `new(g)`.  denoterOf
+        // walked `typeAliases` for that FOREIGN node's name, so a procedure
+        // that merely shadows the pointer's own type name with an unrelated,
+        // SAME-SIZE one slipped straight through the check: `new(g)` inside a
+        // procedure with its own local `type pt = ^inner_dom` (one field,
+        // like the real domain) applied inner_dom's `value` clause to g's
+        // real, unrelated allocation.  initialStateShapeOf is the fix already
+        // used for exactly this pattern elsewhere: it follows
+        // NamedTypeNode::Denotes, which Sema recorded in the scope `pt` was
+        // actually written in.
         if (auto* id = llvm::dyn_cast<IdentExpr>(s.Args[0].get()))
             if (auto* ve = findVar(id->Name))
                 if (auto* ptn = llvm::dyn_cast_or_null<PointerTypeNode>(
-                        denoterOf(ve->typeNode))) {
+                        initialStateShapeOf(ve->typeNode))) {
                     const TypeNode* d = ptn->Base.get();
                     const auto dsz = (int64_t)mod->getDataLayout()
                         .getTypeAllocSize(llvmTypeOfNode(*d));

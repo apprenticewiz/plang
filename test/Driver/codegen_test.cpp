@@ -4878,6 +4878,31 @@ TEST(Shadowing, AValueClauseComesFromTheTypeThatWasWrittenNotAHomonym) {
     EXPECT_EQ(R.Stdout, "[abcd]\n");
 }
 
+TEST(Shadowing, NewsValueClauseIsGuardedAgainstASameSizeHomonymToo) {
+    // The sibling of the two tests above, for new()'s own domain-denoter
+    // lookup rather than writtenInitialState's.  That lookup already has a
+    // size-agreement guard on purpose (a mismatch means the walk found a
+    // different declaration and the value clause is discarded), but the
+    // guard only catches a SIZE disagreement -- a homonym whose record
+    // happens to be the same size slips straight through it.  `g: pt` is
+    // declared at module scope; `inner`'s own local `pt` (unrelated,
+    // one-field `inner_dom`) has the identical size, so the size check
+    // agreed and `new(g)` applied inner_dom's value clause (99) to g's real,
+    // unrelated allocation instead of dom's (5).
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type dom = record a: integer value 5 end;\n"
+        "     pt = ^dom;\n"
+        "var g: pt;\n"
+        "procedure inner;\n"
+        "type inner_dom = record b: integer value 99 end;\n"
+        "     pt = ^inner_dom;\n"
+        "begin new(g); writeln(g^.a) end;\n"
+        "begin inner end.\n", kEP);
+    EXPECT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "5\n");
+}
+
 TEST(Shadowing, AValueClauseIsNotSuppressedByAHomonymThatHasNone) {
     // The same walk ran the other way: an inner homonym with NO value clause
     // made hasInitialState answer false, and the initialization the type really
