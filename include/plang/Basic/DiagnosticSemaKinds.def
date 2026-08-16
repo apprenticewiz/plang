@@ -196,6 +196,7 @@ DIAG(err_line_proc_not_text, Error, "'%0' applies to a text file only, not to 'f
 DIAG(err_assign_file, Error, "a variable of a file type, or with a file component, cannot be assigned")
 DIAG(err_function_result_type, Error, "a function result must be a simple or pointer type, not '%0'")
 DIAG(err_duplicate_enum_value, Error, "duplicate enumeration value '%0'")
+
 DIAG(err_duplicate_field, Error, "duplicate field name '%0' in record")
 DIAG(err_set_base_not_ordinal, Error, "set base type must be ordinal; got '%0'")
 DIAG(err_set_base_too_wide, Error,

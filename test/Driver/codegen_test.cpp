@@ -4730,6 +4730,46 @@ TEST(Shadowing, AnInitialStateIsNotDroppedByAHomonymWithoutOne) {
     EXPECT_EQ(R.Stdout, "k=9\n");
 }
 
+TEST(Storage, ARecordsFieldsAreDistinctAcrossItsVariants) {
+    // ISO §6.4.3.3: a record's field identifiers are distinct, across the fixed
+    // part and EVERY variant alike -- a variant selects which fields exist, not
+    // which of two same-named fields is meant.  The check existed for the fixed
+    // part and not for the variant part, seventy lines apart in one file.
+    //
+    // A repeat was silently skipped, keeping the first declaration and leaving
+    // the second unreachable.  Where the two alternatives put the field at
+    // DIFFERENT offsets, Sema's flattened field list and codegen's
+    // per-alternative layout disagreed, and the offset gate aborted the
+    // compiler with no file and no line -- a user's mistake reported as an
+    // internal error, which is still the wrong answer.
+    auto Differing = compileAndRun(
+        "program p(output);\n"
+        "type r = record\n"
+        "  h: integer;\n"
+        "  case b: boolean of\n"
+        "    true:  (p: integer; x: integer);\n"
+        "    false: (x: real; q: integer)\n"
+        "end;\n"
+        "var v: r;\n"
+        "begin v.h := 1; writeln(v.h:1) end.\n");
+    EXPECT_NE(Differing.ExitCode, 0);
+    EXPECT_NE(Differing.Stderr.find("duplicate field name 'x'"),
+              std::string::npos) << Differing.Stderr;
+    EXPECT_EQ(Differing.Stderr.find("LLVM ERROR"), std::string::npos)
+        << "a user error must not surface as an internal one:\n" << Differing.Stderr;
+
+    // And the same-offset case, which the gate could not see: it compiled, and
+    // the second declaration was simply unreachable.
+    auto SameOffset = compileAndRun(
+        "program p(output);\n"
+        "type r = record case b: boolean of true: (x: integer); false: (x: real) end;\n"
+        "var v: r;\n"
+        "begin v.b := true; v.x := 5; writeln(v.x:1) end.\n");
+    EXPECT_NE(SameOffset.ExitCode, 0);
+    EXPECT_NE(SameOffset.Stderr.find("duplicate field name 'x'"),
+              std::string::npos) << SameOffset.Stderr;
+}
+
 TEST(Shadowing, NewAllocatesTheDomainOfThePointerTypeThatWasWritten) {
     // Review 5, and the archetype this whole redesign is named for -- still
     // live after R1, one hop away from where R1 looked.  new() resolves the

@@ -180,9 +180,20 @@ void Sema::walkVariantFields(const VariantPart& Vp, Type& T) {
         for (const auto& Fd : Vc.Fields) {
             auto Ft = resolveType(*Fd.Type);
             for (const auto& Nm : Fd.Names) {
-                if (!std::ranges::any_of(T.RecordFields,
-                        [&](const Type::Field& F) { return eqCI(F.Name, Nm); }))
-                    T.RecordFields.push_back({ .Name = Nm, .Ty = Ft });
+                // §6.4.3.3: distinct across the fixed part and every variant.
+                // A repeat was silently SKIPPED, which kept the first
+                // declaration and left the second unreachable -- and where the
+                // two alternatives put the field at different offsets, Sema's
+                // flattened list and codegen's per-alternative layout gave
+                // different answers and the offset gate aborted the compiler
+                // with no file and no line.  A user's mistake reported as an
+                // internal error is still the wrong answer.
+                if (std::ranges::any_of(T.RecordFields,
+                        [&](const Type::Field& F) { return eqCI(F.Name, Nm); })) {
+                    error(Fd.Type->Loc, diag::err_duplicate_field, {Nm});
+                    continue;
+                }
+                T.RecordFields.push_back({ .Name = Nm, .Ty = Ft });
             }
         }
         if (Vc.NestedVariant) walkVariantFields(*Vc.NestedVariant, T);
