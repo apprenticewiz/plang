@@ -329,7 +329,7 @@ same widening as every other site in §2.  Test:
 `EP6ConformantArray.ASchemaInstanceElementTypeIndexesWithTheRightBounds`,
 mutation-tested against the pre-fix code.
 
-## 4. Checks that exist for one construct and not its neighbours — SWEPT, three defects found
+## 4. Checks that exist for one construct and not its neighbours — SWEPT, four defects found
 
 `isVarStringLike` was needed by assignment, `+`, `length`, comparison AND substr
 together.  The same question applies to any predicate added for one operator.
@@ -362,14 +362,29 @@ Test: `CharStringType.WorksWithLengthSubstrTrimAndIndexLikeAnEPString`
 (test/Driver/codegen_test.cpp) — mutation-tested against the pre-fix code (the
 LLVM IR verifier failure reproduces exactly).
 
-One further gap was found and NOT fixed: `+` concatenation
-(`SemaExpr.cpp`, the `Plus` case) also omits `isCharStringType`, so
-`charArrA + charArrB` is rejected as non-numeric where the same two operands
-already compare equal.  Left alone: `isCharStringType`'s own doc comment
-enumerates exactly the powers ISO §6.4.3.2 gives the type — "written, compared,
-and assigned a string literal" — and concatenation is not among them, so this
-reads as a deliberate scope limit rather than a missed sibling.  Flagged here
-in case a closer reading of §6.8.3.6 says otherwise.
+A fourth gap was flagged and initially left alone on a wrong reading — FIXED
+once the actual standard was checked (`/home/cparrott/iso10206_a4.pdf`).  `+`
+concatenation (`SemaExpr.cpp`, the `Plus` case) also omitted
+`isCharStringType`, so `charArrA + charArrB` was rejected as non-numeric where
+the same two operands already compare equal.  The operand-type table at
+ISO 10206 §6.8.3.6 names only "char-type or the canonical-string-type", which
+reads like a deliberate exclusion of the fixed-string-type — but §6.4.3.3.1's
+general note settles it explicitly: "each string-type value is a value of the
+canonical-string-type", and the note's own list of what a string-type (the
+category covering the fixed-string-type same as the canonical one) is usable
+for names "the string concatenation operator (see 6.8.3.6)" outright. A
+fixed-string-type operand satisfies the table's canonical-string-type column
+by that coercion rule; the table names the narrower type because that is what
+the *result* always is, not because the fixed kind is excluded as an operand.
+
+Fixed by extending both the Sema operand test and codegen's `strOperand`/
+`staticCap`/right-operand dispatch in the `+` handler to `isCharStringType`/
+`exprIsCharStr`, the same widening as the three builtins above.  Also fixed
+`isCharStringType`'s own doc comment (`Type.h`), which is what led to the
+wrong initial read — it undercounted the type's powers to three, and the
+undercount is what made the gap look intentional. Test:
+`CharStringType.ConcatenatesLikeAnEPString` (test/Driver/codegen_test.cpp),
+mutation-tested against the pre-fix code.
 
 ### Why that one needs both halves at once — an attempt, reverted, then landed
 

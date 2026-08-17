@@ -403,8 +403,11 @@ ordinalRange(const Type& T) {
 
 /// ISO §6.4.3.2: a string-type is `packed array[1..n] of char` with n > 1.
 /// The standard gives it powers no other array has — it is written, compared,
-/// and assigned a string literal — so it is worth telling apart by name rather
-/// than repeating the four conditions at each of those places.  n = 1 is
+/// assigned a string literal, concatenated, and taken length/substr/trim/index
+/// of (ISO 10206 §6.4.3.3.1's note: "each string-type value is a value of the
+/// canonical-string-type", so it satisfies every operator whose table names a
+/// canonical-string-type operand) — so it is worth telling apart by name
+/// rather than repeating the conditions at each of those places.  n = 1 is
 /// excluded because a one-character literal is a char, not a string.
 [[nodiscard]] inline bool isCharStringType(const Type& T) {
     return T.Kind == TypeKind::Array && T.Packed

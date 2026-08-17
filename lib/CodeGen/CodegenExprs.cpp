@@ -340,8 +340,17 @@ llvm::Value* Codegen::Impl::emitBinary(const BinaryExpr& e) {
         // discriminant-fixed operand contributes the widest capacity plang has
         // rather than the probe's one character.  What each operand is declared
         // to hold is told to the runtime separately, as a value.
+        // ISO §6.4.3.3.1: "each string-type value is a value of the
+        // canonical-string-type" -- a fixed-string-type operand (ISO
+        // §6.4.3.2's packed array[1..n] of char) is as much a string operand
+        // of `+` as a char or an EP string(n), and was missing here the same
+        // way it was missing from length/substr/trim/index: treated as a
+        // bare one-character operand, which truncated `charArr + b` to the
+        // array's first character.
         auto strOperand = [&](const ExprNode& x) -> std::pair<llvm::Value*, llvm::Value*> {
             if (exprIsVarStr(x)) return strAddrAndCap(x);
+            if (exprIsCharStr(x))
+                return {emitCharStrAsStr(x), i64c(exprCharStrLen(x))};
             auto* v   = emitExpr(x);
             auto* tmp = createEntryAlloca(strStructType(1), "str.chr");
             if (v && v->getType()->isIntegerTy(8)) emitStrFromChar(tmp, 1, v);
@@ -349,11 +358,15 @@ llvm::Value* Codegen::Impl::emitBinary(const BinaryExpr& e) {
             return {tmp, i64c(1)};
         };
         auto [lv, capL] = strOperand(*e.Left);
-        auto* capR = exprIsVarStr(*e.Right) ? exprStrCapV(*e.Right) : i64c(1);
+        auto* capR = exprIsVarStr(*e.Right) ? exprStrCapV(*e.Right)
+                   : exprIsCharStr(*e.Right) ? i64c(exprCharStrLen(*e.Right))
+                   : i64c(1);
         // A non-string operand is one character, as it was before: returning
         // zero for it sized the result temporary at 1 and cut 'x' + 'y' to "x".
         auto staticCap = [&](const ExprNode& x) -> int64_t {
-            return exprIsVarStr(x) ? exprStrCapStatic(x) : 1;
+            if (exprIsVarStr(x)) return exprStrCapStatic(x);
+            if (exprIsCharStr(x)) return exprCharStrLen(x);
+            return 1;
         };
         // No clamp: a declared capacity may exceed PlangMaxStringCapacity --
         // string(300) is legal and the corpus has one -- and capping the sum
@@ -377,9 +390,10 @@ llvm::Value* Codegen::Impl::emitBinary(const BinaryExpr& e) {
             ? createDynStrAlloca(capResV, "str.concat")
             : static_cast<llvm::Value*>(
                   createEntryAlloca(strStructType(capRes), "str.concat"));
-        auto*   rv     = exprIsVarStr(*e.Right) ? emitStrAddr(*e.Right)
+        auto*   rv     = exprIsVarStr(*e.Right)  ? emitStrAddr(*e.Right)
+                        : exprIsCharStr(*e.Right) ? emitCharStrAsStr(*e.Right)
                                                 : emitExpr(*e.Right);
-        if (exprIsVarStr(*e.Right)) {
+        if (exprIsVarStr(*e.Right) || exprIsCharStr(*e.Right)) {
             auto* fn = getStrFn("plang_str_concat", llvm::Type::getVoidTy(ctx),
                 {ptrTy, i64Ty, ptrTy, i64Ty, ptrTy, i64Ty});
             builder.CreateCall(fn, {resPtr, capResV, lv, capL, rv, capR});

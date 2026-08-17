@@ -396,13 +396,26 @@ std::shared_ptr<Type> Sema::checkBinary(const BinaryExpr& E) {
 
     switch (E.Op) {
         case TokenKind::Plus:
-            // EP §6.8.3.6: string concatenation.
+            // EP §6.8.3.6: string concatenation.  ISO 10206 §6.4.3.3.1's note
+            // is explicit that a STRING-TYPE -- the category covering the
+            // fixed-string-type (ISO §6.4.3.2's packed array[1..n] of char)
+            // as much as the canonical one -- is usable with the
+            // concatenation operator, because "each string-type value is a
+            // value of the canonical-string-type" (§6.4.3.3.1): a
+            // fixed-string-type operand already satisfies table 7's
+            // "canonical-string-type" operand column by that coercion rule.
+            // isVarStringLike/Kind==String were missing isCharStringType, the
+            // same sibling gap length/substr/trim/index had.
             if (isVarStringLike(Lt.get()) || isVarStringLike(Rt.get())
                 || Lt->Kind == TypeKind::String  || Rt->Kind == TypeKind::String
+                || (!Lt->isError() && isCharStringType(*Lt))
+                || (!Rt->isError() && isCharStringType(*Rt))
                 || (Lt->Kind == TypeKind::Char && (isVarStringLike(Rt.get())
-                                                 || Rt->Kind == TypeKind::String))
+                                                 || Rt->Kind == TypeKind::String
+                                                 || (!Rt->isError() && isCharStringType(*Rt))))
                 || (Rt->Kind == TypeKind::Char && (isVarStringLike(Lt.get())
-                                                 || Lt->Kind == TypeKind::String))
+                                                 || Lt->Kind == TypeKind::String
+                                                 || (!Lt->isError() && isCharStringType(*Lt))))
                 // EP §6.8.3.2: a char is a string-compatible operand of '+', so
                 // two of them concatenate rather than failing as non-numeric.
                 || (Opts.has(LangOptions::Feature::CharConcatenation)
@@ -416,6 +429,8 @@ std::shared_ptr<Type> Sema::checkBinary(const BinaryExpr& E) {
                     if (isVarStringLike(T.get()))
                         return T->ExtentVaries ? PlangMaxStringCapacity
                                                : T->StrCapacity;
+                    if (!T->isError() && isCharStringType(*T))
+                        return charStringLength(*T);
                     if (T->Kind == TypeKind::Char)      return 1;
                     return PlangMaxStringCapacity; // unbounded string
                 };

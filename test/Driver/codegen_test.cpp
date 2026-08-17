@@ -3410,6 +3410,30 @@ TEST(CharStringType, GoesWhereAnEPStringIsExpected) {
     EXPECT_EQ(R.Stdout, "hello!\ntrue\n");
 }
 
+TEST(CharStringType, ConcatenatesLikeAnEPString) {
+    // ISO 10206 §6.4.3.3.1's note is explicit that a string-type -- the
+    // category covering a packed array[1..n] of char as much as string(n) --
+    // is usable with the concatenation operator (§6.8.3.6): "each
+    // string-type value is a value of the canonical-string-type", so a
+    // fixed-string-type operand already satisfies table 7's
+    // canonical-string-type operand column.  Sema's operand test and
+    // codegen's operand-handling closures both treated anything that was not
+    // isVarStringLike/char/String as a plain one-character value, so
+    // `charArr + b` either failed as non-numeric (Sema, before the fix) or
+    // truncated to the array's first character (codegen).
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "var a: packed array[1..3] of char; b: packed array[1..2] of char;\n"
+        "    s: string(20);\n"
+        "begin a := 'abc'; b := 'de';\n"
+        "  writeln(a + b);\n"
+        "  writeln(a + 'X');\n"
+        "  writeln('Y' + b);\n"
+        "  s := a + b; writeln(s, ' ', length(s):1) end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "abcde\nabcX\nYde\nabcde 5\n");
+}
+
 TEST(CharStringType, WorksWithLengthSubstrTrimAndIndexLikeAnEPString) {
     // isVarStringLike has a documented sibling requirement: every string
     // operator has to widen for EP string(n) together, or the narrow ones
