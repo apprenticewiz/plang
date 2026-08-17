@@ -8,6 +8,8 @@ version numbers follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-17
+
 ### Added
 
 - **Undiscriminated schema types are implemented** (EP §6.4.4, §6.4.7).  A
@@ -144,6 +146,53 @@ version numbers follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html
   layout.**  `schemaPathOf` descended into a nested schema in its index arm and
   not its field arm, so `q^[i][j]` was right while `q^.x.k` was emitted at the
   probe's offset and landed on another field's bytes.
+
+- **The same "loop, not a step" gap remained in six more places**, found by
+  systematically trying the question above against every other one-hop
+  `SchemaBody` peel in Sema and CodeGen: a `var x: B` formal for `B(n) = A(n)`
+  had no fields at all (`schema 'B' has no discriminant 'id'`) though `var x:
+  A` with the identical body worked; `q^` for a pointer to a schema-of-a-
+  string-schema came back typed as the outer schema rather than the string, so
+  `writeln(q^)` was refused as unwritable, and once that was fixed `new(q, 20)`
+  sized the allocation from the probe's `string(1)` regardless; `with x do`
+  bound none of a declared schema-of-a-schema's fields; and a schema-of-a-
+  schema array was rejected by a conformant-array parameter that a directly-
+  schema'd array already satisfied. A seventh instance of the same gap sat one
+  level further out, in a conformant array's OWN element type: indexing past
+  the conformant dimensions into a static element that was itself a schema
+  instantiation used the wrong bounds and the wrong stride, landing a write on
+  the neighbouring element instead — `a[lo][2]` writing where `a[lo][3]`
+  belonged.
+
+- **A structured-value constructor's untyped nested component took its shape
+  from whatever the lowering procedure's own homonym type happened to be.**
+  The type it should have taken its shape from is reached by recursing into a
+  FOREIGN declaration — a record's field, an array's element — so the names in
+  it belong to that declaration's scope, not to the procedure being lowered.
+  `var r: rec value [f: [1:10; 2:20; 3:30]]`, where `rec.f`'s real type is an
+  array declared elsewhere, aborted with `LLVM ERROR: plang codegen: array
+  constructor has no array declaration...` whenever the lowering procedure
+  happened to declare its own, unrelated type of the same name. Fixed the same
+  way the sibling `writtenInitialState` bug was: by following
+  `NamedTypeNode::Denotes`, which Sema records in the scope a name was
+  actually written in, instead of the per-procedure spelling table. The same
+  fix caught a second instance in `new(p)`'s own `value`-clause lookup, which
+  had a size-agreement guard against exactly this but only for a SIZE
+  mismatch — a same-size homonym slipped straight through it and applied the
+  wrong initial value to a real allocation.
+
+- **ISO §6.4.3.2's `packed array[1..n] of char` didn't get all the powers the
+  standard gives it.** Assignment and comparison already treated it as a
+  string; `length`, `substr`, `trim`, `index` and `+` concatenation did not.
+  `length` fell to a raw `strlen` on the whole fixed-size array where a
+  pointer was wanted — an LLVM IR verifier abort, not a diagnostic — `substr`/
+  `trim`/`index` link-failed on a runtime symbol nothing ever emitted a
+  definition for, and `+` silently truncated a char-array operand to its first
+  character rather than rejecting or concatenating it. ISO 10206 §6.4.3.3.1
+  is explicit that a fixed-string-type value "is a value of the
+  canonical-string-type" and lists the concatenation operator among what a
+  string-type is usable for, so all five now widen the same way assignment
+  and comparison already did.
 
 - **Crashes.**  A schema whose body names itself through a pointer — legal, and
   the ordinary way to write a linked structure — sent Sema into unbounded
