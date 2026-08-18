@@ -3,7 +3,6 @@
 #include <cinttypes>
 #include <cstdint>
 #include <cstdio>
-#include <cstring>
 #include <ctime>
 
 namespace plang {
@@ -35,8 +34,11 @@ void plang_gettimestamp(PlangTimeStamp* T) {
         T->minute    = tm->tm_min;
         T->second    = tm->tm_sec;
     } else {
+        // §6.7.5.8: the false-DateValid fallback is "the date 'January 1, 1'",
+        // not an all-zero non-date -- day/month/year=0 is not even a value
+        // the record's own field bounds (1..31, 1..12) permit.
         T->DateValid = 0;
-        T->year = T->month = T->day = 0;
+        T->year = 1; T->month = 1; T->day = 1;
         T->TimeValid = 0;
         T->hour = T->minute = T->second = 0;
     }
@@ -45,23 +47,24 @@ void plang_gettimestamp(PlangTimeStamp* T) {
 /// EP §6.7.6.9: format the date portion of a TimeStamp as "YYYY-MM-DD".
 /// Returns a pointer to a static buffer (Pascal programs are single-threaded).
 const char* plang_date(const PlangTimeStamp* T) {
+    // date(t) is specified purely as a function of day/month/year -- DateValid
+    // never appears in its contract, only in GetTimeStamp's.  It gated on
+    // DateValid and printed a fixed "0000-00-00" instead, discarding whatever
+    // the fields actually held (which GetTimeStamp guarantees is always a
+    // valid date, DateValid true or false).
     static char buf[16];
-    if (T->DateValid)
-        std::snprintf(buf, sizeof(buf), "%04" PRId64 "-%02" PRId64 "-%02" PRId64,
-                      T->year, T->month, T->day);
-    else
-        std::strcpy(buf, "0000-00-00");
+    std::snprintf(buf, sizeof(buf), "%04" PRId64 "-%02" PRId64 "-%02" PRId64,
+                  T->year, T->month, T->day);
     return buf;
 }
 
 /// EP §6.7.6.9: format the time portion of a TimeStamp as "HH:MM:SS".
 const char* plang_time_ts(const PlangTimeStamp* T) {
+    // Same fix as plang_date, for the identical reason: time(t) is specified
+    // purely as a function of hour/minute/second, not gated on TimeValid.
     static char buf[12];
-    if (T->TimeValid)
-        std::snprintf(buf, sizeof(buf), "%02" PRId64 ":%02" PRId64 ":%02" PRId64,
-                      T->hour, T->minute, T->second);
-    else
-        std::strcpy(buf, "00:00:00");
+    std::snprintf(buf, sizeof(buf), "%02" PRId64 ":%02" PRId64 ":%02" PRId64,
+                  T->hour, T->minute, T->second);
     return buf;
 }
 

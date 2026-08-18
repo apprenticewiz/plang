@@ -1962,20 +1962,25 @@ TEST(EP11DateTime, TimeFormatsCorrectly) {
     EXPECT_EQ(R.Stdout, "14:30:05\n");
 }
 
-// §6.7.6.9: invalid DateValid/TimeValid yields zeroed output
-TEST(EP11DateTime, InvalidDateGivesZeroes) {
+// EP §6.7.6.9: date(t)/time(t) are specified purely as functions of
+// day/month/year (resp. hour/minute/second) -- DateValid/TimeValid never
+// appear in either function's contract, only in GetTimeStamp's (§6.7.5.8).
+// plang_date/plang_time_ts used to gate on the Valid fields and print a
+// fixed "0000-00-00"/"00:00:00" whenever they were false, discarding
+// whatever a caller had actually put in a TimeStamp it built itself.
+TEST(EP11DateTime, DateValidFalseStillFormatsTheRealFields) {
     auto R = compileAndRun(
         "program p;\n"
         "var t: TimeStamp;\n"
         "begin\n"
         "  t.DateValid := false;\n"
-        "  t.year := 0; t.month := 0; t.day := 0;\n"
+        "  t.year := 2024; t.month := 6; t.day := 15;\n"
         "  t.TimeValid := false;\n"
-        "  t.hour := 0; t.minute := 0; t.second := 0;\n"
+        "  t.hour := 14; t.minute := 30; t.second := 5;\n"
         "  writeln(date(t)); writeln(time(t))\n"
         "end.\n", kEP);
     ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
-    EXPECT_EQ(R.Stdout, "0000-00-00\n00:00:00\n");
+    EXPECT_EQ(R.Stdout, "2024-06-15\n14:30:05\n");
 }
 
 // §6.7.5.8: GetTimeStamp fills the record; DateValid and year >= 2024
