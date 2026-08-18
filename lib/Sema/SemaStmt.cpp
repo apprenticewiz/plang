@@ -198,8 +198,25 @@ void Sema::checkAssign(const AssignStmt& S) {
 
     // Assignment to a function-result pseudo-variable satisfies §6.7.3 for the
     // function that owns the result, which need not be the one being checked.
-    if (auto* Id = llvm::dyn_cast<IdentExpr>(S.Target.get()))
-        if (FuncFrame* F = resultFrameFor(Id->Name)) F->HasResult = true;
+    // Asked of the ROOT of the access path, not only a bare identifier target
+    // -- §6.7.3 is satisfied by assigning any part of the result, and a
+    // function returning a record is ordinarily written field by field
+    // (`result.x := 1; result.y := 2`), which this missed entirely: every
+    // field was legitimately assigned and the function was still refused as
+    // not assigning to its result at all.  A dereference stops the walk on
+    // purpose, matching checkNotProtected's own walk for the same reason:
+    // `result^.f := x` for a result that is a pointer writes through what it
+    // points at, not to the result variable itself.
+    {
+        const ExprNode* Root = S.Target.get();
+        while (Root) {
+            if (auto* Ix = llvm::dyn_cast<IndexExpr>(Root)) { Root = Ix->Array.get();  continue; }
+            if (auto* Fe = llvm::dyn_cast<FieldExpr>(Root)) { Root = Fe->Record.get(); continue; }
+            break;
+        }
+        if (auto* Id = llvm::dyn_cast_or_null<IdentExpr>(Root))
+            if (FuncFrame* F = resultFrameFor(Id->Name)) F->HasResult = true;
+    }
 
     // EP §6.7.3.1: detect assignment to a protected parameter.
     // Also covers A[i] := ... where A is a protected conformant array param.

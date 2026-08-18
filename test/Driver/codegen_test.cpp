@@ -2279,6 +2279,27 @@ TEST(FunctionResult, OneThatNeverAssignsIsStillReported) {
         << R.Stderr;
 }
 
+// checkAssign only set HasResult when the target was a bare identifier, so a
+// function returning a structure -- ordinarily written field by field, or
+// element by element -- had every one of its assignments go unnoticed and
+// was refused as never assigning to its result at all.
+TEST(FunctionResult, AssigningItFieldByFieldOrElementByElementCounts) {
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type pt = record x, y: integer end;\n"
+        "function mk = result: pt;\n"
+        "begin result.x := 1; result.y := 2 end;\n"
+        "function mkArr = result: array[1..3] of integer;\n"
+        "begin result[1] := 10; result[2] := 20; result[3] := 30 end;\n"
+        "var v: pt; a: array[1..3] of integer;\n"
+        "begin\n"
+        "  v := mk; writeln(v.x:1, ' ', v.y:1);\n"
+        "  a := mkArr; writeln(a[1]:1, ' ', a[2]:1, ' ', a[3]:1)\n"
+        "end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "1 2\n10 20 30\n");
+}
+
 // A local of the function's name denotes the local, the nearer declaration
 // winning, so assigning it is not assigning the result.
 TEST(FunctionResult, ALocalOfTheSameNameIsNotTheResult) {
