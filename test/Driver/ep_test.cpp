@@ -4372,6 +4372,28 @@ TEST(EP7Schema, APointerToASchemaOfASchemaOfAStringReadsAndSizesAsAString) {
     EXPECT_EQ(R.Stdout, "[abcdefghijklmnopqrst] 20\n");
 }
 
+TEST(EP7Schema, APlainVariableOfASchemaOfASchemaOfAStringWorksTooNotJustAPointer) {
+    // The pointer case above was fixed by widening checkDeref, schemaBodySize
+    // and exprStrCapV -- but varStrTypeOf, the single predicate almost every
+    // string operator in CodeGen asks first, had the identical one-hop
+    // `SchemaBody->Kind == VarString` bug and was never touched by that fix,
+    // because a PLAIN declared variable of the nested type never goes through
+    // checkDeref at all.  `v := 'hello'` stored a raw pointer where a string
+    // struct was expected, and `v = w` hit the internal error meant for "a
+    // capacity that comes from neither a type nor a literal".  The matching
+    // write-parameter check in Sema (checkCallStmt) had the same one-hop bug
+    // on the write side, independently.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type A(m: integer) = string(m);\n"
+        "     B(n: integer) = A(n);\n"
+        "var v, w: B(10);\n"
+        "begin v := 'hello'; w := 'hello';\n"
+        "  writeln(v, ' ', length(v):1, ' ', v = w) end.\n", kEP);
+    EXPECT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "hello 5 true\n");
+}
+
 TEST(EP7Schema, WithOverASchemaOfASchemaBindsTheUnderlyingRecordsFields) {
     // `with` on a declared `var x: B(6)` for `B(n) = A(n)` -- a fixed-layout
     // instance, so it takes the static branch rather than the run-time path --

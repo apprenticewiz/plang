@@ -219,6 +219,22 @@ void plang_str_read(void* s, int64_t cap) {
     strLen(s) = len;
 }
 
+/// ISO §6.10.1(e): a fixed-string-type of capacity n reads up to the line
+/// terminator, same as plang_str_read, but has no length field to record how
+/// much of it was real -- so the components past what was read take the
+/// value the standard requires, "zero or more spaces", rather than whatever
+/// the buffer already held.
+void plang_str_read_fixed(void* buf, int64_t n) {
+    char*   data = static_cast<char*>(buf);
+    int64_t len  = 0;
+    int c;
+    while ((c = plangInCh()) != EOF && c != '\n') {
+        if (len < n) data[len] = static_cast<char>(c);
+        ++len;
+    }
+    if (c == '\n') plangInUnget(c);
+    for (int64_t i = len; i < n; ++i) data[i] = ' ';
+}
 
 } // extern "C"
 

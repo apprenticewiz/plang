@@ -338,6 +338,26 @@ void Codegen::Impl::emitReadArg(const ExprNode& arg, llvm::Value* fp) {
         return;
     }
 
+    // ISO §6.10.1(e): a fixed-string-type (packed array[1..n] of char) reads
+    // like the varying-string sibling just above, minus the length field --
+    // Sema's read-parameter check accepted it, and codegen had no case for
+    // it at all, so it fell through to the scalar path below, which reads a
+    // [n x i8] LLVM array as if it were an i64 (readFnSuffix has no answer
+    // for an array type) and silently did nothing useful.
+    if (exprIsCharStr(arg)) {
+        auto* n = i64c(exprCharStrLen(arg));
+        if (fp)
+            builder.CreateCall(
+                getExternFnN("plang_str_read_fixed_file", llvm::Type::getVoidTy(ctx),
+                             {ptrTy, ptrTy, i64Ty}),
+                {fp, addr, n});
+        else
+            builder.CreateCall(
+                getStrFn("plang_str_read_fixed", llvm::Type::getVoidTy(ctx), {ptrTy, i64Ty}),
+                {addr, n});
+        return;
+    }
+
     // What is being read into, from Sema, not from a name lookup.  Only an
     // identifier had a type here, so `read(a[i])`, `read(r.f)` and `read(p^)`
     // fell back to i64 -- which picked the *integer* reader for a char

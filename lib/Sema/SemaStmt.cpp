@@ -496,6 +496,18 @@ void Sema::checkReadParamType(const Type& T, SourceLocation Loc) {
     case TypeKind::VarString:
         return;
     default:
+        // ISO §6.10.1(e): a fixed-string-type (packed array[1..n] of char) is
+        // as legal a read-parameter as EP's variable-string-type is -- the
+        // write side (checkCallStmt's writeln/write arm) already knew this
+        // and the read side did not, so `readln(c)` for a `packed array of
+        // char` was refused though `writeln(c)` already worked.  Same for a
+        // schema whose body is a string, looked through however many levels
+        // of nested instantiation (EP §6.4.7) it takes to reach one.
+        if (isCharStringType(*Base)) return;
+        if ((Base->Kind == TypeKind::Schema || Base->Kind == TypeKind::SchemaInstance)
+                && Base->SchemaBody
+                && schemaUnderlying(Base->SchemaBody)->Kind == TypeKind::VarString)
+            return;
         error(Loc, diag::err_read_param_type, {T.Name});
     }
 }
@@ -604,11 +616,15 @@ void Sema::checkCallStmt(const CallStmt& S) {
                     // EP §6.4.3.3 makes `string` a schema, so a schema whose
                     // BODY is a string denotes a string value as surely as
                     // `string(10)` does: `type s(n: integer) = string(n);
-                    // var v: s(10)` was refused here for not being one.
+                    // var v: s(10)` was refused here for not being one.  The
+                    // body may itself be another schema instantiation, so
+                    // this is asked of schemaUnderlying, not the immediate
+                    // hop -- `type a(m)=string(m); b(n)=a(n); var v: b(10)`
+                    // was refused the same way for the identical reason.
                     if ((T->Kind == TypeKind::Schema
                          || T->Kind == TypeKind::SchemaInstance)
                             && T->SchemaBody
-                            && T->SchemaBody->Kind == TypeKind::VarString)
+                            && schemaUnderlying(T->SchemaBody)->Kind == TypeKind::VarString)
                         break;
                     error(Arg->Loc, diag::err_write_param_type, {T->Name});
                 }

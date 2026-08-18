@@ -636,6 +636,30 @@ TEST(CodegenStrings, ReadlnTruncatesToCapacity) {
     EXPECT_EQ(R.Stdout, "[abcde] len=5\n");
 }
 
+TEST(CodegenStrings, ReadlnIntoAFixedStringTypePadsAndTruncates) {
+    // ISO §6.10.1(e): a fixed-string-type of capacity c reads up to the line
+    // terminator; short of c it is padded with spaces, past c it is
+    // truncated.  Sema's read-parameter check refused a packed array of char
+    // outright (only string(n) was accepted), so this never reached codegen
+    // to be tested before; codegen had no case for it either -- it fell to
+    // the scalar path, which reads an LLVM array as if it were an integer.
+    auto Short = compileAndRun(
+        "program p;\n"
+        "var c: packed array[1..8] of char;\n"
+        "begin readln(c); writeln('[', c, ']') end.\n",
+        kEP, "hi\n");
+    ASSERT_EQ(Short.ExitCode, 0) << Short.Stderr;
+    EXPECT_EQ(Short.Stdout, "[hi      ]\n");
+
+    auto Long = compileAndRun(
+        "program p;\n"
+        "var c: packed array[1..5] of char;\n"
+        "begin readln(c); writeln('[', c, ']') end.\n",
+        kEP, "abcdefghij\n");
+    ASSERT_EQ(Long.ExitCode, 0) << Long.Stderr;
+    EXPECT_EQ(Long.Stdout, "[abcde]\n");
+}
+
 // ---------------------------------------------------------------------------
 // readln argument handling.
 //

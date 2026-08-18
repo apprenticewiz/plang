@@ -357,6 +357,22 @@ void plang_str_read_file(PascalFile *F, void *S, int64_t Cap) {
     *reinterpret_cast<int64_t*>(Base) = Len;
 }
 
+/// The fixed-string-type sibling of plang_str_read_file (ISO §6.10.1(e)): no
+/// length field, so what plang_str_read_file leaves untouched past Len, this
+/// pads with the spaces the standard requires.
+void plang_str_read_fixed_file(PascalFile *F, void *Buf, int64_t N) {
+    abortIfClosed(F, "read");
+    auto*   Data = static_cast<char*>(Buf);
+    int64_t Len  = 0;
+    ensurePrimed(F);
+    while (F->Buf != EOF && F->Buf != '\n') {
+        const int C = advance(F);
+        if (Len < N) Data[Len] = static_cast<char>(C);
+        ++Len;
+    }
+    for (int64_t I = Len; I < N; ++I) Data[I] = ' ';
+}
+
 /// Writes the string(N) at S, which is not null-terminated.
 void plang_str_write_file(PascalFile *F, const void *S, int64_t /*Cap*/) {
     abortIfClosed(F, "write");

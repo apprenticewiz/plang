@@ -1123,9 +1123,19 @@ struct Codegen::Impl {
         const Type* T = e.ResolvedType.get();
         if (!T) return nullptr;
         if (T->Kind == TypeKind::VarString) return T;
+        // The body may itself be another schema instantiation (EP §6.4.7),
+        // not just a string directly -- `B(n) = A(n)` for `A(m) = string(m)`
+        // -- so this is asked of schemaUnderlying, not the immediate hop.  A
+        // PLAIN variable of such a type (not reached through a pointer, which
+        // had its own version of this fixed already) fell through every
+        // caller of this function: assignment stored a raw pointer into it,
+        // and comparison hit the internal error meant for a capacity that
+        // comes from neither a type nor a literal.
         if ((T->Kind == TypeKind::Schema || T->Kind == TypeKind::SchemaInstance)
-                && T->SchemaBody && T->SchemaBody->Kind == TypeKind::VarString)
-            return T->SchemaBody.get();
+                && T->SchemaBody) {
+            const Type* U = schemaUnderlying(T->SchemaBody.get());
+            if (U->Kind == TypeKind::VarString) return U;
+        }
         return nullptr;
     }
 
