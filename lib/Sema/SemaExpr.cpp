@@ -799,6 +799,27 @@ std::shared_ptr<Type> Sema::checkCallExpr(const CallExpr& E) {
             checkBindingCall(Lo, E.Loc, E.Args);
             return Sym->ReturnType ? Sym->ReturnType : TyErr;
         }
+        // EP §6.7.6.7: EQ/LT/GT/NE/LE/GE's two arguments "shall each be of
+        // char-type or the canonical-string-type" -- the same string-or-char
+        // requirement `+` and the relational operators already enforce, and
+        // this had none at all: any two arguments type-checked, so a call
+        // like `eq(3, 5)` was accepted here and had nothing to lower it to
+        // in CodeGen (only the genuinely string-shaped case emits a call),
+        // reaching the ordinary user-function path and link-failing on an
+        // undefined `pas_eq`.
+        if (Lo == "eq" || Lo == "ne" || Lo == "lt"
+                || Lo == "gt" || Lo == "le" || Lo == "ge") {
+            for (const auto& Arg : E.Args) {
+                auto T = checkExpr(*Arg);
+                if (T->isError()) continue;
+                const bool StringLike = isVarStringLike(T.get())
+                    || (!T->isError() && isCharStringType(*T))
+                    || T->Kind == TypeKind::Char || T->Kind == TypeKind::String;
+                if (!StringLike)
+                    error(Arg->Loc, diag::err_string_fn_arg_type, {Lo, T->Name});
+            }
+            return TyBool;
+        }
         for (const auto& Arg : E.Args) (void)checkExpr(*Arg);
         return Sym->ReturnType ? Sym->ReturnType : TyErr;
     }

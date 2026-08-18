@@ -938,6 +938,19 @@ llvm::Value* Codegen::Impl::emitCallExpr(const CallExpr& e) {
             emitStrFromCStr(tmp, cap, internStrPtr(sl->Value));
             return {tmp, i64c(cap)};
         }
+        // A bare char (a variable, not a literal): EP §6.7.6.7 accepts
+        // char-type as readily as a string-type for EQ/LT/GT/NE/LE/GE, and
+        // this had no case for it at all -- Sema's own check (SemaExpr.cpp)
+        // accepts a char argument, and nothing here built the temporary
+        // VarString it needs to be compared as, so the call reached nothing
+        // and fell through to a link failure exactly like an outright
+        // rejected argument would have.
+        if (arg.ResolvedType && arg.ResolvedType->Kind == TypeKind::Char) {
+            auto* v   = emitExpr(arg);
+            auto* tmp = createEntryAlloca(strStructType(1), "str.arg.chr");
+            if (v) emitStrFromChar(tmp, 1, v);
+            return {tmp, i64c(1)};
+        }
         return {nullptr, nullptr};
     };
     // For sizing a temporary, which needs a constant; see exprStrCapStatic.
@@ -948,6 +961,7 @@ llvm::Value* Codegen::Impl::emitCallExpr(const CallExpr& e) {
         if (exprIsCharStr(arg)) return exprCharStrLen(arg);
         if (auto* sl = llvm::dyn_cast<StringLitExpr>(&arg))
             return (int64_t)sl->Value.size();
+        if (arg.ResolvedType && arg.ResolvedType->Kind == TypeKind::Char) return 1;
         return 0;
     };
     /// A result temporary as wide as the argument it is derived from.  Where a

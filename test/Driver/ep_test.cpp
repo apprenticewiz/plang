@@ -2490,6 +2490,35 @@ TEST(StringFunction, ResultParticipatesInComparison) {
     EXPECT_EQ(R.Stdout, "true 3\n");
 }
 
+TEST(StringComparisonFunctions, TakeCharOrStringOperandsOfEitherShape) {
+    // EP §6.7.6.7: EQ/LT/GT/NE/LE/GE's arguments "shall each be of char-type
+    // or the canonical-string-type" -- but Sema had NO type check on them at
+    // all, so any two arguments type-checked (returning Boolean) and CodeGen,
+    // which only emits a call for the genuinely string-shaped case, emitted
+    // nothing: the call fell through to the ordinary user-function path and
+    // link-failed on an undefined `pas_eq`. A bare CHAR VARIABLE (not just a
+    // literal) is explicitly one of the two legal operand shapes and had the
+    // identical gap one level down, in getStrArgPtr, even after the Sema
+    // fix -- eq(charVar, 'a') still had nothing to lower it to.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "var s: string(10); c: char;\n"
+        "begin s := 'abc'; c := 'a';\n"
+        "  writeln(eq(s, 'abc'), ' ', lt('ab','ac'), ' ', gt('b','a'), ' ', ne(s,'x'));\n"
+        "  writeln(eq(c, 'a'), ' ', le('a','a'), ' ', ge('b','a')) end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "true true true true\ntrue true true\n");
+}
+
+TEST(StringComparisonFunctions, RejectNonStringArguments) {
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "begin writeln(eq(3, 5)) end.\n", kEP);
+    EXPECT_NE(R.ExitCode, 0);
+    EXPECT_NE(R.Stderr.find("cannot be an argument of eq"), std::string::npos)
+        << R.Stderr;
+}
+
 TEST(StringFunction, RecursesThroughTheEmptyString) {
     auto R = compileAndRun(
         "program p(output);\n"

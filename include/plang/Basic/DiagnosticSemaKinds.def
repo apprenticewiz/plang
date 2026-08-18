@@ -156,6 +156,10 @@ DIAG(err_read_type_mismatch, Error, "type mismatch in read: file element type is
 DIAG(err_read_param_type, Error,
      "'%0' cannot be read into; a read-parameter is an integer, real or char "
      "variable")
+// EP §6.7.6.7: EQ/LT/GT/NE/LE/GE's arguments "shall each be of char-type or
+// the canonical-string-type" — the same requirement §6.8.3.6 gives '+'.
+DIAG(err_string_fn_arg_type, Error,
+     "'%1' cannot be an argument of %0; it must be char or string")
 // ISO 7185 §6.9.1: write(f,e) on a file that is not a textfile is f^ := e,
 // so the value written must be assignable to a component.
 DIAG(err_write_type_mismatch, Error, "type mismatch in write: file element type is '%0', but value has type '%1'")
