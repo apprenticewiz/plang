@@ -3038,6 +3038,51 @@ TEST(WriteReal, WritestrGetsTheSameRepresentation) {
     EXPECT_EQ(R.Stdout, " 1.00000000000000e+000\n");
 }
 
+// EP §6.7.5.5: writestr's destination "shall possess a fixed-string-type or
+// a variable-string-type" -- both, not only the varying one emitBuiltinWriteStr
+// asked for.  Defined as `read(f, ss)` on the formatted text, so ISO
+// §6.10.1(e) (no length field, space-padded) is what governs the result.
+TEST(StringTransferProcedures, WritestrAcceptsAFixedStringDestination) {
+    auto R = compileAndRun(
+        "program p(output); var c: packed array[1..5] of char;\n"
+        "begin writestr(c, 42:3); writeln('[', c, ']') end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "[ 42  ]\n");
+}
+
+// EP §6.7.5.5: readstr's string-expression "shall possess char-type or
+// canonical-string-type" -- but ISO §6.4.3.3.1 makes a fixed-string-type
+// value one of the canonical-string-type too, and emitBuiltinReadStr's
+// non-VarString fallback took the expression's raw VALUE and ran strlen on
+// it, which is wrong twice over for an unterminated fixed-width array: wrong
+// type (not a pointer, so it ICE'd before ever reaching strlen) and wrong
+// length rule even if it had been.  This is the standard's own example
+// (§6.7.5.5 NOTE 2), with the source as a char array instead of string(n).
+TEST(StringTransferProcedures, ReadstrAcceptsAFixedStringSource) {
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "var e: packed array[1..8] of char; r: real; c: char; i: integer;\n"
+        "begin e := '0.0-4   '; readstr(e, r, c, i);\n"
+        "  writeln(r:3:1, ' ', c, ' ', i:1) end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "0.0 - 4\n");
+}
+
+TEST(StringTransferProcedures, ReadstrsOutputsDoNotWarnAsReadBeforeAssigned) {
+    // builtinAssigns (SemaFlow.cpp) knew read/readln assign every argument
+    // and new assigns its first, but had no entry for readstr at all, so its
+    // v1..vn fell to the "only looks" default: a definite-assignment false
+    // positive on names this very statement assigns.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "var e: string(8); r: real; c: char; i: integer;\n"
+        "begin e := '0.0-4'; readstr(e, r, c, i);\n"
+        "  writeln(r:3:1, ' ', c, ' ', i:1) end.\n", std::string(kEP) + " -Wall");
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stderr.find("read before"), std::string::npos)
+        << "readstr's own outputs must not warn:\n" << R.Stderr;
+}
+
 // A real written out and read back is the value that was written.
 TEST(WriteReal, TheRepresentationReadsBack) {
     auto R = compileAndRun(

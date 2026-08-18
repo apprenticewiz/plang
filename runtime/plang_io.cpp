@@ -290,6 +290,21 @@ void plang_writestr_end(void *S, int64_t Cap) {
         std::memcpy(Base + sizeof(int64_t), CapBuf, static_cast<std::size_t>(Len));
 }
 
+/// The fixed-string-type sibling: EP §6.7.5.5 defines writestr(s, ...) as
+/// `read(f, ss)` on an auxiliary file holding the formatted text, and ISO
+/// §6.10.1(e) is what a fixed-string read does -- no length field, so
+/// whatever is short of capacity N is padded with spaces rather than left
+/// out of a length count.
+void plang_writestr_end_fixed(void *Buf, int64_t N) {
+    Capturing = false;
+    if (!Buf) return;
+    auto Len = static_cast<int64_t>(CapLen);
+    if (Len > N) Len = N;
+    auto* Data = static_cast<char*>(Buf);
+    if (Len > 0) std::memcpy(Data, CapBuf, static_cast<std::size_t>(Len));
+    for (int64_t I = Len; I < N; ++I) Data[I] = ' ';
+}
+
 void plang_readstr_begin(const void *S, int64_t Len) {
     PlangInBuf = static_cast<const char*>(S);
     PlangInLen = (Len > 0) ? static_cast<std::size_t>(Len) : 0;

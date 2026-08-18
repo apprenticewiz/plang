@@ -498,7 +498,11 @@ void Codegen::Impl::emitBuiltinReadln(const std::vector<std::unique_ptr<ExprNode
 void Codegen::Impl::emitBuiltinWriteStr(
         const std::vector<std::unique_ptr<ExprNode>>& args) {
     const ExprNode& dest = *args[0];
-    if (!exprIsVarStr(dest))
+    // EP §6.7.5.5: the destination "shall possess a fixed-string-type or a
+    // variable-string-type" -- both, not only the varying one this asked
+    // for.  A packed array[1..n] of char destination ICE'd outright.
+    const bool fixed = !exprIsVarStr(dest) && exprIsCharStr(dest);
+    if (!exprIsVarStr(dest) && !fixed)
         codegenICE("writestr destination is not a string variable");
     auto* sPtr = emitLValue(dest);
     if (!sPtr) codegenICE("writestr destination is not assignable");
@@ -509,9 +513,14 @@ void Codegen::Impl::emitBuiltinWriteStr(
     emitWriteArgs(args, /*start=*/1, /*newline=*/false, /*fp=*/nullptr,
                   /*binaryTyped=*/false);
 
-    builder.CreateCall(
-        getExternFnN("plang_writestr_end", voidTy, {ptrTy, i64Ty}),
-        {sPtr, exprStrCapV(dest)});
+    if (fixed)
+        builder.CreateCall(
+            getExternFnN("plang_writestr_end_fixed", voidTy, {ptrTy, i64Ty}),
+            {sPtr, i64c(exprCharStrLen(dest))});
+    else
+        builder.CreateCall(
+            getExternFnN("plang_writestr_end", voidTy, {ptrTy, i64Ty}),
+            {sPtr, exprStrCapV(dest)});
 }
 
 /// readstr(e, v1, ..., vn) — parse the variables out of the string e.
@@ -520,7 +529,9 @@ void Codegen::Impl::emitBuiltinReadStr(
     const ExprNode& src = *args[0];
     auto* voidTy = llvm::Type::getVoidTy(ctx);
 
-    // The source may be a string(N) struct or a plain character pointer.
+    // The source may be a string(N) struct, ISO §6.4.3.2's fixed-string-type
+    // (a packed array[1..n] of char, EP §6.7.5.5's OTHER legal string-
+    // expression shape), or a plain character pointer.
     llvm::Value* data = nullptr;
     llvm::Value* len  = nullptr;
     if (exprIsVarStr(src)) {
@@ -530,6 +541,18 @@ void Codegen::Impl::emitBuiltinReadStr(
         // string(N) is { i64 length, [N x i8] data }.
         len  = builder.CreateLoad(i64Ty, sPtr, "readstr.len");
         data = builder.CreateConstGEP1_64(i8Ty, sPtr, 8, "readstr.data");
+    } else if (exprIsCharStr(src)) {
+        // No length field to read, and no terminator to look for -- every
+        // component is part of the value, so the length is the array's own,
+        // fixed by its declaration.  Without this case, emitExpr(src) handed
+        // the fallback below the ARRAY VALUE (not a pointer, since a fixed-
+        // string is a small aggregate LLVM is free to keep in a register),
+        // which failed `isPointerTy()` and ICE'd; a correctly-shaped pointer
+        // would still have been wrong, since strlen has no terminator to find
+        // in an unterminated fixed-width buffer.
+        data = emitLValue(src);
+        if (!data) codegenICE("readstr source is not a readable string");
+        len  = i64c(exprCharStrLen(src));
     } else {
         data = emitExpr(src);
         if (!data || !data->getType()->isPointerTy())

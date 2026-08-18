@@ -243,6 +243,12 @@ void Sema::flowStmt(const StmtNode* S, FlowState& St) {
         auto builtinAssigns = [&](size_t I) {
             if (Lo == "read" || Lo == "readln") return true;
             if (Lo == "new")                    return I == 0;
+            // EP §6.7.5.5: readstr(e, v1,...,vn) reads e and assigns every
+            // v -- the mirror of read/readln, except its first argument is
+            // the SOURCE rather than the first destination.  Missing here,
+            // v1..vn fell to the "only looks" default and warned "read
+            // before given a value" on names this statement itself assigns.
+            if (Lo == "readstr")                return I >= 1;
             return false;
         };
 
