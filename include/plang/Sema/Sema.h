@@ -600,6 +600,11 @@ private:
     /// it.  Called wherever a variable is WRITTEN, not only in an assignment.
     void checkNotProtected(const ExprNode& Target, SourceLocation Loc);
 
+    /// The protected symbol \p Target's access path bottoms out at, or null.
+    /// The walk checkNotProtected does, without the diagnostic -- so a `with`
+    /// over a protected record-access can mark the fields it exposes.
+    Symbol* protectedBaseOf(const ExprNode& Target);
+
     [[nodiscard]] bool isAssignCompatible(const Type& Dst, const Type& Src,
                                           bool ExactBounds = false,
                                           int Depth = 0) const;

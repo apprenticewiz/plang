@@ -460,7 +460,7 @@ void Sema::checkRepeat(const RepeatStmt& S) {
 /// A dereference deliberately stops the walk: `p^ := x` through a protected
 /// pointer modifies what p points AT, not p, and §6.7.3.1 protects the
 /// parameter rather than the object it reaches.
-void Sema::checkNotProtected(const ExprNode& Target, SourceLocation Loc) {
+Symbol* Sema::protectedBaseOf(const ExprNode& Target) {
     const ExprNode* Base = &Target;
     for (;;) {
         if (auto* Ix = llvm::dyn_cast<IndexExpr>(Base)) { Base = Ix->Array.get(); continue; }
@@ -468,15 +468,20 @@ void Sema::checkNotProtected(const ExprNode& Target, SourceLocation Loc) {
         break;
     }
     auto* Id = llvm::dyn_cast<IdentExpr>(Base);
-    if (!Id) return;
+    if (!Id) return nullptr;
     Symbol* Sym = Symtab.lookup(Id->Name);
-    if (!Sym || !Sym->IsProtected) return;
+    return (Sym && Sym->IsProtected) ? Sym : nullptr;
+}
+
+void Sema::checkNotProtected(const ExprNode& Target, SourceLocation Loc) {
+    Symbol* Sym = protectedBaseOf(Target);
+    if (!Sym) return;
     // EP §6.11.2: a variable exported 'protected' is protected in the same way,
     // but for a different reason, and saying "parameter" about a module's
     // variable would only mislead.
     error(Loc, Sym->Module.empty() ? diag::err_protected_param_assigned
                                    : diag::err_protected_import_assigned,
-          {Id->Name});
+          {Sym->Name});
 }
 
 void Sema::checkReadParamType(const Type& T, SourceLocation Loc) {
@@ -790,6 +795,16 @@ int Sema::pushWithScope(const WithStmt& S) {
         auto T = checkExpr(*Rec);
         if (T->isError()) continue;
 
+        // EP §6.7.3.1: `with` opens a new spelling for the SAME storage a
+        // protected parameter denotes, and checkNotProtected only ever asks
+        // Symtab about the identifier actually written -- which, inside a
+        // `with`, is the field's own with-scope symbol, not `r`.  Every field
+        // exposed below is protected exactly when the record-access itself
+        // is, or `with r do f := 5` on a `protected var r: rec` silently
+        // wrote through it: `checkNotProtected("f")` found a fresh, never-
+        // protected symbol and had nothing to say.
+        Symbol* ProtectedVia = protectedBaseOf(*Rec);
+
         // EP §6.4.7: schema instance — expose discriminants and body record fields.
         // EP §6.4.7: an UNDISCRIMINATED schema -- `with p^ do` for a `^buf`.
         // Its fields are selectable by name like any record's; the difference
@@ -818,9 +833,11 @@ int Sema::pushWithScope(const WithStmt& S) {
             // immediate body's.
             for (const auto& F : schemaUnderlying(T->SchemaBody)->RecordFields) {
                 Symbol FS;
-                FS.Kind = SymbolKind::Var;
-                FS.Name = F.Name;
-                FS.Ty   = F.Ty;
+                FS.Kind        = SymbolKind::Var;
+                FS.Name        = F.Name;
+                FS.Ty          = F.Ty;
+                FS.IsProtected = ProtectedVia != nullptr;
+                FS.Module      = ProtectedVia ? ProtectedVia->Module : std::string();
                 (void)Symtab.define(std::move(FS));
             }
             continue;
@@ -844,9 +861,11 @@ int Sema::pushWithScope(const WithStmt& S) {
             if (T->SchemaBody && schemaUnderlying(T->SchemaBody)->Kind == TypeKind::Record) {
                 for (const auto& F : schemaUnderlying(T->SchemaBody)->RecordFields) {
                     Symbol FS;
-                    FS.Kind = SymbolKind::Var;
-                    FS.Name = F.Name;
-                    FS.Ty   = F.Ty;
+                    FS.Kind        = SymbolKind::Var;
+                    FS.Name        = F.Name;
+                    FS.Ty          = F.Ty;
+                    FS.IsProtected = ProtectedVia != nullptr;
+                    FS.Module      = ProtectedVia ? ProtectedVia->Module : std::string();
                     (void)Symtab.define(std::move(FS));
                 }
             }
@@ -865,6 +884,8 @@ int Sema::pushWithScope(const WithStmt& S) {
             FS.Name           = F.Name;
             FS.Ty             = F.Ty;
             FS.FromPackedWith  = T->Packed;  // ISO §6.6.3.3: can't pass packed field as var
+            FS.IsProtected    = ProtectedVia != nullptr;
+            FS.Module         = ProtectedVia ? ProtectedVia->Module : std::string();
             (void)Symtab.define(std::move(FS));
         }
     }

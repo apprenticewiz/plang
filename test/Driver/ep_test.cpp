@@ -4541,6 +4541,39 @@ TEST(EPProtected, EveryWayOfWritingToAProtectedParameterIsRefused) {
     EXPECT_EQ(n, 4u) << "all four writes must be refused:\n" << R.Stderr;
 }
 
+TEST(EPProtected, WithOpensANewSpellingForTheSameProtectedStorage) {
+    // `with r do` rebinds each field to a fresh with-scope symbol, so
+    // checkNotProtected -- looking up whatever identifier was actually
+    // written -- found that symbol instead of r's, and it was never marked
+    // protected.  `with r do f := 5` silently wrote through a `protected var`
+    // parameter with no diagnostic at all.
+    auto Bad = compileAndRun(
+        "program p(output);\n"
+        "type rec = record f: integer end;\n"
+        "var g: rec;\n"
+        "procedure bumpI(var x: integer); begin x := x + 1 end;\n"
+        "procedure q(protected var r: rec);\n"
+        "begin with r do f := 5 end;\n"
+        "procedure q2(protected var r: rec);\n"
+        "begin with r do bumpI(f) end;\n"
+        "begin g.f := 1; q(g); q2(g) end.\n", kEP);
+    EXPECT_NE(Bad.ExitCode, 0);
+    size_t n = 0, at = 0;
+    while ((at = Bad.Stderr.find("protected parameter", at)) != std::string::npos) { ++n; ++at; }
+    EXPECT_EQ(n, 2u) << "both writes through with must be refused:\n" << Bad.Stderr;
+
+    // A read through the same `with` must still be allowed.
+    auto Ok = compileAndRun(
+        "program p(output);\n"
+        "type rec = record f: integer end;\n"
+        "var g: rec;\n"
+        "procedure q3(protected var r: rec);\n"
+        "begin with r do writeln(f:1) end;\n"
+        "begin g.f := 42; q3(g) end.\n", kEP);
+    EXPECT_EQ(Ok.ExitCode, 0) << Ok.Stderr;
+    EXPECT_EQ(Ok.Stdout, "42\n");
+}
+
 TEST(EPProtected, DereferencingAProtectedPointerIsStillAllowed) {
     // The walk stops at a dereference on purpose: `p^ := x` through a protected
     // pointer modifies what p points AT, not p, and §6.7.3.1 protects the
