@@ -256,7 +256,19 @@ Parser::parseStructuredValueOrIndex(std::string Name, Token Loc) {
     // Check what follows the label list.
     if (match(TokenKind::Colon)) {
         // Constructor arm: labels ':' value { ';' arm }.
-        auto val  = parseExpression();
+        // EP §6.8.7.1: component-value = expression | array-value |
+        // record-value, and the two structured forms are written WITHOUT a
+        // type name -- the type is the one the place they appear in calls
+        // for.  This TypeName[...] form used parseExpression for every arm's
+        // value, which cannot start a structured form at all (a leading '['
+        // is always a set-constructor to parseExpression); `parseValueArms`,
+        // reached through a var-declaration's `value` clause, always used
+        // parseComponentValue for the identical grammar and had no such gap.
+        // `Outer[a: [1: 10; 2: 20]; b: 100]` -- a bare array literal nested
+        // inside a named record constructor -- failed with "expected ']',
+        // got ':'": the '[' opening the nested array was read as the start
+        // of a set, whose own grammar has no colon in it anywhere.
+        auto val  = parseComponentValue();
         auto Node = std::make_unique<StructuredValueExpr>();
         Node->Loc      = Loc;
         Node->TypeName = Name;
@@ -273,7 +285,7 @@ Parser::parseStructuredValueOrIndex(std::string Name, Token Loc) {
             if (check(TokenKind::Otherwise)) {
                 advance(); // 'otherwise'
                 match(TokenKind::Colon);   // EP §6.8.7.2: the colon is optional
-                auto otherwiseVal = parseExpression();
+                auto otherwiseVal = parseComponentValue();
                 StructuredValueArm othArm;
                 othArm.IsOtherwise = true;
                 othArm.Value = std::move(otherwiseVal);
@@ -292,7 +304,7 @@ Parser::parseStructuredValueOrIndex(std::string Name, Token Loc) {
             while (match(TokenKind::Comma))
                 parseOneLabel(nextArm.Labels);
             expect(TokenKind::Colon);
-            nextArm.Value = parseExpression();
+            nextArm.Value = parseComponentValue();
             Node->Arms.push_back(std::move(nextArm));
         }
 

@@ -4773,6 +4773,30 @@ TEST(EPConstructor, AnUnnamedNestedComponentValueIsShapedByTheFieldsOwnDeclarati
     EXPECT_EQ(R.Stdout, "10 20 30\n");
 }
 
+TEST(EPConstructor, ABareNestedComponentValueParsesInsideANamedOuterConstructor) {
+    // EP §6.8.7.1: component-value = expression | array-value | record-value,
+    // and the two structured forms are written WITHOUT a type name -- the
+    // type is the one the place they appear in calls for.  The sibling test
+    // above covers this for the `value` clause's own top-level constructor
+    // (which already used parseComponentValue); parseStructuredValueOrIndex
+    // -- reached for a NAMED constructor, `TypeName[...]`, written as an
+    // ordinary expression rather than in a `value` clause -- parsed every
+    // arm's value with parseExpression instead, which cannot start a
+    // structured form at all: a leading '[' is always a set-constructor to
+    // parseExpression, whose grammar has no colon anywhere in it.
+    // `Outer[a: [1: 10; 2: 20]; b: 100]` failed with "expected ']', got
+    // ':'" on the inner array's very first label.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type Inner = array[1..2] of integer;\n"
+        "     Outer = record a: Inner; b: integer end;\n"
+        "var o: Outer;\n"
+        "begin o := Outer[a: [1: 10; 2: 20]; b: 100];\n"
+        "  writeln(o.a[1]:1, ' ', o.a[2]:1, ' ', o.b:1) end.\n", kEP);
+    EXPECT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "10 20 100\n");
+}
+
 TEST(EPProtected, EveryWayOfWritingToAProtectedParameterIsRefused) {
     // EP §6.7.3.1.  The check walked nested INDEX expressions only, and ran
     // from the assignment statement alone -- so of the four ways a program
