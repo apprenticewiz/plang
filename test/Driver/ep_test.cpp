@@ -4352,6 +4352,44 @@ TEST(EP7Schema, WithOverANestedInstantiationBindsTheInstancesLayout) {
     EXPECT_EQ(R.Stdout, "[abcdefghijklmnopqrst] 12345 4242\n");
 }
 
+TEST(EP7Schema, WithOverAPointerToASchemaOfASchemaDoesNotICE) {
+    // schemaPathOf's ROOT case (a bare `q^` or `q`) handed back the body
+    // declaration ONE hop down and never called descendIntoInstantiation --
+    // unlike its own FieldExpr and IndexExpr arms, which both do.  For
+    // `outer(n) = inner(n)`, that one hop is a SchemaTypeNode, not the record
+    // `with` needs, so `with q^ do` could not cast it and ICE'd ("'with' on a
+    // non-record operand"), for a pointer to a schema-of-a-schema at ANY
+    // nesting depth and regardless of whether it was reached directly or
+    // through an undiscriminated `var` formal.
+    auto Ptr = compileAndRun(
+        "program p(output);\n"
+        "type inner(m: integer) = record vals: array[1..m] of integer; tag: integer end;\n"
+        "     outer(n: integer) = inner(n);\n"
+        "     pouter = ^outer;\n"
+        "var q: pouter;\n"
+        "begin new(q, 5);\n"
+        "  with q^ do begin tag := 1; vals[1] := 2 end;\n"
+        "  writeln(q^.tag:1, ' ', q^.vals[1]:1) end.\n", kEP);
+    EXPECT_EQ(Ptr.ExitCode, 0) << Ptr.Stderr;
+    EXPECT_EQ(Ptr.Stdout, "1 2\n");
+
+    // Three levels deep, and through an undiscriminated var formal rather
+    // than a pointer -- the other route schemaRefOf answers for.
+    auto Formal = compileAndRun(
+        "program p(output);\n"
+        "type inner(m: integer) = record vals: array[1..m] of integer; tag: integer end;\n"
+        "     mid(n: integer) = inner(n);\n"
+        "     outer(n: integer) = mid(n);\n"
+        "     pouter = ^outer;\n"
+        "procedure showIt(var x: outer);\n"
+        "begin with x do begin tag := 9; vals[2] := 22 end end;\n"
+        "var q: pouter;\n"
+        "begin new(q, 5); showIt(q^);\n"
+        "  writeln(q^.tag:1, ' ', q^.vals[2]:1) end.\n", kEP);
+    EXPECT_EQ(Formal.ExitCode, 0) << Formal.Stderr;
+    EXPECT_EQ(Formal.Stdout, "9 22\n");
+}
+
 TEST(EP7Schema, AnUndiscriminatedSchemaWhoseBodyIsAnotherSchemaHasFields) {
     // A field of an undiscriminated schema formal was looked for one level
     // down, so a schema whose body is another schema instantiation --

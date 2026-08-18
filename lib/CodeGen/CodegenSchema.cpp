@@ -936,7 +936,15 @@ Codegen::Impl::schemaPathOf(const ExprNode& e) {
         if (!ref || !ref->semaTy) return std::nullopt;
         const TypeNode* bodyNode = schemaBodyNodeOf(*ref->semaTy);
         if (!bodyNode) return std::nullopt;
-        return SchemaPath{*ref, ref->data, bodyNode};
+        // The body may itself be another schema instantiation --
+        // `outer(n) = inner(n)` -- so the FieldExpr and IndexExpr arms below
+        // both descend through it before asking what the declaration IS.
+        // The root case did not, so `q^` for a `^outer` handed back a
+        // SchemaTypeNode where a RecordTypeNode (or array, or string) was
+        // wanted: `with q^ do` could not cast it to a record and ICE'd
+        // ("'with' on a non-record operand"), regardless of nesting depth.
+        auto [root, decl] = descendIntoInstantiation(*ref, ref->data, bodyNode);
+        return SchemaPath{root, ref->data, decl};
     }
 
     if (auto* fe = llvm::dyn_cast<FieldExpr>(&e)) {
