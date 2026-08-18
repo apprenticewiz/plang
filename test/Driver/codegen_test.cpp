@@ -1460,6 +1460,51 @@ TEST(ConstBound, ConstantFoldedBoundsStillWork) {
     EXPECT_EQ(R.Stdout, "64\n");
 }
 
+TEST(ConstBound, ARequiredFunctionCallFoldsAsABound) {
+    // EP §6.8.2: a call to a required function (other than eof/eoln) with
+    // nonvarying arguments is itself nonvarying, so it may appear in a
+    // constant-expression -- and, by the identical two-part nonvarying test
+    // in §6.4.2.4, in a subrange bound.  §6.3.2's own constant-definition
+    // examples call required functions this way ("pi = 4 * arctan(1);").
+    // constBoundImpl had no CallExpr case at all, so `1..abs(-5)` was
+    // rejected as "not a constant expression" even though every value in it
+    // is one.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "const n = 5;\n"
+        "type t1 = 1..abs(-5);\n"
+        "     t2 = 1..sqr(3);\n"
+        "     t3 = 1..succ(n);\n"
+        "     t4 = 1..pred(n, 2);\n"
+        "     t5 = 1..ord('9');\n"
+        "var a: t1; b: t2; c: t3; d: t4; e: t5;\n"
+        "begin\n"
+        "  a := 5; b := 9; c := 6; d := 3; e := 57;\n"
+        "  writeln(a, ' ', b, ' ', c, ' ', d, ' ', e)\n"
+        "end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "5 9 6 3 57\n");
+}
+
+TEST(ConstBound, AUserDefinedFunctionCallStillDoesNotFoldAsABound) {
+    // EP §6.8.2(c): nonvarying explicitly excludes a function-identifier
+    // "that has a defining-point contained by the program-block" -- only
+    // the required functions get the pass extended above.
+    auto R = compileAndEmitIR(
+        "program p;\n"
+        "function myabs(n: integer): integer;\n"
+        "begin if n < 0 then myabs := -n else myabs := n end;\n"
+        "var x: integer;\n"
+        "procedure q;\n"
+        "type t = 1..myabs(-5);\n"
+        "var y: t;\n"
+        "begin end;\n"
+        "begin end.\n", kEP);
+    EXPECT_FALSE(R.Ok);
+    EXPECT_NE(R.Stderr.find("not a constant expression"), std::string::npos)
+        << R.Stderr;
+}
+
 TEST(ConstBound, NegativeAndCharAndEnumBoundsStillWork) {
     auto R = compileAndRun(
         "program p;\n"

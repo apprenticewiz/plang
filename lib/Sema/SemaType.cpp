@@ -1117,6 +1117,45 @@ std::optional<int64_t> Sema::constBoundImpl(const ExprNode& E) const {
             }
         }
     }
+    // EP §6.8.2: a call to a required function is nonvarying (and so may
+    // appear in a constant-expression, and by the identical two-part test in
+    // §6.4.2.4, in a bound) unless it is eof or eoln -- the ONE exclusion
+    // §6.8.2(c) carves out.  §6.3.2's own constant-definition examples call
+    // arctan and index this way ("pi = 4 * arctan(1);").  Scoped here to the
+    // ordinal-domain functions this int64 fold already has a value space
+    // for: each reduces to one recursive fold of its own argument(s), so a
+    // real-valued argument -- nothing here folds a real constant -- simply
+    // fails to fold, same as it did before this call existed.
+    if (auto* N = llvm::dyn_cast<CallExpr>(&E)) {
+        switch (N->ResolvedBuiltin) {
+        case BuiltinID::Abs:
+            if (auto V = constBound(*N->Args[0])) return *V < 0 ? -*V : *V;
+            break;
+        case BuiltinID::Sqr:
+            if (auto V = constBound(*N->Args[0])) return *V * *V;
+            break;
+        // ord and chr both represent their value as its plain ordinal here,
+        // the same as the single-character StringLitExpr case above.
+        case BuiltinID::Ord:
+        case BuiltinID::Chr:
+            return constBound(*N->Args[0]);
+        case BuiltinID::Odd:
+            if (auto V = constBound(*N->Args[0])) return (*V & 1) != 0;
+            break;
+        // EP §6.7.6.5's second argument is the step; ISO 7185's one-argument
+        // form is this with an implicit step of 1.
+        case BuiltinID::Succ:
+        case BuiltinID::Pred: {
+            const auto V = constBound(*N->Args[0]);
+            const auto K = N->Args.size() > 1 ? constBound(*N->Args[1])
+                                               : std::optional<int64_t>(1);
+            if (V && K)
+                return N->ResolvedBuiltin == BuiltinID::Succ ? *V + *K : *V - *K;
+            break;
+        }
+        default: break;
+        }
+    }
     return std::nullopt;
 }
 
