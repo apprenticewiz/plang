@@ -2288,6 +2288,36 @@ TEST(ModuleMangling, QualifiedCallsReachTheirOwnModule) {
     EXPECT_EQ(R.Stdout, "1 2\n");
 }
 
+TEST(ModuleMangling, QualifiedCallReachesTheModuleEvenPastAnImportersHomonym) {
+    // The whole point of `qualified` is that M.f stays reachable even when
+    // the importer declares its own f (EP §6.11.2).  findMangledProc stripped
+    // the qualifier before walking the caller's enclosing-scope chain for a
+    // bare `f`, so it found the IMPORTER's own f first and both `f` and `M.f`
+    // called it: "99 99" instead of "99 1".  Sema resolved M.f correctly
+    // throughout; only codegen's name lookup re-derived the wrong answer.
+    auto R = compileAndRun(
+        "module M; function f: integer; begin f := 1 end; end.\n"
+        "program p(output); import M qualified;\n"
+        "  function f: integer; begin f := 99 end;\n"
+        "begin writeln(f, ' ', M.f) end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "99 1\n");
+}
+
+TEST(ModuleMangling, QualifiedCallOfDifferentArityThanAHomonymDoesNotICE) {
+    // Same defect, sharper failure mode: when the importer's homonym has a
+    // DIFFERENT signature than the qualified target, the misresolved call
+    // was an LLVM IR verifier abort ("Incorrect number of arguments passed
+    // to called function!") rather than even a wrong answer.
+    auto R = compileAndRun(
+        "module M; function f(x: integer): integer; begin f := x * 2 end; end.\n"
+        "program p(output); import M qualified;\n"
+        "  function f: integer; begin f := 7 end;\n"
+        "begin writeln(f, ' ', M.f(5)) end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "7 10\n");
+}
+
 TEST(ModuleMangling, TwoModulesMayDeclareTheSameVariable) {
     auto R = compileAndRun(
         "module A; var v: integer; procedure set_; begin v := 1 end; end.\n"

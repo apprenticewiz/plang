@@ -1258,6 +1258,17 @@ struct Codegen::Impl {
 
     std::string findMangledProc(const std::string& qualifiedName) const {
         const std::string      name = stripQualifier(qualifiedName);
+        // EP §6.11.2: `M.f` names f as M's export, on purpose, to reach past
+        // an importer's own homonym -- that is the one thing `qualified`
+        // buys over a plain import.  The enclosing-scope walk below answers
+        // a BARE name by asking what is visible here, which is the wrong
+        // question for one that was written qualified: `writeln(f); writeln(
+        // M.f)` inside a procedure that declares its own `f` called its own
+        // `f` for both, because the walk found it before the qualifier was
+        // ever consulted.  A qualified name skips straight to the import.
+        if (qualifiedName.find('.') != std::string::npos)
+            return PlangProcPrefix + moduleScope(importOwner(qualifiedName))
+                 + importLinkName(qualifiedName);
         const std::size_t      root = std::string_view(PlangProcPrefix).size();
         const std::string_view sep(PlangScopeSep);
         std::string prefix = namePrefix;
@@ -1283,7 +1294,13 @@ struct Codegen::Impl {
     /// module that declares it.
     std::string mangledGlobal(const std::string& qualifiedName) const {
         const std::string name = stripQualifier(qualifiedName);
-        if (mod->getGlobalVariable(globalPrefix + name))
+        // Same reasoning as findMangledProc just above: a qualified `M.v`
+        // must reach M's global even when this translation unit happens to
+        // define its own `v`, so the qualified case skips the bare-name
+        // check entirely rather than letting a same-spelling local answer
+        // for an explicitly-qualified reference.
+        if (qualifiedName.find('.') == std::string::npos
+                && mod->getGlobalVariable(globalPrefix + name))
             return globalPrefix + name;
         return PlangGlobalPrefix + moduleScope(importOwner(qualifiedName))
              + importLinkName(qualifiedName);
