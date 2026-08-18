@@ -160,11 +160,21 @@ void plang_str_substr(void* dst, int64_t cap_dst,
 /// is a fixed string of exactly \p n characters, and the value assigned has to
 /// be that long — a shorter one would leave part of the substring undefined,
 /// which a fixed string has no way to say.
+///
+/// \p n arrives as \c high-low+1 (the caller has already collapsed the two
+/// index-expressions to one length), so "the first index-expression is
+/// greater than the second" -- 6.5.6's own wording for what a
+/// substring-variable's indices must never do -- is exactly \c n<=0, not
+/// \c n<0: low>high means high-low is negative, i.e. n=high-low+1<=0, and
+/// n=0 is reached only when low is exactly one past high (there is no other
+/// way to make high-low+1 come out to zero).  Before, only n<0 was checked,
+/// so s[j+1..j] := '' silently copied zero bytes instead of being reported --
+/// the one index relationship this clause names was left partly unchecked.
 void plang_str_substr_assign(void* dst, int64_t /*cap_dst*/,
                               int64_t i, int64_t n,
                               const void* src, int64_t /*cap_src*/) {
     const int64_t ld = strLen(dst);
-    if (n < 0 || i < 1 || i + n - 1 > ld) plang_err_substr(i, n, ld);
+    if (n <= 0 || i < 1 || i + n - 1 > ld) plang_err_substr(i, n, ld);
     const int64_t ls = strLen(src);
     if (ls != n) plang_err_substr_assign(ls, n);
     std::memcpy(strData(dst) + (i - 1), strData(src), static_cast<size_t>(n));

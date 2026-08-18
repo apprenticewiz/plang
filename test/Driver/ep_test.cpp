@@ -3076,6 +3076,24 @@ TEST(Substring, TurnsAwayAValueOfAnotherLength) {
         << R.Stderr;
 }
 
+// EP §6.5.6: "it shall be an error if ... the value of the first
+// index-expression is greater than the value of the second" -- covering
+// s[j+1..j] just as much as s[j+5..j].  The runtime derives its length
+// parameter as high-low+1 and only checked it was non-negative, so
+// low=high+1 (length 0) slipped through: with a non-empty RHS the separate
+// length-mismatch check still caught it, but with an EMPTY RHS (0 characters
+// assigned to a 0-length target) both checks passed and the assignment
+// silently did nothing instead of being reported.
+TEST(Substring, AnAdjacentInvertedRangeIsRejectedEvenWithAnEmptyValue) {
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "var s: string(10);\n"
+        "begin s := 'abcdefghij'; s[5..4] := ''; writeln('unreachable') end.\n",
+        kEP);
+    EXPECT_NE(R.ExitCode, 0) << "accepted";
+    EXPECT_NE(R.Stderr.find("substr"), std::string::npos) << R.Stderr;
+}
+
 TEST(Substring, IsNotStandardPascal) {
     auto R = compileAndRun(
         "program p(output);\n"
