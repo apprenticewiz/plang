@@ -327,6 +327,34 @@ llvm::Value* Codegen::Impl::emitBinary(const BinaryExpr& e) {
         auto* powFn = getExternFnN("pow", dblTy, {dblTy, dblTy});
         auto* base  = toDouble(emitExpr(*e.Left));
         auto* exp   = toDouble(emitExpr(*e.Right));
+        // EP §6.8.3.2: "a factor of the form x**y shall be an error if x is
+        // zero and y is less than or equal to zero" -- shared with `pow`,
+        // whose integer path checks it above (plang_ipow) but whose OWN
+        // real-base path did not; and, for `**` only (a real or integer, so
+        // non-complex, base), "an error if x is negative" -- x**y is
+        // exp(y*ln(x)), and ln has no real value at or below zero.  Neither
+        // was checked, so std::pow's own C99 conventions answered instead:
+        // 0.0**0.0 is 1 by its any**0 rule, (-2.0)**2.0 by its extension for
+        // an integral exponent.
+        auto* zero    = llvm::ConstantFP::get(dblTy, 0.0);
+        auto* baseLT0 = builder.CreateFCmpOLT(base, zero, "pow.base.lt0");
+        auto* expLE0  = builder.CreateFCmpOLE(exp,  zero, "pow.exp.le0");
+        auto* zeroZero = builder.CreateAnd(
+            builder.CreateFCmpOEQ(base, zero, "pow.base.eq0"), expLE0, "pow.00");
+        // `**`: base < 0 (any exponent) OR base = 0 with exponent <= 0.
+        // `pow`'s real-base path (a real or complex-mixed base -- the
+        // integer*integer case took the ipow branch above): base = 0 with
+        // exponent <= 0 only, since pow's recursive definition is well-formed
+        // for a negative base.
+        auto* bad = e.Op == TokenKind::StarStar
+            ? builder.CreateOr(baseLT0, zeroZero, "pow.bad")
+            : zeroZero;
+        emitGuard(bad, "pow.domain", [&] {
+            builder.CreateCall(
+                getExternFnN("plang_err_pow_domain", llvm::Type::getVoidTy(ctx),
+                             {dblTy, dblTy}),
+                {base, exp});
+        });
         return builder.CreateCall(powFn, {base, exp}, "pow");
     }
 

@@ -129,6 +129,34 @@ void plang_err_mod_divisor(int64_t D) {
     std::exit(PlangRuntimeErrorStatus);
 }
 
+/// EP §6.8.3.2: "a factor of the form x pow y shall be an error if x is zero
+/// and y is less than or equal to zero" -- 0 pow (negative) is already
+/// caught by plang_err_ipow_negative above (EP's blanket rule for a negative
+/// integer exponent), but 0 pow 0 is not negative and isoPow's own loop
+/// answers 1 for it, silently, for the one shape the standard singles out as
+/// undefined even before asking what x**0 usually is.
+[[noreturn]] void plang_err_ipow_zero_zero(void) {
+    std::fflush(stdout);
+    std::fprintf(stderr, "plang runtime: 0 pow 0 is undefined\n");
+    std::exit(PlangRuntimeErrorStatus);
+}
+
+/// EP §6.8.3.2: "a factor of the form x**y shall be an error if x is zero
+/// and y is less than or equal to zero"; and, separately, for a real or
+/// integer (non-complex) base, "an error if x is negative" -- x**y is
+/// defined by exp(y*ln(x)), and ln has no real value for x <= 0.  Neither
+/// was checked, so plang's libm-backed '**' silently answered these instead
+/// of raising the error the standard requires: (-2.0)**2.0 by way of
+/// std::pow's own extension for an integral exponent, 0.0**0.0 by way of
+/// std::pow's C99 convention that any**0 is 1.
+[[noreturn]] void plang_err_pow_domain(double Base, double Exp) {
+    std::fflush(stdout);
+    std::fprintf(stderr,
+                 "plang runtime: %g ** %g is undefined (the base must be "
+                 "positive, or zero with a positive exponent)\n", Base, Exp);
+    std::exit(PlangRuntimeErrorStatus);
+}
+
 /// ISO §6.5.4: the identifying value of a pointer variable being dereferenced
 /// shall not be nil.
 [[noreturn]] void plang_err_nil_deref(void) {

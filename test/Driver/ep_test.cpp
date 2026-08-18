@@ -2824,6 +2824,48 @@ TEST(IntegerPow, ANegativeExponentIsReportedAtRuntime) {
     EXPECT_NE(R.Stderr.find("negative exponent"), std::string::npos) << R.Stderr;
 }
 
+TEST(IntegerPow, ZeroToTheZeroIsReportedAtRuntime) {
+    // ISO §6.8.3.2: "a factor of the form x pow y shall be an error if x is
+    // zero and y is less than or equal to zero" -- y < 0 is the negative-
+    // exponent case just above; y = 0 is not negative, so isoPow's loop
+    // never ran and silently answered its initial Result of 1.
+    auto R = compileAndRun(
+        "program p(output); begin writeln(0 pow 0) end.\n", kEP);
+    EXPECT_NE(R.ExitCode, 0);
+    EXPECT_NE(R.Stderr.find("0 pow 0"), std::string::npos) << R.Stderr;
+}
+
+TEST(DoubleStarPow, RejectsAZeroBaseWithANonPositiveExponent) {
+    // Same ISO §6.8.3.2 clause as ZeroToTheZeroIsReportedAtRuntime, for '**'
+    // this time: std::pow's own C99 "any**0 is 1" convention answered
+    // 0.0**0.0 instead of raising the error the standard requires.
+    auto R = compileAndRun(
+        "program p(output); begin writeln(0.0 ** 0.0) end.\n", kEP);
+    EXPECT_NE(R.ExitCode, 0);
+    EXPECT_NE(R.Stderr.find("is undefined"), std::string::npos) << R.Stderr;
+}
+
+TEST(DoubleStarPow, RejectsANegativeBase) {
+    // ISO §6.8.3.2: "**", for a real or integer (non-complex) base, "shall
+    // be an error if x is negative" -- x**y is exp(y*ln(x)), and ln has no
+    // real value at or below zero.  std::pow silently answered via its own
+    // extension for an integral exponent instead.
+    auto R = compileAndRun(
+        "program p(output); begin writeln((-2.0) ** 2.0) end.\n", kEP);
+    EXPECT_NE(R.ExitCode, 0);
+    EXPECT_NE(R.Stderr.find("is undefined"), std::string::npos) << R.Stderr;
+}
+
+TEST(DoubleStarPow, AZeroBaseWithAPositiveExponentIsStillLegal) {
+    // The negative-base and zero-base-nonpositive-exponent checks must not
+    // catch the ORDINARY zero-base case: "the value of x**y shall be zero
+    // if x is zero" whenever y is positive.
+    auto R = compileAndRun(
+        "program p(output); begin writeln(0.0 ** 2.0:0:1) end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "0.0\n");
+}
+
 // ---------------------------------------------------------------------------
 // EP §6.9.2.2: a string value shall fit the capacity it is assigned to
 // ---------------------------------------------------------------------------

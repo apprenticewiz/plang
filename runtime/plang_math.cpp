@@ -21,6 +21,7 @@ namespace plang {
 extern "C" {
 
 [[noreturn]] void plang_err_ipow_negative(int64_t E);
+[[noreturn]] void plang_err_ipow_zero_zero(void);
 
 // ---- Floating-point math (double → double) ----
 
@@ -43,6 +44,12 @@ int64_t plang_ipow(int64_t Base, int64_t Exp) {
     // A negative exponent has no integer value except where the base is 1 or
     // -1, and EP makes the rest an error rather than a silent 0.
     if (Exp < 0) plang_err_ipow_negative(Exp);
+    // EP §6.8.3.2: "an error if x is zero and y is less than or equal to
+    // zero" -- y < 0 is caught above, but y = 0 is not NEGATIVE, so 0 pow 0
+    // reached isoPow's loop, which never runs for Exp = 0 and answers its
+    // initial Result of 1: silently, and for the one shape the standard
+    // singles out as undefined before its "1 if y is zero" clause applies.
+    if (Base == 0 && Exp == 0) plang_err_ipow_zero_zero();
     return isoPow(Base, Exp);
 }
 
