@@ -27,7 +27,7 @@ std::size_t ModuleFinaliserCap   = 0;
 
 extern "C" {
 
-/// Flush stdout then terminate (EP §6.9.7 \c halt).  The standard's halt takes
+/// Flush stdout then terminate (EP §6.7.5.7 \c halt).  The standard's halt takes
 /// no argument; \p Status carries the common extension halt(n), and is zero for
 /// a bare halt.
 void plang_halt(int64_t Status) {

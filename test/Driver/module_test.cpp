@@ -651,7 +651,7 @@ TEST(WithStmt, OpensIndexedAndDereferencedRecords) {
 }
 
 // ===========================================================================
-// EP §6.9.7: halt
+// EP §6.7.5.7: halt
 // ===========================================================================
 
 TEST(Halt, PassesItsArgumentAsTheExitStatus) {

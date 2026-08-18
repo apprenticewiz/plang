@@ -904,7 +904,7 @@ void Codegen::Impl::emitCallStmt(const CallStmt& s) {
     }
 
     if (lo == "halt" || lo == "exit") {
-        // EP §6.9.7 halt takes no argument; halt(n) is the widespread extension
+        // EP §6.7.5.7 halt takes no argument; halt(n) is the widespread extension
         // that sets the exit status.
         auto* status = s.Args.empty() ? llvm::ConstantInt::get(i64Ty, 0)
                                       : toI64(emitExpr(*s.Args[0]));
