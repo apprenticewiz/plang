@@ -51,6 +51,9 @@ extern "C" {
 /// honor a name established by an earlier bind (EP §6.7.5.6).
 static const char* findBinding(PascalFile *F);
 
+/// Defined with the other runtime error reporters in plang_sys.cpp.
+[[noreturn]] void plang_err_bind_already_bound(void);
+
 /// Look at the next character without consuming it.
 static void prime(PascalFile *F) {
     F->Buf = std::fgetc(F->Fp);
@@ -675,6 +678,10 @@ static void setBinding(PascalFile *F, const char *Name) {
 /// following reset or rewrite opens that path; see openBound.
 void plang_bind(PascalFile *F, const PlangBindingType *B) {
     if (!F) return;
+    // "It shall be a dynamic-violation if the variable is already bound to
+    // an external entity" -- checked before touching the table, so a repeat
+    // bind() is reported rather than silently replacing the first one.
+    if (findBinding(F)) plang_err_bind_already_bound();
     clearBinding(F);
     if (!B) return;
     int64_t N = B->name.len;

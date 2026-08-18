@@ -2095,6 +2095,28 @@ TEST(EP12Binding, BindReestablishesBinding) {
     EXPECT_EQ(R.Stdout, "bound\n");
 }
 
+// §6.7.5.6: "It shall be a dynamic-violation if the variable is already
+// bound to an external entity" -- unlike most conditions this clause and its
+// neighbors describe, the standard names this one a dynamic-violation
+// outright, which must be detected (§5.1(f)), not merely an "error" a
+// processor may leave undetected.  plang_bind cleared and replaced any
+// existing binding table entry unconditionally, with no check of prior
+// state, so a second bind(f, b) without an intervening unbind(f) silently
+// rebound f instead of being reported.
+TEST(EP12Binding, ASecondBindWithoutAnInterveningUnbindIsRejected) {
+    auto R = compileAndRun(
+        "program p;\n"
+        "var f: bindable text; b: BindingType;\n"
+        "begin\n"
+        "  b.name := '/tmp/plang_bind_twice_a.txt';\n"
+        "  bind(f, b);\n"
+        "  b.name := '/tmp/plang_bind_twice_b.txt';\n"
+        "  bind(f, b)\n"
+        "end.\n", kEP);
+    EXPECT_NE(R.ExitCode, 0) << "accepted";
+    EXPECT_NE(R.Stderr.find("already bound"), std::string::npos) << R.Stderr;
+}
+
 // §6.7.5.6: a bound file opens the named entity, so data written through it
 // survives close and is read back by a plain reset.
 TEST(EP12Binding, BoundFileRoundTrips) {

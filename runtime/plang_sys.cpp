@@ -165,6 +165,16 @@ void plang_err_mod_divisor(int64_t D) {
     std::exit(PlangRuntimeErrorStatus);
 }
 
+/// EP §6.7.5.6: "It shall be a dynamic-violation if the variable is already
+/// bound to an external entity" -- unlike most of the conditions this file
+/// reports, the standard names this one a dynamic-violation outright, not
+/// the weaker "error" a processor may leave undetected.
+[[noreturn]] void plang_err_bind_already_bound(void) {
+    std::fflush(stdout);
+    std::fprintf(stderr, "plang runtime: bind of a file that is already bound\n");
+    std::exit(PlangRuntimeErrorStatus);
+}
+
 /// EP §6.7.5.4: substr's result must lie wholly within the source string.
 [[noreturn]] void plang_err_substr(int64_t I, int64_t N, int64_t Len) {
     std::fflush(stdout);
