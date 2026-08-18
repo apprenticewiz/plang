@@ -2341,10 +2341,10 @@ TEST(ModuleMangling, QualifiedCallOfDifferentArityThanAHomonymDoesNotICE) {
 
 TEST(ModuleMangling, TwoModulesMayDeclareTheSameVariable) {
     auto R = compileAndRun(
-        "module A; var v: integer; procedure set_; begin v := 1 end; end.\n"
-        "module B; var v: integer; procedure set_; begin v := 2 end; end.\n"
+        "module A; var v: integer; procedure setv; begin v := 1 end; end.\n"
+        "module B; var v: integer; procedure setv; begin v := 2 end; end.\n"
         "program p(output); import A qualified; import B qualified;\n"
-        "begin A.set_; B.set_; writeln(A.v, ' ', B.v) end.\n", kEP);
+        "begin A.setv; B.setv; writeln(A.v, ' ', B.v) end.\n", kEP);
     ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
     EXPECT_EQ(R.Stdout, "1 2\n");
 }
@@ -2396,13 +2396,17 @@ TEST(ModuleMangling, AModulesOwnDeclarationBeatsOneItImports) {
 // name did not separate into its parts one way: EP §6.1.3 allows an underscore
 // inside an identifier, so module `a`'s `b` and a top-level `a__b` were both
 // `pas_a__b`.  Nothing reported it — the second definition was renamed by LLVM
-// and every call went to the first, so this printed 1 twice.
+// and every call went to the first, so this printed 1 twice.  `a__b` itself
+// is no longer legal source text at all — EP §6.1.3's grammar never permits
+// two adjacent underscores in an identifier — so `a_b`, a single medial
+// underscore, is what actually exercises "an underscore in a name is not a
+// scope separator" today.
 TEST(ModuleMangling, AnUnderscoreInANameIsNotAScopeSeparator) {
     auto R = compileAndRun(
         "module a; function b: integer; begin b := 1 end; end.\n"
         "program p(output); import a;\n"
-        "  function a__b: integer; begin a__b := 2 end;\n"
-        "begin writeln(b); writeln(a__b) end.\n", kEP);
+        "  function a_b: integer; begin a_b := 2 end;\n"
+        "begin writeln(b); writeln(a_b) end.\n", kEP);
     ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
     EXPECT_EQ(R.Stdout, "1\n2\n");
 }

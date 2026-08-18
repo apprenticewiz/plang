@@ -143,6 +143,19 @@ Token Scanner::scanIdentifierOrKeyword(size_t TokenStart) {
     // that reporting happens, so this cannot pass silently there.
     if (Underscore && !Opts.has(LangOptions::Feature::UnderscoreIdentifiers))
         emitError(locAt(TokenStart), diag::err_ep_underscore_in_identifier);
+    // ISO 10206 §6.1.3's grammar -- identifier = letter { [ underscore ]
+    // ( letter | digit ) } . -- interleaves each optional underscore with a
+    // MANDATORY following letter-or-digit, so a leading, trailing, or
+    // doubled underscore can never come out of it; the clause's own NOTE
+    // says so directly.  This is an EP-specific restriction on top of
+    // underscores being allowed at all (Turbo's C-like identifiers won't
+    // have it), so it asks extendedPascal() rather than the shared
+    // UnderscoreIdentifiers feature -- see the dialect-vs-feature note in
+    // LangOptions.h.
+    if (Underscore && Opts.extendedPascal() &&
+        (Word.front() == '_' || Word.back() == '_' ||
+         Word.find("__") != std::string::npos))
+        emitError(locAt(TokenStart), diag::err_ep_underscore_placement);
     std::string Lower = toLower(Word);
     auto It = std::ranges::lower_bound(keywords, Lower, {}, &KW::first);
     TokenKind Kind = (It != keywords.end() && It->first == Lower) ? It->second

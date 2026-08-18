@@ -932,6 +932,51 @@ TEST(ScannerEP, UnderscoreInIdentifier7185) {
     EXPECT_EQ(T.Lexeme, "my_var");
 }
 
+// EP §6.1.3's grammar -- identifier = letter { [ underscore ]
+// ( letter | digit ) } . -- interleaves each optional underscore with a
+// mandatory following letter-or-digit, so it can never produce a leading,
+// trailing, or doubled underscore; the clause's own NOTE says this
+// explicitly.  scanIdentifierOrKeyword tracked only whether the run
+// contained an underscore ANYWHERE, so under -std=iso10206 (where
+// underscores are allowed at all) a leading, trailing, or doubled one was
+// accepted completely silently.
+
+TEST(ScannerEP, LeadingUnderscoreIsRejectedUnderExtendedPascal) {
+    TempFile F("_foo");
+    auto S = makeScannerEP(F.path());
+    (void)S.next();
+    ASSERT_FALSE(scanDiags.empty());
+    EXPECT_NE(scanDiags[0].Message.find("begin or end"), std::string::npos)
+        << scanDiags[0].Message;
+}
+
+TEST(ScannerEP, TrailingUnderscoreIsRejectedUnderExtendedPascal) {
+    TempFile F("foo_");
+    auto S = makeScannerEP(F.path());
+    (void)S.next();
+    ASSERT_FALSE(scanDiags.empty());
+    EXPECT_NE(scanDiags[0].Message.find("begin or end"), std::string::npos)
+        << scanDiags[0].Message;
+}
+
+TEST(ScannerEP, DoubledUnderscoreIsRejectedUnderExtendedPascal) {
+    TempFile F("foo__bar");
+    auto S = makeScannerEP(F.path());
+    (void)S.next();
+    ASSERT_FALSE(scanDiags.empty());
+    EXPECT_NE(scanDiags[0].Message.find("adjacent"), std::string::npos)
+        << scanDiags[0].Message;
+}
+
+TEST(ScannerEP, AMedialSingleUnderscoreIsStillFineUnderExtendedPascal) {
+    TempFile F("foo_bar");
+    auto S = makeScannerEP(F.path());
+    Token T = S.next();
+    EXPECT_EQ(T.Kind,   TokenKind::Identifier);
+    EXPECT_EQ(T.Lexeme, "foo_bar");
+    EXPECT_TRUE(scanDiags.empty());
+}
+
 // ---------------------------------------------------------------------------
 // Tier 2 scanner: new two-character tokens
 // ---------------------------------------------------------------------------

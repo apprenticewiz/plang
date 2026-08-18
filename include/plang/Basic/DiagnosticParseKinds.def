@@ -40,6 +40,16 @@ DIAG(err_ep_two_arg_form, Error,
      "the two-argument form of '%0' is an Extended Pascal extension and is "
      "not available under -std=iso7185")
 
+// Distinct from err_ep_underscore_in_identifier above: this fires even where
+// underscores ARE allowed (EP), because ISO 10206 §6.1.3's grammar --
+// identifier = letter { [ underscore ] ( letter | digit ) } . -- only ever
+// places an underscore between two other constituents.  Its own NOTE spells
+// this out: "An identifier cannot begin or end with an underscore, nor can
+// two underscores be adjacent."
+DIAG(err_ep_underscore_placement, Error,
+     "an identifier shall not begin or end with an underscore, nor contain "
+     "two adjacent underscores")
+
 // ISO 7185 §6.6.3.7.1: the packed form of a conformant array schema takes one
 // index-type-specification; the unpacked form is the one that may have several.
 DIAG(err_packed_conformant_shape, Error,
