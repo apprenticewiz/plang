@@ -187,7 +187,14 @@ void Sema::registerBuiltins() {
         (void)Symtab.define(makeConst("maxreal", TyReal));
         (void)Symtab.define(makeConst("epsreal", TyReal));
 
-        // EP §6.4.3.4: predefined TimeStamp record type
+        // EP §6.4.3.4: predefined TimeStamp record type.  Note 4 there spells
+        // the field types out as a Pascal declaration: DateValid/TimeValid
+        // Boolean, year plain integer, and month/day/hour/minute/second each
+        // a subrange (1..12, 1..31, 0..23, 0..59, 0..59) -- five of the eight
+        // fields, not all six numeric ones.  Declaring them plain integer,
+        // as the other five were, left the default range check that every
+        // other subrange field gets nowhere to attach, so `t.month := 13`
+        // compiled and ran silently.
         {
             auto TyTS = std::make_shared<Type>();
             TyTS->Kind = TypeKind::Record;
@@ -195,12 +202,12 @@ void Sema::registerBuiltins() {
             TyTS->RecordFields = {
                 { "DateValid", TyBool },
                 { "year",      TyInt  },
-                { "month",     TyInt  },
-                { "day",       TyInt  },
+                { "month",     Ctx_.getSubrange(TyInt, 1, 12) },
+                { "day",       Ctx_.getSubrange(TyInt, 1, 31) },
                 { "TimeValid", TyBool },
-                { "hour",      TyInt  },
-                { "minute",    TyInt  },
-                { "second",    TyInt  },
+                { "hour",      Ctx_.getSubrange(TyInt, 0, 23) },
+                { "minute",    Ctx_.getSubrange(TyInt, 0, 59) },
+                { "second",    Ctx_.getSubrange(TyInt, 0, 59) },
             };
             Symbol TSym;
             TSym.Kind = SymbolKind::TypeAlias;

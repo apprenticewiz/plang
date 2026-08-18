@@ -1953,7 +1953,11 @@ TEST(EP11DateTime, TimeFormatsCorrectly) {
         "var t: TimeStamp;\n"
         "begin\n"
         "  t.DateValid := false;\n"
-        "  t.year := 0; t.month := 0; t.day := 0;\n"
+        // §6.7.5.8's own placeholder for a DateValid=false TimeStamp:
+        // "the date 'January 1, 1'" -- month/day are 1..12/1..31, so 0
+        // (this test's date fields are otherwise irrelevant to what it
+        // checks) is no longer in range now that they're properly typed.
+        "  t.year := 1; t.month := 1; t.day := 1;\n"
         "  t.TimeValid := true;\n"
         "  t.hour := 14; t.minute := 30; t.second := 5;\n"
         "  writeln(time(t))\n"
@@ -1981,6 +1985,23 @@ TEST(EP11DateTime, DateValidFalseStillFormatsTheRealFields) {
         "end.\n", kEP);
     ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
     EXPECT_EQ(R.Stdout, "2024-06-15\n14:30:05\n");
+}
+
+// EP §6.4.3.4 Note 4: TimeStamp's field-type list is a Pascal declaration --
+// month/day/hour/minute/second are subranges (1..12, 1..31, 0..23, 0..59,
+// 0..59), not plain integer like year. They were all declared plain integer,
+// so the default range check every other subrange field gets had nowhere to
+// attach, and an out-of-range assignment compiled and ran silently.
+TEST(EP11DateTime, OutOfRangeFieldAssignmentIsCaught) {
+    auto R = compileAndRun(
+        "program p;\n"
+        "var t: TimeStamp;\n"
+        "begin\n"
+        "  t.month := 13;\n"
+        "  writeln('unreachable')\n"
+        "end.\n", kEP);
+    EXPECT_NE(R.ExitCode, 0) << "accepted";
+    EXPECT_NE(R.Stderr.find("out of range"), std::string::npos) << R.Stderr;
 }
 
 // §6.7.5.8: GetTimeStamp fills the record; DateValid and year >= 2024
