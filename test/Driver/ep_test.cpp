@@ -3520,6 +3520,25 @@ TEST(EP8Const, ARuntimeConstantIsReachableFromANestedProcedure) {
     EXPECT_EQ(R.Stdout, "outer  3.0\nnested 3.0\n");
 }
 
+TEST(EP8Const, ATopLevelRuntimeConstantIsComputedInMain) {
+    // The sibling of the test above, one scope further out: a runtime
+    // constant declared inside a PROCEDURE already worked (the test above),
+    // but emitGlobals' own comment said a value that has to be computed is
+    // computed "in main for a program, and for a module in its initialiser"
+    // while the code only ever did the module half -- `!currentUnit_.
+    // empty()` gated the runtime-const fallback out for a program entirely,
+    // and emitMain never called emitRuntimeConstInits() to begin with.  A
+    // program-level `const` that codegen could not fold at compile time
+    // ICE'd outright: "constant 'c' has no value that Sema folded or that
+    // codegen can emit".
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "const c = cmplx(3.0, 4.0);\n"
+        "begin writeln(re(c):3:1, ' ', im(c):3:1) end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "3.0 4.0\n");
+}
+
 TEST(EP8Const, AStringCapacityIsFoldedInTheScopeItWasWrittenIn) {
     // R2.  A capacity written as a constant expression was re-folded where the
     // denoter is LOWERED, against codegen's flat constant table -- so a record

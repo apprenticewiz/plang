@@ -191,17 +191,17 @@ void Codegen::Impl::emitGlobals(const BlockNode& block) {
         llvm::Value* cv = constantValueOf(cd);
         // EP §6.8.2: a value that has to be computed is computed where the
         // unit's code runs — in main for a program, and for a module in its
-        // initialiser, which needs storage to leave the answer in.
-        if (!cv && !currentUnit_.empty()) { emitRuntimeConst(cd); continue; }
-        // R2.  This used to fabricate 0 for a constant nothing could evaluate,
-        // and a fabricated value is indistinguishable from a real one to
-        // everything downstream: `const k = <unfoldable>; array[1..k]` became a
-        // one-element array that every subscript ran off the end of.  Sema
-        // records what it folded, so reaching here means neither knows -- which
-        // is a hole in the compiler, not a zero.
-        if (!cv)
-            codegenICE("constant '" + cd.Name + "' has no value that Sema "
-                       "folded or that codegen can emit");
+        // initialiser, which needs storage to leave the answer in.  This said
+        // so and then only did it for a module: a `!currentUnit_.empty()`
+        // guard here used to leave a PROGRAM's unfoldable constant (`const c
+        // = cmplx(3.0, 4.0);` outside any module) with no fallback at all --
+        // an internal error rather than the computed value the comment above
+        // already promised.  R2's old fabricated-0 fallback was worse still
+        // (see emitRuntimeConst's own history); the honest answer is to defer
+        // to the value actually computed where the unit's code runs, which
+        // for a program is now emitMain calling emitRuntimeConstInits() the
+        // same way a module's initialiser already does.
+        if (!cv) { emitRuntimeConst(cd); continue; }
         defineConst(cd.Name, cv);
     }
     for (const auto& vg : block.Vars) registerEnumValues(vg.Type.get());
@@ -1425,6 +1425,12 @@ void Codegen::Impl::emitMain(const BlockNode& block,
     // by a procedure would not be visible to the program body and vice versa.
     emitBlockDecls(block);
     emitFileParamBinds(fileParams);
+    // The constants first, as emitModuleGlobalInits already does for a
+    // module: a variable's initial value may be written in terms of one, and
+    // any constant emitGlobals could not fold at compile time (registered by
+    // emitRuntimeConst) still needs its value computed somewhere before
+    // anything reads it.
+    emitRuntimeConstInits();
     emitGlobalVarInits(block);
 
     // EP §6.11: bring the modules up before the program body runs.  Each
