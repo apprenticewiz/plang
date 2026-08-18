@@ -1839,6 +1839,27 @@ TEST(ProcParams, StructuredParameterTypesPassThrough) {
     EXPECT_EQ(R.Stdout, "7\n6\nhello\n");
 }
 
+TEST(ProcParams, AFunctionalParameterReturningAStringWorks) {
+    // A string(N) result comes back from a call as the whole
+    // { length, bytes } struct, and every consumer of a string expression
+    // expects its ADDRESS instead -- the direct-call path spills the struct
+    // to a temporary and hands back that, but emitProcParamCall (the call
+    // made THROUGH a functional parameter) had no such spill and returned
+    // the raw struct unchanged.  `ap(greet, 1)` fed that struct straight to
+    // plang_str_assign, which wants a pointer for its source: "Call
+    // parameter type does not match function signature!", an LLVM IR
+    // verifier abort.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "function ap(function f(n: integer): string(20); v: integer): string(20);\n"
+        "begin ap := f(v) end;\n"
+        "function greet(n: integer): string(20);\n"
+        "begin if n = 1 then greet := 'one' else greet := 'many' end;\n"
+        "begin writeln(ap(greet, 1)); writeln(ap(greet, 2)) end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "one\nmany\n");
+}
+
 TEST(ProcParams, ForwardDeclaredProcedureCanBePassed) {
     auto R = compileAndRun(
         "program p;\n"

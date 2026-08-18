@@ -375,5 +375,19 @@ Codegen::Impl::emitProcParamCall(const VarEntry& ve,
     }
 
     auto* call = builder.CreateCall(fnTy, fn, args);
-    return fnTy->getReturnType()->isVoidTy() ? nullptr : call;
+    if (fnTy->getReturnType()->isVoidTy()) return nullptr;
+    // A string result comes back as the whole { length, bytes } struct, but
+    // every consumer of a string expression expects its address -- the same
+    // spill the direct-call path already does (CodegenExprs.cpp).  Missing
+    // here, a functional parameter returning string(N) handed the raw struct
+    // to plang_str_assign, which wants a pointer: "Call parameter type does
+    // not match function signature!", an LLVM IR verifier abort.
+    const Type* retTy = ve.procType->ReturnType
+                       ? ve.procType->ReturnType->ResolvedType.get() : nullptr;
+    if (varStrTypeOf(retTy) && call->getType()->isStructTy()) {
+        auto* tmp = createEntryAlloca(call->getType(), "str.ret");
+        builder.CreateStore(call, tmp);
+        return tmp;
+    }
+    return call;
 }

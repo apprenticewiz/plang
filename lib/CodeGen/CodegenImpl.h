@@ -1119,8 +1119,7 @@ struct Codegen::Impl {
     /// where a capacity comes from neither a type nor a literal.  (Which is
     /// what surfaced this: the check was added for a case measured at zero, and
     /// the first thing it caught was a real one.)
-    static const Type* varStrTypeOf(const ExprNode& e) {
-        const Type* T = e.ResolvedType.get();
+    static const Type* varStrTypeOf(const Type* T) {
         if (!T) return nullptr;
         if (T->Kind == TypeKind::VarString) return T;
         // The body may itself be another schema instantiation (EP §6.4.7),
@@ -1137,6 +1136,9 @@ struct Codegen::Impl {
             if (U->Kind == TypeKind::VarString) return U;
         }
         return nullptr;
+    }
+    static const Type* varStrTypeOf(const ExprNode& e) {
+        return varStrTypeOf(e.ResolvedType.get());
     }
 
     /// True if the expression's resolved type is EP string(N).
