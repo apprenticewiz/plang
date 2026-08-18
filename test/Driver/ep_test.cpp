@@ -266,6 +266,32 @@ TEST(EP10DirectFile, LastPositionFunction) {
     EXPECT_EQ(R.Stdout, "2\n");
 }
 
+TEST(EP10DirectFile, PositionAndSeekAreMeasuredAgainstTheDeclaredIndexBase) {
+    // §6.7.6.6: "position(f) = succ(a, length(f.L))" and "LastPosition(f) =
+    // succ(a, length(f.L~f.R)-1)", a being the index type's SMALLEST value
+    // -- not 0.  §6.7.5.2's own pre-assertion for SeekRead/SeekWrite/
+    // SeekUpdate measures "ord(n)-ord(a)", the same offset from a.  Plain
+    // `file of T` (no declared index-type, the sibling tests above) has no a
+    // to be wrong about and keeps its old 0-based behaviour; a file with an
+    // EXPLICIT index-type -- [1..5] here -- did not, and every one of these
+    // five was off by exactly the index base: position/LastPosition read a
+    // raw component count with no `+ a`, and the three Seeks read a raw
+    // byte-offset multiplier with no `- a`.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "var f: file [1..5] of integer; v, pos1, lp: integer;\n"
+        "begin rewrite(f);\n"
+        "  v := 1; write(f, v); v := 2; write(f, v); v := 3; write(f, v);\n"
+        "  pos1 := position(f); writeln(pos1:1);\n"
+        "  lp := lastposition(f); writeln(lp:1);\n"
+        "  SeekRead(f, 2); read(f, v); writeln(v:1);\n"
+        "  SeekWrite(f, 1); v := 999; write(f, v);\n"
+        "  SeekRead(f, 1); read(f, v); writeln(v:1)\n"
+        "end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "4\n3\n2\n999\n");
+}
+
 TEST(EP10DirectFile, EmptyOnNewFile) {
     // Item 60: empty(f) is true for a freshly rewritten (empty) file.
     auto R = compileAndRun(
@@ -468,6 +494,12 @@ TEST(BufferVariable, ReadsAndWritesATextFileOneCharacterAtATime) {
 TEST(BufferVariable, IsTheComponentAtThePositionSeekReadChose) {
     // The buffer is filled by peeking, so position(f) still reports where f^
     // itself is rather than the component after it.
+    //
+    // The file's index type is [1..10], so n in SeekRead/SeekWrite and the
+    // results of position/LastPosition are all measured against index 1, not
+    // 0 (ISO §6.7.5.2's pre-assertion is "ord(n)-ord(a)"; §6.7.6.6 defines
+    // position(f) as "succ(a, ...)").  seekread(f, 2) lands on the SECOND
+    // component -- value 4, one past the first-written 2 -- not the third.
     auto R = compileAndRun(
         "program p;\n"
         "var f: file[1..10] of integer;\n"
@@ -481,10 +513,16 @@ TEST(BufferVariable, IsTheComponentAtThePositionSeekReadChose) {
         "  writeln(position(f), ' ', f^)\n"
         "end.\n", kEP);
     ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
-    EXPECT_EQ(R.Stdout, "2 6 4\n3 8\n");
+    EXPECT_EQ(R.Stdout, "2 4 5\n3 6\n");
 }
 
 TEST(BufferVariable, PutAfterSeekWriteOverwritesThatComponent) {
+    // Same index-base fix as the test above: the file is [1..10], so
+    // seekwrite(f, 1) targets the FIRST component (index 1, the file's own
+    // smallest), overwriting the 1 that write(f, 1) put there -- not the
+    // second, and seekread(f, 1) (not 0, which is outside [1..10] and was
+    // only ever "the first component" by coincidence of the bug this tests)
+    // rewinds to that same first component to read the result back.
     auto R = compileAndRun(
         "program p;\n"
         "var f: file[1..10] of integer;\n"
@@ -493,12 +531,12 @@ TEST(BufferVariable, PutAfterSeekWriteOverwritesThatComponent) {
         "  rewrite(f);\n"
         "  for i := 1 to 4 do write(f, i);\n"
         "  seekwrite(f, 1); f^ := 99; put(f);\n"
-        "  seekread(f, 0);\n"
+        "  seekread(f, 1);\n"
         "  for i := 1 to 4 do begin write(f^, ' '); get(f) end;\n"
         "  writeln\n"
         "end.\n", kEP);
     ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
-    EXPECT_EQ(R.Stdout, "1 99 3 4 \n");
+    EXPECT_EQ(R.Stdout, "99 2 3 4 \n");
 }
 
 TEST(BufferVariable, AWrittenValueBecomesAComponentOfTheFilesType) {

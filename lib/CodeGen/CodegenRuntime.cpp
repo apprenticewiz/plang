@@ -433,6 +433,12 @@ int64_t Codegen::Impl::getFileElemSize(const ExprNode& fileExpr) {
     return 1; // text, or an untyped file: byte-level
 }
 
+int64_t Codegen::Impl::getFileIndexLow(const ExprNode& fileExpr) {
+    if (const Type* T = fileTypeOf(fileExpr))
+        if (T->IndexType) return T->IndexType->SubLo;
+    return 0;
+}
+
 llvm::Function* Codegen::Impl::getRuntimeNewFn() {
     auto* ty = llvm::FunctionType::get(ptrTy, {i64Ty}, false);
     return getExternFn("plang_new", ty);

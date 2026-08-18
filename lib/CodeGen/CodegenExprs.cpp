@@ -862,12 +862,17 @@ llvm::Value* Codegen::Impl::emitCallExpr(const CallExpr& e) {
         return builder.CreateCall(fn, {tPtr}, lo);
     }
 
-    // EP §6.7.6.6: position(f) / lastposition(f)
+    // EP §6.7.6.6: position(f) / lastposition(f).  Both report a value of
+    // the file's declared INDEX TYPE -- "position(f) = succ(a, ...)", a
+    // being the index type's smallest value -- not a 0-based component
+    // count, so a `file[1..5]` fully written reports 4, not 3.
     if ((lo == "position" || lo == "lastposition") && !e.Args.empty()) {
         auto* fp  = fileVarPtr(*e.Args[0]);
         int64_t esz = getFileElemSize(*e.Args[0]);
-        auto* fn  = getExternFnN("plang_" + lo, i64Ty, {ptrTy, i64Ty});
-        return builder.CreateCall(fn, {fp, llvm::ConstantInt::get(i64Ty, esz)}, lo);
+        int64_t ilo = getFileIndexLow(*e.Args[0]);
+        auto* fn  = getExternFnN("plang_" + lo, i64Ty, {ptrTy, i64Ty, i64Ty});
+        return builder.CreateCall(fn, {fp, llvm::ConstantInt::get(i64Ty, esz),
+                                       llvm::ConstantInt::get(i64Ty, ilo)}, lo);
     }
     // EP §6.7.6.5: empty(f)
     if (lo == "empty" && !e.Args.empty()) {

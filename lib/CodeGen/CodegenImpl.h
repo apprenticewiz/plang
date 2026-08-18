@@ -1084,6 +1084,12 @@ struct Codegen::Impl {
     /// The LLVM type of one component of \p fileExpr, or null for a text or
     /// untyped file.
     llvm::Type* getFileElemType(const ExprNode& fileExpr);
+    /// EP §6.4.3.6/§6.7.5.2: the smallest value `a` of a direct-access file's
+    /// declared index-type -- what SeekRead/SeekWrite/SeekUpdate measure an
+    /// index AGAINST, and what position/LastPosition report relative TO
+    /// (§6.7.6.6: `position(f) = succ(a, ...)`).  0 for a file with no
+    /// declared index-type, which is every non-direct-access file.
+    int64_t getFileIndexLow(const ExprNode& fileExpr);
 
     /// EP §6.7.3.7: the address of an element of a conformant array parameter,
     /// or null if \p e does not subscript one.  Takes the whole subscript

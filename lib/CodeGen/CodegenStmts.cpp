@@ -827,15 +827,21 @@ void Codegen::Impl::emitCallStmt(const CallStmt& s) {
         builder.CreateCall(fn, {fp, nm});
         return;
     }
-    // EP §6.7.5.2: SeekRead / SeekWrite / SeekUpdate
+    // EP §6.7.5.2: SeekRead / SeekWrite / SeekUpdate.  n is a value of the
+    // file's declared INDEX TYPE (ISO §6.7.5.2's own pre-assertion measures
+    // "ord(n)-ord(a)"), not a byte offset and not a 0-based component count
+    // -- so `file[5..10] of integer; SeekWrite(f, 5)` must land on the FIRST
+    // component, not five components in.
     if ((lo == "seekread" || lo == "seekwrite" || lo == "seekupdate")
         && s.Args.size() >= 2) {
         auto* fp      = fileVarPtr(*s.Args[0]);
         auto* idx     = toI64(emitExpr(*s.Args[1]));
         int64_t esz   = getFileElemSize(*s.Args[0]);
+        int64_t ilo   = getFileIndexLow(*s.Args[0]);
         auto* fn = getExternFnN("plang_" + lo,
-            llvm::Type::getVoidTy(ctx), {ptrTy, i64Ty, i64Ty});
-        builder.CreateCall(fn, {fp, idx, llvm::ConstantInt::get(i64Ty, esz)});
+            llvm::Type::getVoidTy(ctx), {ptrTy, i64Ty, i64Ty, i64Ty});
+        builder.CreateCall(fn, {fp, idx, llvm::ConstantInt::get(i64Ty, esz),
+                                llvm::ConstantInt::get(i64Ty, ilo)});
         return;
     }
     // EP §6.7.5.6: bind(f, b) / unbind(f) — associate/dissociate file binding

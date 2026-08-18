@@ -543,48 +543,58 @@ void plang_update(PascalFile *F, const char *Name) {
 }
 
 // ---- EP §6.7.5.2: SeekRead / SeekWrite / SeekUpdate ----
+//
+// n is a value of the file's declared INDEX TYPE, not a byte offset and not
+// a 0-based component count -- ISO §6.7.5.2's own pre-assertion measures
+// "ord(n)-ord(a)", a of type T being the index type's smallest value.  Only
+// the difference is a component count; n itself never was one except for
+// the common case where a happens to be 0.
 
-void plang_seekread(PascalFile *F, int64_t N, int64_t ElemSize) {
+void plang_seekread(PascalFile *F, int64_t N, int64_t ElemSize, int64_t IndexLow) {
     abortIfClosed(F, "SeekRead");
-    std::fseek(F->Fp, N * ElemSize, SEEK_SET);
+    std::fseek(F->Fp, (N - IndexLow) * ElemSize, SEEK_SET);
     F->Readable = 1;
     unloadComponent(F);
     prime(F);
 }
 
-void plang_seekwrite(PascalFile *F, int64_t N, int64_t ElemSize) {
+void plang_seekwrite(PascalFile *F, int64_t N, int64_t ElemSize, int64_t IndexLow) {
     abortIfClosed(F, "SeekWrite");
-    std::fseek(F->Fp, N * ElemSize, SEEK_SET);
+    std::fseek(F->Fp, (N - IndexLow) * ElemSize, SEEK_SET);
     F->Buf      = PlangFileUninit;
     F->Readable = 0;
     unloadComponent(F);
 }
 
-void plang_seekupdate(PascalFile *F, int64_t N, int64_t ElemSize) {
+void plang_seekupdate(PascalFile *F, int64_t N, int64_t ElemSize, int64_t IndexLow) {
     abortIfClosed(F, "SeekUpdate");
-    std::fseek(F->Fp, N * ElemSize, SEEK_SET);
+    std::fseek(F->Fp, (N - IndexLow) * ElemSize, SEEK_SET);
     F->Buf      = PlangFileUninit;
     F->Readable = 1;
     unloadComponent(F);
 }
 
 // ---- EP §6.7.6.6: position / LastPosition ----
+//
+// §6.7.6.6: position(f) = succ(a, length(f.L)), LastPosition(f) =
+// succ(a, length(f.L~f.R)-1) -- both relative to a, the index type's
+// smallest value, not to zero.
 
-int64_t plang_position(PascalFile *F, int64_t ElemSize) {
+int64_t plang_position(PascalFile *F, int64_t ElemSize, int64_t IndexLow) {
     abortIfClosed(F, "position");
     long pos = std::ftell(F->Fp);
-    if (pos < 0) return 0;
-    return ElemSize > 0 ? (int64_t)(pos / ElemSize) : 0;
+    if (pos < 0) return IndexLow;
+    return IndexLow + (ElemSize > 0 ? (int64_t)(pos / ElemSize) : 0);
 }
 
-int64_t plang_lastposition(PascalFile *F, int64_t ElemSize) {
+int64_t plang_lastposition(PascalFile *F, int64_t ElemSize, int64_t IndexLow) {
     abortIfClosed(F, "LastPosition");
     long saved = std::ftell(F->Fp);
     std::fseek(F->Fp, 0, SEEK_END);
     long end = std::ftell(F->Fp);
     if (saved >= 0) std::fseek(F->Fp, saved, SEEK_SET);
-    if (ElemSize <= 0 || end <= 0) return -1;
-    return (int64_t)(end / ElemSize) - 1;
+    if (ElemSize <= 0 || end <= 0) return IndexLow - 1;
+    return IndexLow + (int64_t)(end / ElemSize) - 1;
 }
 
 // ---- EP §6.7.6.5: empty ----
