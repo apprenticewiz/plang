@@ -4178,6 +4178,46 @@ TEST(CaseStatement, DistinctLabelsAreStillAccepted) {
     EXPECT_EQ(R.Stdout, "mid\n");
 }
 
+TEST(CaseStatement, TheSemicolonBeforeOtherwiseIsOptional) {
+    // EP §6.9.3.5: case-statement = ... ( case-list-element { ';' case-
+    // list-element } [ [ ';' ] case-statement-completer ] | ... ) [ ';' ]
+    // 'end' .  The ';' immediately before the completer ('otherwise'/'else')
+    // is optional -- unlike the ';' between two ordinary case-list-elements,
+    // which the same grammar (via '{ ';' case-list-element }') makes
+    // mandatory.  parseCaseStmt's arm loop treated any non-';' token the
+    // same way -- an unconditional break straight to expect(End) -- so
+    // seeing 'otherwise' where it expected ';' or 'end' produced "expected
+    // 'end', got 'otherwise'" instead of parsing the completer.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "var i: integer;\n"
+        "begin i := 5;\n"
+        "  case i of\n"
+        "    1: writeln('one')\n"
+        "    otherwise writeln('other')\n"
+        "  end\n"
+        "end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << "compile/run failed:\n" << R.Stderr;
+    EXPECT_EQ(R.Stdout, "other\n");
+}
+
+TEST(CaseStatement, AMissingSemicolonBetweenOrdinaryArmsIsStillRejected) {
+    // The completer's ';' is optional, but the one 'case-list-element {
+    // ';' case-list-element }' requires between two ORDINARY arms is not --
+    // guard against a fix that loops back unconditionally instead of only
+    // when 'otherwise'/'else' follows.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "var i: integer;\n"
+        "begin i := 2;\n"
+        "  case i of\n"
+        "    1: writeln('one')\n"
+        "    2: writeln('two')\n"
+        "  end\n"
+        "end.\n", kEP);
+    EXPECT_NE(R.ExitCode, 0) << "accepted";
+}
+
 TEST(FunctionResult, MustBeSimpleOrPointerUnderIso7185) {
     // 6.6.2 admits a simple-type or a pointer-type and nothing else.
     auto R = compileAndRun(

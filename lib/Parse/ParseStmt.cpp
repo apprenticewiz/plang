@@ -313,8 +313,18 @@ std::unique_ptr<CaseStmt> Parser::parseCaseStmt() {
         Arm.Body = parseStatement();
         Node->Arms.push_back(std::move(Arm));
 
-        // Semicolon between arms is optional; stop when 'end' or 'else' follows.
-        if (!match(TokenKind::Semicolon)) break;
+        // EP §6.9.3.5: case-statement = ... ( case-list-element { ';' case-
+        // list-element } [ [ ';' ] case-statement-completer ] | ... ) [ ';' ]
+        // 'end' .  The semicolon is MANDATORY between two ordinary case-list-
+        // elements, but OPTIONAL immediately before the completer
+        // ('otherwise'/'else').  Loop back without requiring one when that's
+        // what follows, so the check at the top of the loop gets a chance to
+        // fire instead of unconditionally breaking to expect(End) below.
+        if (!match(TokenKind::Semicolon)) {
+            if (check(TokenKind::Otherwise) || check(TokenKind::Else))
+                continue;
+            break;
+        }
         // A trailing semicolon before 'end' is fine — just loop around.
     }
 
