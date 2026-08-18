@@ -905,6 +905,17 @@ llvm::Value* Codegen::Impl::emitCallExpr(const CallExpr& e) {
             : llvm::ConstantInt::get(i64Ty, 1);
         auto* r = lo == "succ" ? builder.CreateAdd(v, k, "succ")
                                : builder.CreateSub(v, k, "pred");
+        // ISO §6.7.6.4: "The function shall yield a value whose ordinal
+        // number is ord(x)+k, if such a value exists.  It shall be an error
+        // if such a value does not exist" -- checked nowhere, so
+        // succ(blue) one past the last value of a 3-member enum silently
+        // wrapped into 3, an ordinal no value of the type has.  integer is
+        // deliberately excluded (ordinalRange's own rule): it has no bounded
+        // range to have walked off the end of.
+        if (const auto& argTy = e.Args[0]->ResolvedType; argTy && !argTy->isError())
+            if (auto range = ordinalRange(*argTy))
+                emitRangeCheck(r, range->first, range->second, /*isIndex=*/false,
+                              e.Loc);
         // ISO §6.6.6.4: the result is of the argument's type.  The arithmetic
         // is done wide, so it has to come back in the width that type is held
         // in, or a boolean result is an i64 that write puts out as 1 and 0.

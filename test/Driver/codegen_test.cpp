@@ -2913,6 +2913,51 @@ TEST(SuccPred, RejectsANonOrdinalArgument) {
         << R.Stderr;
 }
 
+TEST(SuccPred, RangeChecksThePastTheEndResult) {
+    // ISO §6.7.6.4: "The function shall yield a value whose ordinal number
+    // is ord(x)+k, if such a value exists.  It shall be an error if such a
+    // value does not exist" -- unchecked, so succ(blue) one past the last
+    // value of a 3-member enum silently wrapped to the ordinal 3, which no
+    // value of the type has.  integer is deliberately excluded (no bounded
+    // range to walk off the end of), and the check honours
+    // -fno-range-checks like every other one in the compiler.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type Color = (red, green, blue); var c: Color;\n"
+        "begin c := blue; writeln(ord(succ(c))) end.\n", kEP);
+    EXPECT_NE(R.ExitCode, 0);
+    EXPECT_NE(R.Stderr.find("out of range"), std::string::npos) << R.Stderr;
+
+    auto Off = compileAndRun(
+        "program p(output);\n"
+        "type Color = (red, green, blue); var c: Color;\n"
+        "begin c := blue; writeln(ord(succ(c))) end.\n",
+        std::string(kEP) + " -fno-range-checks");
+    ASSERT_EQ(Off.ExitCode, 0) << Off.Stderr;
+    EXPECT_EQ(Off.Stdout, "3\n");
+}
+
+TEST(SuccPred, TheStandardsOwnWorkedExamples) {
+    // EP §6.7.6.4's own examples for succ(x,k)/pred(x,k), verbatim.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type shape = (triangle, square, pentagon);\n"
+        "     colour = (red, yellow, green, blue);\n"
+        "var c: colour; s: shape;\n"
+        "begin\n"
+        "  c := succ(yellow, -1); writeln(ord(c):1);\n"
+        "  s := succ(triangle, 0); writeln(ord(s):1);\n"
+        "  c := succ(yellow); writeln(ord(c):1);\n"
+        "  c := succ(yellow, 2); writeln(ord(c):1);\n"
+        "  c := pred(red, -1); writeln(ord(c):1);\n"
+        "  s := pred(triangle, 0); writeln(ord(s):1);\n"
+        "  c := pred(green); writeln(ord(c):1);\n"
+        "  c := pred(blue, 2); writeln(ord(c):1)\n"
+        "end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "0\n0\n2\n3\n1\n0\n1\n1\n");
+}
+
 // ---------------------------------------------------------------------------
 // ISO §6.7.2.5: pointers compare with = and <> against each other and against
 // nil.  Rejecting that made every linked structure inexpressible.
