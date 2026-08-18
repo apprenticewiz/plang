@@ -566,6 +566,17 @@ std::unique_ptr<RecordTypeNode> Parser::parseRecordType(bool Packed) {
         while (match(TokenKind::Comma)) {
             Fd.Names.push_back(expect(TokenKind::Identifier).Lexeme);
         }
+        // `with` exposes a field by name as surely as a var-declaration
+        // introduces one, and parseStructuredValueOrIndex's Name[...]
+        // disambiguation (TypeNames_ vs VarNames_) has no other way to know
+        // that: a field whose name also happens to be a type name --
+        // `type widget = integer; box = record widget: array[1..3] of
+        // integer end` -- read `with b do widget[1]` as a typed set
+        // constructor instead of an index, "'set literal' cannot be
+        // written".  Registered here so every field name counts as
+        // variable-like, the same as the shadowing convention already
+        // documented below already gives an ordinary var.
+        for (const auto& N : Fd.Names) VarNames_.insert(toLower(N));
         expect(TokenKind::Colon);
         Fd.Type = parseTypeExpr();
         // EP §6.6: a record-section's denoter may say what its fields start
@@ -642,6 +653,9 @@ std::unique_ptr<VariantPart> Parser::parseVariantPart() {
             while (match(TokenKind::Comma)) {
                 Fd.Names.push_back(expect(TokenKind::Identifier).Lexeme);
             }
+            // See the fixed-part loop above: a variant field is exposed by
+            // `with` the same way.
+            for (const auto& N : Fd.Names) VarNames_.insert(toLower(N));
             expect(TokenKind::Colon);
             Fd.Type = parseTypeExpr();
             Vc.Fields.push_back(std::move(Fd));

@@ -4190,6 +4190,28 @@ TEST(Shadowing, AVariableShadowingATypeNameIsStillSubscripted) {
     EXPECT_EQ(R.Stdout, "22\n");
 }
 
+TEST(Shadowing, AWithExposedFieldShadowingATypeNameIsStillSubscripted) {
+    // Same ambiguity as the test above, reached a different way: `with`
+    // exposes a record's fields by name as surely as a var-declaration
+    // introduces one, but the parser's Name[...] disambiguation only ever
+    // consulted VarNames_, which var-declarations and parameters populate
+    // and field declarations did not.  A field whose name also happens to
+    // be a type name -- `type widget = integer; box = record widget:
+    // array[1..3] of integer end` -- had `with b do widget[1]` parsed as a
+    // typed set constructor: "'set literal' cannot be written".
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type widget = integer;\n"
+        "     box = record widget: array[1..3] of integer end;\n"
+        "var b: box;\n"
+        "begin\n"
+        "  b.widget[1] := 7;\n"
+        "  with b do writeln(widget[1])\n"
+        "end.\n", kEP);
+    EXPECT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "7\n");
+}
+
 TEST(EP7Schema, ASchemaWhoseBodyIsAnotherSchemaCanBeSubscripted) {
     // EP §6.4.7 lets a schema's body be another schema's instantiation, so
     // "look through the schema to what it really is" is a LOOP and not a step.
