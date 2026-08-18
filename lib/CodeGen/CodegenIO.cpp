@@ -50,6 +50,32 @@ void Codegen::Impl::emitWriteArgs(
 
         // Binary typed file: write raw bytes.
         if (binaryTyped && fp) {
+            // A VarString component's in-memory shape -- { i64 length, [N x
+            // i8] data } -- IS the record ISO §6.9.1 wants written, byte for
+            // byte, no format conversion.  But emitExpr for a VarString
+            // returns its ADDRESS, not a loaded struct value (every other
+            // caller wants a pointer to pass to the string runtime), and the
+            // generic path below stores whatever emitExpr returned into a
+            // temporary and writes that temporary's own size -- storing an
+            // 8-byte pointer and then reporting the 8-vs-88-byte mismatch
+            // against the file's real component size.  Used directly, the
+            // address emitExpr already returns is exactly what a straight
+            // memcpy into the file wants; nothing to store first.
+            if (exprIsVarStr(*argExpr)) {
+                auto* addr = emitExpr(*argExpr);
+                if (!addr) continue;
+                auto* compTy = getFileElemType(*args[0]);
+                if (!compTy)
+                    codegenICE("a binary typed file with no component type to "
+                               "size its writes by");
+                const auto& dl  = mod->getDataLayout();
+                const int64_t esz = (int64_t)dl.getTypeAllocSize(compTy);
+                builder.CreateCall(
+                    getExternFnN("plang_write_binary", llvm::Type::getVoidTy(ctx),
+                                 {ptrTy, ptrTy, i64Ty}),
+                    {fp, addr, llvm::ConstantInt::get(i64Ty, esz)});
+                continue;
+            }
             auto* val = emitExpr(*argExpr);
             if (!val) continue;
             // ISO §6.9.1: write(f,e) is f^ := e, so what lands in the file is a

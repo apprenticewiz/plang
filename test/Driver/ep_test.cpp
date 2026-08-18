@@ -151,6 +151,31 @@ TEST(EP10DirectFile, BinaryReadWrite) {
     EXPECT_EQ(R.Stdout, "42\n99\n");
 }
 
+TEST(EP10DirectFile, BinaryReadWriteOfAStringComponent) {
+    // A `file of string(N)` is a typed (non-text) file whose component
+    // happens to be EP's VarString rather than a scalar or a record --
+    // isTypedBinaryFileVar correctly calls it binary (anything but char is),
+    // but the write path's generic handling assumed emitExpr(argExpr)
+    // returns a loaded VALUE it can store to a temporary and take the
+    // address of.  For a VarString, emitExpr returns the struct's ADDRESS
+    // directly instead (every other caller wants a pointer for the string
+    // runtime), so the "temporary" ended up holding an 8-byte pointer where
+    // the file's 88-byte string(10) component was expected: "a value
+    // written to a typed file is not the width of the file's component".
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "var f: file of string(10); s: string(10); i: integer;\n"
+        "begin rewrite(f);\n"
+        "  s := 'one'; write(f, s);\n"
+        "  s := 'two-longer'; write(f, s);\n"
+        "  s := 'x'; write(f, s);\n"
+        "  reset(f);\n"
+        "  for i := 1 to 3 do begin read(f, s);\n"
+        "    writeln('[', s, '] ', length(s):1) end end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "[one] 3\n[two-longer] 10\n[x] 1\n");
+}
+
 TEST(EP10DirectFile, SeekWriteAndSeekRead) {
     // Items 58: SeekWrite positions and writes; SeekRead positions and reads.
     auto R = compileAndRun(
