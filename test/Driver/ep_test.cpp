@@ -811,6 +811,31 @@ TEST(EP5NamedResult, ReadResultVariable) {
     EXPECT_EQ(R.Stdout, "21\n");
 }
 
+TEST(EP5NamedResult, ANestedFunctionsOwnLocalOfTheSameNameShadowsTheOuterResult) {
+    // checkIdent consults resultFrameFor BEFORE ordinary symbol lookup, and
+    // resultFrameFor's named-result branch was never checked against
+    // Shadowed at all -- only the bare-function-name branch was.  A nested
+    // function's own unrelated local variable, spelled the same as an
+    // ENCLOSING function's named result, was hijacked by the outer one:
+    // `inner`'s own `var result: real` never got a look-in, and `result`
+    // inside `inner` typed as `outer`'s INTEGER instead, rejecting
+    // `result := 5.5` as a type mismatch on what is, lexically, `inner`'s
+    // own variable. IsResultVar on the Symbol distinguishes "this Var IS a
+    // result variable" from "this Var merely shares a result-name's
+    // spelling", so a function's own self-reference to its named result
+    // (FunctionNameStillWorks-style, unaffected here) still resolves.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "function outer = result: integer;\n"
+        "  function inner: integer;\n"
+        "  var result: real;\n"
+        "  begin result := 5.5; inner := trunc(result * 2.0) end;\n"
+        "begin result := inner + 1000 end;\n"
+        "begin writeln(outer) end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "1011\n");
+}
+
 // §6.7.3.1: protected parameters
 TEST(EP5Protected, AssignmentToProtectedRejected) {
     auto R = compileAndRun(

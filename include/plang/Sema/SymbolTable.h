@@ -125,6 +125,14 @@ struct Symbol {
     /// function body is a compile-time error.
     bool IsProtected{false};
 
+    /// EP §6.7.2: set for a named result variable, registered as an ordinary
+    /// Var so it can be assigned and read by name (Sema.cpp).  Lets
+    /// resultFrameFor tell "this Var IS a result variable" apart from "this
+    /// Var merely shares a result-name's spelling" — a nested function's own
+    /// unrelated local of the same name must shadow an ENCLOSING function's
+    /// named result, not be mistaken for it.
+    bool IsResultVar{false};
+
     /// EP §6.4.1: the declaration carried the 'bindable' prefix, so bind,
     /// unbind and binding will accept this variable.  On a TypeAlias it means
     /// every variable declared with that name is bindable.

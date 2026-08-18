@@ -1239,10 +1239,11 @@ void Sema::checkProcBody(const ProcDecl& Proc) {
         // Var so it can be assigned and read by name inside the body.
         if (!H.ResultName.empty()) {
             Symbol RS;
-            RS.Kind    = SymbolKind::Var;
-            RS.Name    = H.ResultName;
-            RS.Ty      = CurrentRetType;
-            RS.DeclLoc = Proc.Loc;
+            RS.Kind        = SymbolKind::Var;
+            RS.Name        = H.ResultName;
+            RS.Ty          = CurrentRetType;
+            RS.DeclLoc     = Proc.Loc;
+            RS.IsResultVar = true;
             if (!Symtab.define(RS))
                 error(Proc.Loc, diag::err_duplicate_param, {H.ResultName});
         }

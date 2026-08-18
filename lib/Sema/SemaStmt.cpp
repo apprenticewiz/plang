@@ -131,6 +131,9 @@ Sema::FuncFrame* Sema::resultFrameFor(const std::string& Name) {
     // is what leaves a recursive call able to find the function — so anything
     // found there is a nearer declaration.
     const Symbol* Sym = Symtab.lookup(Name);
+    const bool ShadowedByPlainVar = Sym
+        && (Sym->Kind == SymbolKind::Var || Sym->Kind == SymbolKind::VarParam)
+        && !Sym->IsResultVar;
     const bool Shadowed = Sym && (Sym->Kind == SymbolKind::Var
                                   || Sym->Kind == SymbolKind::VarParam);
 
@@ -140,8 +143,20 @@ Sema::FuncFrame* Sema::resultFrameFor(const std::string& Name) {
         const ProcDecl* D = It->Decl;
         if (!D) continue;
         // EP §6.7.2: a named result variable is in the symbol table by design,
-        // being the one form of the result that is written as a variable.
-        if (!D->ResultName.empty() && eqCI(D->ResultName, Name)) return &*It;
+        // being the one form of the result that is written as a variable --
+        // but that cuts both ways.  It was never checked against Shadowed at
+        // all, so a nested function's own unrelated local of the same
+        // spelling as an ENCLOSING function's ResultName was hijacked: `type
+        // of x` aside, `function outer = result: integer; function inner:
+        // integer; var result: real; begin result := 5.5; ...` typed
+        // `result` inside inner as outer's INTEGER, not inner's own REAL,
+        // because this branch walked past inner's local straight to outer's
+        // frame.  ShadowedByPlainVar is false exactly when Sym IS some
+        // frame's own result variable (or there is no shadow at all), which
+        // is what lets a function's own self-reference through unaffected.
+        if (!ShadowedByPlainVar
+                && !D->ResultName.empty() && eqCI(D->ResultName, Name))
+            return &*It;
         if (!Shadowed && eqCI(D->Name, Name)) return &*It;
     }
     return nullptr;
