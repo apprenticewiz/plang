@@ -749,6 +749,25 @@ std::shared_ptr<Type> Sema::resolveNamedUnrestricted(const NamedTypeNode& N) {
         error(N.Loc, diag::err_not_a_type, {N.Name});
         return TyErr;
     }
+    // Phase 3a (Sema.cpp) gives every type name a stub -- Kind=Error, Name
+    // set to the type's own name -- before any body is resolved, so that a
+    // POINTER may name a domain type declared later (ISO §6.2.2.9).  Reached
+    // any other way, the stub means the type this name denotes has not been
+    // resolved yet: `type t = record f: u end; u = integer;` looked "u" up
+    // while resolving t's body, before Phase 3b ever reaches u's own
+    // definition, and got the stub back silently -- a record field or array
+    // element left permanently Kind=Error, with nothing to catch it until
+    // codegen tried to lower it and had no LLVM type to give an "undefined
+    // type" name.  EP §6.2.1(k) is explicit that this is not the relaxation
+    // it sounds like: declaration PARTS may reorder, but "the prohibition of
+    // forward references in declarations is retained" -- so this is refused
+    // here, the same as any other undefined type, rather than silently
+    // handed to whatever resolves the reference.
+    if (InPointerDomain_ <= 0 && Sym->Ty && Sym->Ty->Kind == TypeKind::Error
+            && !Sym->Ty->Name.empty()) {
+        error(N.Loc, diag::err_forward_type_reference, {N.Name});
+        return TyErr;
+    }
     return Sym->Ty ? Sym->Ty : TyErr;
 }
 

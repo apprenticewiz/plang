@@ -386,6 +386,39 @@ TEST(CodegenPointer, ForwardPointerReference) {
     EXPECT_EQ(R.Stdout, "99\n");
 }
 
+TEST(CodegenPointer, AForwardTypeReferenceNotThroughAPointerIsRejected) {
+    // EP §6.2.1(k) permits declaration PARTS in any order, but is explicit
+    // that "the prohibition of forward references in declarations is
+    // retained" -- the pointer's domain type, tested just above, is the one
+    // sanctioned exception (ISO §6.2.2.9). A record field or array element
+    // naming a type declared LATER in the same type-definition-part is not
+    // that exception, and Sema accepted it silently: Phase 3a's forward-
+    // pointer stub (Kind=Error, named for the type) was handed back as the
+    // field's or element's own type, with nothing to notice it was never
+    // replaced, until codegen tried to lower it and had no LLVM type to
+    // give: "no LLVM type for semantic type 'u'", an internal error on a
+    // program the standard says must be rejected.
+    auto RecordField = compileAndRun(
+        "program p;\n"
+        "type t = record f: u end;\n"
+        "type u = integer;\n"
+        "var x: t;\n"
+        "begin x.f := 5; writeln(x.f) end.\n");
+    EXPECT_NE(RecordField.ExitCode, 0);
+    EXPECT_NE(RecordField.Stderr.find("used here before its declaration"),
+              std::string::npos) << RecordField.Stderr;
+
+    auto ArrayElement = compileAndRun(
+        "program p;\n"
+        "type t = array[1..5] of u;\n"
+        "type u = integer;\n"
+        "var x: t;\n"
+        "begin x[1] := 5; writeln(x[1]) end.\n");
+    EXPECT_NE(ArrayElement.ExitCode, 0);
+    EXPECT_NE(ArrayElement.Stderr.find("used here before its declaration"),
+              std::string::npos) << ArrayElement.Stderr;
+}
+
 // ---------------------------------------------------------------------------
 // Tests derived from the /tmp bug-catching files found during code review.
 // These are the exact programs that originally demonstrated each bug.

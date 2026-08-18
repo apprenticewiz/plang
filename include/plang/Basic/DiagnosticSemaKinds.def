@@ -246,6 +246,13 @@ DIAG(err_proc_param_not_assignable, Error,
 DIAG(err_unrecognized_type, Error, "unrecognized type expression")
 DIAG(err_undefined_type, Error, "undefined type '%0'")
 DIAG(err_not_a_type, Error, "'%0' is not a type")
+// EP §6.2.1(k): the relaxation that lets declaration parts appear in any
+// order explicitly retains "the prohibition of forward references in
+// declarations" — the one exception is a pointer's domain type (ISO
+// §6.2.2.9), which needs no size from what it points at.
+DIAG(err_forward_type_reference, Error,
+     "type '%0' is used here before its declaration; only a pointer's "
+     "domain type may be declared later")
 
 // Forward declaration signature checks
 // TRANSLATORS: "parameter(s)" is an English plural dodge.  Use whatever
