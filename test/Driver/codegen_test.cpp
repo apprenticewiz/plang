@@ -3557,6 +3557,27 @@ TEST(CharStringType, GoesWhereAnEPStringIsExpected) {
     EXPECT_EQ(R.Stdout, "hello!\ntrue\n");
 }
 
+TEST(CharStringType, AStringValueAssignsItsFirstCharacterToACharVariable) {
+    // EP §6.4.5(d): "T1 is either a string-type or the char-type and T2 is
+    // either a string-type or the char-type" -- compatible in EITHER
+    // direction. isAssignCompatible had the char-to-string half (a char
+    // widens to a string) but not the reverse: `c := s` for `c: char` was
+    // refused outright ("cannot assign 'string(5)' to variable of type
+    // 'char'") instead of deferring to §6.4.6(f)'s run-time length check.
+    // Covers both string shapes -- string(n) and packed array[1..n] of char
+    // -- and a literal, taking the value's first character each time.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "var c1, c2, c3: char; a: packed array[1..3] of char; s5: string(5);\n"
+        "begin\n"
+        "  a := 'q  '; c1 := a; writeln(c1);\n"
+        "  s5 := 'hello'; c2 := s5; writeln(c2);\n"
+        "  c3 := 'z'; writeln(c3)\n"
+        "end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "q\nh\nz\n");
+}
+
 TEST(CharStringType, ConcatenatesLikeAnEPString) {
     // ISO 10206 §6.4.3.3.1's note is explicit that a string-type -- the
     // category covering a packed array[1..n] of char as much as string(n) --

@@ -278,6 +278,33 @@ void Codegen::Impl::emitAssign(const AssignStmt& s) {
         }
     }
 
+    // EP §6.4.6(f): a string-type value assigned to a char VARIABLE takes
+    // that value's first (only, if it is well-formed) character -- Sema's
+    // isAssignCompatible now allows this direction, and the ordinary scalar
+    // path below cannot: emitExpr for a VarString returns the STRUCT'S
+    // ADDRESS, not a loaded value, since every other caller wants a pointer
+    // for the string runtime, so falling through would have stored a pointer
+    // where a char belongs.
+    if (s.Target->ResolvedType && s.Target->ResolvedType->Kind == TypeKind::Char
+            && (exprIsVarStr(*s.Value) || exprIsCharStr(*s.Value)
+                || llvm::isa<StringLitExpr>(s.Value.get()))) {
+        llvm::Value* dataPtr = nullptr;
+        if (exprIsVarStr(*s.Value)) {
+            auto [addr, cap] = strAddrAndCap(*s.Value);
+            dataPtr = addr ? strDataPtr(addr) : nullptr;
+        } else if (exprIsCharStr(*s.Value)) {
+            dataPtr = emitLValue(*s.Value);
+        } else {
+            dataPtr = internStrPtr(llvm::cast<StringLitExpr>(*s.Value).Value);
+        }
+        if (!dataPtr) codegenICE("string value assigned to a char has no address");
+        auto* ch = builder.CreateLoad(i8Ty, dataPtr, "char.of.str");
+        auto* dstAddr = emitLValue(*s.Target);
+        if (!dstAddr) codegenICE("assignment target is not addressable");
+        builder.CreateStore(ch, dstAddr);
+        return;
+    }
+
     // EP §6.5.6: assigning to a substring replaces those characters and leaves
     // the rest of the string as it was, so it cannot go through the ordinary
     // string store, which would replace the whole value.

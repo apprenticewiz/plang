@@ -1690,6 +1690,19 @@ bool Sema::isAssignCompatible(const Type& Dst, const Type& Src,
     // A string-type is a string value, so it goes where one is expected.
     if (isVarStringLike(&Dst) && isCharStringType(Src))
         return true;
+    // EP §6.4.5(d): "T1 is either a string-type or the char-type and T2 is
+    // either a string-type or the char-type" -- compatible in EITHER
+    // direction, not only char-to-string. The char-to-string half was here
+    // (isVarStringLike(&Dst) && Src.Kind==Char, and Dst.Kind==String &&
+    // Src.Kind==Char, above); the reverse -- a string-type value assigned to
+    // a char VARIABLE -- was missing entirely, so `c := s` for `c: char` was
+    // refused outright rather than deferred to §6.4.6(f)'s run-time length
+    // check (c)'s "length of the value of T2 is <= the capacity of T1",
+    // capacity 1 for char (§6.4.3.3.1).
+    if (Dst.Kind == TypeKind::Char
+            && (isVarStringLike(&Src) || isCharStringType(Src)
+                || Src.Kind == TypeKind::String))
+        return true;
     return false;
 }
 
