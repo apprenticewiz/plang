@@ -837,6 +837,20 @@ TEST(Warnings, DrivingALoopCountsAsUsingTheVariable) {
     EXPECT_EQ(R.Stderr.find("never used"), std::string::npos) << R.Stderr;
 }
 
+// EP §6.4.9: `type of x` names x directly in a type-denoter rather than in an
+// expression, same as a for-statement's control variable above -- and the
+// same gap applied: nothing marked x referenced, so a variable used only to
+// give another one its type was wrongly flagged unused.
+TEST(Warnings, TypeOfCountsAsUsingTheVariable) {
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "var x: integer;\n"
+        "var y: type of x;\n"
+        "begin y := 5; writeln(y) end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stderr.find("never used"), std::string::npos) << R.Stderr;
+}
+
 TEST(Warnings, AProgramThatDoesNotTypecheckGetsNoFlowWarnings) {
     // The walk would be reading a tree where some names have no type and some
     // statements were kept only to carry on looking for errors.  Whatever it

@@ -489,6 +489,10 @@ std::shared_ptr<Type> Sema::resolveTypeImpl(const TypeNode& Node) {
             error(Node.Loc, diag::err_type_of_undefined, {N->VarName});
             return TyErr;
         }
+        // Naming x here is a use, same as checkFor's control variable: x is
+        // named directly by the type-denoter, not through an expression the
+        // identifier check would otherwise see.
+        Sym->Referenced = true;
         return Sym->Ty ? Sym->Ty : TyErr;
     }
     if (auto* N = llvm::dyn_cast<ConformantArrayTypeNode>(&Node)) {
