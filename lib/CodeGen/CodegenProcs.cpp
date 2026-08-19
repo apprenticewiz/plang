@@ -313,22 +313,16 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
     if (isNested && !outerVars.empty())
         paramTypes.push_back(ptrTy); // static link (frame pointer from outer scope)
 
-    // Conformant-array dimension metadata for this function:
-    // one entry per AST param, inner vector is [(loName,hiName)...] per dim.
-    std::vector<std::vector<std::pair<std::string,std::string>>> conformantDims;
+    // One entry per AST param position, recording everything a call site
+    // needs about it; see Impl::ParamMeta.
+    std::vector<ParamMeta> paramMeta;
 
-    // EP §6.4.7: discriminant count per AST param position; 0 = not schematic.
-    std::vector<unsigned> schemaDiscCounts;
-    // Parallel to schemaDiscCounts: the schema type for each schematic param.
+    // Parallel to paramMeta: the schema type for each schematic param
+    // (paramMeta[i].schemaDiscCount != 0).  Not part of ParamMeta itself --
+    // used only locally below, in this same function, to size and type the
+    // parameter's allocated storage; nothing outside emitFunctionDef reads a
+    // schema parameter's Type* the way it reads the other facts.
     std::vector<const plang::Type*> schemaTypes;
-
-    // ISO §6.6.3.1: procedural parameter positions, so call sites know to pass
-    // the pair rather than a single value.
-    std::vector<const ProcedureTypeNode*> procParamFlags;
-
-    // The window each value parameter of set type is based in; 0 elsewhere.
-    std::vector<int64_t> setBases;
-    std::vector<bool>    paramByRef;
 
     for (const auto& pg : hd.Params) {
         // ISO §6.6.3.1: a procedural parameter takes two pointers — the entry
@@ -349,12 +343,8 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
                 paramValTypes.push_back(ptrTy);
                 paramTypeNodes.push_back(nullptr);
 
-                conformantDims.push_back({});
-                schemaDiscCounts.push_back(0);
+                paramMeta.push_back(ParamMeta{ .procType = pt, .byRef = pg.IsVar });
                 schemaTypes.push_back(nullptr);
-                procParamFlags.push_back(pt);
-                setBases.push_back(0);
-                paramByRef.push_back(pg.IsVar);
             }
             continue;
         }
@@ -392,12 +382,8 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
                     paramTypeNodes.push_back(nullptr);
                 }
 
-                conformantDims.push_back({});
-                schemaDiscCounts.push_back(n);
+                paramMeta.push_back(ParamMeta{ .schemaDiscCount = n, .byRef = pg.IsVar });
                 schemaTypes.push_back(schTy);
-                procParamFlags.push_back(nullptr);
-                setBases.push_back(0);
-                paramByRef.push_back(pg.IsVar);
             }
             continue;
         }
@@ -444,12 +430,8 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
                 }
 
                 // Record conformant dims for this AST arg position.
-                conformantDims.push_back(dims);
-                schemaDiscCounts.push_back(0);
+                paramMeta.push_back(ParamMeta{ .conformantDims = dims, .byRef = pg.IsVar });
                 schemaTypes.push_back(nullptr);
-                procParamFlags.push_back(nullptr);
-                setBases.push_back(0);
-                paramByRef.push_back(pg.IsVar);
             }
         } else {
             llvm::Type* vt = llvmTypeOfNode(*pg.Type);
@@ -463,12 +445,8 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
                 paramIsVar.push_back(pg.IsVar);
                 paramValTypes.push_back(vt);
                 paramTypeNodes.push_back(pg.Type.get());
-                conformantDims.push_back({}); // not conformant
-                schemaDiscCounts.push_back(0);
+                paramMeta.push_back(ParamMeta{ .setBase = sb, .byRef = pg.IsVar });
                 schemaTypes.push_back(nullptr);
-                procParamFlags.push_back(nullptr);
-                setBases.push_back(sb);
-                paramByRef.push_back(pg.IsVar);
             }
         }
     }
@@ -511,11 +489,10 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
     // pair of a procedural parameter.  Recorded here rather than alongside the
     // body so that the forward pre-pass leaves it behind too: the call being
     // fixed up is one that runs before the body is emitted.
-    conformantParamDims_[mangledName] = conformantDims;
-    schemaParamDiscs_[mangledName]    = schemaDiscCounts;
-    procParamPositions_[mangledName]  = procParamFlags;
-    paramSetBases_[mangledName]       = setBases;
-    paramByRef_[mangledName]          = paramByRef;
+    // Not std::move: the "copy Pascal-declared parameters to allocas" code
+    // below reads this same local paramMeta again, in this same call --
+    // moving from it here would leave that read seeing an empty vector.
+    paramMeta_[mangledName] = paramMeta;
 
     // A forward declaration contributes its signature and stops; the body
     // arrives with the defining occurrence.
@@ -683,18 +660,18 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
     }
 
     // Copy Pascal-declared parameters to allocas.
-    // conformantDims has one entry per Pascal param name; each LLVM arg sequence
+    // paramMeta has one entry per Pascal param name; each LLVM arg sequence
     // consumed depends on whether the param is conformant or not.
     // flatIdx: current offset into paramNames/paramValTypes/paramIsVar.
     {
         auto it = funcArgIt; // LLVM arg iterator (after static link)
         size_t flatIdx = 0;
-        for (size_t ci = 0; ci < conformantDims.size() && it != func->arg_end(); ++ci) {
+        for (size_t ci = 0; ci < paramMeta.size() && it != func->arg_end(); ++ci) {
             const std::string& nm  = paramNames[flatIdx];
-            const auto&        dims = conformantDims[ci];
+            const auto&        dims = paramMeta[ci].conformantDims;
 
             // ISO §6.6.3.1: procedural param — the entry point and its frame.
-            if (ci < procParamFlags.size() && procParamFlags[ci]) {
+            if (paramMeta[ci].procType) {
                 llvm::Value* fnPtr = &*it; ++it;
                 llvm::Value* frame = &*it; ++it;
                 // Spilled to a cell so the pair has an address: a nested
@@ -705,7 +682,7 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
                 defVar(nm, cell, procPairTy());
                 auto& ve       = scopes.back()[toLower(nm)];
                 ve.isProcParam = true;
-                ve.procType    = procParamFlags[ci];
+                ve.procType    = paramMeta[ci].procType;
                 flatIdx += 2;
                 continue;
             }
@@ -713,10 +690,10 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
             // EP §6.4.7: schema param — consume the body pointer, then one i64
             // per discriminant.  Both value and var parameters take the address
             // because the body's size is not known to the caller's ABI.
-            if (schemaDiscCounts[ci] > 0) {
+            if (paramMeta[ci].schemaDiscCount > 0) {
                 llvm::Value* bodyPtr = &*it; ++it;
                 std::vector<llvm::Value*> discs;
-                for (unsigned d = 0; d < schemaDiscCounts[ci]; ++d) {
+                for (unsigned d = 0; d < paramMeta[ci].schemaDiscCount; ++d) {
                     discs.push_back(&*it); ++it;
                 }
                 // EP §6.7.3.2: a value parameter is a variable of its own, so
@@ -750,7 +727,7 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
                     ve.schemaDiscNames.push_back(dn);
                 }
                 ve.schemaDiscs = std::move(discs);
-                flatIdx += 1 + schemaDiscCounts[ci];
+                flatIdx += 1 + paramMeta[ci].schemaDiscCount;
                 continue;
             }
 
@@ -806,7 +783,7 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
                 // of the body, so its size is bounded by memory rather than by
                 // the stack.
                 llvm::Value* dataPtr = arrPtrArg;
-                const bool ByValue = ci < paramByRef.size() && !paramByRef[ci];
+                const bool ByValue = !paramMeta[ci].byRef;
                 const bool Modified =
                     proc.heading().ModifiedParams.count(toLower(nm)) > 0;
                 if (ByValue && Modified) {

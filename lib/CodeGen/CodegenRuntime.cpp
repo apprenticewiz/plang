@@ -117,9 +117,9 @@ llvm::Value* Codegen::Impl::alignSetArg(llvm::Value* v, const ExprNode& arg,
     // A var parameter arrives as an address, and ISO §6.6.3.3 requires its
     // actual to be of the parameter's own type, so no window is crossed there.
     if (!v || v->getType() != setTy()) return v;
-    const auto It = paramSetBases_.find(mangled);
-    if (It == paramSetBases_.end() || astArgIdx >= It->second.size()) return v;
-    return alignSet(v, setBaseOf(arg), It->second[astArgIdx]);
+    const auto It = paramMeta_.find(mangled);
+    if (It == paramMeta_.end() || astArgIdx >= It->second.size()) return v;
+    return alignSet(v, setBaseOf(arg), It->second[astArgIdx].setBase);
 }
 
 llvm::Value* Codegen::Impl::setBitIndex(llvm::Value* ordinal, int64_t base) {

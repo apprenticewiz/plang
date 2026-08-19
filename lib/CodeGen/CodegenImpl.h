@@ -392,21 +392,50 @@ struct Codegen::Impl {
     std::map<std::string, std::vector<size_t>>       funcOuterVarDepths_;
     std::set<std::string>                            nestedFunctions_;
 
-    // EP §6.7.3.7: conformant array parameter metadata.
-    // Key: mangled function name.
-    // Value: one entry per AST argument position.
-    //   Each entry is a vector of (loVarName, hiVarName) pairs — one pair per
-    //   conformant dimension.  An empty vector means the arg is not conformant.
-    std::map<std::string,
-             std::vector<std::vector<std::pair<std::string,std::string>>>>
-        conformantParamDims_;
-
-    // The ordinal bit 0 stands for in each value parameter of set type, by
-    // mangled function name and AST argument position; 0 for every parameter
-    // that is not a set, which is the window a non-negative base uses anyway.
-    // A set argument is compatible with a parameter whose base begins
-    // elsewhere, and has to be moved into the callee's window to arrive whole.
-    std::map<std::string, std::vector<int64_t>> paramSetBases_;
+    // Everything a call site needs to know about one AST argument position of
+    // a function's declared signature, keyed by mangled function name.
+    //
+    // Five of these were separate maps, each independently keyed by the same
+    // mangled name and indexed by the same AST argument position, each
+    // recording one fact about it.  Nothing tied them together: the four
+    // call sites that build them (CodegenProcs.cpp's four parameter-kind
+    // branches) always pushed to all five in lockstep by construction, but a
+    // future one that forgot a single push_back would desync that entry from
+    // every other function's by one position, silently.  One vector of one
+    // record removes the class of mistake outright — there is no longer a
+    // second, third, fourth and fifth table to forget.
+    //
+    // (procParamThunks_ below looks like a sixth of these at a glance, but
+    // isn't: it's keyed by the callee/signature pair a thunk was built for,
+    // not by (function, argument position), so it stays its own cache.)
+    struct ParamMeta {
+        // EP §6.7.3.7: (loVarName, hiVarName) pairs, one per conformant
+        // dimension.  Empty means this argument is not conformant.
+        std::vector<std::pair<std::string,std::string>> conformantDims;
+        // EP §6.4.7: discriminant count; 0 means not a schema parameter.
+        unsigned schemaDiscCount{0};
+        // ISO §6.6.3.1: the declared signature, or null for an ordinary
+        // argument.  A call site reads this to know it must pass the entry
+        // point and frame pair, and what signature to build the thunk
+        // against.
+        const ProcedureTypeNode* procType{nullptr};
+        // The ordinal bit 0 stands for, when this is a value parameter of
+        // set type; 0 otherwise, which is the window a non-negative base
+        // uses anyway.  A set argument compatible with a parameter whose
+        // base begins elsewhere has to be moved into the callee's window to
+        // arrive whole.
+        int64_t setBase{0};
+        // ISO §6.6.3.3 vs §6.6.3.2: whether this is a variable parameter,
+        // and so takes the actual's address rather than its value.
+        //
+        // A call site cannot read this off the LLVM signature, where both a
+        // var parameter and a value parameter of pointer type are simply
+        // `ptr`.  Taken for the former, `procedure one(p: ^integer)` was
+        // handed the address of the caller's pointer variable, and `p^` read
+        // the variable rather than what it pointed at.
+        bool byRef{false};
+    };
+    std::map<std::string, std::vector<ParamMeta>> paramMeta_;
 
     // EP §6.4.7: schema definitions reachable from the current block, so that
     // the body's bound expressions can be re-emitted with run-time
@@ -417,49 +446,26 @@ struct Codegen::Impl {
     };
     std::map<std::string, SchemaDef> schemaDefs_;
 
-    // EP §6.4.7: undiscriminated schema parameter metadata.
-    // Key: mangled function name.  Value: discriminant count per AST argument
-    // position; zero means the argument is not a schema parameter.
-    std::map<std::string, std::vector<unsigned>> schemaParamDiscs_;
-
-    // ISO §6.6.3.1: the declared signature at each AST argument position of a
-    // function, or null where the argument is an ordinary one.  A call site
-    // reads this to know it must pass the entry point and frame pair, and what
-    // signature to build the thunk against.  Key: mangled function name.
-    std::map<std::string, std::vector<const ProcedureTypeNode*>>
-        procParamPositions_;
-
     // ISO §6.6.3.1: uniform-signature thunks, keyed by the callee they wrap
     // and the signature they present it through.  See procParamThunk.
     std::map<std::pair<llvm::Function*, llvm::FunctionType*>, llvm::Function*>
         procParamThunks_;
 
-    // ISO §6.6.3.3 vs §6.6.3.2: whether each AST argument position of a
-    // function is a variable parameter, and so takes the actual's address
-    // rather than its value.  Key: mangled function name.
-    //
-    // A call site cannot read this off the LLVM signature, where both a var
-    // parameter and a value parameter of pointer type are simply `ptr`.  Taken
-    // for the former, `procedure one(p: ^integer)` was handed the address of
-    // the caller's pointer variable, and `p^` read the variable rather than
-    // what it pointed at.
-    std::map<std::string, std::vector<bool>> paramByRef_;
-
     /// Is AST argument \p astArgIdx of \p mangledName a variable parameter?
     [[nodiscard]] bool paramIsByRef(const std::string& mangledName,
                                     size_t astArgIdx) const {
-        auto it = paramByRef_.find(mangledName);
-        return it != paramByRef_.end() && astArgIdx < it->second.size()
-            && it->second[astArgIdx];
+        auto it = paramMeta_.find(mangledName);
+        return it != paramMeta_.end() && astArgIdx < it->second.size()
+            && it->second[astArgIdx].byRef;
     }
 
     /// The procedural signature at AST argument \p astArgIdx, or null.
     [[nodiscard]] const ProcedureTypeNode*
     procParamArg(const std::string& mangledName, size_t astArgIdx) const {
-        auto it = procParamPositions_.find(mangledName);
-        if (it == procParamPositions_.end() || astArgIdx >= it->second.size())
+        auto it = paramMeta_.find(mangledName);
+        if (it == paramMeta_.end() || astArgIdx >= it->second.size())
             return nullptr;
-        return it->second[astArgIdx];
+        return it->second[astArgIdx].procType;
     }
 
     /// Pushes an actual for a conformant array formal: the array, then a lo/hi

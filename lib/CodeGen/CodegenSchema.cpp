@@ -154,9 +154,9 @@ Codegen::Impl::schemaActual(const ExprNode& arg, unsigned discCount) {
 
 unsigned Codegen::Impl::schemaArgDiscs(const std::string& mangledName,
                                        size_t astArgIdx) const {
-    auto it = schemaParamDiscs_.find(mangledName);
-    if (it == schemaParamDiscs_.end() || astArgIdx >= it->second.size()) return 0;
-    return it->second[astArgIdx];
+    auto it = paramMeta_.find(mangledName);
+    if (it == paramMeta_.end() || astArgIdx >= it->second.size()) return 0;
+    return it->second[astArgIdx].schemaDiscCount;
 }
 
 void Codegen::Impl::pushSchemaArgs(std::vector<llvm::Value*>& args,

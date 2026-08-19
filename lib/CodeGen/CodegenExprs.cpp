@@ -1125,11 +1125,11 @@ llvm::Value* Codegen::Impl::emitUserFuncCall(const CallExpr& e) {
     if (auto* frame = buildStaticLinkFrame(mangledName)) args.push_back(frame);
 
     // EP §6.7.3.7: look up conformant param dimensions for this callee.
-    const std::vector<std::vector<std::pair<std::string,std::string>>>* cDims = nullptr;
+    const std::vector<ParamMeta>* pMeta = nullptr;
     {
-        auto cit = conformantParamDims_.find(mangledName);
-        if (cit != conformantParamDims_.end())
-            cDims = &cit->second;
+        auto cit = paramMeta_.find(mangledName);
+        if (cit != paramMeta_.end())
+            pMeta = &cit->second;
     }
 
     size_t pi = args.size();
@@ -1150,11 +1150,11 @@ llvm::Value* Codegen::Impl::emitUserFuncCall(const CallExpr& e) {
             continue;
         }
 
-        bool isConformant = cDims && astArgIdx < cDims->size()
-                            && !(*cDims)[astArgIdx].empty();
+        bool isConformant = pMeta && astArgIdx < pMeta->size()
+                            && !(*pMeta)[astArgIdx].conformantDims.empty();
 
         if (isConformant) {
-            const size_t dims = (*cDims)[astArgIdx].size();
+            const size_t dims = (*pMeta)[astArgIdx].conformantDims.size();
             pushConformantArgs(args, *arg, dims);
             pi += 1 + 2 * dims;
         } else {
