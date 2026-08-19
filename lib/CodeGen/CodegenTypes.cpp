@@ -148,6 +148,39 @@ void Codegen::Impl::defVar(const std::string& name, llvm::Value* ptr, llvm::Type
         consts.erase(It);
     }
     scopes.back()[Key] = VarEntry{ ptr, type, typeNode };
+
+    // -g: the single choke point every named Pascal variable, parameter,
+    // local, captured outer variable and with-bound field passes through,
+    // so this is the one place a DILocalVariable/DIGlobalVariableExpression
+    // needs building rather than one per caller.  A parameter is registered
+    // as an auto variable, not a formal parameter: preserving that
+    // distinction (info args vs. info locals) would mean threading an
+    // ArgNo through every one of defVar's ~30 call sites for a purely
+    // cosmetic difference -- print <name> finds either kind identically.
+    // ptr is documented (see VarEntry::ptr above) to always be an address
+    // -- an alloca, a GlobalVariable, or (for a var parameter) the
+    // argument itself, already a pointer at the LLVM level -- so it is
+    // always valid to declare a variable's location at, whichever case
+    // this is.
+    if (DBuilder && typeNode && typeNode->ResolvedType) {
+        if (auto* DT = debugTypeOfSemaType(*typeNode->ResolvedType)) {
+            const unsigned line = srcMgr_
+                ? srcMgr_->getPresumedLoc(typeNode->Loc).Line : 0;
+            if (auto* GV = llvm::dyn_cast<llvm::GlobalVariable>(ptr)) {
+                auto* GVE = DBuilder->createGlobalVariableExpression(
+                    DebugCU, name, /*LinkageName=*/"", DebugFile, line, DT,
+                    /*IsLocalToUnit=*/false);
+                GV->addDebugInfo(GVE);
+            } else if (currentDebugScope && builder.GetInsertBlock()) {
+                auto* DV = DBuilder->createAutoVariable(
+                    currentDebugScope, name, DebugFile, line, DT);
+                DBuilder->insertDeclare(
+                    ptr, DV, DBuilder->createExpression(),
+                    llvm::DILocation::get(ctx, line, 0, currentDebugScope),
+                    builder.GetInsertBlock());
+            }
+        }
+    }
 }
 
 const Codegen::Impl::VarEntry* Codegen::Impl::findVar(const std::string& name) const {
@@ -595,10 +628,14 @@ llvm::Type* Codegen::Impl::llvmTypeOfNodeViaSema(const TypeNode& node,
 // See NumSemaTypeKinds in Sema/Type.h.  A kind this file has not been taught
 // falls into the default of canLowerSemaType, which reports it as not
 // lowerable, and a variable of it is then refused for a reason that names
-// nothing -- or reaches llvmTypeOfSemaType and is lowered as an i64.
+// nothing -- or reaches llvmTypeOfSemaType and is lowered as an i64 -- or
+// reaches debugTypeOfSemaType and is silently given no DIType at all,
+// which is the *correct*, deliberate answer for a composite kind but a
+// silent gap for a new scalar-like kind that should have gotten one.
 static_assert(NumSemaTypeKinds == 21,
-              "a new semantic type kind needs a case in canLowerSemaType and "
-              "in llvmTypeOfSemaType");
+              "a new semantic type kind needs a case in canLowerSemaType, "
+              "llvmTypeOfSemaType, and (if it is scalar-like) "
+              "debugTypeOfSemaType");
 
 /// Whether llvmTypeOfSemaType has a lowering for \p T.  An undiscriminated
 /// schema has none — its extent is not known until it is passed or allocated —
@@ -944,6 +981,72 @@ llvm::Type* Codegen::Impl::llvmTypeOfSemaTypeImpl(const Type& T) {
         default:
             codegenICE("no LLVM type for semantic type '" + T.Name + "'");
     }
+}
+
+// -g.  Composite kinds (Record, Array, Set, File, ...) fall through to
+// null: field-level detail for them is explicitly out of scope for this
+// pass (a natural, clearly-separated fast-follow -- see the phase this
+// shipped in), and a pointer to one gets no DIType for its pointee rather
+// than a placeholder invented for the occasion.  A null pointee is a
+// documented, ordinary createPointerType input (a C `void*`'s own DIType
+// is built the same way), not a special case this function has to guard.
+llvm::DIType* Codegen::Impl::debugTypeOfSemaType(const Type& T) {
+    if (!DBuilder) return nullptr;
+    if (auto it = debugTypes_.find(&T); it != debugTypes_.end()) return it->second;
+
+    llvm::DIType* DT = nullptr;
+    switch (T.Kind) {
+        case TypeKind::Integer:
+            DT = DBuilder->createBasicType("integer", 64, llvm::dwarf::DW_ATE_signed);
+            break;
+        case TypeKind::Real:
+            DT = DBuilder->createBasicType("real", 64, llvm::dwarf::DW_ATE_float);
+            break;
+        case TypeKind::Boolean:
+            DT = DBuilder->createBasicType("boolean", 8, llvm::dwarf::DW_ATE_boolean);
+            break;
+        case TypeKind::Char:
+            DT = DBuilder->createBasicType("char", 8, llvm::dwarf::DW_ATE_unsigned_char);
+            break;
+        case TypeKind::Enum: {
+            std::vector<llvm::Metadata*> Elements;
+            Elements.reserve(T.EnumValues.size());
+            // The ordinal of each name is its own index -- see isValid's
+            // sibling read of this same field, EnumValues[V], elsewhere in
+            // this file: there is no separately-stored value to read here.
+            for (size_t I = 0; I < T.EnumValues.size(); ++I)
+                Elements.push_back(DBuilder->createEnumerator(
+                    T.EnumValues[I], static_cast<uint64_t>(I)));
+            DT = DBuilder->createEnumerationType(
+                DebugFile, T.Name, DebugFile, /*LineNumber=*/0,
+                /*SizeInBits=*/64, /*AlignInBits=*/64,
+                DBuilder->getOrCreateArray(Elements),
+                DBuilder->createBasicType("integer", 64, llvm::dwarf::DW_ATE_signed));
+            break;
+        }
+        case TypeKind::Subrange:
+            // The base ordinal type's own DIType, not a qualified DWARF
+            // subrange encoding: enough to print a value correctly, which
+            // is the bar this pass clears; the bound information itself
+            // is a nice-to-have left for a future pass.
+            DT = T.SubBase ? debugTypeOfSemaType(*T.SubBase) : nullptr;
+            break;
+        case TypeKind::Pointer: {
+            // No cycle risk despite the direct (non-RAUW) recursion: a
+            // composite pointee (the only way a real cycle could arise --
+            // Pascal has no way to write `type P = ^P;` directly) hits the
+            // default case above and returns immediately, without
+            // recursing into whatever it itself contains.
+            llvm::DIType* PointeeDT = T.PointeeType
+                ? debugTypeOfSemaType(*T.PointeeType) : nullptr;
+            DT = DBuilder->createPointerType(PointeeDT, 64);
+            break;
+        }
+        default:
+            break;
+    }
+    debugTypes_[&T] = DT;
+    return DT;
 }
 
 // ====================================================================

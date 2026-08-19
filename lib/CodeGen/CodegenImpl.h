@@ -130,6 +130,17 @@ struct Codegen::Impl {
     std::unique_ptr<llvm::DIBuilder> DBuilder;
     llvm::DICompileUnit*             DebugCU{nullptr};
     llvm::DIFile*                    DebugFile{nullptr};
+    /// Keyed on Type* identity, not on Type::Name or Kind: the lesson from
+    /// this cycle's own schema-body-peel bug class was specifically that a
+    /// spelling-keyed cache is what goes wrong when two distinct Types can
+    /// share a name.  A Type lives as long as the shared_ptr chain rooted
+    /// in the AST/symbol table, which outlives this cache either way.
+    std::map<const Type*, llvm::DIType*> debugTypes_;
+    /// The scalar DIType for \p T (integer, real, boolean, char, enum,
+    /// subrange, or a pointer whose pointee is itself one of those); see
+    /// the definition for what a record/array/set/etc. pointee gets
+    /// instead.  Null when Debug is unset.
+    llvm::DIType* debugTypeOfSemaType(const Type& T);
 
     // ---- common type aliases (set in init()) ----
     llvm::IntegerType* i1Ty{nullptr};

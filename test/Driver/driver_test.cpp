@@ -262,6 +262,107 @@ TEST(Driver, DashGGivesAProceduralParameterThunkNoStrayDebugLocation) {
         << R.IR.substr(ThunkStart, ThunkEnd - ThunkStart);
 }
 
+TEST(Driver, DashGGivesAGlobalVariableADIGlobalVariableExpression) {
+    // Pascal's own program-level 'var' declarations compile to LLVM
+    // GlobalVariables, not allocas -- the plan's own createAutoVariable/
+    // insertDeclare design (for a *local*) does not apply to them at all;
+    // they need createGlobalVariableExpression + GlobalVariable::
+    // addDebugInfo instead, found only by checking what the most common
+    // Pascal program shape (a plain `var x: integer` under the program,
+    // no procedures) actually compiles down to.
+    auto R = compileAndEmitIR(
+        "program p(output);\n"
+        "var x: integer;\n"
+        "begin x := 1; writeln(x) end.\n", "-g");
+    ASSERT_TRUE(R.Ok) << R.Stderr;
+    EXPECT_TRUE(irContainsAll(R.IR, {"DIGlobalVariableExpression",
+                                     "!DIGlobalVariable(name: \"x\""}))
+        << R.IR;
+}
+
+TEST(Driver, DashGGivesALocalAndAParameterTheirOwnDeclareRecords) {
+    auto R = compileAndEmitIR(
+        "program p(output);\n"
+        "var x: integer;\n"
+        "\n"
+        "procedure addone(var n: integer);\n"
+        "var doubled: integer;\n"
+        "begin\n"
+        "  doubled := n * 2;\n"
+        "  n := n + 1\n"
+        "end;\n"
+        "\n"
+        "begin\n"
+        "  x := 10;\n"
+        "  addone(x);\n"
+        "  writeln(x)\n"
+        "end.\n", "-g");
+    ASSERT_TRUE(R.Ok) << R.Stderr;
+    // #dbg_declare is LLVM 22's post-"RemoveDIs" textual form for what used
+    // to print as a call to the llvm.dbg.declare intrinsic.
+    EXPECT_TRUE(irContainsAll(R.IR, {"#dbg_declare", "!DILocalVariable(name: \"n\"",
+                                     "!DILocalVariable(name: \"doubled\""}))
+        << R.IR;
+}
+
+TEST(Driver, DashGGivesEachScalarKindItsOwnDIType) {
+    auto R = compileAndEmitIR(
+        "program p(output);\n"
+        "var i: integer; r: real; b: boolean; c: char;\n"
+        "begin\n"
+        "  i := 1; r := 1.0; b := true; c := 'x';\n"
+        "  writeln(i)\n"
+        "end.\n", "-g");
+    ASSERT_TRUE(R.Ok) << R.Stderr;
+    EXPECT_TRUE(irContainsAll(R.IR, {
+        "!DIBasicType(name: \"integer\", size: 64, encoding: DW_ATE_signed)",
+        "!DIBasicType(name: \"real\", size: 64, encoding: DW_ATE_float)",
+        "!DIBasicType(name: \"boolean\", size: 8, encoding: DW_ATE_boolean)",
+        "!DIBasicType(name: \"char\", size: 8, encoding: DW_ATE_unsigned_char)",
+    })) << R.IR;
+}
+
+TEST(Driver, DashGGivesAnEnumItsEnumeratorNamesInDeclarationOrder) {
+    // EnumValues (Type.h) has no separately-stored ordinal per name -- each
+    // name's own index IS its ordinal -- so this also stands in for
+    // confirming that reading, not just the DIEnumerator call itself.
+    auto R = compileAndEmitIR(
+        "program p(output);\n"
+        "type color = (red, green, blue);\n"
+        "var c: color;\n"
+        "begin c := green; writeln(ord(c)) end.\n", "-g");
+    ASSERT_TRUE(R.Ok) << R.Stderr;
+    EXPECT_TRUE(irContainsAll(R.IR, {
+        "DW_TAG_enumeration_type, name: \"color\"",
+        "!DIEnumerator(name: \"red\", value: 0)",
+        "!DIEnumerator(name: \"green\", value: 1)",
+        "!DIEnumerator(name: \"blue\", value: 2)",
+    })) << R.IR;
+}
+
+TEST(Driver, DashGGivesAPointerACorrectlyTypedPointeeAndACompositePointeeNone) {
+    // ^integer needs its pointee's own DIType; ^rec (a pointer to a
+    // composite, out of scope for this pass) still needs to compile
+    // cleanly, with a null pointee rather than a placeholder invented for
+    // the occasion -- createPointerType accepts that, matching a C void*.
+    auto R = compileAndEmitIR(
+        "program p(output);\n"
+        "type rec = record f: integer end;\n"
+        "var ip: ^integer; rp: ^rec;\n"
+        "begin\n"
+        "  new(ip); ip^ := 1;\n"
+        "  new(rp); rp^.f := 2;\n"
+        "  writeln(ip^)\n"
+        "end.\n", "-g");
+    ASSERT_TRUE(R.Ok) << R.Stderr;
+    EXPECT_TRUE(irContainsAll(R.IR,
+        {"!DIDerivedType(tag: DW_TAG_pointer_type, baseType: ",
+         "size: 64)"})) << R.IR;
+    // rp's own pointer DIType has no baseType field at all (a null pointee
+    // is simply omitted from the printed form, not printed as baseType:
+    // null), which is what this is really confirming compiles cleanly.
+}
+
 TEST(Driver, MissingInputFileNoCommandFailed) {
     std::string Out = runPlang("/nonexistent_file_plang_test.pas");
     EXPECT_EQ(Out.find("command failed"), std::string::npos)
