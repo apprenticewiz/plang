@@ -12,6 +12,19 @@ static_assert(NumStmtKinds == 12, "a new statement needs a case in emitStmt");
 void Codegen::Impl::emitStmt(const StmtNode* stmt) {
     if (!stmt || isTerminated()) return;
 
+    // -g: one hook for every statement kind, not one per kind -- IRBuilder's
+    // own Insert() attaches whatever SetCurrentDebugLocation last set to
+    // every instruction it creates from here on, automatically, so this is
+    // the only place a location needs to be set at all.  A statement with
+    // no real source position (synthesized, not written by the program)
+    // leaves the previous location in force rather than attaching line 0.
+    if (DBuilder && currentDebugScope && srcMgr_) {
+        const PresumedLoc PL = srcMgr_->getPresumedLoc(stmt->Loc);
+        if (PL.isValid())
+            builder.SetCurrentDebugLocation(llvm::DILocation::get(
+                ctx, PL.Line, PL.Column, currentDebugScope));
+    }
+
     // The two statement kinds that evaluate an arbitrary expression and then
     // finish are the two that can leave a run-time-sized string temporary
     // behind, and giving the stack back here is what keeps one inside a loop

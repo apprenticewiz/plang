@@ -278,6 +278,12 @@ struct Codegen::Impl {
     llvm::AllocaInst*   curRetAlloca{nullptr}; // alloca for function result
     llvm::Type*         curRetType{nullptr};    // return type (null for procedures)
     std::string         curFuncName;            // for result-variable detection
+    /// -g: the DISubprogram whatever is currently being emitted belongs to,
+    /// null when Debug is unset.  Saved/restored around emitFunctionDef,
+    /// emitMain, emitModuleInitFn and emitModuleLifecycleFn exactly the way
+    /// curFunc is; emitStmt's dispatch point reads it to build each
+    /// statement's DILocation.
+    llvm::DISubprogram* currentDebugScope{nullptr};
     std::string         namePrefix{PlangProcPrefix};   // mangling prefix
     std::string         globalPrefix{PlangGlobalPrefix}; // ditto, for globals
 
@@ -1583,6 +1589,19 @@ struct Codegen::Impl {
     // Procedures and functions
     // ====================================================================
     void emitAllProcedures(const BlockNode& block);
+    /// -g: builds a DISubprogram for \p Fn and attaches it, shared by
+    /// emitFunctionDef/emitMain/emitModuleInitFn/emitModuleLifecycleFn.
+    /// \p Scope is DebugFile for a top-level function and the enclosing
+    /// procedure's own DISubprogram for a nested one, giving a debugger's
+    /// backtrace real lexical nesting.
+    /// The subroutine type is a placeholder with no parameter/return types
+    /// (Phase 4 adds those) -- breakpoints, stepping and a named backtrace
+    /// frame need nothing from it. Returns null, doing nothing else, when
+    /// Debug is unset.
+    llvm::DISubprogram* buildDebugSubprogram(llvm::Function* Fn,
+                                             llvm::DIScope* Scope,
+                                             const std::string& Name,
+                                             unsigned Line);
     /// With declareOnly, stops once the signature and the parameter metadata
     /// are in place — what a 'forward' declaration contributes.
     void emitFunctionDef(const ProcDecl& proc, bool declareOnly = false);

@@ -287,6 +287,32 @@ inline bool irContainsNone(const std::string& IR,
     return true;
 }
 
+/// The source line the first `!dbg !N` after `Needle`, on the same line,
+/// resolves to -- i.e. what a debugger would show for the instruction
+/// `Needle` names.  -1 if `Needle` is not found, has no !dbg attachment on
+/// its own line, or !N has no matching `!N = !DILocation(line: ...)`, so a
+/// test asserting on the result fails loudly on a parse miss rather than
+/// silently passing.
+inline int irDbgLineOf(const std::string& IR, const std::string& Needle) {
+    const auto Pos = IR.find(Needle);
+    if (Pos == std::string::npos) return -1;
+    const auto LineEnd = IR.find('\n', Pos);
+    auto DbgPos = IR.find("!dbg !", Pos);
+    if (DbgPos == std::string::npos || DbgPos > LineEnd) return -1;
+    DbgPos += std::string("!dbg !").size();
+    const auto IdEnd = IR.find_first_not_of("0123456789", DbgPos);
+    if (IdEnd == DbgPos) return -1;
+    const std::string MdId = "!" + IR.substr(DbgPos, IdEnd - DbgPos);
+
+    const std::string Marker = "\n" + MdId + " = !DILocation(line: ";
+    const auto DefPos = IR.find(Marker);
+    if (DefPos == std::string::npos) return -1;
+    const auto LineStart = DefPos + Marker.size();
+    const auto LineNumEnd = IR.find_first_not_of("0123456789", LineStart);
+    if (LineNumEnd == LineStart) return -1;
+    return std::atoi(IR.substr(LineStart, LineNumEnd - LineStart).c_str());
+}
+
 /// Compile Pascal source through the full pipeline and run the resulting
 /// binary.  Returns what the program printed, on both streams, and its exit
 /// status — the ISO runtime checks report on stderr and a test that ignored

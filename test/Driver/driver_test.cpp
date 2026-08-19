@@ -152,6 +152,116 @@ TEST(Driver, WithoutDashGNoDebugMetadataAppears) {
         << R.IR;
 }
 
+TEST(Driver, DashGCompilesMultipleTopLevelProceduresWithoutAVerifierFailure) {
+    // builder's current debug location is not function-scoped state; it
+    // survives across whichever function was emitted right before this one.
+    // Compiling addone() then main() under -g used to attach main's own
+    // prologue instructions (emitFileParamBinds's plang_bind_std call, run
+    // before main's own first statement) to addone's DISubprogram, which
+    // the verifier rejects outright: "!dbg attachment points at wrong
+    // subprogram for function".  Every -g compile of more than one
+    // procedure failed to compile at all.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "var x, y: integer;\n"
+        "\n"
+        "procedure addone(var n: integer);\n"
+        "begin\n"
+        "  n := n + 1\n"
+        "end;\n"
+        "\n"
+        "begin\n"
+        "  x := 10;\n"
+        "  addone(x);\n"
+        "  y := x * 2;\n"
+        "  writeln(y)\n"
+        "end.\n", "-g");
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "22\n");
+    EXPECT_EQ(R.Stderr.find("verification failed"), std::string::npos)
+        << R.Stderr;
+}
+
+TEST(Driver, DashGGivesANestedProcedureCallItsOwnCallSiteLine) {
+    // createEntryAlloca hoists an alloca to the entry block via
+    // saveIP/SetInsertPoint/restoreIP; SetInsertPoint at an *existing*
+    // instruction (entry.begin(), since the prologue's own allocas are
+    // already there) also adopts that instruction's !dbg, and plain
+    // restoreIP does not restore the debug location back afterward.
+    // outer's static-link frame for its call to inner is built this way,
+    // so the call inherited outer's own prologue line (4) instead of its
+    // real call site (14, where 'inner;' is written) -- confirmed with a
+    // real gdb backtrace showing "pas_outer () at ...:4" before the fix,
+    // ":14" after.
+    auto R = compileAndEmitIR(
+        "program p(output);\n"
+        "var x: integer;\n"
+        "\n"
+        "procedure outer;\n"
+        "  var y: integer;\n"
+        "\n"
+        "  procedure inner;\n"
+        "  begin\n"
+        "    y := y + 1\n"
+        "  end;\n"
+        "\n"
+        "begin\n"
+        "  y := 5;\n"
+        "  inner;\n"
+        "  writeln(y)\n"
+        "end;\n"
+        "\n"
+        "begin\n"
+        "  x := 1;\n"
+        "  outer;\n"
+        "  writeln(x)\n"
+        "end.\n", "-g");
+    ASSERT_TRUE(R.Ok) << R.Stderr;
+    EXPECT_EQ(irDbgLineOf(R.IR, "call void @\"pas_outer$inner\""), 14) << R.IR;
+}
+
+TEST(Driver, DashGGivesAProceduralParameterThunkNoStrayDebugLocation) {
+    // procParamThunk builds a whole separate function (the trampoline EP
+    // §6.6.3.1 needs when a procedure is passed as a procedural parameter)
+    // via SetInsertPoint(BasicBlock*), which does not touch the debug
+    // location at all -- so the thunk's own instructions inherited
+    // whatever the *caller's* current location happened to be, silently
+    // scoped to the caller's DISubprogram rather than the thunk's own
+    // (which does not exist: the thunk has no Pascal-level source
+    // identity, so it gets none, correctly, once cleared). The verifier
+    // does not catch this specific case -- a function with no DISubprogram
+    // at all is not checked against the scope its instructions claim --
+    // so this was a silent correctness gap, not a compile failure.
+    auto R = compileAndEmitIR(
+        "program p(output);\n"
+        "var g: integer;\n"
+        "\n"
+        "procedure hello;\n"
+        "begin\n"
+        "  g := g + 1\n"
+        "end;\n"
+        "\n"
+        "procedure invoke(procedure act);\n"
+        "begin\n"
+        "  act\n"
+        "end;\n"
+        "\n"
+        "begin\n"
+        "  g := 0;\n"
+        "  invoke(hello);\n"
+        "  writeln(g)\n"
+        "end.\n", "-g");
+    ASSERT_TRUE(R.Ok) << R.Stderr;
+    // @pas_hello.asparam also appears at its call site (a function-pointer
+    // argument), so this has to anchor on the definition specifically, not
+    // the first occurrence of the bare name.
+    const auto ThunkStart = R.IR.find("define internal void @pas_hello.asparam");
+    ASSERT_NE(ThunkStart, std::string::npos) << R.IR;
+    const auto ThunkEnd = R.IR.find("}", ThunkStart);
+    EXPECT_EQ(R.IR.find("!dbg", ThunkStart), std::string::npos)
+        << R.IR.substr(ThunkStart, ThunkEnd - ThunkStart);
+}
+
 TEST(Driver, MissingInputFileNoCommandFailed) {
     std::string Out = runPlang("/nonexistent_file_plang_test.pas");
     EXPECT_EQ(Out.find("command failed"), std::string::npos)

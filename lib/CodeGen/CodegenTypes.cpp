@@ -951,12 +951,17 @@ llvm::Type* Codegen::Impl::llvmTypeOfSemaTypeImpl(const Type& T) {
 // ====================================================================
 
 llvm::AllocaInst* Codegen::Impl::createEntryAlloca(llvm::Type* ty, const std::string& name) {
-    auto ip = builder.saveIP();
+    // InsertPointGuard, not a bare saveIP/restoreIP pair: SetInsertPoint at
+    // an existing instruction (entry.begin(), here, since the entry block
+    // already has the prologue's allocas in it) also inherits THAT
+    // instruction's !dbg, and plain restoreIP does not restore it back --
+    // silently mis-scoping every instruction emitted afterward, in the
+    // *caller's* block, until the next statement boundary corrects it.  A
+    // hoisted alloca has no source line of its own worth keeping regardless.
+    llvm::IRBuilderBase::InsertPointGuard guard(builder);
     auto& entry = curFunc->getEntryBlock();
     builder.SetInsertPoint(&entry, entry.begin());
-    auto* alloca = builder.CreateAlloca(ty, nullptr, name);
-    builder.restoreIP(ip);
-    return alloca;
+    return builder.CreateAlloca(ty, nullptr, name);
 }
 
 llvm::Value* Codegen::Impl::createDynStrAlloca(llvm::Value* capV,

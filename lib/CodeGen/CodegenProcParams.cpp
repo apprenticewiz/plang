@@ -233,8 +233,16 @@ llvm::Function* Codegen::Impl::procParamThunk(llvm::Function* target,
     auto* thunk = llvm::Function::Create(fnTy, llvm::Function::InternalLinkage,
                                          target->getName() + ".asparam", mod.get());
 
-    auto savedIP = builder.saveIP();
+    // InsertPointGuard, not a bare saveIP/restoreIP pair: this builds a
+    // whole separate function with no Pascal-level source identity of its
+    // own, so its instructions get no debug location at all (valid --
+    // AddMetadataToInst attaches nothing for an empty DebugLoc) rather
+    // than incorrectly inheriting whatever the caller's own current
+    // location happened to be, and a plain restoreIP would not restore
+    // the caller's location afterward either.
+    llvm::IRBuilderBase::InsertPointGuard guard(builder);
     builder.SetInsertPoint(llvm::BasicBlock::Create(ctx, "entry", thunk));
+    builder.SetCurrentDebugLocation(llvm::DebugLoc());
 
     std::vector<llvm::Value*> args;
     auto arg = thunk->arg_begin();
@@ -250,7 +258,6 @@ llvm::Function* Codegen::Impl::procParamThunk(llvm::Function* target,
     if (fnTy->getReturnType()->isVoidTy()) builder.CreateRetVoid();
     else                                   builder.CreateRet(call);
 
-    builder.restoreIP(savedIP);
     procParamThunks_[{target, fnTy}] = thunk;
     return thunk;
 }
