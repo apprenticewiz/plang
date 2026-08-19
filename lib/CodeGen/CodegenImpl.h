@@ -442,8 +442,7 @@ struct Codegen::Impl {
     // the body's bound expressions can be re-emitted with run-time
     // discriminants.  Key: lowercase schema name.
     struct SchemaDef {
-        std::vector<std::string> discNames;
-        const TypeNode*          body{nullptr};
+        const TypeNode* body{nullptr};
     };
     std::map<std::string, SchemaDef> schemaDefs_;
 

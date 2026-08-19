@@ -1564,11 +1564,19 @@ llvm::StructType* Codegen::Impl::resolveRecordStructType(const FieldExpr& e) {
                     return llvm::dyn_cast<llvm::StructType>(llvmTypeOfNode(*ptn->Base));
                 // Via alias: type PtrRec = ^Rec;  var p: PtrRec
                 if (auto* ntn = llvm::dyn_cast_or_null<NamedTypeNode>(ve->typeNode)) {
-                    auto it = typeAliases.find(toLower(ntn->Name));
-                    if (it != typeAliases.end())
-                        if (auto* ptn2 = llvm::dyn_cast<PointerTypeNode>(it->second))
-                            return llvm::dyn_cast<llvm::StructType>(
-                                llvmTypeOfNode(*ptn2->Base));
+                    // Denotes first, same as llvmTypeOfNode's own NamedTypeNode
+                    // case: it is what Sema resolved this name to where it was
+                    // WRITTEN, not a flat table rebuilt per procedure that can
+                    // only agree by coincidence.  typeAliases is a fallback for
+                    // the node it cannot reach, not the first answer to ask.
+                    const TypeNode* target = ntn->Denotes;
+                    if (!target) {
+                        auto it = typeAliases.find(toLower(ntn->Name));
+                        if (it != typeAliases.end()) target = it->second;
+                    }
+                    if (auto* ptn2 = llvm::dyn_cast_or_null<PointerTypeNode>(target))
+                        return llvm::dyn_cast<llvm::StructType>(
+                            llvmTypeOfNode(*ptn2->Base));
                 }
             }
         }
@@ -1812,14 +1820,24 @@ llvm::Value* Codegen::Impl::coerceToType(llvm::Value* v, llvm::Type* dst) {
 // ====================================================================
 
 // EP §6.4.1: the denoter a value is a value of, with any names it is written
-// through followed to the declaration that gives its shape.
+// through followed to the declaration that gives its shape.  Denotes first,
+// same reasoning as llvmTypeOfNode's own NamedTypeNode case and
+// initialStateShapeOf's identical hop loop: it is what Sema resolved this
+// name to where it was WRITTEN, not a flat table rebuilt per procedure.
+// typeAliases is a fallback for the node it cannot reach, not the first
+// answer to ask.
 const TypeNode* Codegen::Impl::denoterOf(const TypeNode* tn) const {
     for (int hops = 0; tn && hops < 32; ++hops) {
         auto* named = llvm::dyn_cast<NamedTypeNode>(tn);
         if (!named) return tn;
-        auto it = typeAliases.find(toLower(named->Name));
-        if (it == typeAliases.end() || it->second == tn) return tn;
-        tn = it->second;
+        const TypeNode* next = named->Denotes;
+        if (!next) {
+            auto it = typeAliases.find(toLower(named->Name));
+            if (it == typeAliases.end()) return tn;
+            next = it->second;
+        }
+        if (next == tn) return tn;
+        tn = next;
     }
     return tn;
 }

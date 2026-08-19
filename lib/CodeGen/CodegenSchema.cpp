@@ -27,9 +27,6 @@ void Codegen::Impl::registerSchemaDefs(const BlockNode& block) {
     for (const auto& td : block.Types) {
         if (td.SchemaParams.empty() || !td.Type) continue;
         SchemaDef def;
-        for (const auto& grp : td.SchemaParams)
-            for (const auto& nm : grp.Names)
-                def.discNames.push_back(nm);
         def.body = td.Type.get();
         schemaDefs_[toLower(td.Name)] = std::move(def);
     }
@@ -190,9 +187,11 @@ void Codegen::Impl::emitSchemaDiscMatch(const SchemaRef& dst,
 // Extents
 // ---------------------------------------------------------------------------
 
-/// The body denoter of a schema, from the type itself rather than from its
-/// name.  The name-keyed map remains only for the discriminant NAMES, which a
-/// declaration carries and a synthetic schema does not.
+/// The body denoter of a schema, from the type itself where it carries one.
+/// The name-keyed map is the fallback for a synthetic schema type that does
+/// not -- a formal parameter's, whose discriminants are only known at run
+/// time (see the file's own opening comment) -- found by the one thing such
+/// a type still has: the name it was declared under.
 const TypeNode* Codegen::Impl::schemaBodyNodeOf(const plang::Type& T) const {
     if (T.SchemaBodyNode) return T.SchemaBodyNode;
     const SchemaDef* def = findSchemaDef(T.SchemaName);
