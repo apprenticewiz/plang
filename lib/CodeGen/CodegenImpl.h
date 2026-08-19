@@ -5,6 +5,7 @@
 #include "plang/Basic/LangOptions.h"
 #include "plang/Basic/PascalFileLayout.h"
 #include "plang/Basic/RequiredRecordLayouts.h"
+#include "plang/Basic/SourceManager.h"
 #include "plang/CodeGen/Codegen.h"
 #include "plang/Sema/Sema.h"
 #include "plang/Sema/Type.h"
@@ -308,6 +309,16 @@ struct Codegen::Impl {
     const ImportOwnerTable* importOwners_{nullptr};
     /// EP §6.11: interfaces read from .pmi files; see Codegen::setLoadedInterfaces.
     std::vector<const ModuleNode*> loadedInterfaces_;
+    /// -g: set by Codegen::setSourceManager, consulted only when
+    /// langOpts.Debug is set.  An ordinary Impl member and never a
+    /// function-local or namespace-scope static -- 0.2.1 shipped a fix for
+    /// exactly that mistake elsewhere (a static outliving the LLVMContext
+    /// that owned it, segfaulting the second Codegen a process constructs,
+    /// which the test suite does routinely, once per test case).  Every
+    /// debug-info object added from here on (DIBuilder, DIType caches, the
+    /// current debug scope) follows the same rule.
+    const SourceManager* srcMgr_{nullptr};
+    FileID               mainFileID_;
     /// The heading of the module being emitted, whose declarations are its
     /// block's; null while emitting anything else.
     const BlockNode* moduleIfaceBlock_{nullptr};

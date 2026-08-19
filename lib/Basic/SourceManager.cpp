@@ -4,11 +4,27 @@
 
 #include <algorithm>
 #include <fstream>
+#include <limits>
 #include <sstream>
 
 using namespace plang;
 
-FileID SourceManager::addBuffer(std::string Name, std::string Text) {
+bool SourceManager::wouldOverflow(size_t TextSize) const {
+    // +1: one past the end of the text is a valid position (see addBuffer).
+    // Computed in 64 bits so the check itself cannot be the thing that
+    // overflows -- NextBase is already this space's high-water mark, and
+    // TextSize alone can exceed UINT32_MAX for a pathological input.
+    const uint64_t Needed = static_cast<uint64_t>(NextBase)
+                          + static_cast<uint64_t>(TextSize) + 1;
+    return Needed > std::numeric_limits<unsigned>::max();
+}
+
+std::optional<FileID> SourceManager::addBuffer(std::string Name, std::string Text) {
+    // A buffer big enough to wrap NextBase would silently alias two
+    // different positions -- every SourceLocation past the wrap would
+    // resolve into whatever buffer next claimed that coordinate range.
+    if (wouldOverflow(Text.size())) return std::nullopt;
+
     Buffer B;
     B.Name = std::move(Name);
     B.Text = std::move(Text);

@@ -51,6 +51,9 @@ struct LangOptions {
     /// -O0..-O3.  Selects the LLVM optimization pipeline run over the module
     /// before it is written out; 0 runs none.
     unsigned OptLevel     = 0;
+    /// -g.  Whether codegen attaches DWARF debug info (DISubprogram,
+    /// DILocation, DILocalVariable) to the module it emits.
+    bool     Debug        = false;
 
     // ---- Positional switch state ------------------------------------------
 

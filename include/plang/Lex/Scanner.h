@@ -41,6 +41,12 @@ public:
     /// subsequent call.
     Token next();
 
+    /// The buffer this scanner is reading, for a caller that needs it after
+    /// construction but before the scanner itself is moved from (-g's
+    /// Codegen::setSourceManager, which needs the main file's FileID).
+    /// Invalid if construction failed to open a buffer at all.
+    [[nodiscard]] FileID fileID() const { return FID; }
+
 private:
     LangOptions          Opts;   // dialect and warning options (owned copy)
     const SourceManager* SM;     // owns the text; not owned here

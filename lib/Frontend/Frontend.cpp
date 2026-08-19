@@ -778,8 +778,6 @@ int frontendPC1Main(int Argc, char *Argv[]) {
         }
     }
 
-    (void)Debug;
-
     if (InputFile.empty()) {
         usagePC1();
         return 1;
@@ -794,6 +792,7 @@ int frontendPC1Main(int Argc, char *Argv[]) {
     Opts.RangeChecks       = RangeChecks;
     Opts.NilChecks         = NilChecks;
     Opts.OptLevel          = OptLevel;
+    Opts.Debug             = Debug;
     Opts.ModuleSearchPaths = std::move(ModuleSearchPaths);
 
     DiagnosticOptions DiagOpts;
@@ -812,6 +811,9 @@ int frontendPC1Main(int Argc, char *Argv[]) {
 
     Scanner Sc(SrcMgr, InputFile, Diags, Opts);
     if (!Diags.empty()) { emitAll(); return 1; }
+    // Captured before the move below takes Sc apart; -g's DIFile/DICompileUnit
+    // need it and have no other way to ask which buffer was the main one.
+    const FileID MainFileID = Sc.fileID();
 
     Parser P(std::move(Sc), Diags, Opts);
     auto Program = P.parse();
@@ -849,6 +851,7 @@ int frontendPC1Main(int Argc, char *Argv[]) {
     Codegen Cg(Opts);
     Cg.setImportOwners(Sem.importOwners());
     Cg.setLoadedInterfaces(Sem.loadedInterfaces());
+    if (Opts.Debug) Cg.setSourceManager(SrcMgr, MainFileID);
     if (OutputFile.empty())
         return Cg.emit(*Program, std::cout) ? 0 : 1;
 

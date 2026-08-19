@@ -50,15 +50,29 @@ Scanner::Scanner(SourceManager& SM, std::string Filename,
         return;
     }
     // No buffer, so no location to report it at; Text stays empty and next()
-    // returns Eof at once.
-    emitError({}, diag::err_file_not_found, {Filename});
+    // returns Eof at once.  addFile fails both when the file cannot be
+    // opened and when SourceManager's coordinate space has no room left for
+    // it (see wouldOverflow); a redundant, harmless re-open here (only ever
+    // reached on this already-rare path) is what tells the two apart, since
+    // addFile itself has no diagnostics engine to report through.
+    if (std::ifstream(Filename))
+        emitError({}, diag::err_source_too_large, {Filename});
+    else
+        emitError({}, diag::err_file_not_found, {Filename});
 }
 
 Scanner::Scanner(SourceManager& SM, std::string SourceName, std::string Content,
                  DiagnosticsEngine& Diags, LangOptions Opts)
     : Opts(Opts), SM(&SM), Diags(Diags), Pos(0) {
-    FID  = SM.addBuffer(std::move(SourceName), std::move(Content));
-    Text = SM.getBufferData(FID);
+    // SourceName is not moved from here (unlike Content): the failure path
+    // below still needs it, and a moved-from string is only left empty by
+    // convention, not by guarantee.
+    if (auto ID = SM.addBuffer(SourceName, std::move(Content))) {
+        FID  = *ID;
+        Text = SM.getBufferData(FID);
+        return;
+    }
+    emitError({}, diag::err_source_too_large, {SourceName});
 }
 
 Token Scanner::next() {

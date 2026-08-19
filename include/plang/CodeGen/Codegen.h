@@ -3,6 +3,7 @@
 #include "plang/AST/Ast.h"
 #include "plang/Basic/LangOptions.h"
 #include "plang/Basic/ModuleImports.h"
+#include "plang/Basic/SourceManager.h"
 
 #include <memory>
 #include <ostream>
@@ -33,6 +34,12 @@ public:
     /// they declare has to be laid out here as if this unit had declared it.
     /// They must outlive emit.
     void setLoadedInterfaces(std::vector<const ModuleNode*> Ifaces);
+
+    /// -g: the SourceManager that resolves every node's SourceLocation to a
+    /// filename/line/column, and the FileID of the main input file, from
+    /// which DIFile/DICompileUnit take their name and directory.  Only
+    /// consulted when LangOptions::Debug is set; must outlive emit.
+    void setSourceManager(const SourceManager& SM, FileID MainFile);
 
 private:
     struct Impl;

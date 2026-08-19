@@ -6,5 +6,9 @@ target_compile_definitions(catalog_test PRIVATE
     PLANG_CATALOG_DIR="${CMAKE_BINARY_DIR}/share/plang/locale")
 add_dependencies(catalog_test plang_catalogs)
 
+add_executable(source_manager_test source_manager_test.cpp)
+target_link_libraries(source_manager_test PRIVATE plang_frontend GTest::GTest GTest::Main)
+
 include(GoogleTest)
 gtest_discover_tests(catalog_test)
+gtest_discover_tests(source_manager_test)

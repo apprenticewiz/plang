@@ -23,14 +23,22 @@ namespace plang {
 /// each file rather than one copy of the filename per token.
 class SourceManager {
 public:
-    /// Take a buffer of text under the given name and return its FileID.
-    /// \p Name is what diagnostics call it; it need not be a path.
-    FileID addBuffer(std::string Name, std::string Text);
+    /// Take a buffer of text under the given name and return its FileID, or
+    /// nullopt if there is no room left in the coordinate space (see
+    /// wouldOverflow).  Reporting that is the caller's business, since the
+    /// manager has no diagnostics engine.
+    std::optional<FileID> addBuffer(std::string Name, std::string Text);
 
     /// Read a file and take its contents as a buffer, or return nullopt if it
-    /// cannot be opened.  Reporting that is the caller's business, since the
-    /// manager has no diagnostics engine.
+    /// cannot be opened, or for the same reason addBuffer can fail.
     std::optional<FileID> addFile(const std::string& Path);
+
+    /// Whether a buffer of \p TextSize bytes would run the coordinate space
+    /// past what a 32-bit SourceLocation can address.  Exposed so a caller
+    /// that can tell "not found" from "too large" apart some other way --
+    /// Scanner's file-path constructor, which knows addFile only reaches
+    /// this once the file has already opened -- can report the right one.
+    [[nodiscard]] bool wouldOverflow(size_t TextSize) const;
 
     /// The location of byte \p Offset within \p FID.  An offset at or past the
     /// end of the buffer is clamped to the end, which is where an

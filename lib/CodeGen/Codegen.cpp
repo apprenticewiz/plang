@@ -214,6 +214,11 @@ void Codegen::setLoadedInterfaces(std::vector<const ModuleNode*> Ifaces) {
     PImpl->loadedInterfaces_ = std::move(Ifaces);
 }
 
+void Codegen::setSourceManager(const SourceManager& SM, FileID MainFile) {
+    PImpl->srcMgr_     = &SM;
+    PImpl->mainFileID_ = MainFile;
+}
+
 bool Codegen::emit(const ProgramNode& prog, std::ostream& os) {
     PImpl->init(prog.Name);
     PImpl->labelBlocks.clear();

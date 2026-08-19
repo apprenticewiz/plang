@@ -2,6 +2,7 @@
 // Included by DiagnosticMessages.def.
 
 DIAG(err_file_not_found, Error, "no such file or directory: '%0'")
+DIAG(err_source_too_large, Error, "source file '%0' is too large to compile")
 DIAG(err_comment_delim_mismatch, Error, "comment delimiter mismatch: %0")
 DIAG(err_unterminated_comment, Error, "unterminated comment")
 DIAG(err_nondecimal_base_range, Error, "nondecimal literal base must be 2–36")
