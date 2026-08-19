@@ -24,9 +24,11 @@
 #include <unordered_map>
 #include <vector>
 
+#include "llvm/BinaryFormat/Dwarf.h"
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DerivedTypes.h"
+#include "llvm/IR/DIBuilder.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/GlobalVariable.h"
 #include "llvm/IR/IRBuilder.h"
@@ -122,6 +124,12 @@ struct Codegen::Impl {
     llvm::LLVMContext            ctx;
     std::unique_ptr<llvm::Module> mod;
     llvm::IRBuilder<>            builder{ctx};
+
+    // ---- -g debug info (built in init() when langOpts.Debug; see Phase 1's
+    // note by srcMgr_ on why these are ordinary members and never statics) ----
+    std::unique_ptr<llvm::DIBuilder> DBuilder;
+    llvm::DICompileUnit*             DebugCU{nullptr};
+    llvm::DIFile*                    DebugFile{nullptr};
 
     // ---- common type aliases (set in init()) ----
     llvm::IntegerType* i1Ty{nullptr};

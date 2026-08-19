@@ -114,24 +114,42 @@ TEST(Driver, MissingInputFileOneError) {
         << "expected exactly one error, got:\n" << Out;
 }
 
-TEST(Driver, DashGCompilesAndSaysItProducesNoDebugInfo) {
-    // -g was forwarded to llc, which has no such option, so EVERY -g compile
-    // failed with "llc: Unknown command line argument '-g'".  Debug info
-    // travels in the IR's metadata rather than as a code-generator flag.
-    //
-    // plang has no DIBuilder, so it cannot produce any.  Accepting -g silently
-    // would be worse than the failure: a debugger would open the program, show
-    // nothing, and the compiler would have said the option was fine.  So it
-    // compiles, and says what it did not do.
+TEST(Driver, DashGStillCompilesAndRunsCorrectly) {
+    // -g used to be forwarded to llc, which has no such option, so EVERY -g
+    // compile failed with "llc: Unknown command line argument '-g'" -- fixed
+    // by not forwarding it (debug info travels in the IR's own metadata, not
+    // as a code-generator flag; see DashGProducesDebugMetadataInTheIR for
+    // confirmation llc picks it up from there without any flag of its own).
     auto R = compileAndRun(
         "program p(output);\n"
         "begin writeln('hi') end.\n", "-g");
     EXPECT_EQ(R.ExitCode, 0) << R.Stderr;
     EXPECT_EQ(R.Stdout, "hi\n");
-    EXPECT_NE(R.Stderr.find("does not emit debug information"),
-              std::string::npos) << R.Stderr;
     EXPECT_EQ(R.Stderr.find("Unknown command line argument"),
               std::string::npos) << R.Stderr;
+    // The old "-g accepted but produces nothing" warning is retired now that
+    // -g actually does something; nothing should still be saying it.
+    EXPECT_EQ(R.Stderr.find("does not emit debug information"),
+              std::string::npos) << R.Stderr;
+}
+
+TEST(Driver, DashGProducesDebugMetadataInTheIR) {
+    auto R = compileAndEmitIR(
+        "program p(output);\n"
+        "begin writeln('hi') end.\n", "-g");
+    ASSERT_TRUE(R.Ok) << R.Stderr;
+    EXPECT_TRUE(irContainsAll(R.IR, {"!llvm.dbg.cu", "DICompileUnit",
+                                     "DIFile", "Debug Info Version"}))
+        << R.IR;
+}
+
+TEST(Driver, WithoutDashGNoDebugMetadataAppears) {
+    auto R = compileAndEmitIR(
+        "program p(output);\n"
+        "begin writeln('hi') end.\n");
+    ASSERT_TRUE(R.Ok) << R.Stderr;
+    EXPECT_TRUE(irContainsNone(R.IR, {"!llvm.dbg.cu", "DICompileUnit"}))
+        << R.IR;
 }
 
 TEST(Driver, MissingInputFileNoCommandFailed) {

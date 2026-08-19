@@ -4,6 +4,10 @@
 #include "llvm/Support/TargetSelect.h"
 #include "llvm/Target/TargetMachine.h"
 
+#include "plang/Basic/Version.h"
+
+#include <filesystem>
+
 using namespace plang;
 
 // See NumTypeKinds in AstBase.h.
@@ -35,6 +39,22 @@ std::optional<llvm::DataLayout> layoutFor(const llvm::Triple& triple) {
     if (!tm) return std::nullopt;
     return tm->createDataLayout();
 }
+
+/// Splits a source buffer's name into the (filename, directory) pair
+/// DIFile wants, resolving a relative name against the working directory
+/// so a debugger started somewhere else can still find the file.  Only
+/// path-string manipulation and the (error_code-checked, non-throwing)
+/// current directory lookup -- PlangCodeGen is built -fno-exceptions, and
+/// std::filesystem's throwing overloads are not safe to call from it.
+std::pair<std::string, std::string> splitDebugFilePath(std::string_view Name) {
+    std::filesystem::path P(Name);
+    if (P.is_relative()) {
+        std::error_code ec;
+        auto cwd = std::filesystem::current_path(ec);
+        if (!ec) P = cwd / P;
+    }
+    return {P.filename().string(), P.parent_path().string()};
+}
 } // namespace
 
 // ====================================================================
@@ -46,6 +66,24 @@ void Codegen::Impl::init(const std::string& progName) {
     llvm::Triple triple(llvm::sys::getDefaultTargetTriple());
     mod->setTargetTriple(triple);
     if (auto dl = layoutFor(triple)) mod->setDataLayout(*dl);
+
+    if (langOpts.Debug) {
+        DBuilder = std::make_unique<llvm::DIBuilder>(*mod);
+        std::string Filename = progName, Directory;
+        if (srcMgr_)
+            std::tie(Filename, Directory) =
+                splitDebugFilePath(srcMgr_->getBufferName(mainFileID_));
+        DebugFile = DBuilder->createFile(Filename, Directory);
+        DebugCU = DBuilder->createCompileUnit(
+            llvm::DISourceLanguageName(llvm::dwarf::DW_LANG_Pascal83),
+            DebugFile, "plang " PLANG_VERSION_STRING,
+            /*isOptimized=*/langOpts.OptLevel > 0, /*Flags=*/"", /*RV=*/0);
+        // DWARF cannot be read back without a producer that states which
+        // version of the metadata schema it wrote; DIBuilder's own nodes
+        // say nothing about this on their own.
+        mod->addModuleFlag(llvm::Module::Warning, "Debug Info Version",
+                           llvm::DEBUG_METADATA_VERSION);
+    }
 
     i1Ty  = llvm::Type::getInt1Ty(ctx);
     i8Ty  = llvm::Type::getInt8Ty(ctx);

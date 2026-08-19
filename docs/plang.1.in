@@ -293,7 +293,7 @@ report in general; see
 .SS "Debugging"
 .TP
 .B \-g
-Generate source-level debug information (reserved for future use).
+Generate source-level debug information.
 .SS "Linker control"
 .TP
 .BI \-\-target= triple
