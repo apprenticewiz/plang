@@ -467,6 +467,37 @@ TEST(Warnings, ReadingAVariableBeforeAssigningIt) {
     EXPECT_NE(R.Stderr.find("'i' is read here before"), std::string::npos) << R.Stderr;
 }
 
+// EP §6.4.1: a var declaration's own 'value' clause gives the variable a
+// value before the walk sees a single statement -- the same as a parameter
+// or a for-loop's control variable does implicitly, both of which the walk
+// already knows about. This one wasn't seeded into the initial FlowState, so
+// reading x before any explicit assignment statement was reported as though
+// `value 5` had done nothing at all.
+TEST(Warnings, AVarLevelValueClauseCountsAsAnAssignment) {
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "var x: integer value 5;\n"
+        "begin writeln(x) end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stderr.find("read here before"), std::string::npos) << R.Stderr;
+}
+
+// Same rule, but the 'value' clause is on the TYPE (`type t = integer value
+// 5;`) rather than the var declaration itself. This carries the initial
+// state on a different TypeNode than the one x's own declaration resolves
+// to, reached only by following Sema's Denotes chain -- exactly what
+// CodeGen's writtenInitialState already has to do to lower the value
+// correctly, but the flow walk did not.
+TEST(Warnings, ATypeLevelValueClauseCountsAsAnAssignment) {
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type t = integer value 5;\n"
+        "var x: t;\n"
+        "begin writeln(x) end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stderr.find("read here before"), std::string::npos) << R.Stderr;
+}
+
 TEST(Warnings, AssignmentOnEveryPathIsQuiet) {
     // The walk is a definite-assignment analysis, so a variable assigned in
     // both arms of an if is assigned after it.

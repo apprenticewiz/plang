@@ -113,6 +113,25 @@ void collectNamesUsedIn(const std::vector<std::unique_ptr<ProcDecl>>& Procs,
     }
 }
 
+/// Whether this type-denoter, or one it names, carries a 'value' clause
+/// (EP §6.4.1) — i.e. whether a variable declared with it already has a
+/// value before the walk sees a single statement.  `type t = integer value
+/// 5; var x: t;` puts InitialState on the TypeNode for `t`'s own definition,
+/// not on the NamedTypeNode `x`'s declaration resolves to, so the answer has
+/// to follow Sema's own Denotes chain to find it — the same chain
+/// CodeGen::Impl::writtenInitialState follows for the identical reason
+/// (denoterOf's old flat, spelling-keyed alternative re-bound every hop in
+/// whatever procedure was being lowered).
+bool hasWrittenInitialState(const TypeNode* TN) {
+    for (int Hops = 0; TN && Hops < 32; ++Hops) {
+        if (TN->InitialState) return true;
+        auto* Named = llvm::dyn_cast<NamedTypeNode>(TN);
+        if (!Named || !Named->Denotes || Named->Denotes == TN) break;
+        TN = Named->Denotes;
+    }
+    return false;
+}
+
 /// The variables assigned on both of two paths — what is still known once they
 /// meet.  Everything else may or may not have a value, which is the same as
 /// not knowing that it has one.
@@ -404,7 +423,16 @@ void Sema::checkDefiniteAssignment(const BlockNode& Block) {
     FlowResultNames_.clear();
     FlowReported_.clear();
 
+    // EP §6.4.1: a 'value' clause -- on the declaration itself (`var x: T
+    // value E;`) or on the type it declares x with (`type t = T value E;`)
+    // -- gives x a value before the walk sees a single statement, the same
+    // as a parameter or a for-loop's control variable does implicitly.
+    // Neither was seeded into the initial FlowState below, so reading such a
+    // variable before its first explicit assignment statement was reported
+    // as though the declaration had done nothing at all.
+    std::set<std::string> PreAssigned;
     for (const auto& Vg : Block.Vars) {
+        const bool HasInit = Vg.InitExpr || hasWrittenInitialState(Vg.Type.get());
         for (const auto& Nm : Vg.Names) {
             const std::string Key = toLower(Nm);
             if (Hidden.contains(Key)) continue;
@@ -416,6 +444,7 @@ void Sema::checkDefiniteAssignment(const BlockNode& Block) {
             if (Sym->IsBindable) continue;
             if (!isSimpleValue(Sym->Ty.get())) continue;
             FlowTracked_.insert(Key);
+            if (HasInit) PreAssigned.insert(Key);
         }
     }
 
@@ -440,6 +469,7 @@ void Sema::checkDefiniteAssignment(const BlockNode& Block) {
 
     if (!FlowTracked_.empty() || IsFunc) {
         FlowState St;
+        St.Assigned = std::move(PreAssigned);
         flowStmt(Block.Body.get(), St);
 
         // A function that assigns its result nowhere at all is already an
