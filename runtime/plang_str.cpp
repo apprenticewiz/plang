@@ -202,10 +202,18 @@ void plang_str_writeln(const void* s, int64_t cap) {
 }
 
 /// ISO §6.10.3.6: the field is exactly w characters, so a longer string is
-/// truncated and w = 0 writes nothing.
+/// truncated and w = 0 writes nothing.  A NEGATIVE w is neither: ISO
+/// §6.10.3.1 calls it "an error" without saying what it means, and checked
+/// directly against FPC (default and Turbo-compatibility modes alike) it
+/// writes the string in full, as if no width had been given at all -- not
+/// zero characters.  `if (len > w) len = w;` did not distinguish this from
+/// w == 0: for any negative w and any len >= 0, len > w always holds, so len
+/// was clamped down to that same negative w, and `if (len > 0)` then skipped
+/// the write entirely, dropping the string's whole text.
 void plang_str_write_w(const void* s, int64_t /*cap*/, int64_t w) {
     if (w == 0) return;
     int64_t len = strLen(s);
+    if (w < 0) { if (len > 0) plangOutN(strData(s), static_cast<size_t>(len)); return; }
     for (int64_t i = 0, pad = w - len; i < pad; ++i) plangOutCh(' ');
     if (len > w) len = w;
     if (len > 0) plangOutN(strData(s), static_cast<size_t>(len));

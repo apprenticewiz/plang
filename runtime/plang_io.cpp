@@ -136,6 +136,20 @@ extern "C" {
 // The width-taking real writers are defined further down with the rest of the
 // field-width forms; the ones without a width are those with the default.
 void plang_write_f64_e(double V, int64_t W);
+void plang_write_f64_f(double V, int64_t W, int64_t D);
+
+// ISO §6.10.3.1 calls a negative TotalWidth or FracDigits "an error" (§3.2's
+// weaker class, which a processor may leave undetected) rather than saying
+// what it means.  Checked directly against FPC, in both its default and
+// Turbo-compatibility modes: neither treats a negative width as the
+// zero-width rule the field-width writers below give several types of their
+// own (which would drop a string's or Boolean's whole value) -- it behaves
+// as though no width had been written at all, uniformly across every type.
+// Before this, `%*d`/`%*c`/`%*.*f` fed a negative width straight to printf,
+// whose `*` takes a negative argument as its own left-justify flag with the
+// field set to the value's absolute value -- an accident of libc, not a
+// considered choice.
+static int64_t noPadIfNegative(int64_t W) { return W < 0 ? 0 : W; }
 
 // ---- write (no trailing newline) ----
 
@@ -169,12 +183,12 @@ void plang_write_cplx_w(double Re, double Im, int64_t W, int64_t D) {
     // The width applies to each component, as it does for the two reals the
     // pair is written from — and so does the representation, which is why this
     // goes through the real writers rather than formatting the pair itself.
+    // plang_write_f64_f already picks between "%*.*f" and the exponential
+    // fallback on D's sign, which used to be duplicated here inline.
     plangOutCh('(');
-    if (D >= 0) plangOutFmt("%*.*f", static_cast<int>(W), static_cast<int>(D), Re);
-    else        plang_write_f64_e(Re, W);
+    plang_write_f64_f(Re, W, D);
     plangOutCh(',');
-    if (D >= 0) plangOutFmt("%*.*f", static_cast<int>(W), static_cast<int>(D), Im);
-    else        plang_write_f64_e(Im, W);
+    plang_write_f64_f(Im, W, D);
     plangOutCh(')');
 }
 void plang_writeln_cplx_w(double Re, double Im, int64_t W, int64_t D)
@@ -231,21 +245,36 @@ void plang_page() { plangOutCh('\f'); }
 // zero writes nothing.  For integer (§6.10.3.3 case b) and real (§6.10.3.4.2)
 // TotalWidth is a minimum: the value is always written, simply without padding,
 // which is what a printf width of zero already does.
+//
+// A NEGATIVE width is not the same as zero width -- see noPadIfNegative above
+// -- so it must not fold into the zero-width case here, which for char/string/
+// Boolean would drop the value's text outright rather than merely misjudging
+// its padding.
 
-void plang_write_i64_w (int64_t V, int64_t W) { plangOutFmt("%*" PRId64, static_cast<int>(W), V); }
+void plang_write_i64_w (int64_t V, int64_t W) {
+    plangOutFmt("%*" PRId64, static_cast<int>(noPadIfNegative(W)), V);
+}
 void plang_write_f64_e (double  V, int64_t W) {
     char Buf[PlangRealMaxChars];
     plangOutN(Buf, plangFormatReal(Buf, V, W));
 }
-void plang_write_f64_f (double  V, int64_t W, int64_t D)
-    { plangOutFmt("%*.*f", static_cast<int>(W), static_cast<int>(D), V); }
+// A negative FracDigits falls back to the same exponential format omitting
+// the decimals clause entirely produces, exactly as plang_write_cplx_w's own
+// per-component formatting already did before it started calling this.
+void plang_write_f64_f (double  V, int64_t W, int64_t D) {
+    if (D < 0) { plang_write_f64_e(V, W); return; }
+    plangOutFmt("%*.*f", static_cast<int>(noPadIfNegative(W)), static_cast<int>(D), V);
+}
 // §6.9.3.6: the field is exactly TotalWidth characters wide, so a string
 // longer than the field loses its tail rather than widening it — the `%*s` a
-// field width otherwise maps onto pads but never truncates.
+// field width otherwise maps onto pads but never truncates.  A negative width
+// truncates nothing and pads nothing: the value is written in full, as if no
+// width had been given at all.
 static void plangOutPadded(const char* S, int64_t W) {
-    if (W <= 0) return;
-    const auto Width = static_cast<size_t>(W);
+    if (W == 0) return;
     const size_t Len = S ? std::strlen(S) : 0;
+    if (W < 0) { if (Len) plangOutN(S, Len); return; }
+    const auto Width = static_cast<size_t>(W);
     for (size_t I = Len; I < Width; ++I) plangOutCh(' ');
     if (Len) plangOutN(S, Len < Width ? Len : Width);
 }
@@ -253,7 +282,11 @@ static void plangOutPadded(const char* S, int64_t W) {
 // §6.9.3.5 writes a boolean as the char-string 'true' or 'false' would be
 // written, which is why it truncates too.
 void plang_write_bool_w(int8_t      V, int64_t W) { plangOutPadded(V ? "true" : "false", W); }
-void plang_write_char_w(int8_t      V, int64_t W) { if (W != 0) plangOutFmt("%*c", static_cast<int>(W), static_cast<unsigned char>(V)); }
+void plang_write_char_w(int8_t      V, int64_t W) {
+    if (W == 0) return;
+    if (W < 0) { plangOutCh(static_cast<unsigned char>(V)); return; }
+    plangOutFmt("%*c", static_cast<int>(W), static_cast<unsigned char>(V));
+}
 void plang_write_str_w (const char *S, int64_t W) { plangOutPadded(S, W); }
 
 // ---- writeln with field-width ----

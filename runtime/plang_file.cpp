@@ -386,14 +386,22 @@ void plang_str_write_file(PascalFile *F, const void *S, int64_t /*Cap*/) {
 }
 
 /// The same, in a field of W characters: right-justified, and truncated rather
-/// than widened when it does not fit (§6.9.3.6).
+/// than widened when it does not fit (§6.9.3.6).  A negative W truncates
+/// nothing and pads nothing: the value is written in full, as if no width
+/// had been given at all -- see noPadIfNegative below for why this must not
+/// fold into the W==0 case, which drops the value's text outright.
 void plang_str_write_file_w(PascalFile *F, const void *S, int64_t /*Cap*/,
                             int64_t W) {
     abortIfClosed(F, "write");
-    if (W <= 0) return;
+    if (W == 0) return;
     const auto* Base = static_cast<const char*>(S);
     int64_t Len = *reinterpret_cast<const int64_t*>(Base);
     if (Len < 0) Len = 0;
+    if (W < 0) {
+        if (Len > 0)
+            std::fwrite(Base + sizeof(int64_t), 1, static_cast<size_t>(Len), F->Fp);
+        return;
+    }
     for (int64_t I = Len; I < W; ++I) std::fputc(' ', F->Fp);
     if (Len > W) Len = W;
     if (Len > 0)
@@ -405,6 +413,7 @@ void plang_str_write_file_w(PascalFile *F, const void *S, int64_t /*Cap*/,
 // Defined below with the rest of the field-width forms; the real writer with no
 // width is the same one with the default.
 void plang_write_file_f64_e(PascalFile *F, double V, int64_t W);
+void plang_write_file_f64_f(PascalFile *F, double V, int64_t W, int64_t D);
 
 void plang_write_file_i64 (PascalFile *F, int64_t     V) { abortIfClosed(F,"write"); std::fprintf(F->Fp, "%" PRId64, V); }
 void plang_write_file_f64 (PascalFile *F, double      V) { plang_write_file_f64_e(F, V, PlangRealWidth); }
@@ -417,32 +426,56 @@ void plang_write_file_str (PascalFile *F, const char *S) { abortIfClosed(F,"writ
 // Same formats as the stdout writers in plang_io.cpp.  A width of zero writes
 // nothing for the fixed-size forms and no padding for the numeric ones, which
 // is what a printf width of zero already does.
+//
+// ISO §6.10.3.1 calls a negative TotalWidth or FracDigits "an error" (§3.2's
+// weaker class, which a processor may leave undetected) rather than saying
+// what it means.  Checked directly against FPC, in both its default and
+// Turbo-compatibility modes: neither treats a negative width as the
+// zero-width rule above -- it behaves as though no width had been written
+// at all, uniformly across every type.  Before this, `%*d`/`%*c`/`%*.*f` fed
+// a negative width straight to printf, whose `*` takes a negative argument
+// as its own left-justify flag with the field set to the value's absolute
+// value -- an accident of libc, not a considered choice.
+static int64_t noPadIfNegative(int64_t W) { return W < 0 ? 0 : W; }
 
-void plang_write_file_i64_w (PascalFile *F, int64_t V, int64_t W)
-    { abortIfClosed(F,"write"); std::fprintf(F->Fp, "%*" PRId64, static_cast<int>(W), V); }
+void plang_write_file_i64_w (PascalFile *F, int64_t V, int64_t W) {
+    abortIfClosed(F,"write");
+    std::fprintf(F->Fp, "%*" PRId64, static_cast<int>(noPadIfNegative(W)), V);
+}
 void plang_write_file_f64_e (PascalFile *F, double V, int64_t W) {
     abortIfClosed(F, "write");
     char Buf[PlangRealMaxChars];
     const std::size_t N = plangFormatReal(Buf, V, W);
     std::fwrite(Buf, 1, N, F->Fp);
 }
-void plang_write_file_f64_f (PascalFile *F, double V, int64_t W, int64_t D)
-    { abortIfClosed(F,"write"); std::fprintf(F->Fp, "%*.*f", static_cast<int>(W), static_cast<int>(D), V); }
+// A negative FracDigits falls back to the same exponential format omitting
+// the decimals clause entirely produces, exactly as plang_write_file_cplx_w's
+// own per-component formatting already did before it started calling this.
+void plang_write_file_f64_f (PascalFile *F, double V, int64_t W, int64_t D) {
+    abortIfClosed(F,"write");
+    if (D < 0) { plang_write_file_f64_e(F, V, W); return; }
+    std::fprintf(F->Fp, "%*.*f", static_cast<int>(noPadIfNegative(W)), static_cast<int>(D), V);
+}
 // §6.9.3.6: the field is exactly W characters, so a longer string loses its
 // tail; the `%*s` a width otherwise maps onto pads but never truncates.
 // §6.9.3.5 writes a boolean as its char-string would be written, truncation
-// included.
+// included.  A negative W is written in full, as if no width had been given.
 static void writePadded(PascalFile *F, const char *S, int64_t W) {
-    if (W <= 0) return;
-    const auto Width = static_cast<std::size_t>(W);
+    if (W == 0) return;
     const std::size_t Len = S ? std::strlen(S) : 0;
+    if (W < 0) { if (Len) std::fwrite(S, 1, Len, F->Fp); return; }
+    const auto Width = static_cast<std::size_t>(W);
     for (std::size_t I = Len; I < Width; ++I) std::fputc(' ', F->Fp);
     if (Len) std::fwrite(S, 1, Len < Width ? Len : Width, F->Fp);
 }
 void plang_write_file_bool_w(PascalFile *F, int8_t V, int64_t W)
     { abortIfClosed(F,"write"); writePadded(F, V ? "true" : "false", W); }
-void plang_write_file_char_w(PascalFile *F, int8_t V, int64_t W)
-    { abortIfClosed(F,"write"); if (W != 0) std::fprintf(F->Fp, "%*c", static_cast<int>(W), static_cast<unsigned char>(V)); }
+void plang_write_file_char_w(PascalFile *F, int8_t V, int64_t W) {
+    abortIfClosed(F,"write");
+    if (W == 0) return;
+    if (W < 0) { std::fputc(static_cast<unsigned char>(V), F->Fp); return; }
+    std::fprintf(F->Fp, "%*c", static_cast<int>(W), static_cast<unsigned char>(V));
+}
 void plang_write_file_str_w (PascalFile *F, const char *S, int64_t W)
     { abortIfClosed(F,"write"); writePadded(F, S, W); }
 
@@ -460,14 +493,12 @@ void plang_write_file_cplx (PascalFile *F, double Re, double Im) {
 void plang_write_file_cplx_w(PascalFile *F, double Re, double Im,
                              int64_t W, int64_t D) {
     abortIfClosed(F,"write");
+    // plang_write_file_f64_f already picks between "%*.*f" and the
+    // exponential fallback on D's sign, which used to be duplicated here.
     std::fputc('(', F->Fp);
-    if (D >= 0) std::fprintf(F->Fp, "%*.*f", static_cast<int>(W),
-                             static_cast<int>(D), Re);
-    else        plang_write_file_f64_e(F, Re, W);
+    plang_write_file_f64_f(F, Re, W, D);
     std::fputc(',', F->Fp);
-    if (D >= 0) std::fprintf(F->Fp, "%*.*f", static_cast<int>(W),
-                             static_cast<int>(D), Im);
-    else        plang_write_file_f64_e(F, Im, W);
+    plang_write_file_f64_f(F, Im, W, D);
     std::fputc(')', F->Fp);
 }
 

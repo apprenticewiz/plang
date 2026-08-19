@@ -4056,6 +4056,85 @@ TEST(FieldWidth, AFieldWidthAppliesWhenWritingToAFile) {
     EXPECT_EQ(R.Stdout, "hi th\n  hi there !\n");
 }
 
+// ISO §6.10.3.1: a negative TotalWidth/FracDigits is "an error" the standard
+// leaves undetected, not defined -- checked directly against FPC (default
+// and Turbo-compatibility modes alike), it treats a negative width as though
+// none had been written at all, uniformly across every type.  `%*d`/`%*c`/
+// `%*.*f` fed a negative width straight to printf before this, whose `*`
+// takes a negative argument as its own left-justify flag with the field set
+// to the value's absolute value; the string/Boolean/char writers separately
+// folded a negative width into the "TotalWidth = 0 writes nothing" case
+// (correct for an explicit zero, EP §6.10.3.1(u), but not for a negative
+// value) and dropped the whole value instead of writing it unpadded.
+TEST(FieldWidth, ANegativeWidthWritesTheValueUnpaddedForEveryType) {
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "var n: integer; s: string(10); c: char; b: boolean; w: integer;\n"
+        "begin\n"
+        "  n := 42; s := 'hi'; c := 'X'; b := true; w := -1;\n"
+        "  write('[', n:-1, ']'); writeln;\n"
+        "  write('[', c:-1, ']'); writeln;\n"
+        "  write('[', s:-1, ']'); writeln;\n"
+        "  write('[', b:-1, ']'); writeln;\n"
+        // A runtime-computed negative width, not just a constant-folded
+        // literal, must be caught the same way.
+        "  write('[', n:w, ']'); writeln;\n"
+        "  write('[', s:w, ']'); writeln\n"
+        "end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << "compile/run failed:\n" << R.Stderr;
+    EXPECT_EQ(R.Stdout, "[42]\n[X]\n[hi]\n[true]\n[42]\n[hi]\n");
+}
+
+TEST(FieldWidth, ANegativeWidthStillAppliesWhenWritingToAFile) {
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "var f: text; s: string(10); c: char;\n"
+        "begin\n"
+        "  s := 'hi';\n"
+        "  rewrite(f); write(f, '[', s:-1, ']'); writeln(f);\n"
+        "  reset(f);\n"
+        "  while not eof(f) do begin\n"
+        "    if eoln(f) then begin readln(f); writeln end\n"
+        "    else begin read(f, c); write(c) end\n"
+        "  end\n"
+        "end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << "compile/run failed:\n" << R.Stderr;
+    EXPECT_EQ(R.Stdout, "[hi]\n");
+}
+
+TEST(FieldWidth, ANegativeFracDigitsFallsBackToTheExponentialForm) {
+    // plang_write_f64_f's "%*.*f" path assumed D was never negative; a
+    // negative FracDigits now falls back to the same exponential format
+    // omitting the decimals clause entirely produces (checked against FPC),
+    // rather than being handed to printf's "%.*f" precision, which (like the
+    // width case above) takes a negative precision as "no precision given"
+    // -- a silent behavior change of its own, not the standard's rule.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "var r: real;\n"
+        "begin r := 3.14159; write(r:10:-1); writeln end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << "compile/run failed:\n" << R.Stderr;
+    EXPECT_NE(R.Stdout.find('e'), std::string::npos) << R.Stdout;
+}
+
+TEST(FieldWidth, AnExplicitZeroWidthIsStillUnaffected) {
+    // Guards the distinction the fix above depends on: TotalWidth == 0 keeps
+    // its own per-type meaning (EP §6.10.3.1(u)) and must not be swept into
+    // the negative-width case just because 0 is also "not positive".
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "var n: integer; s: string(10); c: char; b: boolean;\n"
+        "begin\n"
+        "  n := 42; s := 'hi'; c := 'X'; b := true;\n"
+        "  write('[', n:0, ']'); writeln;\n"
+        "  write('[', c:0, ']'); writeln;\n"
+        "  write('[', s:0, ']'); writeln;\n"
+        "  write('[', b:0, ']'); writeln\n"
+        "end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << "compile/run failed:\n" << R.Stderr;
+    EXPECT_EQ(R.Stdout, "[42]\n[]\n[]\n[]\n");
+}
+
 TEST(TextFiles, ReadingAtALineMarkerGivesASpace) {
     // 6.4.3.5: the line marker separates lines rather than belonging to one,
     // and f^ is a space wherever one stands.  Reading gave the newline itself.
