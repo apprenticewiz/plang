@@ -20,13 +20,13 @@ cmake_minimum_required(VERSION 3.16)
 #   3. move the changelog's [Unreleased] section under the new version
 #   4. after tagging, bump VERSION here and set the suffix back to "-pre"
 #
-project(plang VERSION 0.2.1 LANGUAGES C CXX)
+project(plang VERSION 0.3.0 LANGUAGES C CXX)
 
 # Empty in a release, "-pre" between them, so that a development snapshot
 # cannot be mistaken for the release it is heading towards.  Semantic
 # Versioning §9 gives a pre-release lower precedence than the version it
 # qualifies, which is the right way round: 0.1.3 < 0.2.0-pre < 0.2.0.
-set(PLANG_VERSION_SUFFIX "")
+set(PLANG_VERSION_SUFFIX "-pre")
 set(PLANG_VERSION_STRING "${PROJECT_VERSION}${PLANG_VERSION_SUFFIX}")
 
 # The date in the man page header, which by convention is when the page last
