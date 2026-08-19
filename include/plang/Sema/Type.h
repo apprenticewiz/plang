@@ -1,6 +1,7 @@
 #pragma once
 
 #include "plang/AST/AstBase.h"
+#include "plang/Basic/RequiredRecordLayouts.h"
 #include "plang/Basic/StringUtil.h"
 
 #include <algorithm>
@@ -23,10 +24,9 @@ struct TypeNode;
 /// mainstream Pascal implementations accept.
 inline constexpr int PlangMaxSetElements = 256;
 
-/// Capacity of BindingType.name.  EP §6.4.3.4 requires the field but leaves its
-/// variable-string-type up to the implementation; this is long enough for any
-/// path the host filesystem will accept.
-inline constexpr int PlangMaxBindingName = 255;
+// PlangMaxBindingName (BindingType.name's capacity) is declared in
+// plang/Basic/RequiredRecordLayouts.h, which codegen and the runtime also
+// read; see that header for why.
 
 /// Capacity given to a string whose own capacity is not written down: the
 /// undiscriminated `string` parameter-form of EP §6.7.3.1, and the result of

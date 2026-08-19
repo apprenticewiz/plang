@@ -4,6 +4,7 @@
 
 #include "plang/Basic/LangOptions.h"
 #include "plang/Basic/PascalFileLayout.h"
+#include "plang/Basic/RequiredRecordLayouts.h"
 #include "plang/CodeGen/Codegen.h"
 #include "plang/Sema/Sema.h"
 #include "plang/Sema/Type.h"
@@ -1021,31 +1022,94 @@ struct Codegen::Impl {
     /// fileStructType.
     llvm::StructType* fileStructTy_{nullptr};
 
-    /// EP §6.4.3.4: { i8, i64, i64, i64, i8, i64, i64, i64 }
-    /// DateValid, year, month, day, TimeValid, hour, minute, second.
-    /// Matches the C layout of PlangTimeStamp in plang_time.cpp.
+    /// EP §6.4.3.4: DateValid, year, month, day, TimeValid, hour, minute,
+    /// second.  Built from and checked against PlangTimeStamp, declared once
+    /// in plang/Basic/RequiredRecordLayouts.h and read by the runtime too;
+    /// see fileStructType's own comment for why this checks rather than
+    /// asserts alone.
     llvm::StructType* timestampStructType() {
-        if (!timestampTy_)
-            timestampTy_ = llvm::StructType::get(ctx,
-                {i8Ty, i64Ty, i64Ty, i64Ty, i8Ty, i64Ty, i64Ty, i64Ty});
-        return timestampTy_;
+        // Cached on this Codegen and not in a static; see fileStructType.
+        if (timestampTy_) return timestampTy_;
+        llvm::StructType*& TST = timestampTy_;
+
+        TST = llvm::StructType::get(
+            ctx, {
+#define PLANG_TIMESTAMP_FIELD_TYPE(Member, LLVMTy) LLVMTy,
+                PLANG_TIMESTAMP_FIELDS(PLANG_TIMESTAMP_FIELD_TYPE)
+#undef PLANG_TIMESTAMP_FIELD_TYPE
+            });
+
+        const auto& dl     = mod->getDataLayout();
+        const auto* layout = dl.getStructLayout(TST);
+        if (TST->getNumElements() != PlangTimeStampFieldCount)
+            codegenICE("TimeStamp has " + std::to_string(PlangTimeStampFieldCount)
+                       + " fields and codegen built "
+                       + std::to_string(TST->getNumElements()));
+        if (dl.getTypeAllocSize(TST) != sizeof(PlangTimeStamp))
+            codegenICE("a TimeStamp variable takes "
+                       + std::to_string(dl.getTypeAllocSize(TST).getFixedValue())
+                       + " bytes as codegen lays it out and "
+                       + std::to_string(sizeof(PlangTimeStamp))
+                       + " as the runtime declares it");
+        unsigned idx = 0;
+#define PLANG_TIMESTAMP_FIELD_OFFSET(Member, LLVMTy)                          \
+        if (layout->getElementOffset(idx) != offsetof(PlangTimeStamp, Member)) \
+            codegenICE("TimeStamp's '" #Member "' is at offset "              \
+                       + std::to_string(layout->getElementOffset(idx))        \
+                       + " as codegen lays it out and "                       \
+                       + std::to_string(offsetof(PlangTimeStamp, Member))     \
+                       + " as the runtime declares it");                      \
+        ++idx;
+        PLANG_TIMESTAMP_FIELDS(PLANG_TIMESTAMP_FIELD_OFFSET)
+#undef PLANG_TIMESTAMP_FIELD_OFFSET
+        return TST;
     }
     llvm::StructType* timestampTy_{nullptr};
 
-    /// EP §6.4.3.4: { string(PlangMaxBindingName) name, i8 bound } — both
-    /// fields are required.  Matches PlangBindingType in plang_file.cpp.
+    /// EP §6.4.3.4: 'name' (a string(PlangMaxBindingName)) and 'bound', both
+    /// required.  Built from and checked against PlangBindingType; see
+    /// timestampStructType's own comment for why.
     llvm::StructType* bindingStructType() {
         // Use the structTypes cache keyed by a unique string so the type
         // is stable across multiple llvmTypeOfName() calls within one module.
         auto it = structTypes.find("__binding__");
         if (it != structTypes.end()) return it->second;
+
         // 'bound' is i1 rather than i8 so that writing it selects the Boolean
         // formatter; an i1 still occupies one byte, matching the C struct.
-        auto* st = llvm::StructType::get(ctx,
-            llvm::ArrayRef<llvm::Type*>{strStructType(PlangMaxBindingName),
-                                        llvm::Type::getInt1Ty(ctx)});
-        structTypes["__binding__"] = st;
-        return st;
+        auto* BST = llvm::StructType::get(
+            ctx, {
+#define PLANG_BINDINGTYPE_FIELD_TYPE(Member, LLVMTy) LLVMTy,
+                PLANG_BINDINGTYPE_FIELDS(PLANG_BINDINGTYPE_FIELD_TYPE)
+#undef PLANG_BINDINGTYPE_FIELD_TYPE
+            });
+        structTypes["__binding__"] = BST;
+
+        const auto& dl     = mod->getDataLayout();
+        const auto* layout = dl.getStructLayout(BST);
+        if (BST->getNumElements() != PlangBindingTypeFieldCount)
+            codegenICE("BindingType has "
+                       + std::to_string(PlangBindingTypeFieldCount)
+                       + " fields and codegen built "
+                       + std::to_string(BST->getNumElements()));
+        if (dl.getTypeAllocSize(BST) != sizeof(PlangBindingType))
+            codegenICE("a BindingType variable takes "
+                       + std::to_string(dl.getTypeAllocSize(BST).getFixedValue())
+                       + " bytes as codegen lays it out and "
+                       + std::to_string(sizeof(PlangBindingType))
+                       + " as the runtime declares it");
+        unsigned idx = 0;
+#define PLANG_BINDINGTYPE_FIELD_OFFSET(Member, LLVMTy)                         \
+        if (layout->getElementOffset(idx) != offsetof(PlangBindingType, Member)) \
+            codegenICE("BindingType's '" #Member "' is at offset "             \
+                       + std::to_string(layout->getElementOffset(idx))         \
+                       + " as codegen lays it out and "                        \
+                       + std::to_string(offsetof(PlangBindingType, Member))    \
+                       + " as the runtime declares it");                       \
+        ++idx;
+        PLANG_BINDINGTYPE_FIELDS(PLANG_BINDINGTYPE_FIELD_OFFSET)
+#undef PLANG_BINDINGTYPE_FIELD_OFFSET
+        return BST;
     }
 
     /// Build a { double, double } aggregate from two double values.

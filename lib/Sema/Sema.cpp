@@ -3,6 +3,7 @@
 #include "plang/AST/Ast.h"
 #include "plang/Basic/Diagnostic.h"
 #include "plang/Basic/Diagnostic.h"
+#include "plang/Basic/RequiredRecordLayouts.h"
 #include "plang/Basic/SemaUtil.h"
 #include "plang/Basic/StringUtil.h"
 #include "plang/Basic/Token.h"
@@ -10,6 +11,7 @@
 #include "plang/Parse/Parser.h"
 
 #include "llvm/Support/Casting.h"
+#include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/FileSystem.h"
 
 #include <algorithm>
@@ -79,6 +81,30 @@ void nameNominalType(Type& T, const std::string& DeclName) {
     T.Name      = DeclName;
     T.Anonymous = false;
 }
+
+/// TimeStamp's and BindingType's RecordFields lists are necessarily
+/// hand-written here -- they carry Sema-level subrange types the Basic-layer
+/// field-list macros in RequiredRecordLayouts.h cannot reference -- so
+/// nothing else ties a field added, renamed or reordered on one side to its
+/// counterpart on the other.  Called once per list, right after it is built.
+void checkRequiredRecordFields(const std::vector<Type::Field>& Fields,
+                                std::initializer_list<const char*> Expected,
+                                const char* TypeName) {
+    if (Fields.size() != Expected.size())
+        llvm::report_fatal_error(
+            llvm::Twine("plang sema: ") + TypeName + " has "
+            + llvm::Twine(Expected.size()) + " required fields and Sema built "
+            + llvm::Twine(Fields.size()), false);
+    size_t I = 0;
+    for (const char* Name : Expected) {
+        if (Fields[I].Name != Name)
+            llvm::report_fatal_error(
+                llvm::Twine("plang sema: ") + TypeName + " field "
+                + llvm::Twine(I) + " is '" + Name + "' in its layout and '"
+                + Fields[I].Name + "' as Sema built it", false);
+        ++I;
+    }
+}
 } // namespace
 
 bool Sema::hasErrors() const { return Diags.hasErrors(); }
@@ -107,6 +133,10 @@ void Sema::registerBuiltins() {
             { "name",  TyBindName },
             { "bound", TyBool     },
         };
+#define PLANG_FIELD_NAME_ONLY(Member, LLVMTy) #Member,
+        checkRequiredRecordFields(TyBindingType->RecordFields,
+            {PLANG_BINDINGTYPE_FIELDS(PLANG_FIELD_NAME_ONLY)}, "BindingType");
+#undef PLANG_FIELD_NAME_ONLY
     }
 
     // One loop over Builtins.def.  Every name is declared whatever the dialect,
@@ -209,6 +239,10 @@ void Sema::registerBuiltins() {
                 { "minute",    Ctx_.getSubrange(TyInt, 0, 59) },
                 { "second",    Ctx_.getSubrange(TyInt, 0, 59) },
             };
+#define PLANG_FIELD_NAME_ONLY(Member, LLVMTy) #Member,
+            checkRequiredRecordFields(TyTS->RecordFields,
+                {PLANG_TIMESTAMP_FIELDS(PLANG_FIELD_NAME_ONLY)}, "TimeStamp");
+#undef PLANG_FIELD_NAME_ONLY
             Symbol TSym;
             TSym.Kind = SymbolKind::TypeAlias;
             TSym.Name = "TimeStamp";

@@ -870,6 +870,18 @@ llvm::Type* Codegen::Impl::llvmTypeOfSemaTypeImpl(const Type& T) {
                 // changed the layout of an unrelated `var a: t(4)`.
                 return layoutOf(*T.RecordDecl, &T).Ty;
             }
+            // EP §6.4.3.4: TimeStamp and BindingType have no backing syntax --
+            // they are built directly onto RecordFields by
+            // Sema::registerBuiltins(), the only two Record-kind types with
+            // no RecordDecl at all -- so a record actually written in a
+            // program (even one that shadows either name) always takes the
+            // branch above instead.  Routed to the checked builders in
+            // RequiredRecordLayouts.h rather than the field-walk below so
+            // that a program's own storage and the runtime's own struct are
+            // the same question asked once, not built twice and hoped to
+            // still agree.
+            if (T.Name == "TimeStamp")   return timestampStructType();
+            if (T.Name == "BindingType") return bindingStructType();
             // Build struct from record fields, keyed by LLVM type pointer sequence.
             std::vector<llvm::Type*> fieldTypes;
             std::string key;
