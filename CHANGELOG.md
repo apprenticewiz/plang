@@ -8,6 +8,116 @@ version numbers follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-08-18
+
+A second correctness sweep of 0.2.0's Extended Pascal support, this time for
+conformance defects rather than missing features. Eleven fixes: four are
+wrong output or a wrongly-accepted/wrongly-rejected program the standard
+settles without ambiguity, and the rest fall under EP §6.10.3.1's "error"
+class — violations a processor is explicitly permitted to leave undetected —
+closed anyway, because plang already closes every comparable one elsewhere in
+the language and two of them (the write-field-width family, `TimeStamp`'s
+fields) are things a real program could plausibly hit by accident rather than
+by writing deliberately nonconformant code. Where the standard's own
+resolution was ambiguous or silent, the choice was checked against a real
+Pascal implementation (FPC, in both its default and Turbo-compatibility
+modes) rather than invented locally. Every fix carries a regression test
+verified to fail against the code it fixes.
+
+### Fixed
+
+- **A bare nested structured-value-constructor failed to parse inside a
+  named outer one.** EP §6.8.7.1's component-value grammar —
+  `expression | array-value | record-value` — writes the two structured
+  forms without a type name; the `value` clause's own constructor parser
+  already knew this, but the one reached for a *named* constructor written
+  as an ordinary expression (`TypeName[...]`) parsed every arm's value as a
+  plain expression instead, which cannot start a structured form at all: a
+  leading `[` is always a set-constructor to an expression parser, whose
+  grammar has no colon anywhere in it.
+
+  ```pascal
+  type Inner = array[1..2] of integer;
+       Outer = record a: Inner; b: integer end;
+  var o: Outer;
+  begin o := Outer[a: [1: 10; 2: 20]; b: 100] { was: expected ']', got ':' }
+  ```
+
+- **The semicolon before a case-statement's `otherwise` was wrongly
+  required.** EP §6.9.3.5's grammar makes it optional — mandatory only
+  between two ordinary case-list-elements — but the parser's arm loop
+  treated any non-`;` token the same way, breaking out to an unconditional
+  `expected 'end'` regardless of what actually followed. `case x of 1: foo
+  otherwise bar end` was rejected.
+
+- **A leading, trailing, or doubled underscore in an Extended Pascal
+  identifier was accepted.** §6.1.3's grammar — `identifier = letter
+  { [ underscore ] ( letter | digit ) }` — interleaves each optional
+  underscore with a mandatory following letter-or-digit, and its own NOTE
+  says the consequence directly: "An identifier cannot begin or end with an
+  underscore, nor can two underscores be adjacent." The scanner tracked only
+  whether an underscore occurred *anywhere* in a name, so `_foo`, `foo_` and
+  `foo__bar` all passed silently under `-std=iso10206`.
+
+- **A subrange bound could not call a required function.** `type t =
+  1..abs(-5);` was rejected as "not a constant expression", though EP
+  §6.8.2 makes a call to a required function (other than `eof`/`eoln`) with
+  nonvarying arguments itself nonvarying — exactly what the standard's own
+  constant-definition examples rely on (`pi = 4 * arctan(1);`, §6.3.2). The
+  one general constant-folder plang reuses for every bound, `const`
+  declaration, case-label and schema discriminant had no case for a call at
+  all; it now folds `abs`, `sqr`, `succ`, `pred`, `ord`, `chr` and `odd`.
+
+- **`bind` on an already-bound file silently rebound it.** §6.7.5.6 makes
+  this a dynamic-violation outright — the standard's stronger class, which
+  must be detected — not the weaker "error" a processor may leave
+  unreported. The runtime's binding table was cleared and replaced
+  unconditionally on every `bind` call with no check of prior state; it now
+  reports the violation instead.
+
+- **`date`/`time` printed a fixed placeholder instead of a `TimeStamp`'s
+  real fields.** §6.7.6.9 specifies both purely as functions of the
+  date/time fields; `DateValid`/`TimeValid` belong to `GetTimeStamp`'s
+  contract, not theirs. A caller-constructed `TimeStamp` with `DateValid`
+  (or `TimeValid`) false had its real `year`/`month`/`day` (or
+  `hour`/`minute`/`second`) discarded in favor of a hardcoded
+  `"0000-00-00"`/`"00:00:00"`.
+
+- **`TimeStamp`'s `month`, `day`, `hour`, `minute` and `second` were
+  unrestricted integers.** §6.4.3.4's own field-type declaration gives them
+  subrange bounds — 1..12, 1..31, 0..23, 0..59, 0..59 — so `t.month := 13`
+  compiled and ran with no diagnostic, unlike an out-of-range assignment to
+  every other subrange-typed variable in the language.
+
+- **Assigning an empty string to an adjacent-inverted substring silently did
+  nothing.** §6.5.6 makes it uniformly an error for a substring-variable's
+  first index to exceed its second — `s[j+1..j] := 'x'` (non-empty) already
+  reported it, but `s[j+1..j] := ''` reached the one length check by
+  coincidence (0 characters wanted, 0 assigned) and passed.
+
+- **`type of x` did not count as using `x`**, so a variable named only to
+  give another one its type via `type of` was flagged "declared but never
+  used" — the same gap a for-loop's control variable already has its own
+  explicit exception for.
+
+- **A `value` clause did not count as an assignment**, so `var x: integer
+  value 5;` (and the equivalent `type t = integer value 5; var x: t;`)
+  still warned that `x` was "read here before it has been given a value" on
+  its first use. The definite-assignment walk's initial state never
+  accounted for either spelling of the clause.
+
+- **A negative `write` field width was handled inconsistently, and worse
+  than an error.** ISO §6.10.3.1 calls a negative `TotalWidth`/`FracDigits`
+  "an error" without saying what a processor that acts on it anyway should
+  do; checked against FPC, the answer a real Pascal implementation gives is:
+  treat it as though no width had been written at all. plang's own handling
+  varied by type and was worse in every case — a string or Boolean's
+  *entire text* was silently dropped, an integer or char was left-justified
+  by accident of a negative width also being a `printf` flag, and a
+  negative `FracDigits` was quietly ignored rather than falling back to the
+  exponential form. All of it now normalizes to "as if unspecified,"
+  matching FPC.
+
 ## [0.2.0] - 2026-08-17
 
 ### Added
