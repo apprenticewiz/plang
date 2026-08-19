@@ -1,3 +1,17 @@
+# Each subsystem below declares target_link_libraries edges to the other
+# subsystems it actually calls into (Sema depending on Lex and Parse to run
+# them over a .pmi module interface, CodeGen depending on Sema for
+# Sema::byteSizeOf, and so on) -- not because the OBJECT libraries assembled
+# below need it to compile (every target shares one global include path, set
+# once in the top-level CMakeLists.txt, so a missing edge would not by itself
+# break the build) but because nothing else records the real dependency
+# direction anywhere.  Without it, every subsystem's object files land in one
+# shared library with no layering encoded at all, and a future accidental
+# violation -- Sema code reaching into CodeGen internals, say -- is exactly as
+# silent as a missing edge here would be.  Getting the graph right now also
+# means a future split of any of these into a real separate static or shared
+# library fails at exactly the missing edge, rather than needing the whole
+# graph rediscovered by trial and error.
 add_subdirectory(Basic)  # locale-specific diagnostic messages
 add_subdirectory(AST)
 add_subdirectory(Lex)
