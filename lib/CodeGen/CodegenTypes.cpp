@@ -651,11 +651,9 @@ void Codegen::Impl::checkSizeAgreement(const Type& T, llvm::Type* Built) {
     // Inside a schema body the two are meant to differ: the denoters carry
     // the last instantiation's annotation while the storage being laid out is
     // this one's.  The check above llvmTypeOfNodeChecked skips it for the same
-    // reason.
-    // SchemaBindings marks a record that *is* an instantiation: it resolves
-    // to a plain Record, but its field denoters still carry whichever
-    // instantiation was resolved last.
-    if (!schemaCtx.empty() || !T.SchemaBindings.empty() || T.ExtentVaries) {
+    // reason.  Nor is there a fixed instance to check yet where the extent
+    // still varies -- both are genuinely unanswerable, not merely skipped.
+    if (!schemaCtx.empty() || T.ExtentVaries) {
         if (const char* Log = ::getenv("PLANG_SKIPGATE_LOG")) {
             const auto FS = Sema::byteSizeOf(T);
             if (FS && Built && Built->isSized()) {
@@ -673,6 +671,38 @@ void Codegen::Impl::checkSizeAgreement(const Type& T, llvm::Type* Built) {
         }
         return;
     }
+    // SchemaBindings marks a record that *is* an instantiation: it resolves
+    // to a plain Record, but its field denoters still carry whichever
+    // instantiation was resolved last -- which is exactly what the run-time
+    // walk (built to evaluate against BOUND discriminants, unlike the
+    // denoters) does not depend on.  Sema::byteSizeOf structurally cannot
+    // answer here -- it has no per-instance discriminant values -- so this
+    // was the one layout question left checked zero ways instead of two.
+    // T.SchemaBindings is stamped in declaration order (see the ordering
+    // comment where it is built, SemaType.cpp), which is exactly the index
+    // convention ExtentForm::Op::Disc uses.
+    if (!T.SchemaBindings.empty()) {
+        if (!T.RecordDecl || !Built || !Built->isSized()) return;
+        std::vector<llvm::Value*> Discs;
+        Discs.reserve(T.SchemaBindings.size());
+        for (const auto& [Name, Value] : T.SchemaBindings)
+            Discs.push_back(i64c(Value));
+        RtDiscScope Scope(*this, Discs);
+        auto* RtSize = llvm::dyn_cast_or_null<llvm::ConstantInt>(
+            rtSizeOfTypeNode(T.RecordDecl));
+        if (!RtSize)
+            codegenICE("type '" + T.Name + "' has no constant size in the "
+                       "run-time walk, though its extent does not vary");
+        const uint64_t FromLayout =
+            mod->getDataLayout().getTypeAllocSize(Built).getFixedValue();
+        if (RtSize->getZExtValue() != FromLayout)
+            codegenICE("type '" + T.Name + "' is "
+                       + llvm::Twine(FromLayout) + " bytes as it was laid "
+                       "out and " + llvm::Twine(RtSize->getZExtValue())
+                       + " to the run-time walk");
+        checkSchemaFieldOffsetAgreement(T, Built);
+        return;
+    }
     const auto FromSema = Sema::byteSizeOf(T);
     if (!FromSema || !Built || !Built->isSized()) return;
     const uint64_t FromLayout =
@@ -682,6 +712,44 @@ void Codegen::Impl::checkSizeAgreement(const Type& T, llvm::Type* Built) {
                    + llvm::Twine(*FromSema) + " bytes to Sema and "
                    + llvm::Twine(FromLayout) + " bytes as it was laid out");
     checkFieldOffsetAgreement(T, Built);
+}
+
+// checkFieldOffsetAgreement's sibling for a bound schema instance.  Sema's
+// byteSizeOf cannot supply a Want map here (no per-instance discriminant
+// values), so this compares the same two independent answers
+// checkFieldOffsetAgreement's own R4 addition compares -- the static
+// layout and the run-time walk -- without the three-way Sema leg.  Called
+// under the RtDiscScope checkSizeAgreement already established from
+// T.SchemaBindings, so rtFieldOffset evaluates against this instance's
+// actual discriminants rather than a probe's.
+void Codegen::Impl::checkSchemaFieldOffsetAgreement(const Type& T, llvm::Type* Built) {
+    auto* st = llvm::dyn_cast_or_null<llvm::StructType>(Built);
+    if (!st || !T.RecordDecl || st->isOpaque() || !st->isSized()) return;
+
+    const auto* L = layoutOfRecord(T);
+    if (!L) return;
+    const auto* SL = mod->getDataLayout().getStructLayout(st);
+
+    for (const auto& F : T.RecordFields) {
+        auto It = L->Fields.find(toLower(F.Name));
+        if (It == L->Fields.end()) continue;
+        const auto& P = It->second;
+        if (P.Index >= st->getNumElements()) continue;
+        const uint64_t FromLayout = SL->getElementOffset(P.Index)
+                                  + (P.InVariant ? P.Offset : 0);
+
+        auto* RtOff = rtFieldOffset(*T.RecordDecl, F.Name);
+        auto* RtC   = llvm::dyn_cast_or_null<llvm::ConstantInt>(RtOff);
+        if (!RtC)
+            codegenICE("field '" + F.Name + "' of type '" + T.Name + "' has "
+                       "no constant offset in the run-time walk, though the "
+                       "type does not vary");
+        if (RtC->getZExtValue() != FromLayout)
+            codegenICE("field '" + F.Name + "' of type '" + T.Name + "' is "
+                       "at " + llvm::Twine(FromLayout) + " as it was laid "
+                       "out and at " + llvm::Twine(RtC->getZExtValue())
+                       + " to the run-time walk");
+    }
 }
 
 // R4.  A record can be exactly the right size with every field in the wrong

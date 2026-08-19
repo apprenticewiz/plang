@@ -132,6 +132,27 @@ void Sema::stampSchemaBindings(const TypeNode& Node, Type* T) const {
     if (T->RecordDecl == nullptr
             || T->RecordDecl != llvm::dyn_cast<RecordTypeNode>(&Node))
         return;
+    // ExtentForm::Op::Disc (AstBase.h) indexes a discriminant POSITIONALLY,
+    // by declaration order -- the same order ProbeDiscNames_ is built and
+    // kept in (SchemaTypeNode resolution, above) for exactly this reason,
+    // in force for every node resolved while a schema's body is being
+    // resolved, however deeply nested this one is inside it. Preferred over
+    // sorting ActiveSchemaBindings_'s own entries (it is an unordered_map,
+    // so that would be alphabetical by name): a codegen consumer binding an
+    // RtDiscScope from SchemaBindings in ITS stored order would otherwise
+    // evaluate every ExtentForm here against the wrong discriminant
+    // whenever the two orders disagree -- which a nested record's OWN
+    // bounds do just as much as the outer body's, since both were built
+    // against the same ProbeDiscNames_.
+    if (!ProbeDiscNames_.empty()) {
+        for (const auto& Name : ProbeDiscNames_) {
+            const std::string Key = toLower(Name);
+            if (auto It = ActiveSchemaBindings_.find(Key);
+                    It != ActiveSchemaBindings_.end())
+                T->SchemaBindings.emplace_back(Key, It->second);
+        }
+        return;
+    }
     T->SchemaBindings.assign(ActiveSchemaBindings_.begin(),
                              ActiveSchemaBindings_.end());
     std::sort(T->SchemaBindings.begin(), T->SchemaBindings.end());
@@ -584,8 +605,15 @@ std::shared_ptr<Type> Sema::resolveTypeImpl(const TypeNode& Node) {
         const bool ActualsVary = SchemaBindingUsed_ && ProbeBindingsActive_;
         // The actuals as closed forms over the ENCLOSING discriminants, so the
         // run-time walk can work out this instantiation's discriminants without
-        // re-resolving a name at the allocation site.
-        if (ActualsVary && !ProbeDiscNames_.empty()) {
+        // re-resolving a name at the allocation site.  Gated on SchemaBindingUsed_
+        // alone, not ActualsVary: `outer(6)` resolved CONCRETELY (ProbeBindingsActive_
+        // false) still needs x: inner(n)'s form kept over outer's own discriminants,
+        // not baked to this call's n=6, because N is the one `inner(n)` syntax node
+        // shared by every instantiation of outer -- only the probe pass is guaranteed
+        // to run once per schema, but a program that never names outer bare never
+        // takes that path at all, and the form is just as valid built from a concrete
+        // pass's ProbeDiscNames_ (already in force here regardless of probing).
+        if (SchemaBindingUsed_ && !ProbeDiscNames_.empty()) {
             N->ActualForms.clear();
             for (const auto& A : N->Actuals)
                 if (auto F = buildExtentForm(*A, ProbeDiscNames_))

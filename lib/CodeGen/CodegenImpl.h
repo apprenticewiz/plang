@@ -851,6 +851,9 @@ struct Codegen::Impl {
     void checkSizeAgreement(const Type& T, llvm::Type* Built);
     /// Every fixed field's offset against Sema's; see the definition.
     void checkFieldOffsetAgreement(const Type& T, llvm::Type* Built);
+    /// checkFieldOffsetAgreement's sibling for a bound schema instance,
+    /// where Sema's byteSizeOf cannot answer; see the definition.
+    void checkSchemaFieldOffsetAgreement(const Type& T, llvm::Type* Built);
 
     // ====================================================================
     // Alloca helpers

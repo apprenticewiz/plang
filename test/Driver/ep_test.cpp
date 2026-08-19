@@ -4523,6 +4523,33 @@ TEST(EP7Schema, AVariantFieldIsLaidOutForTheInstanceItBelongsTo) {
     EXPECT_EQ(R.Stdout, "big 1 77 66\nsmall 2 88 22\n");
 }
 
+// The bug above needed a variant to show, but its cause reaches further:
+// ActualForms was only ever recorded for a nested instantiation while the
+// ENCLOSING schema was being probed, which only happens when something in
+// the program names it bare (`^outer`, `var v: outer`). A program that only
+// ever writes `outer(6)`/`outer(2)` never takes that path, so the form was
+// silently never built at all. Isolated here without a variant part, so a
+// future variant-layout regression can't hide this one.
+TEST(EP7Schema, ANestedInstantiationInAPlainFieldNeedsNoBareSchemaReference) {
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type inner(m: integer) = record a: array[1..m] of integer end;\n"
+        "     outer(n: integer) = record\n"
+        "        k: integer;\n"
+        "        x: inner(n);\n"
+        "        y: integer\n"
+        "     end;\n"
+        "var big: outer(6); small: outer(2);\n"
+        "begin\n"
+        "  big.k := 1; big.x.a[6] := 66; big.y := 77;\n"
+        "  small.k := 2; small.x.a[2] := 22; small.y := 88;\n"
+        "  writeln('big ', big.k:1, ' ', big.y:1, ' ', big.x.a[6]:1);\n"
+        "  writeln('small ', small.k:1, ' ', small.y:1, ' ', small.x.a[2]:1)\n"
+        "end.\n", kEP);
+    EXPECT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "big 1 77 66\nsmall 2 88 22\n");
+}
+
 // Review 6 found seven defects with one cause: a component whose type is a
 // nested schema INSTANTIATION was handled at the probe's discriminants wherever
 // it was touched.  These four are the ones this commit closes; each was its own
