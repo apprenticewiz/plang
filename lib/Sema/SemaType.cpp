@@ -149,6 +149,20 @@ void Sema::checkInitialState(const TypeNode& Node, const Type& T) {
               {VT->Name, T.Name});
     checkStringCapacity(T, *Node.InitialState);
     adoptSetType(*Node.InitialState, Node.ResolvedType);
+    // Folded HERE, in the scope the 'value' clause was actually written in --
+    // constBound/constRealBound write the result onto InitialState's own
+    // ConstVal/ConstRealVal.  Without this, codegen's only route to this
+    // expression is emitExpr, reached through writtenInitialState's
+    // Denotes-chain walk to whichever type actually carries the clause,
+    // which may belong to a wholly different scope than wherever a variable
+    // of it is finally declared.  emitExpr resolves an identifier against
+    // whatever scope is CURRENTLY being lowered, not the one this expression
+    // was written in, so `type K = integer value Foo; ... procedure Inner;
+    // const Foo = 99; var n: K;` materialized Inner's unrelated Foo instead
+    // of the one in scope where K's own clause was written.  Ordinal and
+    // real are mutually exclusive folds, so trying both costs nothing.
+    if (!constBound(*Node.InitialState))
+        (void)constRealBound(*Node.InitialState);
 }
 
 void Sema::walkVariantFields(const VariantPart& Vp, Type& T) {
@@ -1158,6 +1172,52 @@ std::optional<int64_t> Sema::constBoundImpl(const ExprNode& E) const {
             break;
         }
         default: break;
+        }
+    }
+    return std::nullopt;
+}
+
+// constBound's real-valued sibling.  Deliberately narrow -- see
+// ExprNode::ConstRealVal's comment for why this exists at all: it is not a
+// general real evaluator, only enough to fold a 'value' clause's real-valued
+// initializer where Sema checks it, in the scope it was written in.
+std::optional<double> Sema::constRealBound(const ExprNode& E) const {
+    if (auto* N = llvm::dyn_cast<RealLitExpr>(&E)) {
+        E.ConstRealVal = N->Value;
+        return N->Value;
+    }
+    // ISO §6.4.6: integer widens to real, so `real value 5` (a literal) and
+    // `real value SomeIntConst` (a named ordinal constant) fold too.
+    if (auto* N = llvm::dyn_cast<IntLitExpr>(&E)) {
+        const double V = static_cast<double>(N->Value);
+        E.ConstRealVal = V;
+        return V;
+    }
+    if (auto* N = llvm::dyn_cast<IdentExpr>(&E)) {
+        if (const Symbol* Sym = Symtab.lookup(N->Name);
+                Sym && Sym->Kind == SymbolKind::Const) {
+            if (Sym->HasConstReal) {
+                E.ConstRealVal = Sym->ConstReal;
+                return Sym->ConstReal;
+            }
+            if (Sym->HasConstOrdinal) {
+                const double V = static_cast<double>(Sym->ConstOrdinal);
+                E.ConstRealVal = V;
+                return V;
+            }
+        }
+    }
+    if (auto* N = llvm::dyn_cast<UnaryExpr>(&E)) {
+        if (N->Op == TokenKind::Minus) {
+            if (auto Inner = constRealBound(*N->Operand)) {
+                E.ConstRealVal = -*Inner;
+                return -*Inner;
+            }
+        } else if (N->Op == TokenKind::Plus) {
+            if (auto Inner = constRealBound(*N->Operand)) {
+                E.ConstRealVal = *Inner;
+                return *Inner;
+            }
         }
     }
     return std::nullopt;

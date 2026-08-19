@@ -393,6 +393,13 @@ private:
     /// on the node for codegen to use instead of folding it a second time.
     [[nodiscard]] std::optional<int64_t> constBoundImpl(const ExprNode& E) const;
 
+    /// constBound's real-valued sibling: a real literal, a real-typed named
+    /// constant, or unary +/- over either.  Not a general real evaluator --
+    /// see ExprNode::ConstRealVal for why this exists at all.  Records the
+    /// answer on E.ConstRealVal, the same way constBound records onto
+    /// E.ConstVal.
+    [[nodiscard]] std::optional<double> constRealBound(const ExprNode& E) const;
+
     /// Reports the first statement of each run in this sequence that no path
     /// can reach, a run being ended by a label that a goto could land on.
     void warnUnreachable(const std::vector<std::unique_ptr<StmtNode>>& Stmts);

@@ -99,6 +99,12 @@ struct Symbol {
     int64_t ConstOrdinal{0};
     bool    HasConstOrdinal{false};
 
+    /// The real-valued sibling of ConstOrdinal/HasConstOrdinal, for a named
+    /// constant Sema::constRealBound can fold -- narrower than the ordinal
+    /// case (see ExprNode::ConstRealVal for why).
+    double ConstReal{0.0};
+    bool   HasConstReal{false};
+
 
     /// Set the first time the name is resolved as a value or as the target of
     /// an assignment.  What is left unset by the end of a block was declared

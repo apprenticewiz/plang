@@ -5298,6 +5298,48 @@ TEST(Shadowing, AValueClauseIsNotSuppressedByAHomonymThatHasNone) {
     EXPECT_EQ(R.Stdout, "outer 7\ninner 7\n");
 }
 
+TEST(Shadowing, AnOrdinalValueClauseResolvesAnIdentifierWhereItWasWritten) {
+    // The same "foreign node, wrong scope" shape as the three tests above,
+    // but for a bare identifier reference INSIDE the value clause itself
+    // rather than for the clause's own type/presence.  writtenInitialState
+    // correctly finds K's value clause through the Denotes chain, but
+    // storeInitialValue used to hand it straight to emitExpr, which
+    // resolves an identifier against whatever scope is CURRENTLY being
+    // lowered -- so `var n: J` inside `Inner` read Inner's own unrelated
+    // Foo instead of the outer one in scope where K's clause was written.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "const Foo = 10;\n"
+        "type K = integer value Foo;\n"
+        "     J = K;\n"
+        "procedure Inner;\n"
+        "const Foo = 99;\n"
+        "var n: J;\n"
+        "begin writeln(n) end;\n"
+        "begin Inner end.\n", kEP);
+    EXPECT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "10\n");
+}
+
+TEST(Shadowing, ARealValueClauseResolvesAnIdentifierWhereItWasWritten) {
+    // The real-valued sibling of the test above.  Sema's ordinal folder
+    // (constBound) cannot fold a real expression at all, so this case
+    // needed its own narrow real-constant fold (constRealBound) rather
+    // than being covered by the ordinal fix.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "const Pi2 = 3.5;\n"
+        "type R = real value Pi2;\n"
+        "     S = R;\n"
+        "procedure Inner;\n"
+        "const Pi2 = 9.9;\n"
+        "var x: S;\n"
+        "begin writeln(x:5:1) end;\n"
+        "begin Inner end.\n", kEP);
+    EXPECT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "  3.5\n");
+}
+
 TEST(Shadowing, ARecordLayoutIsFoldedInTheScopeItWasDeclaredIn) {
     // `arrayIndexRange` folded a field's bounds against codegen's constant
     // table, which holds whatever is innermost where the denoter is being

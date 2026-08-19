@@ -732,6 +732,9 @@ void Sema::checkBlock(const BlockNode& Block,
         if (const auto V = constBound(*Cd.Value)) {
             S.ConstOrdinal    = *V;
             S.HasConstOrdinal = true;
+        } else if (const auto R = constRealBound(*Cd.Value)) {
+            S.ConstReal    = *R;
+            S.HasConstReal = true;
         }
         S.Name    = Cd.Name;
         S.Ty    = ValType;

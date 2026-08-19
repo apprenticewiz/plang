@@ -175,6 +175,17 @@ struct ExprNode : Node {
     /// binding: that is the extent of no instance, and recording it would hand
     /// codegen the probe's answer for every one of them.
     mutable std::optional<int64_t> ConstVal;
+
+    /// The same idea as ConstVal, for the narrow set of REAL-valued constant
+    /// expressions Sema::constRealBound folds -- a real literal, a real-typed
+    /// named constant, and unary +/- over either.  Not a general real
+    /// evaluator: it exists specifically so a `value` clause's real-valued
+    /// initializer can be folded where Sema checks it (in the scope it was
+    /// WRITTEN in), the same reason ConstVal exists, rather than left to
+    /// CodeGen's emitExpr, which -- reached through a foreign TypeNode via
+    /// writtenInitialState -- resolves any identifier in it against whatever
+    /// scope is CURRENTLY being lowered instead.
+    mutable std::optional<double> ConstRealVal;
 protected:
     using Node::Node;
 };

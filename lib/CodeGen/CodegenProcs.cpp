@@ -1081,7 +1081,25 @@ void Codegen::Impl::storeInitialValue(llvm::Value* ptr, llvm::Type* ty,
     }
 
     llvm::Value* val = nullptr;
-    if (auto* sv = llvm::dyn_cast<StructuredValueExpr>(&value);
+    if (value.ConstVal) {
+        // Sema::checkInitialState folded this in the scope the 'value'
+        // clause was actually WRITTEN in -- which may be a different scope
+        // than wherever this call is materializing it, since this value
+        // came from a foreign TypeNode reached through writtenInitialState's
+        // Denotes-chain walk.  emitExpr resolves any identifier in an
+        // expression against whatever scope is CURRENTLY being lowered, not
+        // the one the expression was written in, so a bare `value Foo`
+        // clause read whichever Foo the materializing procedure happened to
+        // have rather than the one in scope where the clause was written.
+        // Materializing the already-folded constant sidesteps that
+        // resolution entirely, the same way every other constant-expression
+        // use site in codegen prefers Sema's answer over re-evaluating.
+        val = i64c(*value.ConstVal);
+    } else if (value.ConstRealVal) {
+        // The real-valued sibling of the ConstVal case just above; same
+        // reasoning, see ExprNode::ConstRealVal.
+        val = llvm::ConstantFP::get(dblTy, *value.ConstRealVal);
+    } else if (auto* sv = llvm::dyn_cast<StructuredValueExpr>(&value);
             sv && sv->TypeName.empty())
         val = emitStructuredValue(*sv, tn); // a component-value names no type
     else
