@@ -35,13 +35,23 @@ void plang_halt(int64_t Status) {
     std::exit(static_cast<int>(Status));
 }
 
+/// EP §6.7.5.3: new(p, d1..ds) computes its size from a runtime discriminant
+/// value (CodeGenSchema.cpp's emitNewSchema), and only the string-schema
+/// capacity path is checked before this call -- every other size computed in
+/// schemaBodySize flows straight into plang_new.  A negative size becomes a
+/// huge size_t at the cast below, so this is the last line of defense
+/// against a corrupted allocation, not a redundant check.
+[[noreturn]] void plang_err_bad_alloc_size(int64_t Requested);
+
 /// Allocate \p Bytes zero-initialized bytes.  Aborts on out-of-memory so
 /// generated code never needs to check the result.
 void *plang_new(int64_t Bytes) {
+    if (Bytes < 0) plang_err_bad_alloc_size(Bytes);
     void *P = std::calloc(1, static_cast<std::size_t>(Bytes));
     if (!P) {
-        std::fputs("plang runtime: out of memory\n", stderr);
-        std::abort();
+        std::fflush(stdout);
+        std::fprintf(stderr, "plang runtime: out of memory\n");
+        std::exit(PlangRuntimeErrorStatus);
     }
     return P;
 }
@@ -263,6 +273,17 @@ void plang_err_schema_disc(const char *Name, int64_t Dst, int64_t Src) {
                  "plang runtime: schema discriminant %s differs between the "
                  "target (%" PRId64 ") and the value (%" PRId64 ")\n",
                  Name ? Name : "?", Dst, Src);
+    std::exit(PlangRuntimeErrorStatus);
+}
+
+/// See the forward declaration above plang_new: the last check before a
+/// runtime-computed size reaches calloc, since not every size-computing path
+/// upstream of it is guarded.
+[[noreturn]] void plang_err_bad_alloc_size(int64_t Requested) {
+    std::fflush(stdout);
+    std::fprintf(stderr,
+                 "plang runtime: allocation size %" PRId64 " is not usable\n",
+                 Requested);
     std::exit(PlangRuntimeErrorStatus);
 }
 

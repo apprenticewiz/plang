@@ -1988,6 +1988,31 @@ TEST(RuntimeChecks, NoRangeChecksLeavesBoundsOutButKeepsNil) {
     EXPECT_NE(R.Stderr.find("dereference of nil"), std::string::npos) << R.Stderr;
 }
 
+// EP §6.7.5.3: new(p, d1..ds) computes its size from runtime discriminant
+// values.  schemaBodySize's string-schema-capacity guard only fires when the
+// schema has exactly one discriminant (discs.size() == 1) -- a schema body
+// that resolves to a var-string but takes a SECOND, unrelated discriminant
+// bypasses that guard entirely and falls into rtSizeOfTypeNode's identical
+// but unchecked capacity computation, so a large enough negative capacity
+// survives the +8-byte header and 8-byte alignment and reaches plang_new as
+// a genuinely negative size -- confirmed unguarded on the pre-fix runtime,
+// where this either corrupted memory or (with a small enough negative
+// capacity that rounds back to a small positive total) silently succeeded.
+TEST(RuntimeChecks, NegativeSchemaCapacityFromASecondDiscriminantReports) {
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type buf(tag: integer; cap: integer) = string(cap);\n"
+        "var b: ^buf;\n"
+        "begin\n"
+        "  new(b, 1, -1000000);\n"
+        "  writeln('should not get here')\n"
+        "end.\n",
+        "-std=iso10206");
+    EXPECT_EQ(R.ExitCode, 70);
+    EXPECT_EQ(R.Stdout, "");
+    EXPECT_NE(R.Stderr.find("allocation size"), std::string::npos) << R.Stderr;
+}
+
 // ---------------------------------------------------------------------------
 // ISO §6.2.2.10 — a required identifier may be redeclared
 //
