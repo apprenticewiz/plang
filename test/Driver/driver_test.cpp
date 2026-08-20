@@ -305,6 +305,42 @@ TEST(Driver, DashGGivesALocalAndAParameterTheirOwnDeclareRecords) {
         << R.IR;
 }
 
+TEST(Driver, DashGKeepsACapturedVariablesWrittenCasingInsideTheCapturingProcedure) {
+    // A nested procedure reaching an outer variable through the static
+    // link re-registers it (so reads/writes inside the nested body resolve
+    // correctly) using outerVars' own collection loop, which read the name
+    // back out of scopes[]'s map key -- case-folded, like every scope-map
+    // key, for Pascal's case-insensitive lookup. The declaring procedure's
+    // own DILocalVariable was never affected (it comes from the AST's own
+    // spelling), so this only ever showed up on the nested side: confirmed
+    // with a real gdb session where "localn" (inner's own, lowercased) and
+    // "localN" (outer's, correctly cased) turned out to be two differently
+    // spelled DILocalVariables for the same source variable, and gdb's
+    // bare `print localN` from inside inner walked out to outer's entry by
+    // name but evaluated its location against inner's own frame, printing
+    // garbage.
+    auto R = compileAndEmitIR(
+        "program p(output);\n"
+        "procedure outer(n: integer);\n"
+        "  var localN: integer;\n"
+        "  procedure inner;\n"
+        "  begin\n"
+        "    localN := localN + 1\n"
+        "  end;\n"
+        "begin\n"
+        "  localN := n;\n"
+        "  inner;\n"
+        "  writeln(localN)\n"
+        "end;\n"
+        "\n"
+        "begin\n"
+        "  outer(5)\n"
+        "end.\n", "-g");
+    ASSERT_TRUE(R.Ok) << R.Stderr;
+    EXPECT_TRUE(irContainsNone(R.IR, {"!DILocalVariable(name: \"localn\""})) << R.IR;
+    EXPECT_TRUE(irContainsAll(R.IR, {"!DILocalVariable(name: \"localN\""})) << R.IR;
+}
+
 TEST(Driver, DashGGivesEachScalarKindItsOwnDIType) {
     auto R = compileAndEmitIR(
         "program p(output);\n"

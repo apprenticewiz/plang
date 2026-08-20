@@ -162,6 +162,15 @@ struct Codegen::Impl {
         llvm::Value*     ptr;               // alloca or GlobalVariable (used as ptr)
         llvm::Type*      type;              // the *value* type (pointee)
         const TypeNode*  typeNode{nullptr}; // original Pascal TypeNode (for file detection)
+        /// The name as the programmer spelled it, kept alongside the
+        /// case-folded map key (Pascal is case-insensitive, so the key
+        /// cannot answer this).  A nested procedure capturing this variable
+        /// through the static link re-registers it under whatever name it
+        /// is handed; without this, that re-registration had only the
+        /// lowercased key to offer -g's DILocalVariable, so a debugger
+        /// asked for `localN` from inside the capturing procedure and
+        /// found only `localn`.
+        std::string displayName{};
         // EP §6.7.3.7: conformant array fields.
         bool        isConformantArray{false};  // true if this is a conformant array param
         std::string conformantLoName{};        // name of the lo bound variable

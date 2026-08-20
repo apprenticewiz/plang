@@ -614,7 +614,10 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
             Bound.ptr = outerPtr;
             if (Named.insert(toLower(nm)).second) {
                 // Register it as the variable's alloca so reads/writes go through.
-                defVar(nm, outerPtr, ve.type, ve.typeNode);
+                // nm is scopes[di]'s own key, case-folded like every scope-map
+                // key; ve.displayName is what the programmer actually wrote,
+                // carried for exactly this re-registration (see VarEntry).
+                defVar(ve.displayName, outerPtr, ve.type, ve.typeNode);
                 // ISO §6.6.3.1: an outer procedural parameter is still one here.
                 // Only the address travels, which is why the pair was spilled to
                 // a cell; what it means has to be carried across separately.

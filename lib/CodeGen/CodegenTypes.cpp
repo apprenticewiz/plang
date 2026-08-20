@@ -147,7 +147,7 @@ void Codegen::Impl::defVar(const std::string& name, llvm::Value* ptr, llvm::Type
             shadowedConsts.back()[Key] = It->second;
         consts.erase(It);
     }
-    scopes.back()[Key] = VarEntry{ ptr, type, typeNode };
+    scopes.back()[Key] = VarEntry{ ptr, type, typeNode, name };
 
     // -g: the single choke point every named Pascal variable, parameter,
     // local, captured outer variable and with-bound field passes through,
