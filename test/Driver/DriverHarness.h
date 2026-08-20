@@ -79,6 +79,17 @@ inline std::string runCmd(const std::string& Cmd) {
     return Out;
 }
 
+/// PLANG_TEST_RUN_WRAPPER, prepended (with a trailing space) to the command
+/// that executes a just-built Pascal program specifically -- never the
+/// compile step, and never the test binary/ctest process itself. Empty when
+/// unset, so every existing caller is unaffected by default. CI sets this to
+/// run a test subset's generated programs under
+/// test/tools/run-under-guardheap.sh.
+inline std::string runWrapperPrefix() {
+    const char* W = std::getenv("PLANG_TEST_RUN_WRAPPER");
+    return (W && *W) ? std::string(W) + " " : std::string();
+}
+
 /// Run "plang -pc1 <args>" and capture combined stderr output.
 inline std::string runPC1(const std::string& Args) {
     return runCmd(std::string(PLANG_PATH) + " -pc1 " + Args + " 2>&1");
@@ -219,7 +230,7 @@ public:
             write("stdin.txt", StdinText);
             Redirect = " < " + at("stdin.txt");
         }
-        R.Stdout = runCmd("cd " + Dir + " && " + Bin + Redirect
+        R.Stdout = runCmd("cd " + Dir + " && " + runWrapperPrefix() + Bin + Redirect
                           + " 2>run.err; echo \"exit:$?\"");
         R.ExitCode = 0;
         if (const auto Pos = R.Stdout.rfind("exit:"); Pos != std::string::npos) {
@@ -337,6 +348,21 @@ struct TwoFileResult {
     std::string Stderr;
 };
 
+/// Runs the already-built "./prog" inside \p C with stdin from /dev/null,
+/// under PLANG_TEST_RUN_WRAPPER if one is set, and fills in \p R's run-step
+/// fields. compileTwoFiles and compileThreeFiles are otherwise identical
+/// from here on, so this is the one place both build it from.
+inline void runProgAndFillResult(const CaseDir& C, TwoFileResult& R) {
+    R.Stdout = runCmd("cd " + C.path() + " && " + runWrapperPrefix()
+                      + "./prog < /dev/null 2>run.err; echo \"exit:$?\"");
+    R.ExitCode = 0;
+    if (const auto Pos = R.Stdout.rfind("exit:"); Pos != std::string::npos) {
+        R.ExitCode = std::atoi(R.Stdout.c_str() + Pos + 5);
+        R.Stdout.erase(Pos);
+    }
+    R.Stderr += C.read("run.err");
+}
+
 inline TwoFileResult compileTwoFiles(const std::string& ModSrc,
                                      const std::string& ProgSrc,
                                      const std::string& ExtraFlags = "") {
@@ -367,14 +393,7 @@ inline TwoFileResult compileTwoFiles(const std::string& ModSrc,
     }
 
     // Step 3: run it.
-    R.Stdout = runCmd("cd " + C.path()
-                      + " && ./prog < /dev/null 2>run.err; echo \"exit:$?\"");
-    R.ExitCode = 0;
-    if (const auto Pos = R.Stdout.rfind("exit:"); Pos != std::string::npos) {
-        R.ExitCode = std::atoi(R.Stdout.c_str() + Pos + 5);
-        R.Stdout.erase(Pos);
-    }
-    R.Stderr += C.read("run.err");
+    runProgAndFillResult(C, R);
     return R;
 }
 
@@ -406,14 +425,7 @@ inline TwoFileResult compileThreeFiles(const std::string& ModASrc,
         R.Stderr += C.read("prog.err");
         if (Rc != 0) { R.ExitCode = Rc; return R; }
     }
-    R.Stdout = runCmd("cd " + C.path()
-                      + " && ./prog < /dev/null 2>run.err; echo \"exit:$?\"");
-    R.ExitCode = 0;
-    if (const auto Pos = R.Stdout.rfind("exit:"); Pos != std::string::npos) {
-        R.ExitCode = std::atoi(R.Stdout.c_str() + Pos + 5);
-        R.Stdout.erase(Pos);
-    }
-    R.Stderr += C.read("run.err");
+    runProgAndFillResult(C, R);
     return R;
 }
 

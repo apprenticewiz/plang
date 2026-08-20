@@ -326,6 +326,20 @@ jobs:
       - name: Guard-page allocator self-test
         run: bash test/tools/run-under-guardheap.sh --self-test
 
+      # Runs a schema/variant/pointer/string-heavy subset of emitted programs
+      # under the guard-page allocator above -- this is the only thing in CI
+      # that would catch a regression of the bug class documented at
+      # test/Driver/codegen_test.cpp's Shadowing.AnInitialStateComesFrom...
+      # and test/Driver/ep_test.cpp's EP7Schema.ANestedInstantiationSmaller...:
+      # an over-run into heap nothing else reads exits 0 printing the right
+      # value everywhere except here. Default flags, not folded into the
+      # -O1/-O2/-O3 axis below: both known instances of this bug class are
+      # allocation-size/layout defects independent of optimization level.
+      - name: Test schema/variant/pointer/string subset under guardheap
+        run: ctest --test-dir build -j"$(nproc)" --output-on-failure -R 'Schema|VariantRecord|VariantPart|ConformantArray|Shadowing|Storage|String|Substr|Pointer'
+        env:
+          PLANG_TEST_RUN_WRAPPER: "bash ${{ github.workspace }}/test/tools/run-under-guardheap.sh"
+
       - name: Test with emitted programs at -O1
         run: ctest --test-dir build -j"$(nproc)" --output-on-failure
         env:
