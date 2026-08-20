@@ -42,7 +42,7 @@
 namespace plang {
 
 /// The compiled-in English for a diagnostic, expanded from the .def
-/// catalogs.  Defined in lib/Basic/en_US.cpp.  Every lookup falls back here.
+/// catalogs.  Defined in lib/Basic/BuiltinCatalog.cpp.  Every lookup falls back here.
 const char* builtinDiagFormat(DiagID ID);
 
 /// The msgctxt namespaces.  A key is a namespace and a stable identifier:
@@ -58,7 +58,7 @@ inline constexpr std::string_view PoTokenPrefix = "token/";
 inline constexpr std::string_view PoLabelPrefix = "label/";
 
 /// The label a severity is printed under, in English.  Defined in
-/// lib/Basic/en_US.cpp beside the messages.
+/// lib/Basic/BuiltinCatalog.cpp beside the messages.
 const char* builtinSeverityLabel(DiagSeverity Sev);
 
 /// What a load did, for a caller that wants to say so.  A load can succeed

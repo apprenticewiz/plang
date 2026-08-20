@@ -1,4 +1,4 @@
-/// en_US.cpp — the compiled-in English diagnostic messages
+/// BuiltinCatalog.cpp — the compiled-in English diagnostic messages
 ///
 /// This is the text plang falls back to, and the text every translation is a
 /// translation *of*.  It is not a table anyone edits: the strings live in the

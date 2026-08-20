@@ -118,20 +118,18 @@ template <typename F> void forEachWarningName(F&& Fn) {
 // ---------------------------------------------------------------------------
 // getDiagFormat — message template for a diagnostic ID
 //
-// INTERNATIONALISATION HOOK
-// -------------------------
-// Declared here; defined in lib/Basic/<locale>.cpp (selected by
-// -DPLANG_LOCALE=<locale>, default en_US).
-//
-// To add a translation:
-//   1. cp lib/Basic/en_US.cpp lib/Basic/<locale>.cpp
-//   2. Translate every string.  Keep the %N placeholders — they may be
-//      reordered for your language's word order.
-//   3. cmake -DPLANG_LOCALE=<locale> && cmake --build build
+// INTERNATIONALISATION
+// ---------------------
+// Defined in lib/Basic/MessageCatalog.cpp: reads a .po translation chosen
+// at run time (-fdiagnostics-language, else LC_ALL/LC_MESSAGES/LANG) and
+// falls back to the compiled-in English (lib/Basic/BuiltinCatalog.cpp,
+// always available, never missing or truncated) for anything the
+// translation doesn't cover. See po/README.md to add or update one.
 // ---------------------------------------------------------------------------
 
-/// Returns the message template for a diagnostic ID.
-/// Defined in the locale compile unit (lib/Basic/<locale>.cpp).
+/// Returns the message template for a diagnostic ID: a translation if one
+/// is loaded and covers it, the compiled-in English otherwise.
+/// Defined in lib/Basic/MessageCatalog.cpp.
 const char* getDiagFormat(DiagID ID);
 
 // ---------------------------------------------------------------------------

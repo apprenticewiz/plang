@@ -1,6 +1,6 @@
 # Diagnostic message text.
 #
-# en_US.cpp is the compiled-in English, expanded from the DiagnosticKinds .def
+# BuiltinCatalog.cpp is the compiled-in English, expanded from the DiagnosticKinds .def
 # catalogs; MessageCatalog.cpp reads a translation of it from a .po file at
 # run time and falls back here whenever it has nothing to say.  Which language
 # plang speaks is therefore a question answered when it runs, not when it is
@@ -15,7 +15,7 @@
 # silently repoint a translation at the wrong message.
 
 add_library(PlangLocale OBJECT
-    en_US.cpp           # compiled-in English: the fallback, and the base text
+    BuiltinCatalog.cpp  # compiled-in English: the fallback, and the base text
     MessageCatalog.cpp  # the .po reader, and getDiagFormat itself
 )
 target_compile_options(PlangLocale PRIVATE -fno-rtti -fno-exceptions -fPIC)
