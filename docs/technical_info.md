@@ -330,20 +330,21 @@ and the two cannot disagree.
 
 ## The test suite
 
-1639 tests, in eleven binaries:
+1890 tests, in thirteen binaries:
 
 | Binary                              | Tests | What it covers                        |
 |-------------------------------------|-------|---------------------------------------|
-| `test/Lex/scanner_test`             | 139   | Tokens, literals, keywords, EP gating |
+| `test/Lex/scanner_test`             | 143   | Tokens, literals, keywords, EP gating |
 | `test/Parse/parser_test`            | 130   | Declarations, statements, expressions |
-| `test/Sema/sema_test`               | 161   | Name resolution and type checking     |
+| `test/Sema/sema_test`               | 165   | Name resolution and type checking     |
 | `test/Basic/catalog_test`           | 46    | The `.po` reader and locale selection |
-| `test/Driver/driver_test`           | 94    | The driver and the command line       |
-| `test/Driver/codegen_test`          | 276   | What the generated code does when run |
-| `test/Driver/ep_test`               | 210   | Extended Pascal, end to end           |
-| `test/Driver/module_test`           | 167   | Modules and separate compilation      |
+| `test/Basic/source_manager_test`    | 4     | Source-buffer coordinate overflow     |
+| `test/Driver/driver_test`           | 111   | The driver and the command line       |
+| `test/Driver/codegen_test`          | 346   | What the generated code does when run |
+| `test/Driver/ep_test`               | 299   | Extended Pascal, end to end           |
+| `test/Driver/module_test`           | 227   | Modules and separate compilation      |
 | `test/CodeGen/codegen_switches_test`| 15    | Positional compiler-switch state      |
-| `test/CodeGen/codegen_storage_test` | 23    | Type widths, layout, one SizeOf       |
+| `test/CodeGen/codegen_storage_test` | 26    | Type widths, layout, one SizeOf       |
 | `test/Conformance/conformance_test` | 377   | The Pascal-P5 ISO 7185 suite          |
 | `test/Acceptance/acceptance_test`   | 1     | The Pascal Acceptance Test            |
 
