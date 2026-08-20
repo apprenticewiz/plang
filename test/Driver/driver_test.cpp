@@ -341,6 +341,45 @@ TEST(Driver, DashGKeepsACapturedVariablesWrittenCasingInsideTheCapturingProcedur
     EXPECT_TRUE(irContainsAll(R.IR, {"!DILocalVariable(name: \"localN\""})) << R.IR;
 }
 
+TEST(Driver, DashGGivesACapturedVariableAStableDebugLocationInsideTheCapturingProcedure) {
+    // Independent of the casing bug above: the captured variable's debug
+    // declare used to target outerPtr (a bare `load` result) directly with
+    // an empty DIExpression. An alloca's own value is a compile-time-fixed
+    // frame offset, good for the whole function; a load result is an
+    // ordinary SSA value subject to normal register allocation/live-range
+    // splitting, so LLVM could only describe it with a location list valid
+    // for whatever narrow PC range the backend happened to keep it live --
+    // confirmed with a real gdb session (and llvm-dwarfdump) to silently
+    // print garbage, with no error at all, once execution moved past that
+    // range. Fixed by spilling outerPtr into its own debug-only stable
+    // alloca and declaring through that with a DW_OP_deref expression
+    // instead -- same address, reached via one extra stable hop.
+    auto R = compileAndEmitIR(
+        "program p(output);\n"
+        "procedure outer(n: integer);\n"
+        "  var localN: integer;\n"
+        "  procedure inner;\n"
+        "  begin\n"
+        "    localN := localN + 1\n"
+        "  end;\n"
+        "begin\n"
+        "  localN := n;\n"
+        "  inner;\n"
+        "  writeln(localN)\n"
+        "end;\n"
+        "\n"
+        "begin\n"
+        "  outer(5)\n"
+        "end.\n", "-g");
+    ASSERT_TRUE(R.Ok) << R.Stderr;
+    EXPECT_TRUE(irContainsNone(R.IR, {"#dbg_declare(ptr %outer.localn,"})) << R.IR;
+    EXPECT_TRUE(irContainsAll(R.IR, {
+        "store ptr %outer.localn, ptr %localN.dbg,",
+        "#dbg_declare(ptr %localN.dbg, ",
+        "!DIExpression(DW_OP_deref)",
+    })) << R.IR;
+}
+
 TEST(Driver, DashGGivesEachScalarKindItsOwnDIType) {
     auto R = compileAndEmitIR(
         "program p(output);\n"

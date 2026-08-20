@@ -744,8 +744,17 @@ struct Codegen::Impl {
     /// from the constant.  A required constant was already handled this way;
     /// every constant the program declares needed it too.
     std::vector<std::map<std::string, llvm::Value*>> shadowedConsts;
+    /// debugIndirectPtr: when non-null (only ever passed when DBuilder is
+    /// active), a stable alloca holding ptr's own value, for a caller whose
+    /// ptr is itself unstable (a bare SSA value -- a load result, or a raw
+    /// Argument -- rather than an alloca/GlobalVariable).  Registers the
+    /// debug declare against the alloca with a DW_OP_deref expression
+    /// instead of against ptr directly with an empty one; ordinary
+    /// codegen still reads/writes through ptr, unchanged.  See defVar's
+    /// body for why a bare SSA value needs this and an alloca doesn't.
     void defVar(const std::string& name, llvm::Value* ptr, llvm::Type* type,
-                const TypeNode* typeNode = nullptr);
+                const TypeNode* typeNode = nullptr,
+                llvm::Value* debugIndirectPtr = nullptr);
     const VarEntry* findVar(const std::string& name) const;
 
     /// Whether \p name is bound by a scope opened INSIDE the current function

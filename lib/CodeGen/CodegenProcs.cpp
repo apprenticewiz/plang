@@ -617,7 +617,19 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
                 // nm is scopes[di]'s own key, case-folded like every scope-map
                 // key; ve.displayName is what the programmer actually wrote,
                 // carried for exactly this re-registration (see VarEntry).
-                defVar(ve.displayName, outerPtr, ve.type, ve.typeNode);
+                //
+                // -g: outerPtr is a load result, not an alloca -- unstable,
+                // per defVar's own comment on debugIndirectPtr.  Spilling it
+                // to a debug-only alloca here (never read back by anything
+                // but the declare defVar builds from it) is -g-gated and has
+                // no effect at all otherwise: no store, no alloca, nothing.
+                llvm::Value* debugAddr = nullptr;
+                if (DBuilder) {
+                    auto* slot = createEntryAlloca(ptrTy, ve.displayName + ".dbg");
+                    builder.CreateStore(outerPtr, slot);
+                    debugAddr = slot;
+                }
+                defVar(ve.displayName, outerPtr, ve.type, ve.typeNode, debugAddr);
                 // ISO §6.6.3.1: an outer procedural parameter is still one here.
                 // Only the address travels, which is why the pair was spilled to
                 // a cell; what it means has to be carried across separately.

@@ -135,7 +135,7 @@ void Codegen::Impl::init(const std::string& progName) {
 // ====================================================================
 
 void Codegen::Impl::defVar(const std::string& name, llvm::Value* ptr, llvm::Type* type,
-                            const TypeNode* typeNode) {
+                            const TypeNode* typeNode, llvm::Value* debugIndirectPtr) {
     if (scopes.empty()) return;
     const std::string Key = toLower(name);
     // A variable of this name hides a constant of it for as long as the scope
@@ -161,7 +161,20 @@ void Codegen::Impl::defVar(const std::string& name, llvm::Value* ptr, llvm::Type
     // -- an alloca, a GlobalVariable, or (for a var parameter) the
     // argument itself, already a pointer at the LLVM level -- so it is
     // always valid to declare a variable's location at, whichever case
-    // this is.
+    // this is.  Valid, but not always STABLE: an alloca's own value is a
+    // compile-time-fixed frame offset, good for the whole function, but a
+    // bare SSA value (a var parameter's raw Argument, or a captured
+    // variable's loaded pointer) is subject to ordinary register
+    // allocation/live-range splitting like any other value, so LLVM can
+    // only describe it with a location list valid for whatever narrow PC
+    // range the backend happens to keep it live -- outside that range a
+    // debugger sees "optimized out" at best, or (confirmed live, for a
+    // captured variable inspected from inside the capturing procedure)
+    // silently wrong data at worst, with no diagnostic either way.
+    // debugIndirectPtr is the caller's fix for its own unstable ptr: a
+    // fresh alloca (stable) that already holds ptr's value, so declaring
+    // through it with one DW_OP_deref reaches the exact same address as
+    // declaring against ptr directly would, just via a stable hop.
     if (DBuilder && typeNode && typeNode->ResolvedType) {
         if (auto* DT = debugTypeOfSemaType(*typeNode->ResolvedType)) {
             const unsigned line = srcMgr_
@@ -174,8 +187,12 @@ void Codegen::Impl::defVar(const std::string& name, llvm::Value* ptr, llvm::Type
             } else if (currentDebugScope && builder.GetInsertBlock()) {
                 auto* DV = DBuilder->createAutoVariable(
                     currentDebugScope, name, DebugFile, line, DT);
+                llvm::Value* storage = debugIndirectPtr ? debugIndirectPtr : ptr;
+                auto* expr = debugIndirectPtr
+                    ? DBuilder->createExpression({llvm::dwarf::DW_OP_deref})
+                    : DBuilder->createExpression();
                 DBuilder->insertDeclare(
-                    ptr, DV, DBuilder->createExpression(),
+                    storage, DV, expr,
                     llvm::DILocation::get(ctx, line, 0, currentDebugScope),
                     builder.GetInsertBlock());
             }
