@@ -1,4 +1,4 @@
-#include "CodegenImpl.h"
+#include "CodeGenImpl.h"
 
 #include "llvm/MC/TargetRegistry.h"
 #include "llvm/Support/TargetSelect.h"
@@ -601,7 +601,7 @@ llvm::Type* Codegen::Impl::llvmTypeOfNode(const TypeNode& node) {
         // 255 survives for exactly one case: a `string(cap)` in a schema body
         // being lowered as the PROBE type.  There the capacity is genuinely
         // unknown until an instance exists, the type built here is nobody's
-        // storage, and CodegenSchema lays the real one out at run time.  Every
+        // storage, and CodeGenSchema lays the real one out at run time.  Every
         // other route now has an answer or is an internal error, rather than a
         // number that describes nothing.
         if (schemaCtx.empty() && node.ResolvedType
@@ -698,7 +698,7 @@ llvm::Type* Codegen::Impl::llvmTypeOf(const TypeNode* denoter,
     // this instance's own — so there the syntax is the only one asked.
     // An extent a discriminant fixes makes both answers meaningless here: Sema
     // holds the probe's and the syntax cannot fold the bound at all, so they
-    // differ by construction.  Neither is the storage -- CodegenSchema lays it
+    // differ by construction.  Neither is the storage -- CodeGenSchema lays it
     // out at run time -- so there is nothing for the two to agree about.
     if (schemaCtx.empty() && resolved && !resolved->isError()
             && !resolved->ExtentVaries && canLowerSemaType(*resolved)) {
@@ -880,7 +880,7 @@ void Codegen::Impl::checkFieldOffsetAgreement(const Type& T, llvm::Type* Built) 
                        + llvm::Twine(Got) + " as it was laid out");
 
         // R4: and the THIRD implementation.  Sema's walk and the static layout
-        // were compared above; the run-time walk in CodegenSchema is a separate
+        // were compared above; the run-time walk in CodeGenSchema is a separate
         // traversal of the same declaration, and until now nothing compared it
         // to either.  What covered it was the differential harness -- a
         // behavioural test over the schema programs somebody thought to write.

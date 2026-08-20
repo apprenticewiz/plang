@@ -1,4 +1,4 @@
-// CodegenSchema.cpp — EP §6.4.7 undiscriminated schema types.
+// CodeGenSchema.cpp — EP §6.4.7 undiscriminated schema types.
 //
 // A schema is a family of types indexed by a tuple of discriminants.  When the
 // discriminants are written out (`vec(4)`) the type is ordinary and lowers like
@@ -15,7 +15,7 @@
 // Everything that needs an extent — indexing, allocation — re-emits the body's
 // bound expressions with the discriminants bound to those run-time values.
 
-#include "CodegenImpl.h"
+#include "CodeGenImpl.h"
 
 #include <ranges>
 
@@ -802,7 +802,7 @@ llvm::Value* Codegen::Impl::rtWalkVariant(const VariantPart& vp,
 /// is wider than any of its alternatives.  rtVariantAlign adds it back for the
 /// question the tag does bear on, which is what the whole record needs.
 ///
-/// The static layout in CodegenTypes.cpp accumulated this same number for
+/// The static layout in CodeGenTypes.cpp accumulated this same number for
 /// itself while placing fields.  It calls this instead: two implementations of
 /// one number is how a cap on it came to be written down three times, and the
 /// blob went 8-aligned around a member that needed 16.

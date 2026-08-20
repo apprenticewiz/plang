@@ -1,4 +1,4 @@
-// CodegenProcParams.cpp — ISO §6.6.3.1 procedural and functional parameters.
+// CodeGenProcParams.cpp — ISO §6.6.3.1 procedural and functional parameters.
 //
 // A procedure passed as a parameter travels as two pointers: where to jump,
 // and the frame its body reads outer variables through.  The frame cannot be
@@ -15,7 +15,7 @@
 // signature; each is wrapped in a thunk that accepts a frame and passes it on
 // only if the target wants one.
 
-#include "CodegenImpl.h"
+#include "CodeGenImpl.h"
 
 #include <optional>
 
@@ -385,7 +385,7 @@ Codegen::Impl::emitProcParamCall(const VarEntry& ve,
     if (fnTy->getReturnType()->isVoidTy()) return nullptr;
     // A string result comes back as the whole { length, bytes } struct, but
     // every consumer of a string expression expects its address -- the same
-    // spill the direct-call path already does (CodegenExprs.cpp).  Missing
+    // spill the direct-call path already does (CodeGenExprs.cpp).  Missing
     // here, a functional parameter returning string(N) handed the raw struct
     // to plang_str_assign, which wants a pointer: "Call parameter type does
     // not match function signature!", an LLVM IR verifier abort.

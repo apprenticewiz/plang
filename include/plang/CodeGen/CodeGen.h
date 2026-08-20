@@ -18,7 +18,7 @@ namespace plang {
 class Codegen {
 public:
     explicit Codegen(const LangOptions& Opts = {});
-    ~Codegen(); ///< defined in Codegen.cpp where Impl is complete
+    ~Codegen(); ///< defined in CodeGen.cpp where Impl is complete
 
     /// Emits a complete LLVM module for the program to \p os as textual IR.
     /// Precondition: Sema has verified the program without errors.

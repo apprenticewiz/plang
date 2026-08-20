@@ -4300,7 +4300,7 @@ TEST(SeparateCompilation, AnExportedVariableIsSizedByItsInterfacesConstants) {
     // Sema resolved it", refusing a legal program rather than miscompiling it.
     //
     // Fixed by array bounds coming from Sema rather than being re-folded here,
-    // in CodegenTypes.cpp; no module-specific change.  The test is in this file
+    // in CodeGenTypes.cpp; no module-specific change.  The test is in this file
     // because nothing else would notice if that stopped covering it.
     auto R = compileTwoFiles(
         "module M interface;\n"

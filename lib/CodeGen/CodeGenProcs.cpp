@@ -1,5 +1,5 @@
 #include <set>
-#include "CodegenImpl.h"
+#include "CodeGenImpl.h"
 using namespace plang;
 
 // ====================================================================

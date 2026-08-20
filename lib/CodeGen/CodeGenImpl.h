@@ -1,4 +1,4 @@
-// CodegenImpl.h — Private implementation header for Codegen.
+// CodeGenImpl.h — Private implementation header for Codegen.
 // NOT installed; used only by the CodeGen translation units.
 #pragma once
 
@@ -6,7 +6,7 @@
 #include "plang/Basic/PascalFileLayout.h"
 #include "plang/Basic/RequiredRecordLayouts.h"
 #include "plang/Basic/SourceManager.h"
-#include "plang/CodeGen/Codegen.h"
+#include "plang/CodeGen/CodeGen.h"
 #include "plang/Sema/Sema.h"
 #include "plang/Sema/Type.h"
 
@@ -51,7 +51,7 @@
 using namespace plang;
 
 // ---------------------------------------------------------------------------
-// Free utility functions (defined in Codegen.cpp, used by multiple TUs).
+// Free utility functions (defined in CodeGen.cpp, used by multiple TUs).
 // ---------------------------------------------------------------------------
 
 std::optional<int64_t> tryEvalConstInt(
@@ -444,7 +444,7 @@ struct Codegen::Impl {
     // Five of these were separate maps, each independently keyed by the same
     // mangled name and indexed by the same AST argument position, each
     // recording one fact about it.  Nothing tied them together: the four
-    // call sites that build them (CodegenProcs.cpp's four parameter-kind
+    // call sites that build them (CodeGenProcs.cpp's four parameter-kind
     // branches) always pushed to all five in lockstep by construction, but a
     // future one that forgot a single push_back would desync that entry from
     // every other function's by one position, silently.  One vector of one
@@ -1488,7 +1488,7 @@ struct Codegen::Impl {
                            bool isIndex, SourceLocation Loc);
 
     // ====================================================================
-    // EP §6.4.7: undiscriminated schema types (CodegenSchema.cpp)
+    // EP §6.4.7: undiscriminated schema types (CodeGenSchema.cpp)
     // ====================================================================
     /// Records the schemas declared in `block` so their bodies can be
     /// re-emitted with run-time discriminants.

@@ -128,7 +128,7 @@ struct Type {
     /// StrCapacity and the index bounds below hold the probe's answer and are
     /// NOT the storage.  Nothing may fold against them: the object carries its
     /// discriminants and the layout is worked out from those at run time.  A
-    /// type that reaches codegen with this set is laid out by CodegenSchema's
+    /// type that reaches codegen with this set is laid out by CodeGenSchema's
     /// run-time path rather than by the specialising one.
     bool ExtentVaries{false};
 

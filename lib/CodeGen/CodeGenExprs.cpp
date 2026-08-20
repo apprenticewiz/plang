@@ -1,4 +1,4 @@
-#include "CodegenImpl.h"
+#include "CodeGenImpl.h"
 using namespace plang;
 
 // See NumExprKinds in AstBase.h.
@@ -157,7 +157,7 @@ llvm::Value* Codegen::Impl::emitExpr(const ExprNode& e) {
         // happened to be: in `record s: string(20); t: array[1..5] of char end`,
         // r.s[1..10] came back five characters long, its capacity taken from t.
         //
-        // The assignment path a few lines away in CodegenStmts already asks
+        // The assignment path a few lines away in CodeGenStmts already asks
         // exprStrCap.  Only the rvalue did this.
         // Two different capacities, and conflating them cut a
         // discriminant-sized string's substring to one character: the result

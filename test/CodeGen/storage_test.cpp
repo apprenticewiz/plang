@@ -16,7 +16,7 @@
 
 #include "plang/AST/TypeContext.h"
 #include "plang/Basic/LangOptions.h"
-#include "plang/CodeGen/Codegen.h"
+#include "plang/CodeGen/CodeGen.h"
 #include "plang/Lex/Scanner.h"
 #include "plang/Parse/Parser.h"
 #include "plang/Sema/Sema.h"

@@ -16,7 +16,7 @@
 
 #include "plang/AST/AstPrinter.h"
 #include "plang/AST/Ast.h"
-#include "plang/CodeGen/Codegen.h"
+#include "plang/CodeGen/CodeGen.h"
 #include "plang/Basic/Diagnostic.h"
 #include "plang/Driver/Options.h"
 #include "plang/Basic/DiagnosticPrinter.h"

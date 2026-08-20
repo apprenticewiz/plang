@@ -1,9 +1,9 @@
-// Codegen.cpp — LLVM IR generation using the LLVM C++ API.
+// CodeGen.cpp — LLVM IR generation using the LLVM C++ API.
 //
 // No exceptions are thrown or caught in this file; errors are emitted as
 // IR comments and the module is printed regardless.
 
-#include "CodegenImpl.h"
+#include "CodeGenImpl.h"
 
 #include "plang/Basic/Arith.h"
 #include "llvm/Passes/OptimizationLevel.h"

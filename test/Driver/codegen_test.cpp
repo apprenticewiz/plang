@@ -751,7 +751,7 @@ TEST(CodegenFiles, RewriteOnOutputKeepsStdout) {
     EXPECT_EQ(R.Stdout, "still stdout\n");
 }
 
-TEST(CodegenIO, ReadCharReadsVerbatimIncludingSpace) {
+TEST(CodeGenIO, ReadCharReadsVerbatimIncludingSpace) {
     // ISO §6.9.2: read(ch) for a char variable reads the next character
     // including spaces; it must NOT skip whitespace as scanf(" %c") would.
     auto R = compileAndRun(
@@ -765,7 +765,7 @@ TEST(CodegenIO, ReadCharReadsVerbatimIncludingSpace) {
     EXPECT_EQ(R.Stdout, "65 32 66\n");
 }
 
-TEST(CodegenIO, ReadCharReadsNewlineVerbatim) {
+TEST(CodeGenIO, ReadCharReadsNewlineVerbatim) {
     // A newline between two chars must be read as the second character,
     // not silently skipped.
     auto R = compileAndRun(
@@ -1168,7 +1168,7 @@ TEST(SemaSets, OrderingOperatorsRejected) {
 // call.  Codegen used to treat the bare name as an out-of-scope variable and
 // emit a reference to a global "g_pick" that nothing defines, so the program
 // failed at link time rather than running.
-TEST(CodegenProcs, ParameterlessFunctionIdentifierIsACall) {
+TEST(CodeGenProcs, ParameterlessFunctionIdentifierIsACall) {
     auto R = compileAndRun(
         "program p;\n"
         "var g: integer;\n"
@@ -1181,7 +1181,7 @@ TEST(CodegenProcs, ParameterlessFunctionIdentifierIsACall) {
 }
 
 // The call still needs the static link, so it cannot bypass the call path.
-TEST(CodegenProcs, ParameterlessNestedFunctionSeesEnclosingLocals) {
+TEST(CodeGenProcs, ParameterlessNestedFunctionSeesEnclosingLocals) {
     auto R = compileAndRun(
         "program p;\n"
         "function outer(n: integer): integer;\n"
@@ -2048,7 +2048,7 @@ TEST(RedeclaredRequired, UserProcedureWins) {
 // A routine the program declares used to be mangled `plang_<name>`, the
 // namespace the runtime's own entry points live in, so `page` here collided
 // with the runtime's `plang_page` and the link failed.  User code is mangled
-// `pas_` now; see the mangling note in CodegenImpl.h.
+// `pas_` now; see the mangling note in CodeGenImpl.h.
 TEST(RedeclaredRequired, UserProcedureWinsOverRuntimeSymbolName) {
     auto R = compileAndRun(
         "program p(output);\n"

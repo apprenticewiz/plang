@@ -63,22 +63,22 @@ in the current environment.  Every confirmed memory-corruption finding is here.
 
 | site | what it re-resolves |
 |---|---|
-| `CodegenTypes.cpp:203` | any `NamedTypeNode` reached from a foreign denoter |
-| `CodegenTypes.cpp:309` | `recordLayouts` memoises on (node, schemaCtx) while the layout also depends on ambient `consts`/`typeAliases` — **the poisoning source is fixed; the memo key itself is still wrong in principle** |
-| `CodegenExprs.cpp:1467` | `resolveRecordStructType` case 2: `ve->typeNode`, then by spelling |
-| `CodegenExprs.cpp:1759` | re-folds a declaration's `Low`/`High` against use-site `consts` — **covered by the array-bound rule** |
-| `CodegenStmts.cpp:839` | `new(p)`: the pointer's recorded denoter through `denoterOf`'s spelling walk |
-| `CodegenRuntime.cpp:420` | `getFileElemType`: the file variable's element denoter, by spelling — **covered by the `NamedTypeNode` rule**; no separate change needed |
-| `CodegenProcs.cpp:101` | interface `var` denoters lowered in the body's environment — **covered by the array-bound rule** |
-| `CodegenProcs.cpp:906`, `:917` | a constant's `llvm::Value` **emitted in one function** and read from another |
-| `CodegenProcs.cpp:869` | enum ordinals pushed into the flat `consts` map — probed through records, inline records and file components; no reachable defect found |
-| `CodegenSchema.cpp:34`, `:40` | `schemaDefs_`, flat and never restored |
-| `CodegenSchema.cpp:181`, `:190` | discriminant names and body denoter, by spelling |
-| `CodegenSchema.cpp:184` | **the archetype**: a body's extent expressions re-emitted at the allocation site |
-| `CodegenSchema.cpp:527`, `:528` | a body component named by a type, sized at the use site |
-| `CodegenStmts.cpp:359`, `:1114` | subrange bounds and `with` field offsets, re-emitted from the declaration |
+| `CodeGenTypes.cpp:203` | any `NamedTypeNode` reached from a foreign denoter |
+| `CodeGenTypes.cpp:309` | `recordLayouts` memoises on (node, schemaCtx) while the layout also depends on ambient `consts`/`typeAliases` — **the poisoning source is fixed; the memo key itself is still wrong in principle** |
+| `CodeGenExprs.cpp:1467` | `resolveRecordStructType` case 2: `ve->typeNode`, then by spelling |
+| `CodeGenExprs.cpp:1759` | re-folds a declaration's `Low`/`High` against use-site `consts` — **covered by the array-bound rule** |
+| `CodeGenStmts.cpp:839` | `new(p)`: the pointer's recorded denoter through `denoterOf`'s spelling walk |
+| `CodeGenRuntime.cpp:420` | `getFileElemType`: the file variable's element denoter, by spelling — **covered by the `NamedTypeNode` rule**; no separate change needed |
+| `CodeGenProcs.cpp:101` | interface `var` denoters lowered in the body's environment — **covered by the array-bound rule** |
+| `CodeGenProcs.cpp:906`, `:917` | a constant's `llvm::Value` **emitted in one function** and read from another |
+| `CodeGenProcs.cpp:869` | enum ordinals pushed into the flat `consts` map — probed through records, inline records and file components; no reachable defect found |
+| `CodeGenSchema.cpp:34`, `:40` | `schemaDefs_`, flat and never restored |
+| `CodeGenSchema.cpp:181`, `:190` | discriminant names and body denoter, by spelling |
+| `CodeGenSchema.cpp:184` | **the archetype**: a body's extent expressions re-emitted at the allocation site |
+| `CodeGenSchema.cpp:527`, `:528` | a body component named by a type, sized at the use site |
+| `CodeGenStmts.cpp:359`, `:1114` | subrange bounds and `with` field offsets, re-emitted from the declaration |
 
-`CodegenProcs.cpp:917` deserves its own line: it stores an `llvm::Value`
+`CodeGenProcs.cpp:917` deserves its own line: it stores an `llvm::Value`
 produced inside one function into a flat map that a later function reads.  That
 is not a scope bug, it is a cross-function SSA reference.
 
@@ -113,8 +113,8 @@ than it is.  They belong to the later phases:
   dangle — the same defect as the raw `Type*` in `~TypeContext`.
 - **R4, one layout engine** — `Sema::layoutVariantCase` is a hand-written
   mirror of `Codegen::Impl::layoutVariantCase`, and **only total size is ever
-  compared; field offsets are compared by nobody** (`CodegenTypes.cpp:218`,
-  `CodegenSchema.cpp:570`).
+  compared; field offsets are compared by nobody** (`CodeGenTypes.cpp:218`,
+  `CodeGenSchema.cpp:570`).
 - **R5, resolve once — DONE.**  Worse than the audit said: with a counting
   function in the subscript, `q^.a[next].s` walked its path **three** times in
   a comparison, a write, a `length`, a whole-value assignment, a substring
@@ -256,7 +256,7 @@ Some class A sites need no edit of their own: they reach a foreign node
 *through* `llvmTypeOfNode`, so the `NamedTypeNode` rule already fixes them.
 `getFileElemType` is one — an array-typed file component was sized from an
 inner procedure's homonym and corrupted the heap, and it is correct now without
-`CodegenRuntime.cpp` being touched.  Each such site still earns a regression
+`CodeGenRuntime.cpp` being touched.  Each such site still earns a regression
 test, because what covers it today is one condition in another file.
 
 1. **R1 — class A.**  Route every foreign-node site through Sema's annotation.
