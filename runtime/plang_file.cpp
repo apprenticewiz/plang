@@ -54,6 +54,7 @@ static const char* findBinding(PascalFile *F);
 
 /// Defined with the other runtime error reporters in plang_sys.cpp.
 [[noreturn]] void plang_err_bind_already_bound(void);
+[[noreturn]] void plang_err_binding_table_full(void);
 
 /// Look at the next character without consuming it.
 static void prime(PascalFile *F) {
@@ -694,7 +695,10 @@ static void setBinding(PascalFile *F, const char *Name) {
             return;
         }
     }
-    // Table full — silently ignore.
+    // plang_close never clears a slot (only an explicit unbind/rebind does,
+    // via clearBinding), so a program that binds 65 distinct file variables
+    // and never unbinds any of them genuinely exhausts this table.
+    plang_err_binding_table_full();
 }
 
 // ---- EP §6.7.5.6: bind / unbind ----

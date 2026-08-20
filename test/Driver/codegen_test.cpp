@@ -2013,6 +2013,25 @@ TEST(RuntimeChecks, NegativeSchemaCapacityFromASecondDiscriminantReports) {
     EXPECT_NE(R.Stderr.find("allocation size"), std::string::npos) << R.Stderr;
 }
 
+// EP §6.7.5.6: the binding table (runtime/plang_file.cpp) is a fixed
+// 64-entry array, and plang_close never frees a slot -- only an explicit
+// unbind/rebind does. 65 distinct, never-unbound bindable file variables
+// genuinely exhaust it.
+TEST(RuntimeChecks, TooManyBoundFilesReports) {
+    std::string Src = "program p(output);\nvar\n  ";
+    for (int i = 1; i <= 65; ++i)
+        Src += "f" + std::to_string(i) + ": bindable text; ";
+    Src += "\n  b: BindingType;\nbegin\n  b.name := 'f';\n";
+    for (int i = 1; i <= 65; ++i)
+        Src += "  bind(f" + std::to_string(i) + ", b);\n";
+    Src += "  writeln('should not get here')\nend.\n";
+
+    auto R = compileAndRun(Src, "-std=iso10206");
+    EXPECT_EQ(R.ExitCode, 70);
+    EXPECT_EQ(R.Stdout, "");
+    EXPECT_NE(R.Stderr.find("too many bound files"), std::string::npos) << R.Stderr;
+}
+
 // ---------------------------------------------------------------------------
 // ISO §6.2.2.10 — a required identifier may be redeclared
 //

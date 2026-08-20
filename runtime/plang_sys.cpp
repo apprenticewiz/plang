@@ -185,6 +185,15 @@ void plang_err_mod_divisor(int64_t D) {
     std::exit(PlangRuntimeErrorStatus);
 }
 
+/// EP §6.7.5.6: the binding table is a small fixed array (plang_file.cpp),
+/// not an ISO/EP-mandated limit -- reported deterministically rather than
+/// silently dropping the binding once every slot is in use.
+[[noreturn]] void plang_err_binding_table_full(void) {
+    std::fflush(stdout);
+    std::fprintf(stderr, "plang runtime: too many bound files (limit 64)\n");
+    std::exit(PlangRuntimeErrorStatus);
+}
+
 /// EP §6.7.5.4: substr's result must lie wholly within the source string.
 [[noreturn]] void plang_err_substr(int64_t I, int64_t N, int64_t Len) {
     std::fflush(stdout);
