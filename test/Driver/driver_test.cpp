@@ -380,6 +380,42 @@ TEST(Driver, DashGGivesACapturedVariableAStableDebugLocationInsideTheCapturingPr
     })) << R.IR;
 }
 
+TEST(Driver, DashGGivesAVarParameterAStableDebugLocationTooNotJustTheCaptureCase) {
+    // The exact same root cause as the capture-loop fix above, found by a
+    // design-review pass while scoping that fix and confirmed with a real
+    // debugger (not just reasoning by analogy): a `var` parameter's debug
+    // declare targeted the raw incoming Argument directly with an empty
+    // DIExpression. An Argument is not inherently more location-stable than
+    // a load result once past function entry -- it lives in a register per
+    // the calling convention and is subject to the same live-range-driven
+    // splitting. Confirmed with both gdb (`<optimized out>`) and lldb
+    // (`variable not available`) on a `var` parameter read once early and
+    // not touched again for several statements: an honest non-answer
+    // rather than the capture case's silently wrong one, but still a real
+    // gap relative to Clang's own -O0 guarantee (every local/parameter
+    // always inspectable), and more common, since `var` parameters are
+    // ordinary and captures are not. Same fix: spill the Argument into its
+    // own debug-only stable alloca, declare through that with DW_OP_deref.
+    auto R = compileAndEmitIR(
+        "program p(output);\n"
+        "procedure consume(var n: integer);\n"
+        "var a: integer;\n"
+        "begin\n"
+        "  a := n;\n"
+        "  writeln(a)\n"
+        "end;\n"
+        "\n"
+        "begin\n"
+        "end.\n", "-g");
+    ASSERT_TRUE(R.Ok) << R.Stderr;
+    EXPECT_TRUE(irContainsNone(R.IR, {"#dbg_declare(ptr %n.param,"})) << R.IR;
+    EXPECT_TRUE(irContainsAll(R.IR, {
+        "store ptr %n.param, ptr %n.dbg,",
+        "#dbg_declare(ptr %n.dbg, ",
+        "!DIExpression(DW_OP_deref)",
+    })) << R.IR;
+}
+
 TEST(Driver, DashGGivesEachScalarKindItsOwnDIType) {
     auto R = compileAndEmitIR(
         "program p(output);\n"

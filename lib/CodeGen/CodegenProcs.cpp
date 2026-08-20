@@ -893,7 +893,16 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
                 const TypeNode* tn   = flatIdx < paramTypeNodes.size()
                                         ? paramTypeNodes[flatIdx] : nullptr;
                 if (isV) {
-                    defVar(nm, &*it, vt, tn);
+                    // -g: &*it is the raw incoming Argument, not an alloca --
+                    // unstable, per defVar's own comment on debugIndirectPtr.
+                    // Same -g-gated debug-only spill as the capture loop.
+                    llvm::Value* debugAddr = nullptr;
+                    if (DBuilder) {
+                        auto* slot = createEntryAlloca(ptrTy, nm + ".dbg");
+                        builder.CreateStore(&*it, slot);
+                        debugAddr = slot;
+                    }
+                    defVar(nm, &*it, vt, tn, debugAddr);
                 } else {
                     auto* a = createEntryAlloca(vt, nm + ".addr");
                     builder.CreateStore(&*it, a);
