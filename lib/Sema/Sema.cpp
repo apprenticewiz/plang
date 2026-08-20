@@ -481,33 +481,55 @@ void Sema::processImports(const std::vector<ImportClause>& Imports) {
 
         auto It = ModuleExports_.find(Key);
         if (It == ModuleExports_.end()) {
-            // Try to load the module from a .pmi file.
-            bool Loaded = false;
-            // Search in ModuleSearchPaths first.
-            for (const auto& Dir : Opts.ModuleSearchPaths) {
-                std::string PMIPath = Dir + "/" + Clause.ModuleName + ".pmi";
-                if (llvm::sys::fs::exists(PMIPath)) {
-                    loadPMI(Key, PMIPath);
+            // Try every candidate .pmi path in turn.  A candidate that
+            // EXISTS but is broken (malformed, or names a different module)
+            // must not shadow a working one elsewhere on the search path --
+            // only a genuine success stops the search; a broken candidate is
+            // remembered and the search keeps going, exactly like "does not
+            // exist" does already.
+            PMILoadResult LastFailure{PMILoadResult::Status::Ok, ""};
+            std::string   LastFailurePath;
+            auto tryCandidate = [&](const std::string& PMIPath) {
+                if (!llvm::sys::fs::exists(PMIPath)) return false;
+                PMILoadResult R = loadPMI(Key, PMIPath);
+                if (R.St == PMILoadResult::Status::Ok) {
                     It = ModuleExports_.find(Key);
-                    Loaded = true;
+                    return true;
+                }
+                if (R.St != PMILoadResult::Status::Unreadable) {
+                    LastFailure     = R;
+                    LastFailurePath = PMIPath;
+                }
+                return false;
+            };
+
+            // Search in ModuleSearchPaths first, then the current directory.
+            bool Found = false;
+            for (const auto& Dir : Opts.ModuleSearchPaths)
+                if (tryCandidate(Dir + "/" + Clause.ModuleName + ".pmi")) {
+                    Found = true;
                     break;
                 }
-            }
-            // Fallback: try current directory.
-            if (!Loaded) {
-                std::string PMIPath = "./" + Clause.ModuleName + ".pmi";
-                if (llvm::sys::fs::exists(PMIPath)) {
-                    loadPMI(Key, PMIPath);
-                    It = ModuleExports_.find(Key);
+            if (!Found) Found = tryCandidate("./" + Clause.ModuleName + ".pmi");
+
+            if (!Found) {
+                switch (LastFailure.St) {
+                case PMILoadResult::Status::ParseFailed:
+                    error(Clause.Loc, diag::err_malformed_module_interface,
+                          {Clause.ModuleName, LastFailurePath, LastFailure.Detail});
+                    break;
+                case PMILoadResult::Status::WrongModule:
+                    error(Clause.Loc, diag::err_module_interface_name_mismatch,
+                          {LastFailurePath, Clause.ModuleName, LastFailure.Detail});
+                    break;
+                default:
+                    // Nothing declares this module and no interface for it was
+                    // found, so every name the clause was to bring in is missing.
+                    // Saying so once here beats an undeclared-identifier error at
+                    // each use, none of which mentions the module.
+                    error(Clause.Loc, diag::err_unknown_module,
+                          {Clause.ModuleName});
                 }
-            }
-            if (It == ModuleExports_.end()) {
-                // Nothing declares this module and no interface for it was
-                // found, so every name the clause was to bring in is missing.
-                // Saying so once here beats an undeclared-identifier error at
-                // each use, none of which mentions the module.
-                error(Clause.Loc, diag::err_unknown_module,
-                      {Clause.ModuleName});
                 continue;
             }
         }
@@ -579,10 +601,13 @@ void Sema::processImports(const std::vector<ImportClause>& Imports) {
 // EP §6.11: .pmi file loading (separate compilation)
 // ---------------------------------------------------------------------------
 
-void Sema::loadPMI(const std::string& Key, const std::string& Path) {
-    // Read the .pmi file contents.
+Sema::PMILoadResult Sema::loadPMI(const std::string& Key, const std::string& Path) {
+    // Read the .pmi file contents.  Not found/not readable is not this
+    // function's problem to diagnose -- the caller tries more search-path
+    // candidates first, and only reports "no module found" once every one
+    // of them has come up empty.
     std::ifstream PMIFile(Path);
-    if (!PMIFile) return;
+    if (!PMIFile) return {PMILoadResult::Status::Unreadable, ""};
     std::ostringstream SS;
     SS << PMIFile.rdbuf();
 
@@ -592,7 +617,12 @@ void Sema::loadPMI(const std::string& Key, const std::string& Path) {
     std::string Wrapped = SS.str();
     Wrapped += "\nprogram __pmi__;\nbegin end.\n";
 
-    // Parse the wrapped content using an in-memory scanner.
+    // Parse the wrapped content using an in-memory scanner.  PMIDiags and
+    // PMISrcMgr are both local to this call -- a Diagnostic's own SourceLoc
+    // would dangle the moment this function returns, so what a caller can
+    // safely keep is PMIDiags's own fully-formatted Message text (built
+    // eagerly in report(), not deferred), never the located diagnostic
+    // objects themselves.
     DiagnosticsEngine PMIDiags;
     // Use EP mode so 'forward' and other EP keywords are recognized.
     LangOptions PMIOpts = Opts;
@@ -601,18 +631,47 @@ void Sema::loadPMI(const std::string& Key, const std::string& Path) {
     Scanner PSc(PMISrcMgr, "<" + Path + ">", Wrapped, PMIDiags, PMIOpts);
     Parser  PP(std::move(PSc), PMIDiags, PMIOpts);
     auto Prog = PP.parse();
-    if (!Prog) return; // parse failed; silently ignore
+    // !Prog, not PMIDiags.hasErrors(): confirmed empirically, not just by
+    // reasoning about the two conditions in the abstract.  The synthetic
+    // "program __pmi__;" wrapper above trips this compiler's own
+    // leading/trailing-underscore identifier rule -- a real, pre-existing
+    // scanner defect in the wrapper name, unrelated to whatever a real .pmi
+    // actually says -- and the parser's error recovery still returns a
+    // valid Prog despite it, so hasErrors() is true on every load, including
+    // ones that have always worked. Using hasErrors() as the gate broke
+    // importing a real, freshly-compiler-generated .pmi outright; !Prog
+    // matches the original, working behavior.
+    if (!Prog) {
+        std::string Detail;
+        for (const auto& D : PMIDiags.diagnostics())
+            if (D.Severity == DiagSeverity::Error) { Detail = D.Message; break; }
+        return {PMILoadResult::Status::ParseFailed, Detail};
+    }
 
     // Read exactly as an interface written in this file would be, so that
     // separate compilation and single-file compilation agree by construction.
-    for (auto* Mod : Prog->Modules)
-        if (Mod->IsInterface && eqCI(Mod->Name, Key))
+    bool        Matched = false;
+    std::string OtherInterfaces;
+    for (auto* Mod : Prog->Modules) {
+        if (!Mod->IsInterface) continue;
+        if (eqCI(Mod->Name, Key)) {
             processModuleInterface(*Mod);
+            Matched = true;
+        } else {
+            if (!OtherInterfaces.empty()) OtherInterfaces += ", ";
+            OtherInterfaces += "'" + Mod->Name + "'";
+        }
+    }
+    // A .pmi that parses cleanly but names a different module (renamed,
+    // stale, copy-pasted from elsewhere) used to fall through to the exact
+    // same "no module found" as a file that does not exist at all.
+    if (!Matched) return {PMILoadResult::Status::WrongModule, OtherInterfaces};
 
     // The types resolved above point back into this tree — a record type
     // remembers the declaration it was laid out from — and codegen follows
     // those pointers long after this call has returned, so it is kept.
     LoadedInterfaces_.push_back(std::move(Prog));
+    return {PMILoadResult::Status::Ok, ""};
 }
 
 std::vector<const ModuleNode*> Sema::loadedInterfaces() const {

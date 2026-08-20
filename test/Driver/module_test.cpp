@@ -1075,6 +1075,74 @@ TEST(ImportClause, AnUnknownModuleIsReported) {
     EXPECT_NE(R.Stderr.find("no module named 'nowhere'"), std::string::npos);
 }
 
+// A .pmi found on the search path but syntactically broken used to collapse
+// into the exact same "no module named" message a completely absent module
+// gets -- actively misleading, since "write the module" is not the fix for
+// "the interface file that already exists is corrupt".
+TEST(ImportClause, AMalformedInterfaceFileIsReportedDistinctlyFromUnknown) {
+    CaseDir C;
+    C.write("broken.pmi", "not valid pascal ???");
+    C.write("prog.pas",
+            "program p;\n"
+            "  import broken;\n"
+            "begin end.\n");
+    auto R = C.compileAndRunFile("prog.pas", kEP + " -I.");
+    EXPECT_NE(R.ExitCode, 0);
+    EXPECT_EQ(R.Stderr.find("no module named"), std::string::npos) << R.Stderr;
+    EXPECT_NE(R.Stderr.find("could not be parsed"), std::string::npos) << R.Stderr;
+}
+
+// A .pmi that parses cleanly but declares a different interface than the one
+// being imported (renamed module, stale file, copy-paste) used to silently
+// fall through to "no module named" too, for the same underlying reason.
+TEST(ImportClause, AWrongNamedInterfaceFileIsReportedDistinctlyFromUnknown) {
+    CaseDir C;
+    C.write("broken.pmi", "module notthemodule interface;\nend.\n");
+    C.write("prog.pas",
+            "program p;\n"
+            "  import broken;\n"
+            "begin end.\n");
+    auto R = C.compileAndRunFile("prog.pas", kEP + " -I.");
+    EXPECT_NE(R.ExitCode, 0);
+    EXPECT_EQ(R.Stderr.find("no module named"), std::string::npos) << R.Stderr;
+    EXPECT_NE(R.Stderr.find("does not declare"), std::string::npos) << R.Stderr;
+}
+
+// The bug the fix for the two tests above turned up: the search loop used to
+// stop at the first *existing* candidate regardless of whether it actually
+// loaded, so a broken .pmi on an earlier search-path entry silently shadowed
+// a working one on a later entry -- the module was findable, just never
+// found.
+TEST(ImportClause, ABrokenInterfaceOnAnEarlierSearchPathDoesNotShadowAWorkingOneOnALater) {
+    CaseDir C;
+    // A real module, compiled in place so its own writer produces a real,
+    // well-formed good.pmi beside it in dir2 -- no need to guess the
+    // writer's exact output format for the working side of this test.
+    C.write("dir2/good.pas",
+            "module good;\n"
+            "  function declared: integer;\n"
+            "  begin declared := 7 end;\n"
+            "end.\n");
+    ASSERT_EQ(std::system((std::string(PLANG_PATH) + " " + kEP
+                           + " -c " + C.at("dir2/good.pas")
+                           + " -o " + C.at("dir2/good.o")).c_str()), 0);
+    ASSERT_TRUE(C.exists("dir2/good.pmi"));
+
+    C.write("dir1/good.pmi", "not valid pascal ???");
+    C.write("prog.pas",
+            "program p;\n"
+            "  import good (declared);\n"
+            "begin writeln(declared()) end.\n");
+    const std::string Cmd = std::string(PLANG_PATH) + " " + kEP
+        + " -I" + C.at("dir1") + " -I" + C.at("dir2")
+        + " " + C.at("prog.pas") + " " + C.at("dir2/good.o")
+        + " -o " + C.at("prog") + " 2>" + C.at("prog.err");
+    ASSERT_EQ(std::system(Cmd.c_str()), 0) << C.read("prog.err");
+
+    const std::string Out = runCmd(C.at("prog") + " < /dev/null");
+    EXPECT_EQ(Out, "7\n");
+}
+
 TEST(ImportClause, ANameTheInterfaceDoesNotExportIsReported) {
     auto R = compileAndRun(
         "module m;\n"

@@ -165,9 +165,23 @@ private:
     void harvestModuleExports  (const ModuleNode& Mod);
 
     // --- EP §6.11: separate compilation (.pmi file loading) ---
+
+    /// What happened trying to load one candidate .pmi path.  Unreadable
+    /// behaves like "this candidate doesn't exist" -- normal control flow
+    /// while more search-path entries remain, not an error -- so it carries
+    /// no detail.  ParseFailed and WrongModule are real problems with a file
+    /// that DOES exist, and the caller decides what to report once every
+    /// candidate has been tried, not loadPMI itself: reporting from inside
+    /// here would stop the search on the first existing-but-broken file
+    /// instead of trying the rest of the search path.
+    struct PMILoadResult {
+        enum class Status { Ok, Unreadable, ParseFailed, WrongModule } St;
+        std::string Detail; ///< location-free text; empty for Ok/Unreadable
+    };
+
     // Load a .pmi interface file for module \p Key (lowercase) from \p Path.
     // Parses the PMI content, resolves types, and populates ModuleExports_[Key].
-    void loadPMI(const std::string& Key, const std::string& Path);
+    PMILoadResult loadPMI(const std::string& Key, const std::string& Path);
 
     /// The syntax trees of the interfaces loaded from .pmi files.  Types
     /// resolved from them keep pointers into the declarations they came from,

@@ -334,6 +334,12 @@ DIAG(err_import_name_clash, Error, "'%0' is imported from both '%1' and '%2'")
 DIAG(err_unknown_module, Error,
      "no module named '%0' was found; it must be defined in this file or have "
      "an interface file on the module search path")
+// A .pmi found on the search path but broken -- distinct from err_unknown_module
+// so "regenerate the interface file" isn't confused with "write the module".
+DIAG(err_malformed_module_interface, Error,
+     "module interface for '%0' at '%1' could not be parsed: %2")
+DIAG(err_module_interface_name_mismatch, Error,
+     "module interface at '%0' does not declare '%1'%2")
 // EP §6.11.3: the import-list may only name what the interface exports.
 DIAG(err_import_name_not_exported, Error,
      "'%0' is not exported by module '%1'")
