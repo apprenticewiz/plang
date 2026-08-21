@@ -49,6 +49,7 @@
 #include "CGLinkage.h"
 #include "CGSymbolTable.h"
 #include "CGTypes.h"
+#include "ClosureAndCallABI.h"
 #include "ComplexOps.h"
 #include "ConstFold.h"
 #include "LabelGotoEngine.h"
@@ -109,6 +110,9 @@ struct Codegen::Impl {
     /// CodeGenExprs.cpp name them directly).
     using SchemaRef  = SchemaAccess::SchemaRef;
     using SchemaPath = SchemaAccess::SchemaPath;
+    // Procedural-parameter ABI + conformant-array marshalling; built after
+    // schemaAccess_ (needs it for schemaPathOf/pushSchemaArgs).
+    std::unique_ptr<ClosureAndCallABI>    closureAbi_;
 
     // ---- common type aliases (set in init()) ----
     llvm::IntegerType* i1Ty{nullptr};
@@ -342,42 +346,55 @@ struct Codegen::Impl {
     /// Pushes an actual for a conformant array formal: the array, then a lo/hi
     /// pair per dimension (EP §6.7.3.7).
     void pushConformantArgs(std::vector<llvm::Value*>& args, const ExprNode& arg,
-                            size_t dims);
-
-    /// Discriminants a schema formal of this denoter takes, or 0 (EP §6.4.7).
-    [[nodiscard]] unsigned schemaParamDiscCount(const TypeNode* t) const {
-        if (!t || !t->ResolvedType || t->ResolvedType->Kind != TypeKind::Schema)
-            return 0;
-        return static_cast<unsigned>(t->ResolvedType->SchemaDiscs.size());
+                            size_t dims) {
+        closureAbi_->pushConformantArgs(args, arg, dims);
     }
 
     /// The { entry point, frame } cell a procedural parameter is held in.
+    /// Kept on Impl (not just forwarded) since ClosureAndCallABI's own
+    /// procPairTy is private -- this is CodeGenProcs.cpp's own copy of the
+    /// same one-liner, unaffected by the extraction.
     llvm::StructType* procPairTy() {
         return llvm::StructType::get(ctx, {ptrTy, ptrTy});
     }
-    void storeProcPair(llvm::Value* cell, llvm::Value* fn, llvm::Value* frame);
+    void storeProcPair(llvm::Value* cell, llvm::Value* fn, llvm::Value* frame) {
+        closureAbi_->storeProcPair(cell, fn, frame);
+    }
     /// Reads a closure cell back as (entry point, frame).
-    std::pair<llvm::Value*, llvm::Value*> loadProcPair(llvm::Value* cell);
+    std::pair<llvm::Value*, llvm::Value*> loadProcPair(llvm::Value* cell) {
+        return closureAbi_->loadProcPair(cell);
+    }
 
     /// The LLVM signature a procedural parameter is called through.
-    llvm::FunctionType* procParamFnType(const ProcedureTypeNode& node);
+    llvm::FunctionType* procParamFnType(const ProcedureTypeNode& node) {
+        return closureAbi_->procParamFnType(node);
+    }
 
     /// A wrapper around \p target with that uniform signature.
     llvm::Function* procParamThunk(llvm::Function* target,
-                                   const ProcedureTypeNode& node);
+                                   const ProcedureTypeNode& node) {
+        return closureAbi_->procParamThunk(target, node);
+    }
 
     /// Pushes the (entry point, frame) pair for the procedure named by \p arg.
     void pushProcParamArgs(std::vector<llvm::Value*>& args, const ExprNode& arg,
-                           const ProcedureTypeNode& node);
+                           const ProcedureTypeNode& node) {
+        closureAbi_->pushProcParamArgs(args, arg, node);
+    }
 
     /// The static-link frame a direct call to \p mangledName would build, or
-    /// null when it needs none.
+    /// null when it needs none.  Stays on Impl -- resolves the
+    /// closure-capture loop's own state, this project's standing
+    /// extra-caution zone; ClosureAndCallABI reaches this through a
+    /// closure, never absorbing it.
     llvm::Value* buildStaticLinkFrame(const std::string& mangledName);
 
     /// Emits a call through procedural parameter \p ve.  Returns null for a
     /// procedural (void) target.
     llvm::Value* emitProcParamCall(const VarEntry& ve,
-                                   std::span<const std::unique_ptr<ExprNode>> args);
+                                   std::span<const std::unique_ptr<ExprNode>> args) {
+        return closureAbi_->emitProcParamCall(ve, args);
+    }
 
     /// Does \p block's label section declare \p label?
     static bool declaresLabel(const BlockNode& block, const std::string& label);

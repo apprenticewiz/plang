@@ -148,6 +148,22 @@ void Codegen::Impl::init(const std::string& progName) {
             if (it == paramMeta_.end() || astArgIdx >= it->second.size()) return 0;
             return it->second[astArgIdx].schemaDiscCount;
         });
+    // Procedural-parameter ABI + conformant-array marshalling.
+    // BuildStaticLinkFrame/IsNestedFunction deliberately don't absorb
+    // buildStaticLinkFrame/nestedFunctions_ -- the closure-capture loop's
+    // own state stays on Impl, this project's standing extra-caution zone.
+    // EmitLValue/EmitCallArg/CreateEntryAlloca are narrow closures into
+    // methods not yet extracted (CodeGenExprs.cpp/CodeGenRuntime.cpp/
+    // CodeGenTypes.cpp).
+    closureAbi_ = std::make_unique<ClosureAndCallABI>(ctx, *mod, builder,
+        *schemaAccess_, *schemaLayout_, *cgTypes_, *symTab_, *linkage_,
+        i32Ty, i64Ty, ptrTy,
+        [this](const ExprNode& e){ return emitLValue(e); },
+        [this](const ExprNode& e, llvm::Type* t, bool byRef){
+            return emitCallArg(e, t, byRef); },
+        [this](llvm::Type* t, const std::string& n){ return createEntryAlloca(t, n); },
+        [this](const std::string& mangledName){ return buildStaticLinkFrame(mangledName); },
+        [this](const std::string& mangledName){ return nestedFunctions_.count(mangledName) != 0; });
     // DefineBuf/LookupBuf are narrow closures into defVar/findVar
     // (CGSymbolTable territory, not yet extracted) -- LookupBuf hands back
     // just the llvm::Value*, the only field of a VarEntry this engine needs.
