@@ -52,7 +52,7 @@ void Codegen::Impl::init(const std::string& progName) {
     // first of the two, harmless only because Impl is never reused for a
     // second emit()).
     runtimeFns_ = std::make_unique<RuntimeFunctionCache>(ctx, *mod);
-    strings_    = std::make_unique<StringRuntime>(ctx, *mod, builder,
+    strings_    = std::make_unique<StringRuntime>(ctx, *mod, builder, *runtimeFns_,
         [this](int64_t cap){ return strStructType(cap); });
     // namePrefix/globalPrefix/currentUnit_ stay Impl fields (see linkage_'s
     // own constructor comment); importOwners_ is captured by value here,
@@ -164,6 +164,11 @@ void Codegen::Impl::init(const std::string& progName) {
         [this](llvm::Type* t, const std::string& n){ return createEntryAlloca(t, n); },
         [this](const std::string& mangledName){ return buildStaticLinkFrame(mangledName); },
         [this](const std::string& mangledName){ return nestedFunctions_.count(mangledName) != 0; });
+    // File-variable address/type/size helpers.  EmitLValue is the one
+    // dependency not yet extracted (still CodeGenExprs.cpp).
+    fileVarHelpers_ = std::make_unique<FileVarHelpers>(*mod, builder,
+        *symTab_, *cgTypes_, *runtimeFns_, i64Ty, i8Ty, ptrTy,
+        [this](const ExprNode& e){ return emitLValue(e); });
     // DefineBuf/LookupBuf are narrow closures into defVar/findVar
     // (CGSymbolTable territory, not yet extracted) -- LookupBuf hands back
     // just the llvm::Value*, the only field of a VarEntry this engine needs.

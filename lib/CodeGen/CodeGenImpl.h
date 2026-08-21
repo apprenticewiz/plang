@@ -52,6 +52,7 @@
 #include "ClosureAndCallABI.h"
 #include "ComplexOps.h"
 #include "ConstFold.h"
+#include "FileVarHelpers.h"
 #include "LabelGotoEngine.h"
 #include "RangeCheckGuards.h"
 #include "RuntimeFunctionCache.h"
@@ -113,6 +114,9 @@ struct Codegen::Impl {
     // Procedural-parameter ABI + conformant-array marshalling; built after
     // schemaAccess_ (needs it for schemaPathOf/pushSchemaArgs).
     std::unique_ptr<ClosureAndCallABI>    closureAbi_;
+    // File-variable address/type/size helpers (ISO §6.6.5.2); built after
+    // cgTypes_/symTab_/runtimeFns_ all exist.
+    std::unique_ptr<FileVarHelpers>       fileVarHelpers_;
 
     // ---- common type aliases (set in init()) ----
     llvm::IntegerType* i1Ty{nullptr};
@@ -701,7 +705,9 @@ struct Codegen::Impl {
 
     /// ISO §6.5.5: the address of the buffer variable \p fileExpr ^, which the
     /// runtime keeps beside the stream.
-    llvm::Value* fileBufferPtr(const ExprNode& fileExpr);
+    llvm::Value* fileBufferPtr(const ExprNode& fileExpr) {
+        return fileVarHelpers_->fileBufferPtr(fileExpr);
+    }
 
     // ---- set helpers (ISO §6.7.2.4) ----
     /// Sets are a flat bitmask of PlangMaxSetElements bits.  Bit 0 stands for
@@ -767,27 +773,37 @@ struct Codegen::Impl {
     llvm::Value* emitComplexPow(llvm::Value* a, llvm::Value* b);
     /// Call a (re_out, im_out, re_in, im_in) runtime function and return complex.
     llvm::Value* callComplexUnary(const std::string& name, llvm::Value* z);
-    static bool isTextTypeName(const TypeNode* tn);
-    bool isFileVar(const ExprNode& e);
-    llvm::Value* fileVarPtr(const ExprNode& e);
+    static bool isTextTypeName(const TypeNode* tn) {
+        return FileVarHelpers::isTextTypeName(tn);
+    }
+    bool isFileVar(const ExprNode& e) { return fileVarHelpers_->isFileVar(e); }
+    llvm::Value* fileVarPtr(const ExprNode& e) { return fileVarHelpers_->fileVarPtr(e); }
     /// Returns true if the expression is a typed binary file variable
     /// (file of T where T is not char/text).  Used to route binary I/O.
     /// The file type \p e denotes, looked up through a type name rather than
     /// read off the denoter, which may be one.  Null when \p e is not a file.
-    const Type* fileTypeOf(const ExprNode& e);
-    bool isTypedBinaryFileVar(const ExprNode& e);
+    const Type* fileTypeOf(const ExprNode& e) { return fileVarHelpers_->fileTypeOf(e); }
+    bool isTypedBinaryFileVar(const ExprNode& e) {
+        return fileVarHelpers_->isTypedBinaryFileVar(e);
+    }
     /// Returns the byte-size of one component of a typed file variable.
     /// Returns 1 as a fallback for untyped or unknown files.
-    int64_t getFileElemSize(const ExprNode& fileExpr);
+    int64_t getFileElemSize(const ExprNode& fileExpr) {
+        return fileVarHelpers_->getFileElemSize(fileExpr);
+    }
     /// The LLVM type of one component of \p fileExpr, or null for a text or
     /// untyped file.
-    llvm::Type* getFileElemType(const ExprNode& fileExpr);
+    llvm::Type* getFileElemType(const ExprNode& fileExpr) {
+        return fileVarHelpers_->getFileElemType(fileExpr);
+    }
     /// EP §6.4.3.6/§6.7.5.2: the smallest value `a` of a direct-access file's
     /// declared index-type -- what SeekRead/SeekWrite/SeekUpdate measure an
     /// index AGAINST, and what position/LastPosition report relative TO
     /// (§6.7.6.6: `position(f) = succ(a, ...)`).  0 for a file with no
     /// declared index-type, which is every non-direct-access file.
-    int64_t getFileIndexLow(const ExprNode& fileExpr);
+    int64_t getFileIndexLow(const ExprNode& fileExpr) {
+        return fileVarHelpers_->getFileIndexLow(fileExpr);
+    }
 
     /// EP §6.7.3.7: the address of an element of a conformant array parameter,
     /// or null if \p e does not subscript one.  Takes the whole subscript
@@ -1013,14 +1029,18 @@ struct Codegen::Impl {
     llvm::Value* spillToTemporary(const ExprNode& e);
 
     llvm::Function* getStrFn(const std::string& name, llvm::Type* retTy,
-                              std::initializer_list<llvm::Type*> argTys);
-    llvm::Value* strLoadLen(llvm::Value* strPtr);
-    llvm::Value* strDataPtr(llvm::Value* strPtr);
+                              std::initializer_list<llvm::Type*> argTys) {
+        return strings_->getStrFn(name, retTy, argTys);
+    }
+    llvm::Value* strLoadLen(llvm::Value* strPtr) { return strings_->strLoadLen(strPtr); }
+    llvm::Value* strDataPtr(llvm::Value* strPtr) { return strings_->strDataPtr(strPtr); }
     // EP §6.4.7: a capacity fixed by a schema discriminant is not a literal, so
     // these take it as a value.  The int64_t overloads wrap a constant and are
     // what every fixed-capacity caller still uses, so their IR is unchanged.
     void emitStrAssign(llvm::Value* dst, llvm::Value* capDst,
-                       llvm::Value* src, llvm::Value* capSrc);
+                       llvm::Value* src, llvm::Value* capSrc) {
+        strings_->emitStrAssign(dst, capDst, src, capSrc);
+    }
     void emitStrAssign(llvm::Value* dst, int64_t capDst,
                        llvm::Value* src, int64_t capSrc) {
         emitStrAssign(dst, i64c(capDst), src, i64c(capSrc));
@@ -1123,11 +1143,15 @@ struct Codegen::Impl {
                        std::span<const std::unique_ptr<ExprNode>> discArgs) {
         schemaAccess_->emitNewSchema(ptrArg, schema, discArgs);
     }
-    void emitStrFromCStr(llvm::Value* dst, llvm::Value* cap, llvm::Value* cstr);
+    void emitStrFromCStr(llvm::Value* dst, llvm::Value* cap, llvm::Value* cstr) {
+        strings_->emitStrFromCStr(dst, cap, cstr);
+    }
     void emitStrFromCStr(llvm::Value* dst, int64_t cap, llvm::Value* cstr) {
         emitStrFromCStr(dst, i64c(cap), cstr);
     }
-    void emitStrFromChar(llvm::Value* dst, llvm::Value* cap, llvm::Value* c);
+    void emitStrFromChar(llvm::Value* dst, llvm::Value* cap, llvm::Value* c) {
+        strings_->emitStrFromChar(dst, cap, c);
+    }
     void emitStrFromChar(llvm::Value* dst, int64_t cap, llvm::Value* c) {
         emitStrFromChar(dst, i64c(cap), c);
     }
