@@ -2,6 +2,7 @@ add_library(PlangCodeGen OBJECT
     ConstFold.cpp
     RuntimeFunctionCache.cpp
     StringRuntime.cpp
+    ComplexOps.cpp
     CodeGen.cpp
     CodeGenTypes.cpp
     CodeGenRuntime.cpp

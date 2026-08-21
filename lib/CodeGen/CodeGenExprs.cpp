@@ -643,81 +643,27 @@ llvm::Value* Codegen::Impl::emitBinary(const BinaryExpr& e) {
 // ====================================================================
 
 llvm::Value* Codegen::Impl::emitComplexAdd(llvm::Value* a, llvm::Value* b) {
-    auto* ar = builder.CreateExtractValue(a, 0, "a.re");
-    auto* ai = builder.CreateExtractValue(a, 1, "a.im");
-    auto* br = builder.CreateExtractValue(b, 0, "b.re");
-    auto* bi = builder.CreateExtractValue(b, 1, "b.im");
-    return makeComplex(builder.CreateFAdd(ar, br, "c.re"),
-                       builder.CreateFAdd(ai, bi, "c.im"));
+    return complexOps_->emitComplexAdd(a, b);
 }
 
 llvm::Value* Codegen::Impl::emitComplexSub(llvm::Value* a, llvm::Value* b) {
-    auto* ar = builder.CreateExtractValue(a, 0, "a.re");
-    auto* ai = builder.CreateExtractValue(a, 1, "a.im");
-    auto* br = builder.CreateExtractValue(b, 0, "b.re");
-    auto* bi = builder.CreateExtractValue(b, 1, "b.im");
-    return makeComplex(builder.CreateFSub(ar, br, "c.re"),
-                       builder.CreateFSub(ai, bi, "c.im"));
+    return complexOps_->emitComplexSub(a, b);
 }
 
 llvm::Value* Codegen::Impl::emitComplexMul(llvm::Value* a, llvm::Value* b) {
-    // (ar+ai*i)(br+bi*i) = (ar*br - ai*bi) + (ar*bi + ai*br)*i
-    auto* ar = builder.CreateExtractValue(a, 0, "a.re");
-    auto* ai = builder.CreateExtractValue(a, 1, "a.im");
-    auto* br = builder.CreateExtractValue(b, 0, "b.re");
-    auto* bi = builder.CreateExtractValue(b, 1, "b.im");
-    auto* rr = builder.CreateFMul(ar, br, "ar.br");
-    auto* ii = builder.CreateFMul(ai, bi, "ai.bi");
-    auto* ri = builder.CreateFMul(ar, bi, "ar.bi");
-    auto* ir = builder.CreateFMul(ai, br, "ai.br");
-    return makeComplex(builder.CreateFSub(rr, ii, "c.re"),
-                       builder.CreateFAdd(ri, ir, "c.im"));
+    return complexOps_->emitComplexMul(a, b);
 }
 
 llvm::Value* Codegen::Impl::emitComplexDiv(llvm::Value* a, llvm::Value* b) {
-    // (ar+ai*i)/(br+bi*i) = ((ar*br+ai*bi) + (ai*br-ar*bi)*i) / (br^2+bi^2)
-    auto* ar = builder.CreateExtractValue(a, 0, "a.re");
-    auto* ai = builder.CreateExtractValue(a, 1, "a.im");
-    auto* br = builder.CreateExtractValue(b, 0, "b.re");
-    auto* bi = builder.CreateExtractValue(b, 1, "b.im");
-    auto* denom = builder.CreateFAdd(builder.CreateFMul(br, br, "br2"),
-                                      builder.CreateFMul(bi, bi, "bi2"), "denom");
-    auto* numRe = builder.CreateFAdd(builder.CreateFMul(ar, br, "ar.br"),
-                                      builder.CreateFMul(ai, bi, "ai.bi"), "num.re");
-    auto* numIm = builder.CreateFSub(builder.CreateFMul(ai, br, "ai.br"),
-                                      builder.CreateFMul(ar, bi, "ar.bi"), "num.im");
-    return makeComplex(builder.CreateFDiv(numRe, denom, "c.re"),
-                       builder.CreateFDiv(numIm, denom, "c.im"));
+    return complexOps_->emitComplexDiv(a, b);
 }
 
 llvm::Value* Codegen::Impl::callComplexUnary(const std::string& name, llvm::Value* z) {
-    // Convention: plang_cXXX_out(double* re_out, double* im_out, double re, double im)
-    auto* re_out = createEntryAlloca(dblTy, name + ".re");
-    auto* im_out = createEntryAlloca(dblTy, name + ".im");
-    auto* re_in  = builder.CreateExtractValue(z, 0, "z.re");
-    auto* im_in  = builder.CreateExtractValue(z, 1, "z.im");
-    auto* fn = getExternFnN(name, llvm::Type::getVoidTy(ctx),
-                             {ptrTy, ptrTy, dblTy, dblTy});
-    builder.CreateCall(fn, {re_out, im_out, re_in, im_in});
-    auto* re = builder.CreateLoad(dblTy, re_out, "re");
-    auto* im = builder.CreateLoad(dblTy, im_out, "im");
-    return makeComplex(re, im);
+    return complexOps_->callComplexUnary(name, z);
 }
 
 llvm::Value* Codegen::Impl::emitComplexPow(llvm::Value* a, llvm::Value* b) {
-    // plang_cpow_out(re_out, im_out, are, aim, bre, bim)
-    auto* re_out = createEntryAlloca(dblTy, "cpow.re");
-    auto* im_out = createEntryAlloca(dblTy, "cpow.im");
-    auto* ar = builder.CreateExtractValue(a, 0, "a.re");
-    auto* ai = builder.CreateExtractValue(a, 1, "a.im");
-    auto* br = builder.CreateExtractValue(b, 0, "b.re");
-    auto* bi = builder.CreateExtractValue(b, 1, "b.im");
-    auto* fn = getExternFnN("plang_cpow_out", llvm::Type::getVoidTy(ctx),
-                             {ptrTy, ptrTy, dblTy, dblTy, dblTy, dblTy});
-    builder.CreateCall(fn, {re_out, im_out, ar, ai, br, bi});
-    auto* re = builder.CreateLoad(dblTy, re_out, "re");
-    auto* im = builder.CreateLoad(dblTy, im_out, "im");
-    return makeComplex(re, im);
+    return complexOps_->emitComplexPow(a, b);
 }
 
 llvm::Value* Codegen::Impl::emitUnary(const UnaryExpr& e) {

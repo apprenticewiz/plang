@@ -104,6 +104,12 @@ void Codegen::Impl::init(const std::string& progName) {
     dblTy = llvm::Type::getDoubleTy(ctx);
     ptrTy = llvm::PointerType::get(ctx, 0); // opaque ptr (LLVM 15+)
 
+    // These two leaf units need dblTy/ptrTy by value, so they're constructed
+    // here rather than alongside runtimeFns_/strings_ above.
+    complexOps_ = std::make_unique<ComplexOps>(ctx, dblTy, ptrTy, builder, *runtimeFns_,
+        [this](llvm::Value* v){ return toDouble(v); },
+        [this](llvm::Type* t, const std::string& n){ return createEntryAlloca(t, n); });
+
     scopes.clear();
     consts.clear();
 

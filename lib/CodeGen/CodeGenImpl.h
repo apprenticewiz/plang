@@ -48,6 +48,7 @@
 #include "plang/Basic/StringUtil.h"
 #include "plang/Basic/Token.h"
 
+#include "ComplexOps.h"
 #include "ConstFold.h"
 #include "RuntimeFunctionCache.h"
 #include "StringRuntime.h"
@@ -115,6 +116,7 @@ struct Codegen::Impl {
     // exist; see init()'s own comment) ----
     std::unique_ptr<RuntimeFunctionCache> runtimeFns_;
     std::unique_ptr<StringRuntime>        strings_;
+    std::unique_ptr<ComplexOps>           complexOps_;
 
     // ---- -g debug info (built in init() when langOpts.Debug; see Phase 1's
     // note by srcMgr_ on why these are ordinary members and never statics) ----
@@ -1052,11 +1054,7 @@ struct Codegen::Impl {
 
     // ---- complex-number helpers (EP §6.4.2.2) ----
     /// Returns the LLVM struct type for EP complex: { double, double }.
-    llvm::StructType* complexTy() {
-        if (!complexTy_) complexTy_ = llvm::StructType::get(ctx, {dblTy, dblTy});
-        return complexTy_;
-    }
-    llvm::StructType* complexTy_{nullptr};
+    llvm::StructType* complexTy() { return complexOps_->complexTy(); }
     /// The PascalFile struct, built and checked once per compilation; see
     /// fileStructType.
     llvm::StructType* fileStructTy_{nullptr};
@@ -1153,20 +1151,14 @@ struct Codegen::Impl {
 
     /// Build a { double, double } aggregate from two double values.
     llvm::Value* makeComplex(llvm::Value* re, llvm::Value* im) {
-        auto* v  = llvm::UndefValue::get(complexTy());
-        auto* v1 = builder.CreateInsertValue(v,  re, 0, "cplx.re");
-        return    builder.CreateInsertValue(v1, im, 1, "cplx.im");
+        return complexOps_->makeComplex(re, im);
     }
 
     /// Coerce a scalar or complex value to a { double, double } complex aggregate.
     /// If the value is already complexTy, it is returned as-is.
     /// Integer values are first widened to double.
     llvm::Value* coerceToComplex(llvm::Value* v) {
-        if (!v) return llvm::ConstantAggregateZero::get(complexTy());
-        if (v->getType() == complexTy()) return v;
-        auto* re = toDouble(v);
-        auto* im = llvm::ConstantFP::get(dblTy, 0.0);
-        return makeComplex(re, im);
+        return complexOps_->coerceToComplex(v);
     }
 
     /// Inline complex addition.
