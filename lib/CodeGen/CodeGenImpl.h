@@ -54,6 +54,7 @@
 #include "LabelGotoEngine.h"
 #include "RangeCheckGuards.h"
 #include "RuntimeFunctionCache.h"
+#include "SchemaLayoutEngine.h"
 #include "SchemaTypeRegistry.h"
 #include "SetOps.h"
 #include "StringRuntime.h"
@@ -82,6 +83,7 @@ struct Codegen::Impl {
     std::unique_ptr<LabelGotoEngine>      gotoEngine_;
     std::unique_ptr<CGLinkage>            linkage_;
     std::unique_ptr<SchemaTypeRegistry>   schemaTypes_;
+    std::unique_ptr<SchemaLayoutEngine>   schemaLayout_;
 
     // ---- -g debug info (built in init() when langOpts.Debug; see Phase 1's
     // note by srcMgr_ on why these are ordinary members and never statics) ----
@@ -1196,26 +1198,42 @@ struct Codegen::Impl {
     /// extent in the body is a closed form over the discriminants BY INDEX, and
     /// is evaluated against that object's.  A subtree that reads no
     /// discriminant folds to a constant.
-    uint64_t     rtAlignOfTypeNode(const TypeNode* tn);
-    llvm::Value* rtSizeOfTypeNode(const TypeNode* tn);
+    uint64_t rtAlignOfTypeNode(const TypeNode* tn) {
+        return schemaLayout_->rtAlignOfTypeNode(tn);
+    }
+    llvm::Value* rtSizeOfTypeNode(const TypeNode* tn) {
+        return schemaLayout_->rtSizeOfTypeNode(tn);
+    }
     /// The index bounds of \p at as run-time values.  The only place that
     /// answers this, so that the run-time walk and the static layout cannot
     /// disagree about how many elements an array has.
     std::optional<std::pair<llvm::Value*, llvm::Value*>>
-    rtIndexBounds(const ArrayTypeNode& at);
-    llvm::Value* rtFieldOffset(const RecordTypeNode& rt, const std::string& field);
+    rtIndexBounds(const ArrayTypeNode& at) {
+        return schemaLayout_->rtIndexBounds(at);
+    }
+    llvm::Value* rtFieldOffset(const RecordTypeNode& rt, const std::string& field) {
+        return schemaLayout_->rtFieldOffset(rt, field);
+    }
     llvm::Value* rtWalkFields(const std::vector<FieldDecl>& fields,
                               llvm::Value* off, bool packed,
-                              const std::string* stopAt, bool* found);
+                              const std::string* stopAt, bool* found) {
+        return schemaLayout_->rtWalkFields(fields, off, packed, stopAt, found);
+    }
     /// One walk over a variant part: its size with \p stopAt null, or the
     /// offset of that field with \p stopAt set and *found written.
     llvm::Value* rtWalkVariant(const VariantPart& vp, llvm::Value* off,
                                bool packed, const std::string* stopAt,
-                               bool* found, bool nested = false);
+                               bool* found, bool nested = false) {
+        return schemaLayout_->rtWalkVariant(vp, off, packed, stopAt, found, nested);
+    }
     /// What the shared run of a variant part must be aligned to; see the
     /// definition for why the outer tag is not part of the answer.
-    uint64_t     rtVariantRunAlign(const VariantPart& vp);
-    uint64_t     rtVariantAlign(const VariantPart& vp);
+    uint64_t rtVariantRunAlign(const VariantPart& vp) {
+        return schemaLayout_->rtVariantRunAlign(vp);
+    }
+    uint64_t rtVariantAlign(const VariantPart& vp) {
+        return schemaLayout_->rtVariantAlign(vp);
+    }
 
     /// A component of a run-time-laid-out object: the enclosing schema whose
     /// header carries the discriminants, the component's address, and the
@@ -1236,7 +1254,9 @@ struct Codegen::Impl {
     const TypeNode* fieldDenoterOf(const RecordTypeNode& rt, const std::string& field);
     const TypeNode* variantFieldDenoterOf(const VariantPart& vp, const std::string& field);
     static bool isRuntimeLaidOut(const ExprNode& e);
-    llvm::Value* alignUpV(llvm::Value* v, uint64_t align);
+    llvm::Value* alignUpV(llvm::Value* v, uint64_t align) {
+        return schemaLayout_->alignUpV(v, align);
+    }
     const ArrayTypeNode* varyingArrayFieldOf(const FieldExpr& fe);
 
     /// True if the expression is an ISO §6.4.3.2 string-type: a
@@ -1359,41 +1379,22 @@ struct Codegen::Impl {
     std::pair<llvm::Value*, llvm::Value*> schemaArrayBounds(const SchemaRef& ref);
     /// R3: a closed extent form evaluated against an object's discriminants.
     /// Bytes of discriminant header in front of a schema body; see the definition.
-    uint64_t schemaHeaderBytes(const plang::Type& schema);
+    uint64_t schemaHeaderBytes(const plang::Type& schema) {
+        return schemaLayout_->schemaHeaderBytes(schema);
+    }
     llvm::Value* emitExtentForm(const plang::ExtentForm& F,
-                                const std::vector<llvm::Value*>& discs);
-    /// The discriminants the run-time layout walk is working against, set by
-    /// RtDiscScope.  The walk is always entered under one, so this is live
-    /// exactly where a form may be evaluated.
-    const std::vector<llvm::Value*>* rtDiscs_{nullptr};
-    /// A denoter's extent as a value, from its closed form when it has one.
-    ///
-    /// Against the AMBIENT discriminants: correct only inside the run-time
-    /// layout walk, which is entered between a bind and its popScope.  A site
-    /// holding a particular object's path wants boundsOfDenoter() instead --
-    /// evaluating that object's extent against whichever discriminants happen
-    /// to be ambient is the same error as resolving its name in whichever
-    /// scope happens to be innermost, one level down.
-    llvm::Value* extentOf(const std::optional<plang::ExtentForm>& F) {
-        return (F && rtDiscs_) ? emitExtentForm(*F, *rtDiscs_) : nullptr;
+                                const std::vector<llvm::Value*>& discs) {
+        return schemaLayout_->emitExtentForm(F, discs);
     }
     /// R3: makes an object's discriminants the ones extent forms are evaluated
-    /// against, for as long as the guard lives.
-    ///
-    /// This replaced a bindSchemaDiscs()/popScope() pair that also defined the
-    /// discriminant NAMES as ordinary variables, so the declaration's extent
-    /// expressions could be re-emitted at the use site.  Nothing re-emits them
-    /// any more -- every extent is a closed form -- so there are no names to
-    /// define and no scope to push.  It restores the PREVIOUS discriminants
-    /// rather than clearing them, which the old pair did not do: one call site
-    /// had grown a hand-written save/restore around it and the others had not,
-    /// so a nested walk left the outer one pointing at the inner object's.
+    /// against, for as long as the guard lives.  A thin adapter over
+    /// SchemaLayoutEngine::RtDiscScope so every existing call site
+    /// (`RtDiscScope disc(*this, ...)`, `*this` being an Impl&) keeps working
+    /// unchanged; the discriminant stack itself lives on schemaLayout_ now.
     struct RtDiscScope {
-        Impl& I;
-        const std::vector<llvm::Value*>* Prev;
+        SchemaLayoutEngine::RtDiscScope Inner;
         RtDiscScope(Impl& I, const std::vector<llvm::Value*>& D)
-            : I(I), Prev(I.rtDiscs_) { I.rtDiscs_ = &D; }
-        ~RtDiscScope() { I.rtDiscs_ = Prev; }
+            : Inner(*I.schemaLayout_, D) {}
     };
     /// R3: a denoter's low and high extents evaluated against the discriminants
     /// of the object it was reached through, so no identifier in it is ever
@@ -1401,12 +1402,7 @@ struct Codegen::Impl {
     /// no form, which outside a schema body is the ordinary case.
     std::optional<std::pair<llvm::Value*, llvm::Value*>>
     boundsOfDenoter(const TypeNode& D, const SchemaRef& Root) {
-        if (!D.ExtentLow || !D.ExtentHigh || Root.discs.empty())
-            return std::nullopt;
-        auto* lo = emitExtentForm(*D.ExtentLow,  Root.discs);
-        auto* hi = emitExtentForm(*D.ExtentHigh, Root.discs);
-        if (!lo || !hi) return std::nullopt;
-        return std::pair{lo, hi};
+        return schemaLayout_->boundsOfDenoter(D, Root.discs);
     }
     /// LLVM type of the schema body's storage: the element type for an array
     /// body, the whole body otherwise.

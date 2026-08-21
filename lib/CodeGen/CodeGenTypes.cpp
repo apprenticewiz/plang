@@ -85,6 +85,13 @@ void Codegen::Impl::init(const std::string& progName) {
     linkage_ = std::make_unique<CGLinkage>(*mod, namePrefix, globalPrefix,
         currentUnit_, importOwners_);
     schemaTypes_ = std::make_unique<SchemaTypeRegistry>();
+    // LlvmTypeOfNode/arrayIndexRange are CGTypes territory, still Impl
+    // methods -- narrow closures rather than a concrete dependency, same
+    // seam every prior unit has used for not-yet-extracted state.
+    schemaLayout_ = std::make_unique<SchemaLayoutEngine>(ctx, *mod, builder,
+        *schemaTypes_, *runtimeFns_,
+        [this](const TypeNode& tn){ return llvmTypeOfNode(tn); },
+        [this](const ArrayTypeNode& at){ return arrayIndexRange(at); });
 
     if (langOpts.Debug) {
         DBuilder = std::make_unique<llvm::DIBuilder>(*mod);
