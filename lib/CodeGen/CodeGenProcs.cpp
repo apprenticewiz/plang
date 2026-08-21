@@ -1237,7 +1237,7 @@ void Codegen::Impl::emitInitialState(llvm::Value* ptr, llvm::Type* ty,
         const TypeNode* body = schemaInstanceBody(stn);
         if (!body) return;
         if (stn->ResolvedBody && stn->ResolvedBody->SchemaBody) {
-            SchemaBindingScope bind(*this, *stn->ResolvedBody->SchemaBody);
+            SchemaBindingScope bind(*cgTypes_, *stn->ResolvedBody->SchemaBody);
             emitInitialState(ptr, ty, body, depth + 1);
         }
         return;

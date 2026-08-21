@@ -3,8 +3,6 @@
 #pragma once
 
 #include "plang/Basic/LangOptions.h"
-#include "plang/Basic/PascalFileLayout.h"
-#include "plang/Basic/RequiredRecordLayouts.h"
 #include "plang/Basic/SourceManager.h"
 #include "plang/CodeGen/CodeGen.h"
 #include "plang/Sema/Sema.h"
@@ -50,6 +48,7 @@
 #include "CGDebugInfo.h"
 #include "CGLinkage.h"
 #include "CGSymbolTable.h"
+#include "CGTypes.h"
 #include "ComplexOps.h"
 #include "ConstFold.h"
 #include "LabelGotoEngine.h"
@@ -90,6 +89,16 @@ struct Codegen::Impl {
     // -g debug info; unconditionally constructed in init() like every other
     // unit above, internally a no-op wherever langOpts.Debug is unset.
     std::unique_ptr<CGDebugInfo>          dbgInfo_;
+    // Static type-lowering/layout; built later in init() than the units
+    // above (needs the common type aliases below plus complexOps_/setOps_,
+    // see init()'s own comment).
+    std::unique_ptr<CGTypes>              cgTypes_;
+    /// `Impl::RecordLayout`/`FieldPlace` are pure data with no behavior tied
+    /// to `Impl` -- a plain alias, not a wrapper, keeps every external
+    /// site naming these types (CodeGenExprs.cpp/CodeGenStmts.cpp)
+    /// compiling unchanged now that `CGTypes` owns them.
+    using RecordLayout = CGTypes::RecordLayout;
+    using FieldPlace   = CGTypes::FieldPlace;
 
     // ---- common type aliases (set in init()) ----
     llvm::IntegerType* i1Ty{nullptr};
@@ -115,54 +124,13 @@ struct Codegen::Impl {
     std::unordered_map<std::string, llvm::Value*> consts;
 
     // ---- caches ----
-    std::map<std::string, llvm::StructType*>     structTypes;  // record struct types
-
-    /// Where one field of a record lives.  A field of the fixed part is an
-    /// element of the struct.  ISO §6.4.3.3 has at most one variant active at a
-    /// time, so the alternatives share a single run of storage: their fields
-    /// are all placed in the one element standing for the variant part, each at
-    /// its own byte offset within it.
-    struct FieldPlace {
-        unsigned    Index{0};        ///< element index in the struct
-        llvm::Type* Ty{nullptr};     ///< the field's own type
-        bool        InVariant{false};
-        uint64_t    Offset{0};       ///< byte offset into the variant element
-    };
-    struct RecordLayout {
-        llvm::StructType* Ty{nullptr};
-        /// Field name, folded to lower case, to where it lives.
-        std::map<std::string, FieldPlace> Fields;
-    };
-    /// Keyed by declaration, not by struct type: two records may be laid out
-    /// identically and share one llvm::StructType while naming their fields
-    /// differently, and the variant tree that decides the offsets is only on
-    /// the declaration.  The declaration alone is not enough for a record in a
-    /// schema body, where one of them lays out differently in each
-    /// instantiation, so the discriminants in force go into the key too.
-    ///
-    /// And the SEMA RECORD, because since R4 the field types come from what
-    /// Sema resolved for THIS record rather than from re-reading the field
-    /// denoters -- so it is an input to the layout, and an input that is not in
-    /// the key is an input the memo ignores.  Measured before it was added: 5
-    /// tests took a hit whose layout had been computed for a different Sema
-    /// record, and in all 5 the two agreed.  That is the arrangement this work
-    /// exists to remove.  Agreement reached by luck of which programs anyone
-    /// wrote is not a property of the compiler, and the next record where they
-    /// differ gets the first one's field offsets with no diagnostic.
-    ///
-    /// It costs nothing in emitted code: structTypes still dedups the
-    /// llvm::StructType by its element list, so two records that really do lay
-    /// out identically go on sharing one.
-    std::map<std::tuple<const RecordTypeNode*, std::string, const Type*>,
-             RecordLayout>
-        recordLayouts;
-
-    /// The discriminants a layout is currently being worked out under, written
-    /// as `name=value` pairs.  Empty everywhere outside a schema body.
-    std::string schemaCtx;
-
+    // structTypes/recordLayouts/schemaCtx/strStructTypes moved into CGTypes
+    // (private there -- confirmed zero external touches once
+    // fileStructType/timestampStructType/bindingStructType moved with
+    // them). typeAliases stays here, referenced by CGTypes -- it's
+    // copied/restored wholesale in emitFunctionDef and read directly at
+    // ~14 other external sites.
     std::unordered_map<std::string, const TypeNode*> typeAliases; // user typedef name → AST node
-    std::map<int64_t, llvm::StructType*> strStructTypes;  // cap → { i64, [cap x i8] }
 
     // ---- current function context ----
     llvm::Function*     curFunc{nullptr};
@@ -566,21 +534,24 @@ struct Codegen::Impl {
                                        const Type* semaTy);
 
     // ====================================================================
-    // Type resolution
+    // Type resolution -- CGTypes forwarders.  semaFieldType/layoutVariantCase/
+    // layoutVariantPart/variantBlobType/llvmTypeOfSemaTypeImpl/
+    // llvmTypeOfNodeViaSema/checkSizeAgreement/checkFieldOffsetAgreement/
+    // checkSchemaFieldOffsetAgreement have zero external callers (confirmed
+    // by grep) and so aren't forwarded at all -- CGTypes is the only caller
+    // of its own internal helpers, same as every prior unit's purely-
+    // internal methods.
     // ====================================================================
-    llvm::StructType* strStructType(int64_t cap);
+    llvm::StructType* strStructType(int64_t cap) { return cgTypes_->strStructType(cap); }
     /// Returns null when the name is not a known type; callers retry via Sema.
-    llvm::Type* llvmTypeOfName(const std::string& name);
-    /// Lowers a type denoter from the type Sema resolved for it, reporting
-    /// `what` as an internal error if Sema left it unresolved.
-    llvm::Type* llvmTypeOfNodeViaSema(const TypeNode& node, const std::string& what);
+    llvm::Type* llvmTypeOfName(const std::string& name) { return cgTypes_->llvmTypeOfName(name); }
 
     /// The first and last index of \p n, or nothing when neither the bounds nor
     /// Sema's resolved type can supply them.  An index written as an ordinal
     /// type — `array[color]` — has no bound expressions to fold, so the range
     /// comes from the type Sema resolved for the node.
     std::optional<std::pair<int64_t, int64_t>>
-    arrayIndexRange(const ArrayTypeNode& n) const;
+    arrayIndexRange(const ArrayTypeNode& n) const { return cgTypes_->arrayIndexRange(n); }
 
     /// The first index of \p n.  Subtracting it maps a Pascal index onto the
     /// zero-based LLVM array, so an array whose first index is not known is one
@@ -595,59 +566,27 @@ struct Codegen::Impl {
                            "Sema can give");
         return R->first;
     }
-    llvm::StructType* structTypeFor(const RecordTypeNode& rt);
+    llvm::StructType* structTypeFor(const RecordTypeNode& rt) { return cgTypes_->structTypeFor(rt); }
 
     /// The layout of \p rt, building it if this is the first time it is asked
     /// for.  Never null.
     /// \p semaRec is the record type Sema resolved for THIS use, when there is
-    /// one; its field types win over re-reading the denoters.  See the
-    /// definition.
+    /// one; its field types win over re-reading the denoters.  See CGTypes.
     const RecordLayout& layoutOf(const RecordTypeNode& rt,
-                                 const Type* semaRec = nullptr);
+                                 const Type* semaRec = nullptr) {
+        return cgTypes_->layoutOf(rt, semaRec);
+    }
 
     /// The layout of the record \p T, which is \p T's declaration laid out
     /// under the discriminants \p T was resolved with.  Null when T is not a
     /// record or has no declaration to lay out.
-    const RecordLayout* layoutOfRecord(const Type& T);
+    const RecordLayout* layoutOfRecord(const Type& T) { return cgTypes_->layoutOfRecord(T); }
 
-    /// Binds the discriminants \p T was resolved under for as long as it is
-    /// alive, so that the bound expressions in its declaration — written in
-    /// terms of those names — fold to the values this instance has, and so
-    /// that the layout they produce is cached apart from the other instances'.
-    class SchemaBindingScope {
-    public:
-        SchemaBindingScope(Impl& I, const Type& T);
-        ~SchemaBindingScope();
-        SchemaBindingScope(const SchemaBindingScope&)            = delete;
-        SchemaBindingScope& operator=(const SchemaBindingScope&) = delete;
-
-    private:
-        Impl&       I;
-        std::string SavedCtx;
-        /// Each bound name with what it stood for before, if anything did.
-        std::vector<std::pair<std::string, std::optional<llvm::Value*>>> Saved;
-    };
-
-    /// Place the alternatives of \p vp into \p elems and \p L.  The tag becomes
-    /// an ordinary element — it is there whichever variant is active — and the
-    /// alternatives share the one element appended after it.
-    void layoutVariantPart(const VariantPart& vp, RecordLayout& L, bool packed,
-                           std::vector<llvm::Type*>& elems,
-                           const Type* semaRec);
-
-    /// Place one alternative's fields from byte \p base of the variant element
-    /// at \p blobIdx, recursing into a nested variant.  Returns the offset one
-    /// past the last of them, and widens \p align to what they need.
-    /// The type Sema resolved for a field of \p semaRec; see the definition.
-    llvm::Type* semaFieldType(const Type* semaRec, const std::string& nm);
-    uint64_t layoutVariantCase(const VariantCase& vc, RecordLayout& L, bool packed,
-                               unsigned blobIdx, uint64_t base,
-                               const Type* semaRec);
-
-    /// A type of at least \p size bytes and alignment \p align, to stand for
-    /// the whole variant part.  A plain [n x i8] would be byte-aligned and
-    /// leave every wider field inside it misaligned.
-    llvm::Type* variantBlobType(uint64_t size, uint64_t align);
+    /// `Impl::SchemaBindingScope` names `CGTypes::SchemaBindingScope`, so the
+    /// one external construction site outside CGTypes
+    /// (`CodeGenProcs.cpp`'s `emitInitialState`) keeps reading almost
+    /// unchanged, just naming `*cgTypes_` instead of `*this`.
+    using SchemaBindingScope = CGTypes::SchemaBindingScope;
 
     /// The storage a value of this type occupies, given both of the ways there
     /// are to say what the type is: the denoter it was written as and the type
@@ -660,24 +599,16 @@ struct Codegen::Impl {
     /// declaration a typedef stands for.  With only a resolved type that
     /// decides.  With neither there is nothing to lay out and that is an
     /// internal error, not a pointer-sized guess.
-    llvm::Type* llvmTypeOf(const TypeNode* denoter, const Type* resolved);
+    llvm::Type* llvmTypeOf(const TypeNode* denoter, const Type* resolved) {
+        return cgTypes_->llvmTypeOf(denoter, resolved);
+    }
 
-    llvm::Type* llvmTypeOfNode(const TypeNode& node);
-    /// Convert a semantic Type (from Sema) directly to an LLVM type.
-    /// Used by schema instance handling where the AST TypeNode is parameterized.
-    /// The integer type an ordinal denoter lowers to; see the definition.
-    [[nodiscard]] llvm::Type* ordinalTyOf(const TypeNode& node);
-    /// Whether llvmTypeOfSemaType has a lowering for \p T; see the definition.
-    static bool canLowerSemaType(const Type& T);
-    llvm::Type* llvmTypeOfSemaType(const Type& T);
-    llvm::Type* llvmTypeOfSemaTypeImpl(const Type& T);
-    /// Checks Sema's byteSizeOf against the layout; see the definition.
-    void checkSizeAgreement(const Type& T, llvm::Type* Built);
-    /// Every fixed field's offset against Sema's; see the definition.
-    void checkFieldOffsetAgreement(const Type& T, llvm::Type* Built);
-    /// checkFieldOffsetAgreement's sibling for a bound schema instance,
-    /// where Sema's byteSizeOf cannot answer; see the definition.
-    void checkSchemaFieldOffsetAgreement(const Type& T, llvm::Type* Built);
+    llvm::Type* llvmTypeOfNode(const TypeNode& node) { return cgTypes_->llvmTypeOfNode(node); }
+    /// The integer type an ordinal denoter lowers to; see CGTypes.
+    [[nodiscard]] llvm::Type* ordinalTyOf(const TypeNode& node) { return cgTypes_->ordinalTyOf(node); }
+    /// Whether llvmTypeOfSemaType has a lowering for \p T; see CGTypes.
+    static bool canLowerSemaType(const Type& T) { return CGTypes::canLowerSemaType(T); }
+    llvm::Type* llvmTypeOfSemaType(const Type& T) { return cgTypes_->llvmTypeOfSemaType(T); }
 
     // ====================================================================
     // Alloca helpers
@@ -746,57 +677,8 @@ struct Codegen::Impl {
 
     // ---- file-variable helpers ----
     /// The LLVM type of a file variable: storage laid out to match the
-    /// runtime's PascalFile, which is declared once in
-    /// plang/Basic/PascalFileLayout.h and read by both sides.
-    ///
-    /// Building it from a list is only half the job — the list has to be the
-    /// same one the runtime compiled.  So every field's offset, and the whole
-    /// size, are checked against that struct here, the first time the type is
-    /// wanted.  A field added, widened or reordered on either side alone stops
-    /// the compiler rather than leaving generated code reading a field at an
-    /// offset nothing wrote it to.
-    llvm::StructType* fileStructType() {
-        // Cached on this Codegen and not in a static.  A static outlives the
-        // LLVMContext that owns the type, so a second compilation in one
-        // process -- which the binary never does and anything embedding the
-        // front end does immediately -- got a type belonging to a context that
-        // had been destroyed, and took a segmentation fault building a null
-        // value of it.
-        if (fileStructTy_) return fileStructTy_;
-        llvm::StructType*& FST = fileStructTy_;
-
-        FST = llvm::StructType::get(
-            ctx, {
-#define PLANG_FILE_FIELD_TYPE(Member, LLVMTy) LLVMTy,
-                PLANG_FILE_FIELDS(PLANG_FILE_FIELD_TYPE)
-#undef PLANG_FILE_FIELD_TYPE
-            });
-
-        const auto& dl     = mod->getDataLayout();
-        const auto* layout = dl.getStructLayout(FST);
-        if (FST->getNumElements() != PlangFileFieldCount)
-            codegenICE("the file record has " + std::to_string(PlangFileFieldCount)
-                       + " fields and codegen built "
-                       + std::to_string(FST->getNumElements()));
-        if (dl.getTypeAllocSize(FST) != sizeof(PascalFile))
-            codegenICE("a file variable takes "
-                       + std::to_string(dl.getTypeAllocSize(FST).getFixedValue())
-                       + " bytes as codegen lays it out and "
-                       + std::to_string(sizeof(PascalFile))
-                       + " as the runtime declares it");
-        unsigned idx = 0;
-#define PLANG_FILE_FIELD_OFFSET(Member, LLVMTy)                                \
-        if (layout->getElementOffset(idx) != offsetof(PascalFile, Member))     \
-            codegenICE("the file record's '" #Member "' is at offset "         \
-                       + std::to_string(layout->getElementOffset(idx))         \
-                       + " as codegen lays it out and "                        \
-                       + std::to_string(offsetof(PascalFile, Member))          \
-                       + " as the runtime declares it");                       \
-        ++idx;
-        PLANG_FILE_FIELDS(PLANG_FILE_FIELD_OFFSET)
-#undef PLANG_FILE_FIELD_OFFSET
-        return FST;
-    }
+    /// runtime's PascalFile, checked field-by-field against it.  See CGTypes.
+    llvm::StructType* fileStructType() { return cgTypes_->fileStructType(); }
 
     /// ISO §6.5.5: the address of the buffer variable \p fileExpr ^, which the
     /// runtime keeps beside the stream.
@@ -832,99 +714,15 @@ struct Codegen::Impl {
     // ---- complex-number helpers (EP §6.4.2.2) ----
     /// Returns the LLVM struct type for EP complex: { double, double }.
     llvm::StructType* complexTy() { return complexOps_->complexTy(); }
-    /// The PascalFile struct, built and checked once per compilation; see
-    /// fileStructType.
-    llvm::StructType* fileStructTy_{nullptr};
 
     /// EP §6.4.3.4: DateValid, year, month, day, TimeValid, hour, minute,
-    /// second.  Built from and checked against PlangTimeStamp, declared once
-    /// in plang/Basic/RequiredRecordLayouts.h and read by the runtime too;
-    /// see fileStructType's own comment for why this checks rather than
-    /// asserts alone.
-    llvm::StructType* timestampStructType() {
-        // Cached on this Codegen and not in a static; see fileStructType.
-        if (timestampTy_) return timestampTy_;
-        llvm::StructType*& TST = timestampTy_;
-
-        TST = llvm::StructType::get(
-            ctx, {
-#define PLANG_TIMESTAMP_FIELD_TYPE(Member, LLVMTy) LLVMTy,
-                PLANG_TIMESTAMP_FIELDS(PLANG_TIMESTAMP_FIELD_TYPE)
-#undef PLANG_TIMESTAMP_FIELD_TYPE
-            });
-
-        const auto& dl     = mod->getDataLayout();
-        const auto* layout = dl.getStructLayout(TST);
-        if (TST->getNumElements() != PlangTimeStampFieldCount)
-            codegenICE("TimeStamp has " + std::to_string(PlangTimeStampFieldCount)
-                       + " fields and codegen built "
-                       + std::to_string(TST->getNumElements()));
-        if (dl.getTypeAllocSize(TST) != sizeof(PlangTimeStamp))
-            codegenICE("a TimeStamp variable takes "
-                       + std::to_string(dl.getTypeAllocSize(TST).getFixedValue())
-                       + " bytes as codegen lays it out and "
-                       + std::to_string(sizeof(PlangTimeStamp))
-                       + " as the runtime declares it");
-        unsigned idx = 0;
-#define PLANG_TIMESTAMP_FIELD_OFFSET(Member, LLVMTy)                          \
-        if (layout->getElementOffset(idx) != offsetof(PlangTimeStamp, Member)) \
-            codegenICE("TimeStamp's '" #Member "' is at offset "              \
-                       + std::to_string(layout->getElementOffset(idx))        \
-                       + " as codegen lays it out and "                       \
-                       + std::to_string(offsetof(PlangTimeStamp, Member))     \
-                       + " as the runtime declares it");                      \
-        ++idx;
-        PLANG_TIMESTAMP_FIELDS(PLANG_TIMESTAMP_FIELD_OFFSET)
-#undef PLANG_TIMESTAMP_FIELD_OFFSET
-        return TST;
-    }
-    llvm::StructType* timestampTy_{nullptr};
+    /// second.  Built from and checked against PlangTimeStamp; see CGTypes.
+    llvm::StructType* timestampStructType() { return cgTypes_->timestampStructType(); }
 
     /// EP §6.4.3.4: 'name' (a string(PlangMaxBindingName)) and 'bound', both
     /// required.  Built from and checked against PlangBindingType; see
-    /// timestampStructType's own comment for why.
-    llvm::StructType* bindingStructType() {
-        // Use the structTypes cache keyed by a unique string so the type
-        // is stable across multiple llvmTypeOfName() calls within one module.
-        auto it = structTypes.find("__binding__");
-        if (it != structTypes.end()) return it->second;
-
-        // 'bound' is i1 rather than i8 so that writing it selects the Boolean
-        // formatter; an i1 still occupies one byte, matching the C struct.
-        auto* BST = llvm::StructType::get(
-            ctx, {
-#define PLANG_BINDINGTYPE_FIELD_TYPE(Member, LLVMTy) LLVMTy,
-                PLANG_BINDINGTYPE_FIELDS(PLANG_BINDINGTYPE_FIELD_TYPE)
-#undef PLANG_BINDINGTYPE_FIELD_TYPE
-            });
-        structTypes["__binding__"] = BST;
-
-        const auto& dl     = mod->getDataLayout();
-        const auto* layout = dl.getStructLayout(BST);
-        if (BST->getNumElements() != PlangBindingTypeFieldCount)
-            codegenICE("BindingType has "
-                       + std::to_string(PlangBindingTypeFieldCount)
-                       + " fields and codegen built "
-                       + std::to_string(BST->getNumElements()));
-        if (dl.getTypeAllocSize(BST) != sizeof(PlangBindingType))
-            codegenICE("a BindingType variable takes "
-                       + std::to_string(dl.getTypeAllocSize(BST).getFixedValue())
-                       + " bytes as codegen lays it out and "
-                       + std::to_string(sizeof(PlangBindingType))
-                       + " as the runtime declares it");
-        unsigned idx = 0;
-#define PLANG_BINDINGTYPE_FIELD_OFFSET(Member, LLVMTy)                         \
-        if (layout->getElementOffset(idx) != offsetof(PlangBindingType, Member)) \
-            codegenICE("BindingType's '" #Member "' is at offset "             \
-                       + std::to_string(layout->getElementOffset(idx))         \
-                       + " as codegen lays it out and "                        \
-                       + std::to_string(offsetof(PlangBindingType, Member))    \
-                       + " as the runtime declares it");                       \
-        ++idx;
-        PLANG_BINDINGTYPE_FIELDS(PLANG_BINDINGTYPE_FIELD_OFFSET)
-#undef PLANG_BINDINGTYPE_FIELD_OFFSET
-        return BST;
-    }
+    /// CGTypes.
+    llvm::StructType* bindingStructType() { return cgTypes_->bindingStructType(); }
 
     /// Build a { double, double } aggregate from two double values.
     llvm::Value* makeComplex(llvm::Value* re, llvm::Value* im) {

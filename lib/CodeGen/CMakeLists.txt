@@ -9,6 +9,7 @@ add_library(PlangCodeGen OBJECT
     CGLinkage.cpp
     SchemaTypeRegistry.cpp
     SchemaLayoutEngine.cpp
+    CGTypes.cpp
     CGDebugInfo.cpp
     CGSymbolTable.cpp
     CodeGen.cpp
@@ -23,7 +24,7 @@ add_library(PlangCodeGen OBJECT
 )
 target_link_libraries(PlangCodeGen PRIVATE plang_warnings)
 # Sema::byteSizeOf: the one cross-subsystem call this makes, the Sema side of
-# every layout cross-check in CodeGenTypes.cpp.  Diagnostics never route
+# every layout cross-check in CGTypes.cpp.  Diagnostics never route
 # through here at all -- codegenICE is llvm::report_fatal_error, not
 # plang's DiagnosticsEngine -- so PlangLocale is deliberately not an edge.
 target_link_libraries(PlangCodeGen PRIVATE PlangSema)
