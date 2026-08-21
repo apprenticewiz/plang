@@ -48,25 +48,9 @@
 #include "plang/Basic/StringUtil.h"
 #include "plang/Basic/Token.h"
 
+#include "ConstFold.h"
+
 using namespace plang;
-
-// ---------------------------------------------------------------------------
-// Free utility functions (defined in CodeGen.cpp, used by multiple TUs).
-// ---------------------------------------------------------------------------
-
-std::optional<int64_t> tryEvalConstInt(
-        const ExprNode& e,
-        const std::unordered_map<std::string, llvm::Value*>* known = nullptr);
-
-int64_t evalConstInt(const ExprNode& e, int64_t fallback,
-                     const std::unordered_map<std::string, llvm::Value*>* known = nullptr);
-
-llvm::Constant* evalConst(
-        const ExprNode& e,
-        const std::unordered_map<std::string, llvm::Value*>& known,
-        llvm::LLVMContext& ctx,
-        llvm::IntegerType* i64Ty,
-        llvm::Type* dblTy);
 
 /// Aborts on an internal codegen inconsistency.
 ///
