@@ -5,6 +5,7 @@ add_library(PlangCodeGen OBJECT
     ComplexOps.cpp
     RangeCheckGuards.cpp
     SetOps.cpp
+    LabelGotoEngine.cpp
     CodeGen.cpp
     CodeGenTypes.cpp
     CodeGenRuntime.cpp

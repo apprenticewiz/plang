@@ -299,8 +299,11 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
     // escaped it by accident: emitMain re-registers the program block's
     // schemas, putting the outer definition back before the body is emitted.
     auto  savedSchemaDefs  = schemaDefs_;
-    auto  savedLabels      = std::move(labelBlocks);
-    labelBlocks.clear();
+    // Restored automatically on every exit path (the declareOnly early
+    // return below, or the normal end of this function) by the destructor --
+    // see FunctionLabelScope's own comment for why this one field gets RAII
+    // instead of a fourth save-and-two-manual-restores like its neighbors.
+    LabelGotoEngine::FunctionLabelScope labelScope(*gotoEngine_);
 
     std::string mangledName = namePrefix + proc.Name;
     namePrefix = mangledName + PlangScopeSep;
@@ -534,7 +537,6 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
         curStaticLink = savedStaticLink;
         outerVarNames = savedOuterVars;
         outerVarBindings = savedOuterBinds;
-        labelBlocks   = std::move(savedLabels);
         builder.restoreIP(savedIP);
         return;
     }
@@ -960,7 +962,6 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
     consts        = std::move(savedConsts);
     requiredConsts = std::move(savedRequired);
     schemaDefs_   = std::move(savedSchemaDefs);
-    labelBlocks   = std::move(savedLabels);
     builder.restoreIP(savedIP);
 }
 

@@ -62,8 +62,8 @@ void Codegen::setSourceManager(const SourceManager& SM, FileID MainFile) {
 }
 
 bool Codegen::emit(const ProgramNode& prog, std::ostream& os) {
-    PImpl->init(prog.Name);
-    PImpl->labelBlocks.clear();
+    PImpl->init(prog.Name); // gotoEngine_ is freshly constructed here, with
+                            // an empty label map already -- nothing left to clear.
 
     PImpl->pushScope(); // global scope
 

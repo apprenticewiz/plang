@@ -117,6 +117,14 @@ void Codegen::Impl::init(const std::string& progName) {
         [this](llvm::Value* v){ return toI64(v); });
     setOps_ = std::make_unique<SetOps>(ctx, *mod, builder,
         [this](llvm::Value* v){ return toI64(v); });
+    // DefineBuf/LookupBuf are narrow closures into defVar/findVar
+    // (CGSymbolTable territory, not yet extracted) -- LookupBuf hands back
+    // just the llvm::Value*, the only field of a VarEntry this engine needs.
+    gotoEngine_ = std::make_unique<LabelGotoEngine>(ctx, *mod, builder, curFunc,
+        *runtimeFns_,
+        [this](const std::string& n, llvm::Value* p, llvm::Type* t){ defVar(n, p, t); },
+        [this](const std::string& n) -> llvm::Value* {
+            const auto* ve = findVar(n); return ve ? ve->ptr : nullptr; });
 
     scopes.clear();
     consts.clear();

@@ -50,6 +50,7 @@
 
 #include "ComplexOps.h"
 #include "ConstFold.h"
+#include "LabelGotoEngine.h"
 #include "RangeCheckGuards.h"
 #include "RuntimeFunctionCache.h"
 #include "SetOps.h"
@@ -113,6 +114,7 @@ struct Codegen::Impl {
     std::unique_ptr<ComplexOps>           complexOps_;
     std::unique_ptr<RangeCheckGuards>     rangeGuards_;
     std::unique_ptr<SetOps>               setOps_;
+    std::unique_ptr<LabelGotoEngine>      gotoEngine_;
 
     // ---- -g debug info (built in init() when langOpts.Debug; see Phase 1's
     // note by srcMgr_ on why these are ordinary members and never statics) ----
@@ -545,58 +547,25 @@ struct Codegen::Impl {
         std::vector<llvm::Value*> discs;           // one i64 per discriminant
     };
 
-    /// Label name to the block it names, for the function being emitted.
-    /// ISO §6.2.1 scopes a label to its block, so this is saved and cleared
-    /// around each function: two procedures may both declare label 1, and
-    /// sharing one entry would have the second branch into the first's body.
-    std::map<std::string, llvm::BasicBlock*> labelBlocks;
-
-    /// A block being emitted that declares labels, with the machinery a goto
-    /// from an enclosed procedure needs to reach it (ISO §6.8.1).  Innermost
-    /// last, so a goto finds the nearest activation that declares its label.
-    ///
-    /// Leaving a procedure means abandoning its frame and every frame under
-    /// it, which a branch cannot express: the target is not in this function.
-    /// So the owning block records where it was with setjmp, and the goto
-    /// returns there with longjmp, naming the label it wants in the value the
-    /// setjmp is seen to return.  A switch on that value does the rest.
-    struct LabelOwner {
-        const BlockNode*      block{nullptr};
-        std::string           bufName;   ///< scope name of its jump buffer
-        llvm::SwitchInst*     dispatch{nullptr};
-    };
-    std::vector<LabelOwner> labelOwners;
-
-    /// The jump buffer is sized once, here, for every target: the generated
-    /// code cannot see the platform's jmp_buf, and the runtime asserts that
-    /// this is enough room for it.
-    static constexpr unsigned gotoBufWords = 64;
-
     /// Does \p block's label section declare \p label?
     static bool declaresLabel(const BlockNode& block, const std::string& label);
 
     /// The labels \p block declares that a goto inside a procedure declared in
     /// it names.  These are the ones that need somewhere to land.
     static std::set<std::string> nonLocalTargets(const BlockNode& block);
-    /// Recursive half of nonLocalTargets: scans the procedures declared in
-    /// \p inner for gotos naming a label \p block declares, collecting into
-    /// \p found.
-    static void scanNonLocalTargets(const BlockNode& inner,
-                                    const BlockNode& block,
-                                    std::set<std::string>& found);
 
     /// The value a longjmp passes for \p label.  Offset by one because zero is
     /// what setjmp returns when it is first called, and longjmp turns a
     /// requested zero into one anyway.
     static int64_t gotoDispatchValue(const std::string& label);
 
+    llvm::BasicBlock* getOrCreateLabel(const std::string& name);
+
     /// Record \p block as the owner of its labels, and, if a goto from inside
-    /// one of its procedures names any of them, plant the landing pad.  \p buf
-    /// is the jump buffer to record in — a global for the program's block,
-    /// whose one activation lasts the run, and an alloca for a procedure's,
-    /// which nested procedures reach over the static link.  Emits at the
-    /// current insertion point, which must be past the block's initialization:
-    /// a goto landing here resumes the block, it does not restart it.
+    /// one of its procedures names any of them, plant the landing pad.  Emits
+    /// at the current insertion point, which must be past the block's
+    /// initialization: a goto landing here resumes the block, it does not
+    /// restart it.
     void openLabelScope(const BlockNode& block, bool programBlock);
 
     /// Plant the setjmp and the switch that dispatches on what it returns.
@@ -1677,7 +1646,6 @@ struct Codegen::Impl {
     // Statement emission
     // ====================================================================
     void emitStmt(const StmtNode* stmt);
-    llvm::BasicBlock* getOrCreateLabel(const std::string& name);
     void resumeAfterTerminator();
     void emitCompound(const CompoundStmt& s);
     void emitAssign(const AssignStmt& s);
