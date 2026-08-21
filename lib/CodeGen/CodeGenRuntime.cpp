@@ -296,46 +296,33 @@ void Codegen::Impl::emitRangeCheckDyn(llvm::Value* val, llvm::Value* lo,
 // ====================================================================
 
 llvm::Function* Codegen::Impl::getExternFn(const std::string& name, llvm::FunctionType* ty) {
-    auto it = externFuncs.find(name);
-    if (it != externFuncs.end()) return it->second;
-    auto* f = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, name, mod.get());
-    externFuncs[name] = f;
-    return f;
+    return runtimeFns_->getExternFn(name, ty);
 }
 
 llvm::Function* Codegen::Impl::getRTMathRR(const std::string& name) {
-    auto* ty = llvm::FunctionType::get(dblTy, {dblTy}, false);
-    return getExternFn(name, ty);
+    return runtimeFns_->getRTMathRR(name);
 }
 
 llvm::Function* Codegen::Impl::getRTMathRI(const std::string& name) {
-    auto* ty = llvm::FunctionType::get(i64Ty, {dblTy}, false);
-    return getExternFn(name, ty);
+    return runtimeFns_->getRTMathRI(name);
 }
 
 llvm::Function* Codegen::Impl::getRTMathII(const std::string& name) {
-    auto* ty = llvm::FunctionType::get(i64Ty, {i64Ty}, false);
-    return getExternFn(name, ty);
+    return runtimeFns_->getRTMathII(name);
 }
 
 llvm::Function* Codegen::Impl::getRuntimeFn(const std::string& name, llvm::Type* argTy) {
-    auto* voidTy = llvm::Type::getVoidTy(ctx);
-    auto* ty = argTy
-        ? llvm::FunctionType::get(voidTy, {argTy}, false)
-        : llvm::FunctionType::get(voidTy, {}, false);
-    return getExternFn(name, ty);
+    return runtimeFns_->getRuntimeFn(name, argTy);
 }
 
 llvm::Function* Codegen::Impl::getRuntimeBoolFn(const std::string& name) {
-    auto* ty = llvm::FunctionType::get(i8Ty, {}, false);
-    return getExternFn(name, ty);
+    return runtimeFns_->getRuntimeBoolFn(name);
 }
 
 llvm::Function* Codegen::Impl::getExternFnN(const std::string& name,
                                               llvm::Type* retTy,
                                               std::vector<llvm::Type*> params) {
-    auto* ty = llvm::FunctionType::get(retTy, params, false);
-    return getExternFn(name, ty);
+    return runtimeFns_->getExternFnN(name, retTy, std::move(params));
 }
 
 // ---- file-variable helpers ----
@@ -440,22 +427,15 @@ int64_t Codegen::Impl::getFileIndexLow(const ExprNode& fileExpr) {
 }
 
 llvm::Function* Codegen::Impl::getRuntimeNewFn() {
-    auto* ty = llvm::FunctionType::get(ptrTy, {i64Ty}, false);
-    return getExternFn("plang_new", ty);
+    return runtimeFns_->getRuntimeNewFn();
 }
 
 llvm::Function* Codegen::Impl::getRuntimeDisposeFn() {
-    auto* voidTy = llvm::Type::getVoidTy(ctx);
-    auto* ty = llvm::FunctionType::get(voidTy, {ptrTy}, false);
-    return getExternFn("plang_dispose", ty);
+    return runtimeFns_->getRuntimeDisposeFn();
 }
 
 llvm::Function* Codegen::Impl::getRuntimeHaltFn() {
-    auto* voidTy = llvm::Type::getVoidTy(ctx);
-    auto* ty = llvm::FunctionType::get(voidTy, {i64Ty}, false);
-    auto* f = getExternFn("plang_halt", ty);
-    f->addFnAttr(llvm::Attribute::NoReturn);
-    return f;
+    return runtimeFns_->getRuntimeHaltFn();
 }
 
 // ====================================================================

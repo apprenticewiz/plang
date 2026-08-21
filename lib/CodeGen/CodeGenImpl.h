@@ -49,6 +49,7 @@
 #include "plang/Basic/Token.h"
 
 #include "ConstFold.h"
+#include "RuntimeFunctionCache.h"
 
 using namespace plang;
 
@@ -108,6 +109,10 @@ struct Codegen::Impl {
     llvm::LLVMContext            ctx;
     std::unique_ptr<llvm::Module> mod;
     llvm::IRBuilder<>            builder{ctx};
+
+    // ---- leaf units (constructed fresh in init(), once mod/common types
+    // exist; see init()'s own comment) ----
+    std::unique_ptr<RuntimeFunctionCache> runtimeFns_;
 
     // ---- -g debug info (built in init() when langOpts.Debug; see Phase 1's
     // note by srcMgr_ on why these are ordinary members and never statics) ----
@@ -273,7 +278,6 @@ struct Codegen::Impl {
     /// as `name=value` pairs.  Empty everywhere outside a schema body.
     std::string schemaCtx;
 
-    std::map<std::string, llvm::Function*>       externFuncs;  // declared externals
     std::unordered_map<std::string, const TypeNode*> typeAliases; // user typedef name → AST node
     std::map<int64_t, llvm::StructType*> strStructTypes;  // cap → { i64, [cap x i8] }
 

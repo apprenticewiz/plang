@@ -67,6 +67,12 @@ void Codegen::Impl::init(const std::string& progName) {
     mod->setTargetTriple(triple);
     if (auto dl = layoutFor(triple)) mod->setDataLayout(*dl);
 
+    // Leaf units: constructed fresh here, after mod exists, rather than in
+    // Impl's member-initializer list -- a unique_ptr<Module> stays null until
+    // this point, so a unit needing one cannot be bound any earlier.  Fresh
+    // construction also gives each a clean cache with no separate reset().
+    runtimeFns_ = std::make_unique<RuntimeFunctionCache>(ctx, *mod);
+
     if (langOpts.Debug) {
         DBuilder = std::make_unique<llvm::DIBuilder>(*mod);
         std::string Filename = progName, Directory;
@@ -117,7 +123,6 @@ void Codegen::Impl::init(const std::string& progName) {
 
     strGVs.clear();
     structTypes.clear();
-    externFuncs.clear();
     typeAliases.clear();
     strStructTypes.clear();
     curFunc = nullptr;
