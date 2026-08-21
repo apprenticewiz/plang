@@ -6,6 +6,7 @@ add_library(PlangCodeGen OBJECT
     RangeCheckGuards.cpp
     SetOps.cpp
     LabelGotoEngine.cpp
+    CGLinkage.cpp
     CodeGen.cpp
     CodeGenTypes.cpp
     CodeGenRuntime.cpp

@@ -48,6 +48,7 @@
 #include "plang/Basic/StringUtil.h"
 #include "plang/Basic/Token.h"
 
+#include "CGLinkage.h"
 #include "ComplexOps.h"
 #include "ConstFold.h"
 #include "LabelGotoEngine.h"
@@ -59,43 +60,6 @@
 #include "CodegenICE.h"
 
 using namespace plang;
-
-// ---------------------------------------------------------------------------
-// Name mangling
-//
-// Every symbol a compiled program defines for something the *source* named — a
-// procedure, a function, a variable — is built from one of these prefixes.  The
-// runtime's own ~150 entry points are the other half of the same link, and they
-// are spelled `plang_*`.
-//
-// So user code may not be spelled `plang_*` too, which it was until 0.1.3: a
-// procedure the program called `close`, `round`, `page` or `halt` — thirty-three
-// names collided, twenty-four of them required identifiers ISO §6.2.2.10
-// entitles a program to redeclare — was emitted as `plang_close`, the same
-// symbol the runtime defines.  Whether that was caught depended on whether the
-// runtime translation unit holding the twin happened to be pulled out of the
-// archive for some other reason, so it was a duplicate-symbol error in some
-// programs and silence in others.
-//
-// `pas_` and `pasg_` cannot collide with the runtime whatever the program
-// declares, since nothing in the runtime begins with either.
-//
-// An enclosing scope — a module, or a procedure a procedure is nested in — is
-// joined on with `$`.  Extended Pascal §6.1.3 allows an underscore inside an
-// identifier, so the `__` that used to join them was itself something a name
-// could contain, and a module `a` exporting `b` and a top-level `a__b` both
-// wanted the same symbol.  `$` is not in the Pascal alphabet, so a mangled name
-// now separates into its parts exactly one way.  It is accepted unquoted in an
-// LLVM identifier, and in an ELF and a Mach-O symbol.
-// ---------------------------------------------------------------------------
-
-/// Prefix for a procedure or function the source declares.
-inline constexpr const char* PlangProcPrefix   = "pas_";
-/// Prefix for a variable the source declares at file or module scope.
-inline constexpr const char* PlangGlobalPrefix = "pasg_";
-/// Joins an enclosing scope to what it declares.  Must be something no Pascal
-/// identifier can contain, or a mangled name is ambiguous; see above.
-inline constexpr const char* PlangScopeSep     = "$";
 
 // ---------------------------------------------------------------------------
 // Impl — contains all LLVM objects
@@ -115,6 +79,7 @@ struct Codegen::Impl {
     std::unique_ptr<RangeCheckGuards>     rangeGuards_;
     std::unique_ptr<SetOps>               setOps_;
     std::unique_ptr<LabelGotoEngine>      gotoEngine_;
+    std::unique_ptr<CGLinkage>            linkage_;
 
     // ---- -g debug info (built in init() when langOpts.Debug; see Phase 1's
     // note by srcMgr_ on why these are ordinary members and never statics) ----
@@ -299,7 +264,7 @@ struct Codegen::Impl {
     /// the symbol `plang_f`, and the second definition is renamed to
     /// `plang_f.1` and never called.
     static std::string moduleScope(const std::string& moduleName) {
-        return moduleName.empty() ? "" : toLower(moduleName) + PlangScopeSep;
+        return CGLinkage::moduleScope(moduleName);
     }
 
     /// Name of the unit being emitted: a lowercased module name, or empty for
@@ -346,11 +311,7 @@ struct Codegen::Impl {
     /// What is known about \p name as an import of the unit being emitted, or
     /// null if this unit does not import it.
     const ImportedName* importedName(const std::string& name) const {
-        if (!importOwners_) return nullptr;
-        auto unit = importOwners_->find(currentUnit_);
-        if (unit == importOwners_->end()) return nullptr;
-        auto it = unit->second.find(toLower(name));
-        return it == unit->second.end() ? nullptr : &it->second;
+        return linkage_->importedName(name);
     }
 
     /// Globals declared by module bodies in this compilation unit, keyed
@@ -364,27 +325,21 @@ struct Codegen::Impl {
     /// name is not imported.  A qualified name answers for itself: the parser
     /// folds `M.f` into one identifier, and M is the module.
     std::string importOwner(const std::string& name) const {
-        if (const auto* imp = importedName(name)) return imp->Module;
-        const auto dot = name.rfind('.');
-        return dot == std::string::npos ? std::string()
-                                        : toLower(name.substr(0, dot));
+        return linkage_->importOwner(name);
     }
 
     /// The name \p name is mangled under in the module that declares it.  EP
     /// §6.11.2 renaming lets a unit call an imported procedure something else
     /// entirely; the object file still knows only the original.
     std::string importLinkName(const std::string& name) const {
-        if (const auto* imp = importedName(name))
-            if (!imp->LinkName.empty()) return imp->LinkName;
-        return stripQualifier(name);
+        return linkage_->importLinkName(name);
     }
 
     /// True when \p name is an imported procedure or function, so a bare
     /// mention of it is a call even though nothing of that name has been
     /// emitted here — its module was compiled separately.
     bool isImportedCallable(const std::string& name) const {
-        const auto* imp = importedName(name);
-        return imp && imp->IsCallable;
+        return linkage_->isImportedCallable(name);
     }
 
     // Static link for nested procedures (ISO §6.7.1).
@@ -1334,58 +1289,17 @@ struct Codegen::Impl {
     /// the identifier.  The module it names is recovered separately, by
     /// importOwner, because it is part of the mangled name.
     static std::string stripQualifier(const std::string& name) {
-        const auto dot = name.rfind('.');
-        return (dot == std::string::npos) ? name : name.substr(dot + 1);
+        return CGLinkage::stripQualifier(name);
     }
 
     std::string findMangledProc(const std::string& qualifiedName) const {
-        const std::string      name = stripQualifier(qualifiedName);
-        // EP §6.11.2: `M.f` names f as M's export, on purpose, to reach past
-        // an importer's own homonym -- that is the one thing `qualified`
-        // buys over a plain import.  The enclosing-scope walk below answers
-        // a BARE name by asking what is visible here, which is the wrong
-        // question for one that was written qualified: `writeln(f); writeln(
-        // M.f)` inside a procedure that declares its own `f` called its own
-        // `f` for both, because the walk found it before the qualifier was
-        // ever consulted.  A qualified name skips straight to the import.
-        if (qualifiedName.find('.') != std::string::npos)
-            return PlangProcPrefix + moduleScope(importOwner(qualifiedName))
-                 + importLinkName(qualifiedName);
-        const std::size_t      root = std::string_view(PlangProcPrefix).size();
-        const std::string_view sep(PlangScopeSep);
-        std::string prefix = namePrefix;
-        while (true) {
-            std::string candidate = prefix + name;
-            if (mod->getFunction(candidate)) return candidate;
-            // Strip the innermost enclosing scope: "pas_outer$inner$" →
-            // "pas_outer$".  prefix ends with the separator, so the search
-            // starts before it, at the last character of the scope name.
-            if (prefix.size() <= root) break; // the bare prefix is the last try
-            auto pos = prefix.rfind(sep, prefix.size() - sep.size() - 1);
-            if (pos == std::string::npos || pos + sep.size() < root) break;
-            prefix = prefix.substr(0, pos + sep.size());
-        }
-        // Nothing of that name is in scope here, so it is imported.  The walk
-        // above runs first so a procedure this unit declares itself still wins
-        // over one of the same name that it imports.
-        return PlangProcPrefix + moduleScope(importOwner(qualifiedName))
-             + importLinkName(qualifiedName);
+        return linkage_->findMangledProc(qualifiedName);
     }
 
     /// The symbol naming the global variable \p name denotes, mangled with the
     /// module that declares it.
     std::string mangledGlobal(const std::string& qualifiedName) const {
-        const std::string name = stripQualifier(qualifiedName);
-        // Same reasoning as findMangledProc just above: a qualified `M.v`
-        // must reach M's global even when this translation unit happens to
-        // define its own `v`, so the qualified case skips the bare-name
-        // check entirely rather than letting a same-spelling local answer
-        // for an explicitly-qualified reference.
-        if (qualifiedName.find('.') == std::string::npos
-                && mod->getGlobalVariable(globalPrefix + name))
-            return globalPrefix + name;
-        return PlangGlobalPrefix + moduleScope(importOwner(qualifiedName))
-             + importLinkName(qualifiedName);
+        return linkage_->mangledGlobal(qualifiedName);
     }
 
     /// The value of \p e in memory, for reading a component of a function

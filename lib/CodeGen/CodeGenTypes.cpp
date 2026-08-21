@@ -78,6 +78,12 @@ void Codegen::Impl::init(const std::string& progName) {
     runtimeFns_ = std::make_unique<RuntimeFunctionCache>(ctx, *mod);
     strings_    = std::make_unique<StringRuntime>(ctx, *mod, builder,
         [this](int64_t cap){ return strStructType(cap); });
+    // namePrefix/globalPrefix/currentUnit_ stay Impl fields (see linkage_'s
+    // own constructor comment); importOwners_ is captured by value here,
+    // valid because Codegen::setImportOwners is always called before
+    // emit()/init() runs, never after.
+    linkage_ = std::make_unique<CGLinkage>(*mod, namePrefix, globalPrefix,
+        currentUnit_, importOwners_);
 
     if (langOpts.Debug) {
         DBuilder = std::make_unique<llvm::DIBuilder>(*mod);
