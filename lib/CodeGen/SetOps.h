@@ -1,0 +1,73 @@
+// SetOps.h — ISO §6.7.2.4 sets: a flat bitmask, one bit per ordinal of the
+// base type. Every operation here is emitted inline: the bitwise ones map
+// directly to LLVM instructions, which avoids having to define a calling
+// convention for a 256-bit value crossing into the C runtime.
+//
+// Membership and construction clamp their ordinal so an out-of-range value
+// yields the empty set or false rather than a shift past the type width,
+// which LLVM treats as poison.
+#pragma once
+
+#include <functional>
+#include <optional>
+
+#include "llvm/IR/DerivedTypes.h"
+#include "llvm/IR/IRBuilder.h"
+#include "llvm/IR/LLVMContext.h"
+#include "llvm/IR/Module.h"
+
+#include "plang/AST/Ast.h"
+#include "plang/Basic/Token.h"
+#include "plang/Sema/Type.h"
+
+namespace plang { struct ExprNode; }
+
+class SetOps {
+public:
+    SetOps(llvm::LLVMContext& Ctx, llvm::Module& Mod, llvm::IRBuilder<>& B,
+           std::function<llvm::Value*(llvm::Value*)> ToI64)
+        : Ctx(Ctx), Mod(Mod), B(B), ToI64(std::move(ToI64)) {}
+
+    /// Sets are a flat bitmask of PlangMaxSetElements bits.  Bit 0 stands for
+    /// the base type's origin rather than for ordinal 0, so a base type
+    /// reaching below zero still fits.  Sema rejects base types that span
+    /// more ordinals than there are bits.
+    llvm::IntegerType* setTy() const {
+        return llvm::Type::getIntNTy(Ctx, plang::PlangMaxSetElements);
+    }
+    /// Widens/narrows an integer to the set width.  Sets never flow through
+    /// ToI64, which would discard every ordinal above 63.
+    llvm::Value* toSetWidth(llvm::Value* v);
+    /// Clamps v into [0, PlangMaxSetElements - 1].
+    llvm::Value* clampToSetWidth(llvm::Value* v);
+    /// The ordinal that bit 0 of e's set type stands for; 0 when e has no set
+    /// type, which is the layout every non-negative base type uses anyway.
+    int64_t setBaseOf(const plang::ExprNode& e);
+    /// Moves a set value from the window based at `from` into the one based
+    /// at `to`.  Two compatible set types may be based at different
+    /// ordinals, and a value crossing between them has to be shifted to
+    /// keep its members.
+    llvm::Value* alignSet(llvm::Value* v, int64_t from, int64_t to);
+    /// alignSet for an argument being passed by value, whose destination
+    /// window is \p destSetBase (the callee parameter's recorded set base,
+    /// already resolved by the caller -- this method has no knowledge of
+    /// paramMeta_/mangled-name lookups). Leaves anything that is not a set
+    /// value alone, a var parameter's address included.
+    llvm::Value* alignSetArg(llvm::Value* v, const plang::ExprNode& arg,
+                              std::optional<int64_t> destSetBase);
+    /// Bit index for an ordinal in a set based at `base`.
+    llvm::Value* setBitIndex(llvm::Value* ordinal, int64_t base);
+    llvm::Value* emitSetSingleton(llvm::Value* ordinal, int64_t base);
+    llvm::Value* emitSetRange(llvm::Value* lo, llvm::Value* hi, int64_t base);
+    llvm::Value* emitSetMember(llvm::Value* ordinal, llvm::Value* set, int64_t base);
+    /// Lowers a set-valued or set-comparing binary operator; returns null if
+    /// op is not one of them.
+    llvm::Value* emitSetBinary(plang::TokenKind op, llvm::Value* a, llvm::Value* b);
+
+private:
+    llvm::LLVMContext& Ctx;
+    llvm::Module& Mod;
+    llvm::IRBuilder<>& B;
+    std::function<llvm::Value*(llvm::Value*)> ToI64;
+    llvm::IntegerType* i64Ty() const { return llvm::Type::getInt64Ty(Ctx); }
+};

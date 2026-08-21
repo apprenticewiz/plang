@@ -1095,12 +1095,15 @@ void Codegen::Impl::emitUserProcCall(const CallStmt& s) {
             pi += 1 + 2 * dims;
         } else {
             // Regular param (var or value).
-            args.push_back(alignSetArg(
+            std::optional<int64_t> destSetBase;
+            if (pMeta && astArgIdx < pMeta->size())
+                destSetBase = (*pMeta)[astArgIdx].setBase;
+            args.push_back(setOps_->alignSetArg(
                 emitCallArg(*arg,
                     pi < callee->arg_size()
                         ? callee->getFunctionType()->getParamType(pi) : nullptr,
                     paramIsByRef(mangledName, astArgIdx)),
-                *arg, mangledName, astArgIdx));
+                *arg, destSetBase));
             ++pi;
         }
     }

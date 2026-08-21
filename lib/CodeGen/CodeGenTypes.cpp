@@ -115,6 +115,8 @@ void Codegen::Impl::init(const std::string& progName) {
     rangeGuards_ = std::make_unique<RangeCheckGuards>(ctx, builder, curFunc,
         *runtimeFns_, *strings_, langOpts, nilChecks,
         [this](llvm::Value* v){ return toI64(v); });
+    setOps_ = std::make_unique<SetOps>(ctx, *mod, builder,
+        [this](llvm::Value* v){ return toI64(v); });
 
     scopes.clear();
     consts.clear();

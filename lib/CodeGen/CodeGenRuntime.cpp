@@ -31,154 +31,42 @@ llvm::Constant* Codegen::Impl::internStrStruct(const std::string& content) {
 // ====================================================================
 
 llvm::Value* Codegen::Impl::toSetWidth(llvm::Value* v) {
-    auto* st = setTy();
-    if (v->getType() == st) return v;
-    if (v->getType()->isIntegerTy())
-        return builder.CreateZExtOrTrunc(v, st, "set.cast");
-    codegenICE("expected an integer value where a set was required");
+    return setOps_->toSetWidth(v);
 }
 
-/// True when 0 <= ord < PlangMaxSetElements, plus the ordinal clamped into
-/// that window so the caller can shift by it unconditionally.
-static llvm::Value* clampOrdinal(llvm::IRBuilder<>& b, llvm::Type* i64Ty,
-                                 llvm::Value* ord, llvm::Value*& inRange) {
-    auto* lo = b.CreateICmpSGE(ord, llvm::ConstantInt::get(i64Ty, 0), "set.ge0");
-    auto* hi = b.CreateICmpSLT(ord,
-        llvm::ConstantInt::get(i64Ty, PlangMaxSetElements), "set.ltmax");
-    inRange  = b.CreateAnd(lo, hi, "set.inrange");
-    return b.CreateSelect(inRange, ord, llvm::ConstantInt::get(i64Ty, 0), "set.ord");
-}
-
-/// Clamps v into [0, PlangMaxSetElements - 1].
 llvm::Value* Codegen::Impl::clampToSetWidth(llvm::Value* v) {
-    auto* zero = llvm::ConstantInt::get(i64Ty, 0);
-    auto* max  = llvm::ConstantInt::get(i64Ty, PlangMaxSetElements - 1);
-    auto  pick = [&](llvm::Intrinsic::ID id, llvm::Value* a, llvm::Value* b) {
-        return builder.CreateCall(
-            llvm::Intrinsic::getOrInsertDeclaration(mod.get(), id, {i64Ty}), {a, b});
-    };
-    return pick(llvm::Intrinsic::smin, pick(llvm::Intrinsic::smax, v, zero), max);
+    return setOps_->clampToSetWidth(v);
 }
 
 int64_t Codegen::Impl::setBaseOf(const ExprNode& e) {
-    const auto& t = e.ResolvedType;
-    return (t && t->Kind == TypeKind::Set) ? setOffsetOf(*t) : 0;
+    return setOps_->setBaseOf(e);
 }
 
 llvm::Value* Codegen::Impl::alignSet(llvm::Value* v, int64_t from, int64_t to) {
-    if (!v || from == to) return v;
-    // A member sits at the bit given by its ordinal less the window's origin,
-    // so moving a value from a window based at `from` into one based at `to`
-    // moves every bit by the difference between the two origins.
-    //
-    // ISO §6.4.5 c) makes two set types compatible when their base types are,
-    // and two compatible bases need not begin at the same ordinal: `set of
-    // -5..10` and `set of 0..10` are compatible and their windows are five bits
-    // apart.  Without this the bits were carried across unmoved and every
-    // member came out shifted — {1, 3} read back as {-4, -2}.
-    auto* st  = setTy();
-    auto* amt = llvm::ConstantInt::get(
-        st, static_cast<uint64_t>(from > to ? from - to : to - from));
-    auto* x = toSetWidth(v);
-    return from > to ? builder.CreateShl (x, amt, "set.align")
-                     : builder.CreateLShr(x, amt, "set.align");
-}
-
-llvm::Value* Codegen::Impl::alignSetArg(llvm::Value* v, const ExprNode& arg,
-                                        const std::string& mangled,
-                                        size_t astArgIdx) {
-    // A var parameter arrives as an address, and ISO §6.6.3.3 requires its
-    // actual to be of the parameter's own type, so no window is crossed there.
-    if (!v || v->getType() != setTy()) return v;
-    const auto It = paramMeta_.find(mangled);
-    if (It == paramMeta_.end() || astArgIdx >= It->second.size()) return v;
-    return alignSet(v, setBaseOf(arg), It->second[astArgIdx].setBase);
+    return setOps_->alignSet(v, from, to);
 }
 
 llvm::Value* Codegen::Impl::setBitIndex(llvm::Value* ordinal, int64_t base) {
-    auto* ord = toI64(ordinal);
-    if (base == 0) return ord;
-    return builder.CreateSub(ord, llvm::ConstantInt::get(i64Ty, base, true),
-                             "set.rebase");
+    return setOps_->setBitIndex(ordinal, base);
 }
 
 llvm::Value* Codegen::Impl::emitSetSingleton(llvm::Value* ordinal, int64_t base) {
-    auto* st    = setTy();
-    auto* zero  = llvm::ConstantInt::get(st, 0);
-    llvm::Value* inRange = nullptr;
-    auto* ord   = clampOrdinal(builder, i64Ty, setBitIndex(ordinal, base), inRange);
-    auto* bit   = builder.CreateShl(llvm::ConstantInt::get(st, 1),
-                                    builder.CreateZExt(ord, st), "set.bit");
-    return builder.CreateSelect(inRange, bit, zero, "set.single");
+    return setOps_->emitSetSingleton(ordinal, base);
 }
 
 llvm::Value* Codegen::Impl::emitSetRange(llvm::Value* lo, llvm::Value* hi,
                                          int64_t base) {
-    auto* st       = setTy();
-    auto* zero     = llvm::ConstantInt::get(st, 0);
-    auto* allOnes  = llvm::ConstantInt::getAllOnesValue(st);
-    auto* i64Zero  = llvm::ConstantInt::get(i64Ty, 0);
-    auto* i64Max   = llvm::ConstantInt::get(i64Ty, PlangMaxSetElements - 1);
-
-    // Emptiness is decided from the original bounds; the clamped copies below
-    // only keep the shift amounts inside the type width, since a shift past it
-    // is poison in LLVM even on a path whose result is discarded.
-    auto* l = setBitIndex(lo, base);
-    auto* h = setBitIndex(hi, base);
-    auto* empty = builder.CreateOr(
-        builder.CreateICmpSGT(l, h, "set.lo.gt.hi"),
-        builder.CreateOr(builder.CreateICmpSGT(l, i64Max, "set.lo.big"),
-                         builder.CreateICmpSLT(h, i64Zero, "set.hi.neg")),
-        "set.empty");
-    auto* lClamped = clampToSetWidth(l);
-    auto* hClamped = clampToSetWidth(h);
-
-    // bits >= lo
-    auto* lowBits = builder.CreateShl(allOnes,
-        builder.CreateZExt(lClamped, st), "set.lowbits");
-
-    // bits > hi, i.e. allOnes << (hi + 1).  hi == max would shift by the full
-    // width, so substitute a shift of 0 and select the result away.
-    auto* hiIsMax = builder.CreateICmpEQ(hClamped, i64Max, "set.hi.ismax");
-    auto* shAmt   = builder.CreateSelect(hiIsMax, i64Zero,
-        builder.CreateAdd(hClamped, llvm::ConstantInt::get(i64Ty, 1)), "set.hi.sh");
-    auto* above   = builder.CreateSelect(hiIsMax, zero,
-        builder.CreateShl(allOnes, builder.CreateZExt(shAmt, st)), "set.above");
-
-    auto* mask = builder.CreateAnd(lowBits, builder.CreateNot(above), "set.range");
-    return builder.CreateSelect(empty, zero, mask, "set.range.chk");
+    return setOps_->emitSetRange(lo, hi, base);
 }
 
 llvm::Value* Codegen::Impl::emitSetMember(llvm::Value* ordinal, llvm::Value* set,
                                           int64_t base) {
-    auto* st = setTy();
-    llvm::Value* inRange = nullptr;
-    auto* ord   = clampOrdinal(builder, i64Ty, setBitIndex(ordinal, base), inRange);
-    auto* shifted = builder.CreateLShr(toSetWidth(set),
-                                       builder.CreateZExt(ord, st), "set.shr");
-    auto* bit = builder.CreateTrunc(shifted, i1Ty, "set.bit");
-    return builder.CreateAnd(inRange, bit, "set.in");
+    return setOps_->emitSetMember(ordinal, set, base);
 }
 
 llvm::Value* Codegen::Impl::emitSetBinary(TokenKind op, llvm::Value* a,
                                           llvm::Value* b) {
-    auto* x = toSetWidth(a);
-    auto* y = toSetWidth(b);
-    switch (op) {
-        case TokenKind::Plus:     return builder.CreateOr(x, y, "set.union");
-        case TokenKind::Times:    return builder.CreateAnd(x, y, "set.isect");
-        case TokenKind::Minus:
-            return builder.CreateAnd(x, builder.CreateNot(y), "set.diff");
-        case TokenKind::SymDiff:  return builder.CreateXor(x, y, "set.symdiff");
-        case TokenKind::Equal:    return builder.CreateICmpEQ(x, y, "set.eq");
-        case TokenKind::NotEqual: return builder.CreateICmpNE(x, y, "set.ne");
-        // a <= b holds when a contributes no bits outside b.
-        case TokenKind::LessThanOrEqual:
-            return builder.CreateICmpEQ(builder.CreateAnd(x, y), x, "set.subset");
-        case TokenKind::GreaterThanOrEqual:
-            return builder.CreateICmpEQ(builder.CreateAnd(x, y), y, "set.supset");
-        default: return nullptr;
-    }
+    return setOps_->emitSetBinary(op, a, b);
 }
 
 // ====================================================================

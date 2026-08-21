@@ -52,19 +52,12 @@
 #include "ConstFold.h"
 #include "RangeCheckGuards.h"
 #include "RuntimeFunctionCache.h"
+#include "SetOps.h"
 #include "StringRuntime.h"
 
-using namespace plang;
+#include "CodegenICE.h"
 
-/// Aborts on an internal codegen inconsistency.
-///
-/// Reaching one of these means Sema accepted a construct that codegen cannot
-/// lower.  Returning a placeholder value instead would emit a program that
-/// compiles and runs but computes the wrong answer, so failing loudly here is
-/// the only way such a gap becomes visible.
-[[noreturn]] inline void codegenICE(const llvm::Twine& What) {
-    llvm::report_fatal_error(llvm::Twine("plang codegen: ") + What, false);
-}
+using namespace plang;
 
 // ---------------------------------------------------------------------------
 // Name mangling
@@ -119,6 +112,7 @@ struct Codegen::Impl {
     std::unique_ptr<StringRuntime>        strings_;
     std::unique_ptr<ComplexOps>           complexOps_;
     std::unique_ptr<RangeCheckGuards>     rangeGuards_;
+    std::unique_ptr<SetOps>               setOps_;
 
     // ---- -g debug info (built in init() when langOpts.Debug; see Phase 1's
     // note by srcMgr_ on why these are ordinary members and never statics) ----
@@ -1027,7 +1021,7 @@ struct Codegen::Impl {
     /// the base type's origin rather than for ordinal 0, so a base type
     /// reaching below zero still fits; see setBaseOffset.  Sema rejects base
     /// types that span more ordinals than there are bits.
-    llvm::IntegerType* setTy() { return llvm::Type::getIntNTy(ctx, PlangMaxSetElements); }
+    llvm::IntegerType* setTy() { return setOps_->setTy(); }
     /// Widens/narrows an integer to the set width.  Sets never flow through
     /// toI64, which would discard every ordinal above 63.
     llvm::Value* toSetWidth(llvm::Value* v);
@@ -1039,11 +1033,6 @@ struct Codegen::Impl {
     /// `to`.  Two compatible set types may be based at different ordinals, and
     /// a value crossing between them has to be shifted to keep its members.
     llvm::Value* alignSet(llvm::Value* v, int64_t from, int64_t to);
-    /// alignSet for an argument being passed by value, whose destination window
-    /// is the one recorded for the callee's parameter.  Leaves anything that is
-    /// not a set value alone, a var parameter's address included.
-    llvm::Value* alignSetArg(llvm::Value* v, const ExprNode& arg,
-                             const std::string& mangled, size_t astArgIdx);
     /// Bit index for an ordinal in a set based at `base`.
     llvm::Value* setBitIndex(llvm::Value* ordinal, int64_t base);
     llvm::Value* emitSetSingleton(llvm::Value* ordinal, int64_t base);

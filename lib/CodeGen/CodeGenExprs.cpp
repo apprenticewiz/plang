@@ -1104,12 +1104,15 @@ llvm::Value* Codegen::Impl::emitUserFuncCall(const CallExpr& e) {
             pushConformantArgs(args, *arg, dims);
             pi += 1 + 2 * dims;
         } else {
-            args.push_back(alignSetArg(
+            std::optional<int64_t> destSetBase;
+            if (pMeta && astArgIdx < pMeta->size())
+                destSetBase = (*pMeta)[astArgIdx].setBase;
+            args.push_back(setOps_->alignSetArg(
                 emitCallArg(*arg,
                     pi < callee->arg_size()
                         ? callee->getFunctionType()->getParamType(pi) : nullptr,
                     paramIsByRef(mangledName, astArgIdx)),
-                *arg, mangledName, astArgIdx));
+                *arg, destSetBase));
             ++pi;
         }
     }
