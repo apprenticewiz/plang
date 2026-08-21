@@ -49,6 +49,7 @@
 #include "plang/Basic/Token.h"
 
 #include "CGLinkage.h"
+#include "CGSymbolTable.h"
 #include "ComplexOps.h"
 #include "ConstFold.h"
 #include "LabelGotoEngine.h"
@@ -58,6 +59,7 @@
 #include "SchemaTypeRegistry.h"
 #include "SetOps.h"
 #include "StringRuntime.h"
+#include "VarEntry.h"
 
 #include "CodegenICE.h"
 
@@ -84,6 +86,7 @@ struct Codegen::Impl {
     std::unique_ptr<CGLinkage>            linkage_;
     std::unique_ptr<SchemaTypeRegistry>   schemaTypes_;
     std::unique_ptr<SchemaLayoutEngine>   schemaLayout_;
+    std::unique_ptr<CGSymbolTable>        symTab_;
 
     // ---- -g debug info (built in init() when langOpts.Debug; see Phase 1's
     // note by srcMgr_ on why these are ordinary members and never statics) ----
@@ -118,81 +121,8 @@ struct Codegen::Impl {
     }
 
     // ---- symbol table ----
-    struct VarEntry {
-        llvm::Value*     ptr;               // alloca or GlobalVariable (used as ptr)
-        llvm::Type*      type;              // the *value* type (pointee)
-        const TypeNode*  typeNode{nullptr}; // original Pascal TypeNode (for file detection)
-        /// The name as the programmer spelled it, kept alongside the
-        /// case-folded map key (Pascal is case-insensitive, so the key
-        /// cannot answer this).  A nested procedure capturing this variable
-        /// through the static link re-registers it under whatever name it
-        /// is handed; without this, that re-registration had only the
-        /// lowercased key to offer -g's DILocalVariable, so a debugger
-        /// asked for `localN` from inside the capturing procedure and
-        /// found only `localn`.
-        std::string displayName{};
-        // EP §6.7.3.7: conformant array fields.
-        bool        isConformantArray{false};  // true if this is a conformant array param
-        std::string conformantLoName{};        // name of the lo bound variable
-        std::string conformantHiName{};        // name of the hi bound variable
-        llvm::Type* conformantElemTy{nullptr}; // LLVM element type of the conformant array
-        /// The bound-variable names of every dimension, outermost first.  A
-        /// multi-dimensional conformant array is one flat block whose row
-        /// width is only known from the inner bounds, so indexing needs all of
-        /// them and not just the outermost pair.
-        std::vector<std::pair<std::string, std::string>> conformantDims{};
-        /// The bound variables themselves, in the same order.
-        ///
-        /// The names above are what the programmer wrote in the parameter
-        /// list, and re-resolving them wherever a subscript appears is what
-        /// let an inner scope answer instead: a record with fields spelled
-        /// `lo` and `hi` made `x[5]` inside `with r do` adjust by r.lo rather
-        /// than by the array's own bound, and read out of the block.  The
-        /// bound belongs to this activation and its address is known when the
-        /// prologue creates it, so it is kept rather than looked up again.
-        std::vector<std::pair<llvm::Value*, llvm::Value*>> conformantDimPtrs{};
-        // EP §6.4.7: set for an undiscriminated schema formal parameter.  The
-        // discriminants arrive as extra arguments, so they are plain Values
-        // that stay live for the whole activation.
-        const plang::Type*        schemaTy{nullptr};
-        std::vector<llvm::Value*> schemaDiscs{};
-        /// The names those discriminants were spilled to in the declaring
-        /// procedure.  A nested procedure reaches an outer variable through a
-        /// static link, which carries ADDRESSES: schemaDiscs above are the
-        /// parent's own function arguments and mean nothing there, so a nested
-        /// binding reloads them from these cells instead.
-        std::vector<std::string> schemaDiscNames{};
-        // ISO §6.6.3.1: set for a procedural or functional formal parameter.
-        // ptr addresses a { ptr, ptr } cell holding the closure pair: where to
-        // jump, and the frame the target reads its own outer variables
-        // through.  The pair arrives in registers and could have been kept
-        // there, but then a nested procedure could not reach it — a static
-        // link carries one address per outer variable, and a value belonging
-        // to another activation is not something this one may name.
-        bool                       isProcParam{false};
-        const ProcedureTypeNode*   procType{nullptr};
-        /// EP §6.4.7: a `with`-bound field of a run-time-laid-out record has a
-        /// capacity its object carries, and once bound it is an ordinary name
-        /// with no path back to the object.  Recorded here so that
-        /// `with p^ do s := ...` checks against the real capacity rather than
-        /// the probe's string(1).  Last, and default-initialised, so that every
-        /// existing aggregate initialisation of this struct is unaffected.
-        llvm::Value*     strCapV{nullptr};
-        /// EP §6.4.7: a `with`-bound component of a run-time-laid-out object.
-        /// Binding it as a bare address loses the layout for anything reached
-        /// THROUGH it -- an array field indexed against the probe's bounds, a
-        /// nested record addressed by the probe struct -- so the denoter its
-        /// extents are written in is kept, and schemaPathOf resumes from here.
-        const TypeNode*  pathDecl{nullptr};
-        /// The schema the path above is rooted in.  Separate from schemaTy on
-        /// purpose: schemaTy means "this NAME is a schematic object", which a
-        /// with-bound FIELD is not.  Writing the root there made every bound
-        /// field answer schemaRefOf, so indexing a fixed array field went
-        /// looking for an array body on the enclosing RECORD and killed the
-        /// compiler on a legal program.
-        const plang::Type* pathRootTy{nullptr};
-        std::vector<llvm::Value*> pathDiscs;
-    };
+    // VarEntry is free-standing (VarEntry.h), not nested here -- see that
+    // header's own comment for why.
     std::vector<std::unordered_map<std::string, VarEntry>> scopes;
 
     // Constants from Pascal 'const' sections — folded to LLVM Values inline.
@@ -284,15 +214,13 @@ struct Codegen::Impl {
 
     /// True if \p lowerName is a required constant that nothing has replaced.
     [[nodiscard]] bool isRequiredConst(const std::string& lowerName) const {
-        return requiredConsts.count(lowerName) != 0;
+        return symTab_->isRequiredConst(lowerName);
     }
 
     /// Records what a declared constant stands for.  A name declared here is
     /// the program's own from now on, whatever the language calls it.
     void defineConst(const std::string& name, llvm::Value* value) {
-        const std::string lo = toLower(name);
-        consts[lo] = value;
-        requiredConsts.erase(lo);
+        symTab_->defineConst(name, value);
     }
 
     const ImportOwnerTable* importOwners_{nullptr};
@@ -594,49 +522,12 @@ struct Codegen::Impl {
     /// the object from a run-time variable and corrupted the heap.
     size_t varLookupFloor_{0};
 
-    /// Hide every enclosing variable scope for the duration, leaving only the
-    /// scope just pushed.  Constants are a separate table and stay visible,
-    /// which is precisely the set of names a schema body may legally use.
-    struct DeclarationScopeOnly {
-        Impl&                    I;
-        size_t                   Saved;
-        std::vector<std::string> Restored;
-        explicit DeclarationScopeOnly(Impl& Impl_) : I(Impl_), Saved(Impl_.varLookupFloor_) {
-            I.varLookupFloor_ = I.scopes.empty() ? 0 : I.scopes.size() - 1;
-            // Hiding the variable is not enough on its own.  defVar does not
-            // merely shadow a constant of the same spelling -- it REMOVES it
-            // from `consts` and parks it in shadowedConsts until the scope
-            // closes.  So with the variable hidden and the constant still
-            // parked, the body's name resolved to nothing at all and codegen
-            // emitted a reference to a global that never existed
-            // ("undefined symbol: pasg_k").  Put the parked constants back for
-            // the duration: they are what the declaration scope would have had.
-            // EVERY level, not just the ones above the floor: the variable that
-            // parked the constant lives in the scope we are hiding, which is
-            // below it.  Exactly one level can hold a given constant -- once
-            // erased, an inner defVar finds nothing left to park -- so there is
-            // no ambiguity about which saved value is the original.
-            for (const auto& Level : I.shadowedConsts)
-                for (const auto& [K, V] : Level)
-                    if (!I.consts.count(K)) { I.consts[K] = V; Restored.push_back(K); }
-        }
-        ~DeclarationScopeOnly() {
-            for (const auto& K : Restored) I.consts.erase(K);
-            I.varLookupFloor_ = Saved;
-        }
-        DeclarationScopeOnly(const DeclarationScopeOnly&)            = delete;
-        DeclarationScopeOnly& operator=(const DeclarationScopeOnly&) = delete;
-    };
+    /// DeclarationScopeOnly moved to CGSymbolTable -- it has no construction
+    /// call sites anywhere in the current tree (confirmed by grep), so
+    /// there is nothing here to keep forwarder-compatible.
 
-    void pushScope() { scopes.emplace_back(); shadowedConsts.emplace_back(); }
-    void popScope()  {
-        // Put back any constant a variable in this scope was shadowing.
-        if (!shadowedConsts.empty() && shadowedConsts.size() == scopes.size()) {
-            for (auto& [K, V] : shadowedConsts.back()) consts[K] = V;
-            shadowedConsts.pop_back();
-        }
-        if (!scopes.empty()) scopes.pop_back();
-    }
+    void pushScope() { symTab_->pushScope(); }
+    void popScope()  { symTab_->popScope(); }
 
     /// Constants a variable declaration hid, one map per scope, put back when
     /// the scope ends.
@@ -675,19 +566,11 @@ struct Codegen::Impl {
     /// Look \p name up from this function's own scope outward, skipping the
     /// scopes a with-statement or a `for ... in` opened inside the body.
     [[nodiscard]] const VarEntry* findVarInFunctionScope(const std::string& name) const {
-        const std::string K = toLower(name);
-        const size_t Start = curFuncScopeDepth ? curFuncScopeDepth - 1 : 0;
-        for (size_t i = Start + 1; i-- > 0;) {
-            const auto It = scopes[i].find(K);
-            if (It != scopes[i].end()) return &It->second;
-        }
-        return nullptr;
+        return symTab_->findVarInFunctionScope(name);
     }
 
     [[nodiscard]] bool boundInsideFunction(const std::string& name) const {
-        for (size_t i = scopes.size(); i-- > curFuncScopeDepth;)
-            if (scopes[i].count(toLower(name))) return true;
-        return false;
+        return symTab_->boundInsideFunction(name);
     }
 
     /// How many scopes were open when the current function body began.

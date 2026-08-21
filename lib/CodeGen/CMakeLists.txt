@@ -9,6 +9,7 @@ add_library(PlangCodeGen OBJECT
     CGLinkage.cpp
     SchemaTypeRegistry.cpp
     SchemaLayoutEngine.cpp
+    CGSymbolTable.cpp
     CodeGen.cpp
     CodeGenTypes.cpp
     CodeGenRuntime.cpp

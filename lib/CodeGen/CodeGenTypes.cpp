@@ -111,6 +111,17 @@ void Codegen::Impl::init(const std::string& progName) {
                            llvm::DEBUG_METADATA_VERSION);
     }
 
+    // scopes/consts/shadowedConsts/requiredConsts/varLookupFloor_/
+    // curFuncScopeDepth and the -g fields defVar touches all stay Impl
+    // fields (see CGSymbolTable.h's own comment); symTab_ holds references
+    // into them, plus a closure into debugTypeOfSemaType (CGDebugInfo
+    // territory, not yet extracted).
+    symTab_ = std::make_unique<CGSymbolTable>(
+        scopes, consts, shadowedConsts, requiredConsts, varLookupFloor_,
+        curFuncScopeDepth, DBuilder, DebugCU, DebugFile, currentDebugScope,
+        srcMgr_, builder, ctx,
+        [this](const Type& T){ return debugTypeOfSemaType(T); });
+
     i1Ty  = llvm::Type::getInt1Ty(ctx);
     i8Ty  = llvm::Type::getInt8Ty(ctx);
     i32Ty = llvm::Type::getInt32Ty(ctx);
@@ -182,78 +193,11 @@ void Codegen::Impl::init(const std::string& progName) {
 
 void Codegen::Impl::defVar(const std::string& name, llvm::Value* ptr, llvm::Type* type,
                             const TypeNode* typeNode, llvm::Value* debugIndirectPtr) {
-    if (scopes.empty()) return;
-    const std::string Key = toLower(name);
-    // A variable of this name hides a constant of it for as long as the scope
-    // lasts.  See shadowedConsts: the constant table is flat, so without this
-    // the constant answered every read while the writes went to the variable.
-    if (const auto It = consts.find(Key); It != consts.end()) {
-        if (shadowedConsts.size() == scopes.size()
-                && !shadowedConsts.back().count(Key))
-            shadowedConsts.back()[Key] = It->second;
-        consts.erase(It);
-    }
-    scopes.back()[Key] = VarEntry{ ptr, type, typeNode, name };
-
-    // -g: the single choke point every named Pascal variable, parameter,
-    // local, captured outer variable and with-bound field passes through,
-    // so this is the one place a DILocalVariable/DIGlobalVariableExpression
-    // needs building rather than one per caller.  A parameter is registered
-    // as an auto variable, not a formal parameter: preserving that
-    // distinction (info args vs. info locals) would mean threading an
-    // ArgNo through every one of defVar's ~30 call sites for a purely
-    // cosmetic difference -- print <name> finds either kind identically.
-    // ptr is documented (see VarEntry::ptr above) to always be an address
-    // -- an alloca, a GlobalVariable, or (for a var parameter) the
-    // argument itself, already a pointer at the LLVM level -- so it is
-    // always valid to declare a variable's location at, whichever case
-    // this is.  Valid, but not always STABLE: an alloca's own value is a
-    // compile-time-fixed frame offset, good for the whole function, but a
-    // bare SSA value (a var parameter's raw Argument, or a captured
-    // variable's loaded pointer) is subject to ordinary register
-    // allocation/live-range splitting like any other value, so LLVM can
-    // only describe it with a location list valid for whatever narrow PC
-    // range the backend happens to keep it live -- outside that range a
-    // debugger sees "optimized out" at best, or (confirmed live, for a
-    // captured variable inspected from inside the capturing procedure)
-    // silently wrong data at worst, with no diagnostic either way.
-    // debugIndirectPtr is the caller's fix for its own unstable ptr: a
-    // fresh alloca (stable) that already holds ptr's value, so declaring
-    // through it with one DW_OP_deref reaches the exact same address as
-    // declaring against ptr directly would, just via a stable hop.
-    if (DBuilder && typeNode && typeNode->ResolvedType) {
-        if (auto* DT = debugTypeOfSemaType(*typeNode->ResolvedType)) {
-            const unsigned line = srcMgr_
-                ? srcMgr_->getPresumedLoc(typeNode->Loc).Line : 0;
-            if (auto* GV = llvm::dyn_cast<llvm::GlobalVariable>(ptr)) {
-                auto* GVE = DBuilder->createGlobalVariableExpression(
-                    DebugCU, name, /*LinkageName=*/"", DebugFile, line, DT,
-                    /*IsLocalToUnit=*/false);
-                GV->addDebugInfo(GVE);
-            } else if (currentDebugScope && builder.GetInsertBlock()) {
-                auto* DV = DBuilder->createAutoVariable(
-                    currentDebugScope, name, DebugFile, line, DT);
-                llvm::Value* storage = debugIndirectPtr ? debugIndirectPtr : ptr;
-                auto* expr = debugIndirectPtr
-                    ? DBuilder->createExpression({llvm::dwarf::DW_OP_deref})
-                    : DBuilder->createExpression();
-                DBuilder->insertDeclare(
-                    storage, DV, expr,
-                    llvm::DILocation::get(ctx, line, 0, currentDebugScope),
-                    builder.GetInsertBlock());
-            }
-        }
-    }
+    symTab_->defVar(name, ptr, type, typeNode, debugIndirectPtr);
 }
 
-const Codegen::Impl::VarEntry* Codegen::Impl::findVar(const std::string& name) const {
-    std::string key = toLower(name);
-    // Down to varLookupFloor_ and no further; see DeclarationScopeOnly.
-    for (size_t i = scopes.size(); i-- > varLookupFloor_;) {
-        auto f = scopes[i].find(key);
-        if (f != scopes[i].end()) return &f->second;
-    }
-    return nullptr;
+const VarEntry* Codegen::Impl::findVar(const std::string& name) const {
+    return symTab_->findVar(name);
 }
 
 std::optional<std::pair<int64_t, int64_t>>
@@ -290,7 +234,7 @@ Codegen::Impl::arrayIndexRange(const ArrayTypeNode& n) const {
     return std::nullopt;
 }
 
-const Codegen::Impl::VarEntry*
+const VarEntry*
 Codegen::Impl::resolveImportedVar(const std::string& name, const Type* semaTy) {
     const std::string owner = importOwner(name);
     // What the declaring module calls it, which is what it emitted the global
