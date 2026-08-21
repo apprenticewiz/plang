@@ -54,6 +54,7 @@
 #include "LabelGotoEngine.h"
 #include "RangeCheckGuards.h"
 #include "RuntimeFunctionCache.h"
+#include "SchemaAccess.h"
 #include "SchemaLayoutEngine.h"
 #include "SchemaTypeRegistry.h"
 #include "SetOps.h"
@@ -99,6 +100,15 @@ struct Codegen::Impl {
     /// compiling unchanged now that `CGTypes` owns them.
     using RecordLayout = CGTypes::RecordLayout;
     using FieldPlace   = CGTypes::FieldPlace;
+    // Schema value/access-path resolution; built after cgTypes_ (needs it
+    // for llvmTypeOfSemaType) and rangeGuards_ (needs it for guards).
+    std::unique_ptr<SchemaAccess>         schemaAccess_;
+    /// `Impl::SchemaRef`/`SchemaPath` are pure data too -- same alias
+    /// treatment as `RecordLayout`/`FieldPlace` above, for the same reason
+    /// (external sites in CodeGenProcParams.cpp/CodeGenStmts.cpp/
+    /// CodeGenExprs.cpp name them directly).
+    using SchemaRef  = SchemaAccess::SchemaRef;
+    using SchemaPath = SchemaAccess::SchemaPath;
 
     // ---- common type aliases (set in init()) ----
     llvm::IntegerType* i1Ty{nullptr};
@@ -368,14 +378,6 @@ struct Codegen::Impl {
     /// procedural (void) target.
     llvm::Value* emitProcParamCall(const VarEntry& ve,
                                    std::span<const std::unique_ptr<ExprNode>> args);
-
-    /// A schematic variable at run time: where its body lives and what
-    /// discriminants it carries.  Produced by schemaRefOf.
-    struct SchemaRef {
-        const plang::Type*        semaTy{nullptr}; // TypeKind::Schema
-        llvm::Value*              data{nullptr};   // start of the body storage
-        std::vector<llvm::Value*> discs;           // one i64 per discriminant
-    };
 
     /// Does \p block's label section declare \p label?
     static bool declaresLabel(const BlockNode& block, const std::string& label);
@@ -839,10 +841,14 @@ struct Codegen::Impl {
     /// one discriminant is the capacity, so for a `^string` the answer is in the
     /// header new() wrote and is not known until run time; StrCapacity holds the
     /// probe's answer and would check `q^ := 'hi'` against a string(1).
-    llvm::Value* exprStrCapV(const ExprNode& e);
-    void setVarStrCap(const std::string& name, llvm::Value* cap);
+    llvm::Value* exprStrCapV(const ExprNode& e) { return schemaAccess_->exprStrCapV(e); }
+    void setVarStrCap(const std::string& name, llvm::Value* cap) {
+        schemaAccess_->setVarStrCap(name, cap);
+    }
     void setVarSchemaPath(const std::string& name, const SchemaRef& root,
-                          const TypeNode* decl);
+                          const TypeNode* decl) {
+        schemaAccess_->setVarSchemaPath(name, root, decl);
+    }
 
     /// The capacity to SIZE A TEMPORARY with, which has to be a constant.  A
     /// discriminant-fixed capacity is not one, and the probe's answer would cut
@@ -899,29 +905,34 @@ struct Codegen::Impl {
         return schemaLayout_->rtVariantAlign(vp);
     }
 
-    /// A component of a run-time-laid-out object: the enclosing schema whose
-    /// header carries the discriminants, the component's address, and the
-    /// denoter its extents are written in.
-    struct SchemaPath {
-        SchemaRef       root;
-        llvm::Value*    addr{nullptr};
-        const TypeNode* decl{nullptr};
-    };
-    std::optional<SchemaPath> schemaPathOf(const ExprNode& e);
+    std::optional<SchemaPath> schemaPathOf(const ExprNode& e) {
+        return schemaAccess_->schemaPathOf(e);
+    }
     /// Address and capacity of a string from one walk of its access path.
-    std::pair<llvm::Value*, llvm::Value*> strAddrAndCap(const ExprNode& e);
-    llvm::Value* strCapFromPath(const SchemaPath& path);
-    /// Descend into a nested schema instantiation; see the definition.
+    std::pair<llvm::Value*, llvm::Value*> strAddrAndCap(const ExprNode& e) {
+        return schemaAccess_->strAddrAndCap(e);
+    }
+    llvm::Value* strCapFromPath(const SchemaPath& path) {
+        return schemaAccess_->strCapFromPath(path);
+    }
+    /// Descend into a nested schema instantiation; see SchemaAccess.
     std::pair<SchemaRef, const TypeNode*>
     descendIntoInstantiation(const SchemaRef& root, llvm::Value* addr,
-                             const TypeNode* decl);
-    const TypeNode* fieldDenoterOf(const RecordTypeNode& rt, const std::string& field);
-    const TypeNode* variantFieldDenoterOf(const VariantPart& vp, const std::string& field);
-    static bool isRuntimeLaidOut(const ExprNode& e);
+                             const TypeNode* decl) {
+        return schemaAccess_->descendIntoInstantiation(root, addr, decl);
+    }
+    const TypeNode* fieldDenoterOf(const RecordTypeNode& rt, const std::string& field) {
+        return schemaAccess_->fieldDenoterOf(rt, field);
+    }
+    const TypeNode* variantFieldDenoterOf(const VariantPart& vp, const std::string& field) {
+        return schemaAccess_->variantFieldDenoterOf(vp, field);
+    }
     llvm::Value* alignUpV(llvm::Value* v, uint64_t align) {
         return schemaLayout_->alignUpV(v, align);
     }
-    const ArrayTypeNode* varyingArrayFieldOf(const FieldExpr& fe);
+    const ArrayTypeNode* varyingArrayFieldOf(const FieldExpr& fe) {
+        return schemaAccess_->varyingArrayFieldOf(fe);
+    }
 
     /// True if the expression is an ISO §6.4.3.2 string-type: a
     /// packed array[1..n] of char, which is n bytes with no length and no
@@ -1027,20 +1038,32 @@ struct Codegen::Impl {
     const TypeNode* schemaBodyNodeOf(const plang::Type& T) const;
     /// The run-time view of `e`, or nullopt when `e` is not schematic.
     /// May emit loads, so call it once per use.
-    std::optional<SchemaRef> schemaRefOf(const ExprNode& e);
+    std::optional<SchemaRef> schemaRefOf(const ExprNode& e) {
+        return schemaAccess_->schemaRefOf(e);
+    }
     /// Body pointer and discriminants to pass for a schema formal parameter.
     std::pair<llvm::Value*, std::vector<llvm::Value*>>
-        schemaActual(const ExprNode& arg, unsigned discCount);
+        schemaActual(const ExprNode& arg, unsigned discCount) {
+        return schemaAccess_->schemaActual(arg, discCount);
+    }
     /// Discriminant count for one argument position of `mangledName`;
     /// zero when that parameter is not an undiscriminated schema.
-    unsigned schemaArgDiscs(const std::string& mangledName, size_t astArgIdx) const;
+    unsigned schemaArgDiscs(const std::string& mangledName, size_t astArgIdx) const {
+        return schemaAccess_->schemaArgDiscs(mangledName, astArgIdx);
+    }
     void pushSchemaArgs(std::vector<llvm::Value*>& args, const ExprNode& arg,
-                        unsigned discCount);
+                        unsigned discCount) {
+        schemaAccess_->pushSchemaArgs(args, arg, discCount);
+    }
     /// Traps unless the two schematic values carry the same discriminants,
     /// which EP §6.7.3.2 requires for them to be assignment-compatible.
-    void emitSchemaDiscMatch(const SchemaRef& dst, const SchemaRef& src);
+    void emitSchemaDiscMatch(const SchemaRef& dst, const SchemaRef& src) {
+        schemaAccess_->emitSchemaDiscMatch(dst, src);
+    }
     /// Bounds of an array-bodied schema, computed from `ref`'s discriminants.
-    std::pair<llvm::Value*, llvm::Value*> schemaArrayBounds(const SchemaRef& ref);
+    std::pair<llvm::Value*, llvm::Value*> schemaArrayBounds(const SchemaRef& ref) {
+        return schemaAccess_->schemaArrayBounds(ref);
+    }
     /// R3: a closed extent form evaluated against an object's discriminants.
     /// Bytes of discriminant header in front of a schema body; see the definition.
     uint64_t schemaHeaderBytes(const plang::Type& schema) {
@@ -1070,13 +1093,19 @@ struct Codegen::Impl {
     }
     /// LLVM type of the schema body's storage: the element type for an array
     /// body, the whole body otherwise.
-    llvm::Type* schemaStorageType(const SchemaRef& ref);
+    llvm::Type* schemaStorageType(const SchemaRef& ref) {
+        return schemaAccess_->schemaStorageType(ref);
+    }
     /// Size in bytes of one schematic value with the given discriminants.
     llvm::Value* schemaBodySize(const plang::Type& schema,
-                                const std::vector<llvm::Value*>& discs);
+                                const std::vector<llvm::Value*>& discs) {
+        return schemaAccess_->schemaBodySize(schema, discs);
+    }
     /// EP §6.7.5.3: new(p, d1..ds) for a pointer whose domain is a schema.
     void emitNewSchema(const ExprNode& ptrArg, const plang::Type& schema,
-                       std::span<const std::unique_ptr<ExprNode>> discArgs);
+                       std::span<const std::unique_ptr<ExprNode>> discArgs) {
+        schemaAccess_->emitNewSchema(ptrArg, schema, discArgs);
+    }
     void emitStrFromCStr(llvm::Value* dst, llvm::Value* cap, llvm::Value* cstr);
     void emitStrFromCStr(llvm::Value* dst, int64_t cap, llvm::Value* cstr) {
         emitStrFromCStr(dst, i64c(cap), cstr);

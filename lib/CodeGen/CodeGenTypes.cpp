@@ -121,6 +121,33 @@ void Codegen::Impl::init(const std::string& progName) {
     cgTypes_ = std::make_unique<CGTypes>(ctx, *mod, langOpts, *schemaLayout_,
         *complexOps_, *setOps_, typeAliases, consts,
         i1Ty, i8Ty, i32Ty, i64Ty, dblTy, ptrTy);
+    // Schema value/access-path resolution.  scopes stays an Impl field,
+    // referenced -- touched directly by setVarStrCap/setVarSchemaPath from
+    // outside this unit too.  EmitExpr/EmitLValue/EmitStrAddr/ToI64 and the
+    // four string-shape predicates are narrow closures into methods that
+    // are either not yet extracted (still Impl/CodeGenExprs.cpp/
+    // CodeGenRuntime.cpp) or, for the predicates, deliberately staying put
+    // (stateless, used far outside schema code too).
+    // SchemaArgDiscCountOf stands in for direct paramMeta_ access: its
+    // value type, ParamMeta, is used far outside this unit, so bridging
+    // just this one derived query is narrower than giving ParamMeta a
+    // free-standing header as a side effect of this extraction.
+    schemaAccess_ = std::make_unique<SchemaAccess>(ctx, *mod, builder,
+        *schemaTypes_, *schemaLayout_, *cgTypes_, *runtimeFns_, *strings_,
+        *rangeGuards_, *symTab_, scopes, i64Ty, i8Ty, ptrTy,
+        [this](const ExprNode& e){ return emitExpr(e); },
+        [this](const ExprNode& e){ return emitLValue(e); },
+        [this](const ExprNode& e){ return emitStrAddr(e); },
+        [this](llvm::Value* v){ return toI64(v); },
+        [this](const ExprNode& e){ return exprIsVarStr(e); },
+        [this](const ExprNode& e){ return exprIsCharStr(e); },
+        [this](const ExprNode& e){ return exprStrCap(e); },
+        [this](const ExprNode& e){ return exprCharStrLen(e); },
+        [this](const std::string& mangledName, size_t astArgIdx) -> unsigned {
+            auto it = paramMeta_.find(mangledName);
+            if (it == paramMeta_.end() || astArgIdx >= it->second.size()) return 0;
+            return it->second[astArgIdx].schemaDiscCount;
+        });
     // DefineBuf/LookupBuf are narrow closures into defVar/findVar
     // (CGSymbolTable territory, not yet extracted) -- LookupBuf hands back
     // just the llvm::Value*, the only field of a VarEntry this engine needs.
