@@ -104,11 +104,17 @@ void Codegen::Impl::init(const std::string& progName) {
     dblTy = llvm::Type::getDoubleTy(ctx);
     ptrTy = llvm::PointerType::get(ctx, 0); // opaque ptr (LLVM 15+)
 
-    // These two leaf units need dblTy/ptrTy by value, so they're constructed
-    // here rather than alongside runtimeFns_/strings_ above.
+    // ComplexOps needs dblTy/ptrTy by value, so it's constructed here rather
+    // than alongside runtimeFns_/strings_ above.
     complexOps_ = std::make_unique<ComplexOps>(ctx, dblTy, ptrTy, builder, *runtimeFns_,
         [this](llvm::Value* v){ return toDouble(v); },
         [this](llvm::Type* t, const std::string& n){ return createEntryAlloca(t, n); });
+    // RangeCheckGuards binds a reference into curFunc/nilChecks rather than a
+    // copy, so it sees each function activation's/-fno-nil-checks' current
+    // value with no rebinding needed later.
+    rangeGuards_ = std::make_unique<RangeCheckGuards>(ctx, builder, curFunc,
+        *runtimeFns_, *strings_, langOpts, nilChecks,
+        [this](llvm::Value* v){ return toI64(v); });
 
     scopes.clear();
     consts.clear();

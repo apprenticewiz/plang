@@ -187,81 +187,30 @@ llvm::Value* Codegen::Impl::emitSetBinary(TokenKind op, llvm::Value* a,
 
 void Codegen::Impl::emitGuard(llvm::Value* failCond, const char* name,
                               llvm::function_ref<void()> emitFail) {
-    auto* failBB = llvm::BasicBlock::Create(ctx, llvm::Twine(name) + ".fail", curFunc);
-    auto* contBB = llvm::BasicBlock::Create(ctx, llvm::Twine(name) + ".ok",   curFunc);
-    builder.CreateCondBr(failCond, failBB, contBB);
-    builder.SetInsertPoint(failBB);
-    emitFail();
-    builder.CreateUnreachable(); // the reporter is [[noreturn]]
-    builder.SetInsertPoint(contBB);
+    rangeGuards_->emitGuard(failCond, name, emitFail);
 }
 
 void Codegen::Impl::emitDivZeroCheck(llvm::Value* divisor, const char* op) {
-    // Without this the hardware raises SIGFPE, which surfaces as a bare
-    // "Floating point exception" with no source context.
-    auto* isZero = builder.CreateICmpEQ(divisor,
-        llvm::ConstantInt::get(i64Ty, 0), "divzero");
-    emitGuard(isZero, "divzero", [&] {
-        builder.CreateCall(
-            getExternFnN("plang_err_div_zero", llvm::Type::getVoidTy(ctx), {ptrTy}),
-            {internStrPtr(op)});
-    });
+    rangeGuards_->emitDivZeroCheck(divisor, op);
 }
 
 void Codegen::Impl::emitModDivisorCheck(llvm::Value* divisor) {
-    // ISO §6.7.2.2 defines mod only for a positive divisor, so this subsumes
-    // the div-by-zero test rather than sitting alongside it.
-    auto* bad = builder.CreateICmpSLE(divisor,
-        llvm::ConstantInt::get(i64Ty, 0), "mod.baddiv");
-    emitGuard(bad, "mod.baddiv", [&] {
-        builder.CreateCall(
-            getExternFnN("plang_err_mod_divisor", llvm::Type::getVoidTy(ctx),
-                         {i64Ty}),
-            {divisor});
-    });
+    rangeGuards_->emitModDivisorCheck(divisor);
 }
 
 void Codegen::Impl::emitNilCheck(llvm::Value* ptr) {
-    // ISO §6.5.4: dereferencing nil is an error.  Left to the hardware it is a
-    // segmentation fault with no indication of which line, which is the least
-    // useful thing a Pascal implementation can say.  It has its own flag:
-    // this was grouped with the range checks until 0.1.2, so -fno-range-checks
-    // silently removed it, and a program compiled that way answered a nil
-    // dereference with a signal rather than a diagnostic.  A single compare
-    // against null is also not what anyone turns range checking off to avoid.
-    if (!nilChecks || !ptr) return;
-    auto* isNil = builder.CreateICmpEQ(
-        ptr, llvm::ConstantPointerNull::get(ptrTy), "isnil");
-    emitGuard(isNil, "nilderef", [&] {
-        builder.CreateCall(
-            getExternFnN("plang_err_nil_deref", llvm::Type::getVoidTy(ctx), {}),
-            {});
-    });
+    rangeGuards_->emitNilCheck(ptr);
 }
 
 void Codegen::Impl::emitRangeCheck(llvm::Value* val, int64_t lo, int64_t hi,
                                    bool isIndex, SourceLocation Loc) {
-    if (!rangeChecksAt(Loc)) return;
-    emitRangeCheckDyn(val, llvm::ConstantInt::get(i64Ty, lo, true),
-                      llvm::ConstantInt::get(i64Ty, hi, true), isIndex, Loc);
+    rangeGuards_->emitRangeCheck(val, lo, hi, isIndex, Loc);
 }
 
 void Codegen::Impl::emitRangeCheckDyn(llvm::Value* val, llvm::Value* lo,
                                       llvm::Value* hi, bool isIndex,
                                       SourceLocation Loc) {
-    if (!rangeChecksAt(Loc)) return;
-    auto* v      = toI64(val);
-    auto* loV    = toI64(lo);
-    auto* hiV    = toI64(hi);
-    auto* tooLow = builder.CreateICmpSLT(v, loV, "rng.lo");
-    auto* tooHi  = builder.CreateICmpSGT(v, hiV, "rng.hi");
-    auto* bad    = builder.CreateOr(tooLow, tooHi, "rng.bad");
-    emitGuard(bad, isIndex ? "bounds" : "range", [&] {
-        builder.CreateCall(
-            getExternFnN(isIndex ? "plang_err_index" : "plang_err_range",
-                         llvm::Type::getVoidTy(ctx), {i64Ty, i64Ty, i64Ty}),
-            {v, loV, hiV});
-    });
+    rangeGuards_->emitRangeCheckDyn(val, lo, hi, isIndex, Loc);
 }
 
 // ====================================================================

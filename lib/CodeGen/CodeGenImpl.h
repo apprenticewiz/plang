@@ -50,6 +50,7 @@
 
 #include "ComplexOps.h"
 #include "ConstFold.h"
+#include "RangeCheckGuards.h"
 #include "RuntimeFunctionCache.h"
 #include "StringRuntime.h"
 
@@ -117,6 +118,7 @@ struct Codegen::Impl {
     std::unique_ptr<RuntimeFunctionCache> runtimeFns_;
     std::unique_ptr<StringRuntime>        strings_;
     std::unique_ptr<ComplexOps>           complexOps_;
+    std::unique_ptr<RangeCheckGuards>     rangeGuards_;
 
     // ---- -g debug info (built in init() when langOpts.Debug; see Phase 1's
     // note by srcMgr_ on why these are ordinary members and never statics) ----
@@ -628,7 +630,7 @@ struct Codegen::Impl {
     /// is searched, so the code emitted is what it was before there was a
     /// table.  See Basic/SwitchTable.h.
     [[nodiscard]] bool rangeChecksAt(SourceLocation Loc) const {
-        return langOpts.switchOn(Switch::RangeChecks, Loc);
+        return rangeGuards_->rangeChecksAt(Loc);
     }
 
     /// Mirrors LangOptions::NilChecks; see emitNilCheck.
