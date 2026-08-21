@@ -28,7 +28,6 @@
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DerivedTypes.h"
-#include "llvm/IR/DIBuilder.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/GlobalVariable.h"
 #include "llvm/IR/IRBuilder.h"
@@ -48,6 +47,7 @@
 #include "plang/Basic/StringUtil.h"
 #include "plang/Basic/Token.h"
 
+#include "CGDebugInfo.h"
 #include "CGLinkage.h"
 #include "CGSymbolTable.h"
 #include "ComplexOps.h"
@@ -87,23 +87,9 @@ struct Codegen::Impl {
     std::unique_ptr<SchemaTypeRegistry>   schemaTypes_;
     std::unique_ptr<SchemaLayoutEngine>   schemaLayout_;
     std::unique_ptr<CGSymbolTable>        symTab_;
-
-    // ---- -g debug info (built in init() when langOpts.Debug; see Phase 1's
-    // note by srcMgr_ on why these are ordinary members and never statics) ----
-    std::unique_ptr<llvm::DIBuilder> DBuilder;
-    llvm::DICompileUnit*             DebugCU{nullptr};
-    llvm::DIFile*                    DebugFile{nullptr};
-    /// Keyed on Type* identity, not on Type::Name or Kind: the lesson from
-    /// this cycle's own schema-body-peel bug class was specifically that a
-    /// spelling-keyed cache is what goes wrong when two distinct Types can
-    /// share a name.  A Type lives as long as the shared_ptr chain rooted
-    /// in the AST/symbol table, which outlives this cache either way.
-    std::map<const Type*, llvm::DIType*> debugTypes_;
-    /// The scalar DIType for \p T (integer, real, boolean, char, enum,
-    /// subrange, or a pointer whose pointee is itself one of those); see
-    /// the definition for what a record/array/set/etc. pointee gets
-    /// instead.  Null when Debug is unset.
-    llvm::DIType* debugTypeOfSemaType(const Type& T);
+    // -g debug info; unconditionally constructed in init() like every other
+    // unit above, internally a no-op wherever langOpts.Debug is unset.
+    std::unique_ptr<CGDebugInfo>          dbgInfo_;
 
     // ---- common type aliases (set in init()) ----
     llvm::IntegerType* i1Ty{nullptr};
@@ -183,12 +169,6 @@ struct Codegen::Impl {
     llvm::AllocaInst*   curRetAlloca{nullptr}; // alloca for function result
     llvm::Type*         curRetType{nullptr};    // return type (null for procedures)
     std::string         curFuncName;            // for result-variable detection
-    /// -g: the DISubprogram whatever is currently being emitted belongs to,
-    /// null when Debug is unset.  Saved/restored around emitFunctionDef,
-    /// emitMain, emitModuleInitFn and emitModuleLifecycleFn exactly the way
-    /// curFunc is; emitStmt's dispatch point reads it to build each
-    /// statement's DILocation.
-    llvm::DISubprogram* currentDebugScope{nullptr};
     std::string         namePrefix{PlangProcPrefix};   // mangling prefix
     std::string         globalPrefix{PlangGlobalPrefix}; // ditto, for globals
 
@@ -226,14 +206,17 @@ struct Codegen::Impl {
     const ImportOwnerTable* importOwners_{nullptr};
     /// EP §6.11: interfaces read from .pmi files; see Codegen::setLoadedInterfaces.
     std::vector<const ModuleNode*> loadedInterfaces_;
-    /// -g: set by Codegen::setSourceManager, consulted only when
-    /// langOpts.Debug is set.  An ordinary Impl member and never a
-    /// function-local or namespace-scope static -- 0.2.1 shipped a fix for
-    /// exactly that mistake elsewhere (a static outliving the LLVMContext
-    /// that owned it, segfaulting the second Codegen a process constructs,
-    /// which the test suite does routinely, once per test case).  Every
-    /// debug-info object added from here on (DIBuilder, DIType caches, the
-    /// current debug scope) follows the same rule.
+    /// -g: set by Codegen::setSourceManager, which always runs before
+    /// emit()/init() -- these stay plain Impl members, rather than moving
+    /// into dbgInfo_ outright, purely so setSourceManager has somewhere to
+    /// write before dbgInfo_ exists; init() passes both by value into
+    /// dbgInfo_'s constructor, same ordering shape as importOwners_ above.
+    /// An ordinary Impl member and never a function-local or
+    /// namespace-scope static -- 0.2.1 shipped a fix for exactly that
+    /// mistake elsewhere (a static outliving the LLVMContext that owned it,
+    /// segfaulting the second Codegen a process constructs, which the test
+    /// suite does routinely, once per test case).  Every debug-info object
+    /// added from here on follows the same rule.
     const SourceManager* srcMgr_{nullptr};
     FileID               mainFileID_;
     /// The heading of the module being emitted, whose declarations are its
@@ -539,7 +522,7 @@ struct Codegen::Impl {
     /// from the constant.  A required constant was already handled this way;
     /// every constant the program declares needed it too.
     std::vector<std::map<std::string, llvm::Value*>> shadowedConsts;
-    /// debugIndirectPtr: when non-null (only ever passed when DBuilder is
+    /// debugIndirectPtr: when non-null (only ever passed when debug info is
     /// active), a stable alloca holding ptr's own value, for a caller whose
     /// ptr is itself unstable (a bare SSA value -- a load result, or a raw
     /// Argument -- rather than an alloca/GlobalVariable).  Registers the
@@ -1343,19 +1326,6 @@ struct Codegen::Impl {
     // Procedures and functions
     // ====================================================================
     void emitAllProcedures(const BlockNode& block);
-    /// -g: builds a DISubprogram for \p Fn and attaches it, shared by
-    /// emitFunctionDef/emitMain/emitModuleInitFn/emitModuleLifecycleFn.
-    /// \p Scope is DebugFile for a top-level function and the enclosing
-    /// procedure's own DISubprogram for a nested one, giving a debugger's
-    /// backtrace real lexical nesting.
-    /// The subroutine type is a placeholder with no parameter/return types
-    /// (Phase 4 adds those) -- breakpoints, stepping and a named backtrace
-    /// frame need nothing from it. Returns null, doing nothing else, when
-    /// Debug is unset.
-    llvm::DISubprogram* buildDebugSubprogram(llvm::Function* Fn,
-                                             llvm::DIScope* Scope,
-                                             const std::string& Name,
-                                             unsigned Line);
     /// With declareOnly, stops once the signature and the parameter metadata
     /// are in place — what a 'forward' declaration contributes.
     void emitFunctionDef(const ProcDecl& proc, bool declareOnly = false);

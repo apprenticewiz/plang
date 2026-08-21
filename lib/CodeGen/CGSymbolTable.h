@@ -1,40 +1,31 @@
 // CGSymbolTable.h — the variable/constant scope stack.
 //
 // scopes/consts/shadowedConsts/requiredConsts/varLookupFloor_/
-// curFuncScopeDepth, and the -g fields defVar's body touches (DBuilder,
-// DebugCU, DebugFile, currentDebugScope), all stay owned by Codegen::Impl
-// -- referenced here, not moved -- because they are read/written directly
-// (not through defVar/findVar) from ~20 external call sites (the
-// closure-capture loop's "define, then re-find-by-name to mutate" idiom in
-// CodeGenProcs.cpp, SchemaBindingScope's overlay in CodeGenTypes.cpp,
-// ConstFold's evalConst/tryEvalConstInt callers). Moving that storage is
-// real, deferred work -- see project memory on the CodeGen decomposition.
+// curFuncScopeDepth all stay owned by Codegen::Impl -- referenced here, not
+// moved -- because they are read/written directly (not through
+// defVar/findVar) from ~20 external call sites (the closure-capture loop's
+// "define, then re-find-by-name to mutate" idiom in CodeGenProcs.cpp,
+// SchemaBindingScope's overlay in CodeGenTypes.cpp, ConstFold's
+// evalConst/tryEvalConstInt callers). Moving that storage is real, deferred
+// work -- see project memory on the CodeGen decomposition.
 //
-// defVar's -g half moves here FUSED with its symbol-table half, unsplit,
-// exactly as it reads today: this session's real debug-info bugs lived in
-// exactly this code, and restructuring the fusion (giving a future
-// CGDebugInfo its own declareLocal that this class's bind calls into) is
-// its own dedicated, real-debugger-verified piece of work, not a side
-// effect of relocating the symbol table.
+// defVar's -g half has finally split out into CGDebugInfo::declareLocal --
+// this class holds a CGDebugInfo& and makes exactly one call into it, per
+// the same "one fused entry point, not thirty two-call sites" reasoning
+// that put defVar here in the first place.
 #pragma once
 
-#include <functional>
 #include <map>
 #include <set>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
-#include "llvm/IR/DIBuilder.h"
-#include "llvm/IR/IRBuilder.h"
-#include "llvm/IR/LLVMContext.h"
-
+#include "CGDebugInfo.h"
 #include "VarEntry.h"
 
 namespace plang {
 struct TypeNode;
-struct Type;
-class SourceManager;
 }
 
 class CGSymbolTable {
@@ -46,19 +37,10 @@ public:
         std::set<std::string>& RequiredConsts,
         size_t& VarLookupFloor,
         size_t& CurFuncScopeDepth,
-        std::unique_ptr<llvm::DIBuilder>& DBuilderRef,
-        llvm::DICompileUnit*& DebugCURef,
-        llvm::DIFile*& DebugFileRef,
-        llvm::DISubprogram*& CurrentDebugScopeRef,
-        const plang::SourceManager* SrcMgr,
-        llvm::IRBuilder<>& B, llvm::LLVMContext& Ctx,
-        std::function<llvm::DIType*(const plang::Type&)> DebugTypeOf)
+        CGDebugInfo& DbgInfo)
         : Scopes(Scopes), Consts(Consts), ShadowedConsts(ShadowedConsts),
           RequiredConsts(RequiredConsts), VarLookupFloor(VarLookupFloor),
-          CurFuncScopeDepth(CurFuncScopeDepth), DBuilderRef(DBuilderRef),
-          DebugCURef(DebugCURef), DebugFileRef(DebugFileRef),
-          CurrentDebugScopeRef(CurrentDebugScopeRef), SrcMgr(SrcMgr),
-          B(B), Ctx(Ctx), DebugTypeOf(std::move(DebugTypeOf)) {}
+          CurFuncScopeDepth(CurFuncScopeDepth), DbgInfo(DbgInfo) {}
 
     void pushScope() { Scopes.emplace_back(); ShadowedConsts.emplace_back(); }
     void popScope() {
@@ -108,7 +90,7 @@ public:
         std::vector<std::string> Restored;
     };
 
-    /// debugIndirectPtr: when non-null (only ever passed when DBuilder is
+    /// debugIndirectPtr: when non-null (only ever passed when debug info is
     /// active), a stable alloca holding ptr's own value, for a caller whose
     /// ptr is itself unstable (a bare SSA value -- a load result, or a raw
     /// Argument -- rather than an alloca/GlobalVariable).  Registers the
@@ -140,12 +122,5 @@ private:
     std::set<std::string>& RequiredConsts;
     size_t& VarLookupFloor;
     size_t& CurFuncScopeDepth;
-    std::unique_ptr<llvm::DIBuilder>& DBuilderRef;
-    llvm::DICompileUnit*& DebugCURef;
-    llvm::DIFile*& DebugFileRef;
-    llvm::DISubprogram*& CurrentDebugScopeRef;
-    const plang::SourceManager* SrcMgr;
-    llvm::IRBuilder<>& B;
-    llvm::LLVMContext& Ctx;
-    std::function<llvm::DIType*(const plang::Type&)> DebugTypeOf;
+    CGDebugInfo& DbgInfo;
 };

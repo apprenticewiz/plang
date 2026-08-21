@@ -243,33 +243,6 @@ void Codegen::Impl::emitAllProcedures(const BlockNode& block) {
     }
 }
 
-llvm::DISubprogram* Codegen::Impl::buildDebugSubprogram(llvm::Function* Fn,
-                                                        llvm::DIScope* Scope,
-                                                        const std::string& Name,
-                                                        unsigned Line) {
-    if (!DBuilder) return nullptr;
-    auto* SubTy = DBuilder->createSubroutineType(
-        DBuilder->getOrCreateTypeArray({}));
-    auto* SP = DBuilder->createFunction(
-        Scope, Name, Fn->getName(), DebugFile, Line, SubTy, Line,
-        llvm::DINode::FlagZero,
-        llvm::DISubprogram::SPFlagDefinition
-            | (langOpts.OptLevel > 0 ? llvm::DISubprogram::SPFlagOptimized
-                                      : llvm::DISubprogram::SPFlagZero));
-    Fn->setSubprogram(SP);
-    // builder's current debug location is not function-scoped state -- it
-    // survives across whichever function was emitted right before this one,
-    // and anything emitted before this function's own first emitStmt call
-    // (a parameter-to-alloca copy, a file-parameter bind) would otherwise
-    // inherit that PREVIOUS function's last statement location, scoped to
-    // its own, different DISubprogram.  The verifier rejects that outright
-    // ("!dbg attachment points at wrong subprogram for function"), not just
-    // misattributes a line -- caught by compiling a program with more than
-    // one procedure under -g, which no test before this one exercised.
-    builder.SetCurrentDebugLocation(llvm::DILocation::get(ctx, Line, 0, SP));
-    return SP;
-}
-
 void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
     // Save outer context.
     auto* savedFunc       = curFunc;
@@ -278,7 +251,6 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
     auto  savedFuncName   = curFuncName;
     auto  savedPrefix     = namePrefix;
     auto  savedIP         = builder.saveIP();
-    auto* savedDebugScope = currentDebugScope;
     auto* savedStaticLink = curStaticLink;
     auto  savedFuncDepth  = curFuncScopeDepth;
     auto  savedOuterVars  = outerVarNames;
@@ -533,7 +505,6 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
         curRetType    = savedRetType;
         curFuncName   = savedFuncName;
         namePrefix    = savedPrefix;
-        currentDebugScope = savedDebugScope;
         curStaticLink = savedStaticLink;
         outerVarNames = savedOuterVars;
         outerVarBindings = savedOuterBinds;
@@ -548,14 +519,14 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
     // which for a 'forward' declaration's defining occurrence is the
     // declaration -- the body's own line is a better bet for where a
     // breakpoint on the procedure should land than the forward heading's.
-    if (DBuilder) {
-        llvm::DIScope* scope = (isNested && savedDebugScope)
-            ? static_cast<llvm::DIScope*>(savedDebugScope)
-            : static_cast<llvm::DIScope*>(DebugFile);
-        const unsigned line = srcMgr_
-            ? srcMgr_->getPresumedLoc(proc.Loc).Line : 0;
-        currentDebugScope = buildDebugSubprogram(func, scope, proc.Name, line);
-    }
+    // dbgScope's destructor restores the enclosing scope on every exit path
+    // from here on, so nothing below needs a matching manual restore.
+    llvm::DISubprogram* enclosingScope = dbgInfo_->currentScope();
+    llvm::DIScope* scope = (isNested && enclosingScope)
+        ? static_cast<llvm::DIScope*>(enclosingScope)
+        : static_cast<llvm::DIScope*>(dbgInfo_->getFile());
+    CGDebugInfo::ScopeGuard dbgScope(
+        *dbgInfo_, dbgInfo_->emitFunctionStart(func, scope, proc.Name, proc.Loc));
 
     // Name the static-link parameter (first arg of nested procs).
     auto funcArgIt = func->arg_begin();
@@ -626,7 +597,7 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
                 // but the declare defVar builds from it) is -g-gated and has
                 // no effect at all otherwise: no store, no alloca, nothing.
                 llvm::Value* debugAddr = nullptr;
-                if (DBuilder) {
+                if (dbgInfo_->isActive()) {
                     auto* slot = createEntryAlloca(ptrTy, ve.displayName + ".dbg");
                     builder.CreateStore(outerPtr, slot);
                     debugAddr = slot;
@@ -899,7 +870,7 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
                     // unstable, per defVar's own comment on debugIndirectPtr.
                     // Same -g-gated debug-only spill as the capture loop.
                     llvm::Value* debugAddr = nullptr;
-                    if (DBuilder) {
+                    if (dbgInfo_->isActive()) {
                         auto* slot = createEntryAlloca(ptrTy, nm + ".dbg");
                         builder.CreateStore(&*it, slot);
                         debugAddr = slot;
@@ -953,7 +924,6 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
     curRetType    = savedRetType;
     curFuncName   = savedFuncName;
     namePrefix    = savedPrefix;
-    currentDebugScope = savedDebugScope;
     curStaticLink = savedStaticLink;
     curFuncScopeDepth = savedFuncDepth;
     outerVarNames = savedOuterVars;
@@ -1470,7 +1440,6 @@ void Codegen::Impl::emitMain(const BlockNode& block,
     auto  savedFuncName  = curFuncName;
     auto  savedPrefix    = namePrefix;
     auto  savedIP        = builder.saveIP();
-    auto* savedDebugScope = currentDebugScope;
 
     curFuncName  = "main";
     namePrefix   = PlangProcPrefix;
@@ -1488,13 +1457,11 @@ void Codegen::Impl::emitMain(const BlockNode& block,
     // there regardless of source language.  The block's own Loc points at
     // its first declaration, not its 'begin' -- Body->Loc is where a reader
     // (and a debugger opening on this frame) would actually expect main to
-    // start.
-    if (DBuilder) {
-        const SourceLocation startLoc = block.Body ? block.Body->Loc : block.Loc;
-        const unsigned line = srcMgr_
-            ? srcMgr_->getPresumedLoc(startLoc).Line : 0;
-        currentDebugScope = buildDebugSubprogram(func, DebugFile, "main", line);
-    }
+    // start.  dbgScope's destructor restores the enclosing (null) scope at
+    // the end of this function.
+    const SourceLocation startLoc = block.Body ? block.Body->Loc : block.Loc;
+    CGDebugInfo::ScopeGuard dbgScope(
+        *dbgInfo_, dbgInfo_->emitFunctionStart(func, dbgInfo_->getFile(), "main", startLoc));
 
     auto* entry = llvm::BasicBlock::Create(ctx, "entry", func);
     builder.SetInsertPoint(entry);
@@ -1547,7 +1514,6 @@ void Codegen::Impl::emitMain(const BlockNode& block,
     curRetType   = savedRetType;
     curFuncName  = savedFuncName;
     namePrefix   = savedPrefix;
-    currentDebugScope = savedDebugScope;
     builder.restoreIP(savedIP);
 }
 
@@ -1579,7 +1545,6 @@ std::string Codegen::Impl::emitModuleInitFn(const ModuleNode& modNode) {
     auto* savedRetType   = curRetType;
     auto  savedFuncName  = curFuncName;
     auto  savedIP        = builder.saveIP();
-    auto* savedDebugScope = currentDebugScope;
 
     curFuncName  = fnName;
     curRetType   = nullptr;
@@ -1595,14 +1560,13 @@ std::string Codegen::Impl::emitModuleInitFn(const ModuleNode& modNode) {
     // than named, so a backtrace through it says what it is.  InitStmt's
     // own Loc is the 'to begin do' block itself, a better start line than
     // modNode.Loc's 'module ... implementation', when there is one.
-    if (DBuilder) {
-        const SourceLocation startLoc =
-            modNode.InitStmt ? modNode.InitStmt->Loc : modNode.Loc;
-        const unsigned line = srcMgr_
-            ? srcMgr_->getPresumedLoc(startLoc).Line : 0;
-        currentDebugScope = buildDebugSubprogram(
-            func, DebugFile, "initialization of " + modNode.Name, line);
-    }
+    // dbgScope's destructor restores the enclosing scope at the end of
+    // this function.
+    const SourceLocation startLoc =
+        modNode.InitStmt ? modNode.InitStmt->Loc : modNode.Loc;
+    CGDebugInfo::ScopeGuard dbgScope(
+        *dbgInfo_, dbgInfo_->emitFunctionStart(
+            func, dbgInfo_->getFile(), "initialization of " + modNode.Name, startLoc));
 
     // The guard lives with the initialiser, in whichever object defines it.
     auto* done = new llvm::GlobalVariable(
@@ -1651,7 +1615,6 @@ std::string Codegen::Impl::emitModuleInitFn(const ModuleNode& modNode) {
     curRetAlloca = savedRetAlloca;
     curRetType   = savedRetType;
     curFuncName  = savedFuncName;
-    currentDebugScope = savedDebugScope;
     builder.restoreIP(savedIP);
     return fnName;
 }
@@ -1664,7 +1627,6 @@ void Codegen::Impl::emitModuleLifecycleFn(const std::string& fnName,
     auto* savedRetType   = curRetType;
     auto  savedFuncName  = curFuncName;
     auto  savedIP        = builder.saveIP();
-    auto* savedDebugScope = currentDebugScope;
 
     // namePrefix is left as the caller set it: the block belongs to the module,
     // and the procedures it calls are mangled with that module's name.
@@ -1681,12 +1643,10 @@ void Codegen::Impl::emitModuleLifecycleFn(const std::string& fnName,
     // -g: EP §6.11.2's 'to begin do'/'to end do', the same as
     // emitModuleInitFn's own initializer -- this is its finalizer,
     // reached the same way, from a synthesized name with no Pascal-level
-    // declaration of its own.
-    if (DBuilder) {
-        const unsigned line = srcMgr_
-            ? srcMgr_->getPresumedLoc(stmt.Loc).Line : 0;
-        currentDebugScope = buildDebugSubprogram(func, DebugFile, fnName, line);
-    }
+    // declaration of its own.  dbgScope's destructor restores the
+    // enclosing scope at the end of this function.
+    CGDebugInfo::ScopeGuard dbgScope(
+        *dbgInfo_, dbgInfo_->emitFunctionStart(func, dbgInfo_->getFile(), fnName, stmt.Loc));
 
     auto* entry = llvm::BasicBlock::Create(ctx, "entry", func);
     builder.SetInsertPoint(entry);
@@ -1702,6 +1662,5 @@ void Codegen::Impl::emitModuleLifecycleFn(const std::string& fnName,
     curRetAlloca = savedRetAlloca;
     curRetType   = savedRetType;
     curFuncName  = savedFuncName;
-    currentDebugScope = savedDebugScope;
     builder.restoreIP(savedIP);
 }

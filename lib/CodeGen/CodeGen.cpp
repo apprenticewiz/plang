@@ -164,8 +164,8 @@ bool Codegen::emit(const ProgramNode& prog, std::ostream& os) {
 
     // -g: construct whatever deferred debug-info nodes DIBuilder collected
     // (e.g. forward-declared types) before the module is inspected by
-    // anything else.  A no-op, not a null check away, when Debug is unset.
-    if (PImpl->DBuilder) PImpl->DBuilder->finalize();
+    // anything else.  A no-op when Debug is unset.
+    PImpl->dbgInfo_->finalize();
 
     // Verify the module before emitting — a failed verify indicates a codegen
     // bug and must not produce output that downstream tools would accept.

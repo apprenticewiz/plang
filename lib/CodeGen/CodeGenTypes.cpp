@@ -4,10 +4,6 @@
 #include "llvm/Support/TargetSelect.h"
 #include "llvm/Target/TargetMachine.h"
 
-#include "plang/Basic/Version.h"
-
-#include <filesystem>
-
 using namespace plang;
 
 // See NumTypeKinds in AstBase.h.
@@ -38,22 +34,6 @@ std::optional<llvm::DataLayout> layoutFor(const llvm::Triple& triple) {
         triple, "generic", "", llvm::TargetOptions{}, llvm::Reloc::PIC_));
     if (!tm) return std::nullopt;
     return tm->createDataLayout();
-}
-
-/// Splits a source buffer's name into the (filename, directory) pair
-/// DIFile wants, resolving a relative name against the working directory
-/// so a debugger started somewhere else can still find the file.  Only
-/// path-string manipulation and the (error_code-checked, non-throwing)
-/// current directory lookup -- PlangCodeGen is built -fno-exceptions, and
-/// std::filesystem's throwing overloads are not safe to call from it.
-std::pair<std::string, std::string> splitDebugFilePath(std::string_view Name) {
-    std::filesystem::path P(Name);
-    if (P.is_relative()) {
-        std::error_code ec;
-        auto cwd = std::filesystem::current_path(ec);
-        if (!ec) P = cwd / P;
-    }
-    return {P.filename().string(), P.parent_path().string()};
 }
 } // namespace
 
@@ -93,34 +73,21 @@ void Codegen::Impl::init(const std::string& progName) {
         [this](const TypeNode& tn){ return llvmTypeOfNode(tn); },
         [this](const ArrayTypeNode& at){ return arrayIndexRange(at); });
 
-    if (langOpts.Debug) {
-        DBuilder = std::make_unique<llvm::DIBuilder>(*mod);
-        std::string Filename = progName, Directory;
-        if (srcMgr_)
-            std::tie(Filename, Directory) =
-                splitDebugFilePath(srcMgr_->getBufferName(mainFileID_));
-        DebugFile = DBuilder->createFile(Filename, Directory);
-        DebugCU = DBuilder->createCompileUnit(
-            llvm::DISourceLanguageName(llvm::dwarf::DW_LANG_Pascal83),
-            DebugFile, "plang " PLANG_VERSION_STRING,
-            /*isOptimized=*/langOpts.OptLevel > 0, /*Flags=*/"", /*RV=*/0);
-        // DWARF cannot be read back without a producer that states which
-        // version of the metadata schema it wrote; DIBuilder's own nodes
-        // say nothing about this on their own.
-        mod->addModuleFlag(llvm::Module::Warning, "Debug Info Version",
-                           llvm::DEBUG_METADATA_VERSION);
-    }
+    // srcMgr_/mainFileID_ captured by value here, valid because
+    // Codegen::setSourceManager is always called before emit()/init() runs,
+    // never after -- same ordering shape as importOwners_ above.  dbgInfo_
+    // is constructed unconditionally; internally a no-op wherever
+    // langOpts.Debug is unset.
+    dbgInfo_ = std::make_unique<CGDebugInfo>(*mod, ctx, builder, langOpts,
+        srcMgr_, mainFileID_, progName);
 
     // scopes/consts/shadowedConsts/requiredConsts/varLookupFloor_/
-    // curFuncScopeDepth and the -g fields defVar touches all stay Impl
-    // fields (see CGSymbolTable.h's own comment); symTab_ holds references
-    // into them, plus a closure into debugTypeOfSemaType (CGDebugInfo
-    // territory, not yet extracted).
+    // curFuncScopeDepth stay Impl fields (see CGSymbolTable.h's own
+    // comment); symTab_ holds references into them plus a CGDebugInfo&,
+    // through which defVar makes its one -g call.
     symTab_ = std::make_unique<CGSymbolTable>(
         scopes, consts, shadowedConsts, requiredConsts, varLookupFloor_,
-        curFuncScopeDepth, DBuilder, DebugCU, DebugFile, currentDebugScope,
-        srcMgr_, builder, ctx,
-        [this](const Type& T){ return debugTypeOfSemaType(T); });
+        curFuncScopeDepth, *dbgInfo_);
 
     i1Ty  = llvm::Type::getInt1Ty(ctx);
     i8Ty  = llvm::Type::getInt8Ty(ctx);
@@ -988,72 +955,6 @@ llvm::Type* Codegen::Impl::llvmTypeOfSemaTypeImpl(const Type& T) {
         default:
             codegenICE("no LLVM type for semantic type '" + T.Name + "'");
     }
-}
-
-// -g.  Composite kinds (Record, Array, Set, File, ...) fall through to
-// null: field-level detail for them is explicitly out of scope for this
-// pass (a natural, clearly-separated fast-follow -- see the phase this
-// shipped in), and a pointer to one gets no DIType for its pointee rather
-// than a placeholder invented for the occasion.  A null pointee is a
-// documented, ordinary createPointerType input (a C `void*`'s own DIType
-// is built the same way), not a special case this function has to guard.
-llvm::DIType* Codegen::Impl::debugTypeOfSemaType(const Type& T) {
-    if (!DBuilder) return nullptr;
-    if (auto it = debugTypes_.find(&T); it != debugTypes_.end()) return it->second;
-
-    llvm::DIType* DT = nullptr;
-    switch (T.Kind) {
-        case TypeKind::Integer:
-            DT = DBuilder->createBasicType("integer", 64, llvm::dwarf::DW_ATE_signed);
-            break;
-        case TypeKind::Real:
-            DT = DBuilder->createBasicType("real", 64, llvm::dwarf::DW_ATE_float);
-            break;
-        case TypeKind::Boolean:
-            DT = DBuilder->createBasicType("boolean", 8, llvm::dwarf::DW_ATE_boolean);
-            break;
-        case TypeKind::Char:
-            DT = DBuilder->createBasicType("char", 8, llvm::dwarf::DW_ATE_unsigned_char);
-            break;
-        case TypeKind::Enum: {
-            std::vector<llvm::Metadata*> Elements;
-            Elements.reserve(T.EnumValues.size());
-            // The ordinal of each name is its own index -- see isValid's
-            // sibling read of this same field, EnumValues[V], elsewhere in
-            // this file: there is no separately-stored value to read here.
-            for (size_t I = 0; I < T.EnumValues.size(); ++I)
-                Elements.push_back(DBuilder->createEnumerator(
-                    T.EnumValues[I], static_cast<uint64_t>(I)));
-            DT = DBuilder->createEnumerationType(
-                DebugFile, T.Name, DebugFile, /*LineNumber=*/0,
-                /*SizeInBits=*/64, /*AlignInBits=*/64,
-                DBuilder->getOrCreateArray(Elements),
-                DBuilder->createBasicType("integer", 64, llvm::dwarf::DW_ATE_signed));
-            break;
-        }
-        case TypeKind::Subrange:
-            // The base ordinal type's own DIType, not a qualified DWARF
-            // subrange encoding: enough to print a value correctly, which
-            // is the bar this pass clears; the bound information itself
-            // is a nice-to-have left for a future pass.
-            DT = T.SubBase ? debugTypeOfSemaType(*T.SubBase) : nullptr;
-            break;
-        case TypeKind::Pointer: {
-            // No cycle risk despite the direct (non-RAUW) recursion: a
-            // composite pointee (the only way a real cycle could arise --
-            // Pascal has no way to write `type P = ^P;` directly) hits the
-            // default case above and returns immediately, without
-            // recursing into whatever it itself contains.
-            llvm::DIType* PointeeDT = T.PointeeType
-                ? debugTypeOfSemaType(*T.PointeeType) : nullptr;
-            DT = DBuilder->createPointerType(PointeeDT, 64);
-            break;
-        }
-        default:
-            break;
-    }
-    debugTypes_[&T] = DT;
-    return DT;
 }
 
 // ====================================================================
