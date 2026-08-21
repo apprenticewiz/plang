@@ -24,18 +24,12 @@
 // ---------------------------------------------------------------------------
 
 void Codegen::Impl::registerSchemaDefs(const BlockNode& block) {
-    for (const auto& td : block.Types) {
-        if (td.SchemaParams.empty() || !td.Type) continue;
-        SchemaDef def;
-        def.body = td.Type.get();
-        schemaDefs_[toLower(td.Name)] = std::move(def);
-    }
+    schemaTypes_->registerSchemaDefs(block);
 }
 
-const Codegen::Impl::SchemaDef*
+const SchemaTypeRegistry::SchemaDef*
 Codegen::Impl::findSchemaDef(const std::string& name) const {
-    auto it = schemaDefs_.find(toLower(name));
-    return it != schemaDefs_.end() ? &it->second : nullptr;
+    return schemaTypes_->findSchemaDef(name);
 }
 
 namespace {
@@ -193,9 +187,7 @@ void Codegen::Impl::emitSchemaDiscMatch(const SchemaRef& dst,
 /// time (see the file's own opening comment) -- found by the one thing such
 /// a type still has: the name it was declared under.
 const TypeNode* Codegen::Impl::schemaBodyNodeOf(const plang::Type& T) const {
-    if (T.SchemaBodyNode) return T.SchemaBodyNode;
-    const SchemaDef* def = findSchemaDef(T.SchemaName);
-    return def ? def->body : nullptr;
+    return schemaTypes_->schemaBodyNodeOf(T);
 }
 
 // R3: evaluate a closed extent form against the discriminants this object

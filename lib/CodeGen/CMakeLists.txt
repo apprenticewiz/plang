@@ -7,6 +7,7 @@ add_library(PlangCodeGen OBJECT
     SetOps.cpp
     LabelGotoEngine.cpp
     CGLinkage.cpp
+    SchemaTypeRegistry.cpp
     CodeGen.cpp
     CodeGenTypes.cpp
     CodeGenRuntime.cpp

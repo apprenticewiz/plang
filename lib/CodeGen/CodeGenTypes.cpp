@@ -84,6 +84,7 @@ void Codegen::Impl::init(const std::string& progName) {
     // emit()/init() runs, never after.
     linkage_ = std::make_unique<CGLinkage>(*mod, namePrefix, globalPrefix,
         currentUnit_, importOwners_);
+    schemaTypes_ = std::make_unique<SchemaTypeRegistry>();
 
     if (langOpts.Debug) {
         DBuilder = std::make_unique<llvm::DIBuilder>(*mod);

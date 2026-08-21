@@ -298,7 +298,7 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
     // after it -- so a sibling's new() was sized from a stranger's body.  main
     // escaped it by accident: emitMain re-registers the program block's
     // schemas, putting the outer definition back before the body is emitted.
-    auto  savedSchemaDefs  = schemaDefs_;
+    auto  savedSchemaDefs  = schemaTypes_->snapshotDefs();
     // Restored automatically on every exit path (the declareOnly early
     // return below, or the normal end of this function) by the destructor --
     // see FunctionLabelScope's own comment for why this one field gets RAII
@@ -961,7 +961,7 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
     typeAliases   = std::move(savedTypeAliases);
     consts        = std::move(savedConsts);
     requiredConsts = std::move(savedRequired);
-    schemaDefs_   = std::move(savedSchemaDefs);
+    schemaTypes_->restoreDefs(std::move(savedSchemaDefs));
     builder.restoreIP(savedIP);
 }
 

@@ -54,6 +54,7 @@
 #include "LabelGotoEngine.h"
 #include "RangeCheckGuards.h"
 #include "RuntimeFunctionCache.h"
+#include "SchemaTypeRegistry.h"
 #include "SetOps.h"
 #include "StringRuntime.h"
 
@@ -80,6 +81,7 @@ struct Codegen::Impl {
     std::unique_ptr<SetOps>               setOps_;
     std::unique_ptr<LabelGotoEngine>      gotoEngine_;
     std::unique_ptr<CGLinkage>            linkage_;
+    std::unique_ptr<SchemaTypeRegistry>   schemaTypes_;
 
     // ---- -g debug info (built in init() when langOpts.Debug; see Phase 1's
     // note by srcMgr_ on why these are ordinary members and never statics) ----
@@ -423,14 +425,6 @@ struct Codegen::Impl {
         bool byRef{false};
     };
     std::map<std::string, std::vector<ParamMeta>> paramMeta_;
-
-    // EP §6.4.7: schema definitions reachable from the current block, so that
-    // the body's bound expressions can be re-emitted with run-time
-    // discriminants.  Key: lowercase schema name.
-    struct SchemaDef {
-        const TypeNode* body{nullptr};
-    };
-    std::map<std::string, SchemaDef> schemaDefs_;
 
     // ISO §6.6.3.1: uniform-signature thunks, keyed by the callee they wrap
     // and the signature they present it through.  See procParamThunk.
@@ -1345,7 +1339,7 @@ struct Codegen::Impl {
     /// Records the schemas declared in `block` so their bodies can be
     /// re-emitted with run-time discriminants.
     void registerSchemaDefs(const BlockNode& block);
-    const SchemaDef* findSchemaDef(const std::string& name) const;
+    const SchemaTypeRegistry::SchemaDef* findSchemaDef(const std::string& name) const;
     const TypeNode* schemaBodyNodeOf(const plang::Type& T) const;
     /// The run-time view of `e`, or nullopt when `e` is not schematic.
     /// May emit loads, so call it once per use.
