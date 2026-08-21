@@ -6,42 +6,15 @@ using namespace plang;
 // ====================================================================
 
 llvm::GlobalVariable* Codegen::Impl::internStrGV(const std::string& content) {
-    auto it = strGVs.find(content);
-    if (it != strGVs.end()) return it->second;
-
-    auto* cda = llvm::ConstantDataArray::getString(ctx, content, /*addNull=*/true);
-    auto* gv  = new llvm::GlobalVariable(*mod, cda->getType(), /*isConst=*/true,
-                                          llvm::GlobalValue::PrivateLinkage, cda);
-    gv->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
-    gv->setAlignment(llvm::Align(1));
-    strGVs[content] = gv;
-    return gv;
+    return strings_->internStrGV(content);
 }
 
 llvm::Value* Codegen::Impl::internStrPtr(const std::string& content) {
-    auto* gv  = internStrGV(content);
-    auto* gep = builder.CreateConstInBoundsGEP2_64(gv->getValueType(), gv, 0, 0);
-    return gep;
+    return strings_->internStrPtr(content);
 }
 
 llvm::Constant* Codegen::Impl::internStrStruct(const std::string& content) {
-    auto it = strStructGVs.find(content);
-    if (it != strStructGVs.end()) return it->second;
-
-    // Everything that handles a string value expects the address of a
-    // { i64 length, [cap x i8] } — a bare run of bytes would be read as though
-    // its first eight characters were the length.  A string constant is not
-    // written to, so the whole struct can be built once, here.
-    const auto cap = static_cast<int64_t>(content.size());
-    auto* st  = strStructType(cap);
-    auto* len = llvm::ConstantInt::get(i64Ty, static_cast<uint64_t>(cap), true);
-    auto* dat = llvm::ConstantDataArray::getString(ctx, content, /*addNull=*/false);
-    auto* init = llvm::ConstantStruct::get(st, {len, dat});
-    auto* gv  = new llvm::GlobalVariable(*mod, st, /*isConst=*/true,
-                                         llvm::GlobalValue::PrivateLinkage, init);
-    gv->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
-    strStructGVs[content] = gv;
-    return gv;
+    return strings_->internStrStruct(content);
 }
 
 // ====================================================================

@@ -50,6 +50,7 @@
 
 #include "ConstFold.h"
 #include "RuntimeFunctionCache.h"
+#include "StringRuntime.h"
 
 using namespace plang;
 
@@ -113,6 +114,7 @@ struct Codegen::Impl {
     // ---- leaf units (constructed fresh in init(), once mod/common types
     // exist; see init()'s own comment) ----
     std::unique_ptr<RuntimeFunctionCache> runtimeFns_;
+    std::unique_ptr<StringRuntime>        strings_;
 
     // ---- -g debug info (built in init() when langOpts.Debug; see Phase 1's
     // note by srcMgr_ on why these are ordinary members and never statics) ----
@@ -228,10 +230,6 @@ struct Codegen::Impl {
     std::unordered_map<std::string, llvm::Value*> consts;
 
     // ---- caches ----
-    std::map<std::string, llvm::GlobalVariable*> strGVs;      // interned string GVs
-    // Interned { length, bytes } string structs, for constants whose value is
-    // used where a string variable would be.
-    std::map<std::string, llvm::GlobalVariable*> strStructGVs;
     std::map<std::string, llvm::StructType*>     structTypes;  // record struct types
 
     /// Where one field of a record lives.  A field of the fixed part is an

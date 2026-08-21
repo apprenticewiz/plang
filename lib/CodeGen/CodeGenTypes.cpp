@@ -70,8 +70,14 @@ void Codegen::Impl::init(const std::string& progName) {
     // Leaf units: constructed fresh here, after mod exists, rather than in
     // Impl's member-initializer list -- a unique_ptr<Module> stays null until
     // this point, so a unit needing one cannot be bound any earlier.  Fresh
-    // construction also gives each a clean cache with no separate reset().
+    // construction also gives each a clean cache with no separate reset() --
+    // and, for strings_ specifically, means its two caches start empty
+    // together (the old strGVs/strStructGVs pair only ever cleared the
+    // first of the two, harmless only because Impl is never reused for a
+    // second emit()).
     runtimeFns_ = std::make_unique<RuntimeFunctionCache>(ctx, *mod);
+    strings_    = std::make_unique<StringRuntime>(ctx, *mod, builder,
+        [this](int64_t cap){ return strStructType(cap); });
 
     if (langOpts.Debug) {
         DBuilder = std::make_unique<llvm::DIBuilder>(*mod);
@@ -121,7 +127,6 @@ void Codegen::Impl::init(const std::string& progName) {
     consts["epsreal"] = llvm::ConstantFP::get(dblTy, DBL_EPSILON);
     for (const auto& [name, _] : consts) requiredConsts.insert(name);
 
-    strGVs.clear();
     structTypes.clear();
     typeAliases.clear();
     strStructTypes.clear();
