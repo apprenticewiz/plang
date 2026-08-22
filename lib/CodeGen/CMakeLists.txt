@@ -18,6 +18,7 @@ add_library(PlangCodeGen OBJECT
     StringCallMarshalling.cpp
     BuiltinIO.cpp
     CGAssign.cpp
+    CGControlFlow.cpp
     CodeGen.cpp
     CodeGenTypes.cpp
     CodeGenRuntime.cpp

@@ -223,6 +223,32 @@ void Codegen::Impl::init(const std::string& progName) {
         [this](const ExprNode& e){ return exprIsCharStr(e); },
         [this](const ExprNode& e){ return exprCharStrLen(e); },
         [this](const ExprNode& e){ return exprStrCapStatic(e); });
+    // Structured-statement emission.  EmitExpr/EmitStmt/EnsureI1/ToI64/
+    // CoerceToType/CreateEntryAlloca/ResumeAfterTerminator/IsTerminated/
+    // BrIfNeeded/OrdinalIsUnsigned are narrow closures into methods that
+    // either aren't yet extracted or (isTerminated/brIfNeeded/
+    // ordinalIsUnsigned) are shared with code outside this unit's scope, so
+    // stay on Impl bridged rather than duplicated -- same treatment the
+    // string-shape predicates already get elsewhere.  WithStackScope wraps
+    // Impl::StackScope's RAII (touches dynAllocaUsed_/builder/isTerminated,
+    // none of it exposed otherwise) around a caller-supplied body, the same
+    // "closure runs inside Impl-owned scope logic" shape RangeCheckGuards'
+    // emitGuard already uses for emitFail.
+    controlFlow_ = std::make_unique<CGControlFlow>(ctx, builder, curFunc,
+        *symTab_, *cgTypes_, *setOps_, *runtimeFns_,
+        i1Ty, i64Ty,
+        [this](const ExprNode& e){ return emitExpr(e); },
+        [this](const StmtNode* stmt){ emitStmt(stmt); },
+        [this](llvm::Value* v){ return ensureI1(v); },
+        [this](llvm::Value* v){ return toI64(v); },
+        [this](llvm::Value* v, llvm::Type* t){ return coerceToType(v, t); },
+        [this](llvm::Type* t, const std::string& n){ return createEntryAlloca(t, n); },
+        [this](){ resumeAfterTerminator(); },
+        [this](){ return isTerminated(); },
+        [this](llvm::BasicBlock* target){ brIfNeeded(target); },
+        [this](const Type* t){ return ordinalIsUnsigned(t); },
+        [this](std::function<llvm::Value*()> body) -> llvm::Value* {
+            StackScope frame(*this); return body(); });
     // DefineBuf/LookupBuf are narrow closures into defVar/findVar
     // (CGSymbolTable territory, not yet extracted) -- LookupBuf hands back
     // just the llvm::Value*, the only field of a VarEntry this engine needs.

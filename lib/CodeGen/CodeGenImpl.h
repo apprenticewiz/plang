@@ -47,6 +47,7 @@
 
 #include "BuiltinIO.h"
 #include "CGAssign.h"
+#include "CGControlFlow.h"
 #include "CGDebugInfo.h"
 #include "CGLinkage.h"
 #include "CGSymbolTable.h"
@@ -132,6 +133,9 @@ struct Codegen::Impl {
     // strCallMarshal_/strings_/cgTypes_/rangeGuards_/setOps_/complexOps_/
     // symTab_) already exists.
     std::unique_ptr<CGAssign>             assign_;
+    // Structured-statement emission: if/while/for/for-in/repeat/case; built
+    // after assign_, once symTab_/cgTypes_/setOps_/runtimeFns_ all exist.
+    std::unique_ptr<CGControlFlow>        controlFlow_;
 
     // ---- common type aliases (set in init()) ----
     llvm::IntegerType* i1Ty{nullptr};
@@ -1294,13 +1298,13 @@ struct Codegen::Impl {
     void resumeAfterTerminator();
     void emitCompound(const CompoundStmt& s);
     void emitAssign(const AssignStmt& s) { assign_->emitAssign(s); }
-    void emitIf(const IfStmt& s);
-    void emitWhile(const WhileStmt& s);
-    void emitFor(const ForStmt& s);
-    void emitForIn(const ForInStmt& s);
+    void emitIf(const IfStmt& s) { controlFlow_->emitIf(s); }
+    void emitWhile(const WhileStmt& s) { controlFlow_->emitWhile(s); }
+    void emitFor(const ForStmt& s) { controlFlow_->emitFor(s); }
+    void emitForIn(const ForInStmt& s) { controlFlow_->emitForIn(s); }
     void emitPackUnpack(const CallStmt& s, bool isPack);
-    void emitRepeat(const RepeatStmt& s);
-    void emitCase(const CaseStmt& s);
+    void emitRepeat(const RepeatStmt& s) { controlFlow_->emitRepeat(s); }
+    void emitCase(const CaseStmt& s) { controlFlow_->emitCase(s); }
     void emitWith(const WithStmt& s);
     void emitCallStmt(const CallStmt& s);
     /// The tail of emitCallStmt: a call to a procedure the program declared,
