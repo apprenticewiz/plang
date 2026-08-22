@@ -1,0 +1,101 @@
+// StringCallMarshalling.h — call-argument marshalling (ISO §6.6.3.2) and
+// the EP string-store/address operations it and everyday string
+// assignment both rest on.
+//
+// Mutually recursive with itself (emitCallArg -> emitStrStore ->
+// emitCharStrAsStr, emitCharStrStore -> emitStrAddr), which is why these
+// five stay one unit rather than splitting further.
+#pragma once
+
+#include <cstdint>
+#include <functional>
+
+#include "llvm/IR/DerivedTypes.h"
+#include "llvm/IR/IRBuilder.h"
+#include "llvm/IR/LLVMContext.h"
+
+#include "CGTypes.h"
+#include "RangeCheckGuards.h"
+#include "RuntimeFunctionCache.h"
+#include "SchemaAccess.h"
+#include "StringRuntime.h"
+
+namespace llvm {
+class Value;
+class AllocaInst;
+}
+
+namespace plang {
+struct ExprNode;
+}
+
+class StringCallMarshalling {
+public:
+    StringCallMarshalling(
+        llvm::LLVMContext& Ctx, llvm::IRBuilder<>& B,
+        StringRuntime& Strings, RangeCheckGuards& RangeGuards,
+        RuntimeFunctionCache& RtFns, CGTypes& Types, SchemaAccess& Schema,
+        llvm::IntegerType* I64Ty, llvm::PointerType* PtrTy,
+        std::function<llvm::Value*(const plang::ExprNode&)> EmitExpr,
+        std::function<llvm::Value*(const plang::ExprNode&)> EmitLValue,
+        std::function<llvm::AllocaInst*(llvm::Type*, const std::string&)> CreateEntryAlloca,
+        std::function<llvm::Value*(llvm::Value*, llvm::Type*)> CoerceToType,
+        std::function<bool(const plang::ExprNode&)> ExprIsCharStr,
+        std::function<bool(const plang::ExprNode&)> ExprIsVarStr,
+        std::function<int64_t(const plang::ExprNode&)> ExprCharStrLen)
+        : Ctx(Ctx), B(B), Strings(Strings), RangeGuards(RangeGuards),
+          RtFns(RtFns), Types(Types), Schema(Schema), I64Ty(I64Ty), PtrTy(PtrTy),
+          EmitExpr(std::move(EmitExpr)), EmitLValue(std::move(EmitLValue)),
+          CreateEntryAlloca(std::move(CreateEntryAlloca)),
+          CoerceToType(std::move(CoerceToType)),
+          ExprIsCharStr(std::move(ExprIsCharStr)),
+          ExprIsVarStr(std::move(ExprIsVarStr)),
+          ExprCharStrLen(std::move(ExprCharStrLen)) {}
+
+    /// One argument of a call to a user-declared procedure or function,
+    /// given the LLVM type the callee declared for that position: an
+    /// address for a var parameter, a copy for a string, the value
+    /// otherwise.  \p byRef says the formal is a variable parameter, which
+    /// the LLVM type cannot: a value parameter of pointer type is declared
+    /// `ptr` there as well.
+    llvm::Value* emitCallArg(const plang::ExprNode& arg, llvm::Type* paramTy,
+                             bool byRef);
+    /// The address of the { length, bytes } struct a string expression
+    /// denotes, which is what every string runtime entry point takes.
+    llvm::Value* emitStrAddr(const plang::ExprNode& e);
+    /// Wraps a §6.4.3.2 char-array value as a temporary `string(n)` struct.
+    llvm::Value* emitCharStrAsStr(const plang::ExprNode& e);
+    /// Stores \p src into the fixed-\p n-byte char-array at \p dst.
+    void emitCharStrStore(llvm::Value* dst, int64_t n, const plang::ExprNode& src);
+    /// Store \p src into the string variable at \p dst, whose capacity is
+    /// \p capDst.  A string is a length and a buffer, so which runtime call
+    /// this takes depends on what the source is; assignment and the
+    /// 'value' initializer both come through here.
+    void emitStrStore(llvm::Value* dst, llvm::Value* capDst, const plang::ExprNode& src);
+
+private:
+    llvm::LLVMContext& Ctx;
+    llvm::IRBuilder<>& B;
+    StringRuntime& Strings;
+    RangeCheckGuards& RangeGuards;
+    RuntimeFunctionCache& RtFns;
+    CGTypes& Types;
+    SchemaAccess& Schema;
+    llvm::IntegerType* I64Ty;
+    llvm::PointerType* PtrTy;
+    std::function<llvm::Value*(const plang::ExprNode&)> EmitExpr;
+    std::function<llvm::Value*(const plang::ExprNode&)> EmitLValue;
+    std::function<llvm::AllocaInst*(llvm::Type*, const std::string&)> CreateEntryAlloca;
+    std::function<llvm::Value*(llvm::Value*, llvm::Type*)> CoerceToType;
+    /// Stateless string-shape predicates -- static Impl methods used far
+    /// outside this unit too, so they stay put; reached via closure rather
+    /// than a qualified call, which would need this file to see all of
+    /// Impl.  Same treatment SchemaAccess already gives these same three.
+    std::function<bool(const plang::ExprNode&)> ExprIsCharStr;
+    std::function<bool(const plang::ExprNode&)> ExprIsVarStr;
+    std::function<int64_t(const plang::ExprNode&)> ExprCharStrLen;
+
+    llvm::Constant* i64c(int64_t v) const {
+        return llvm::ConstantInt::get(I64Ty, static_cast<uint64_t>(v), true);
+    }
+};

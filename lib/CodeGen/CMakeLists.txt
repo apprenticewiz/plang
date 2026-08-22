@@ -15,6 +15,7 @@ add_library(PlangCodeGen OBJECT
     SchemaAccess.cpp
     ClosureAndCallABI.cpp
     FileVarHelpers.cpp
+    StringCallMarshalling.cpp
     CodeGen.cpp
     CodeGenTypes.cpp
     CodeGenRuntime.cpp

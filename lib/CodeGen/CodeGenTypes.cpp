@@ -148,6 +148,22 @@ void Codegen::Impl::init(const std::string& progName) {
             if (it == paramMeta_.end() || astArgIdx >= it->second.size()) return 0;
             return it->second[astArgIdx].schemaDiscCount;
         });
+    // Call-argument marshalling + the EP string-store/address operations.
+    // EmitExpr/EmitLValue/CreateEntryAlloca/CoerceToType are narrow
+    // closures into methods not yet extracted (CodeGenExprs.cpp/
+    // CodeGenTypes.cpp); the three string-shape predicates stay on Impl
+    // (stateless, used far outside this unit too), same treatment
+    // SchemaAccess already gives these same three.
+    strCallMarshal_ = std::make_unique<StringCallMarshalling>(ctx, builder,
+        *strings_, *rangeGuards_, *runtimeFns_, *cgTypes_, *schemaAccess_,
+        i64Ty, ptrTy,
+        [this](const ExprNode& e){ return emitExpr(e); },
+        [this](const ExprNode& e){ return emitLValue(e); },
+        [this](llvm::Type* t, const std::string& n){ return createEntryAlloca(t, n); },
+        [this](llvm::Value* v, llvm::Type* t){ return coerceToType(v, t); },
+        [this](const ExprNode& e){ return exprIsCharStr(e); },
+        [this](const ExprNode& e){ return exprIsVarStr(e); },
+        [this](const ExprNode& e){ return exprCharStrLen(e); });
     // Procedural-parameter ABI + conformant-array marshalling.
     // BuildStaticLinkFrame/IsNestedFunction deliberately don't absorb
     // buildStaticLinkFrame/nestedFunctions_ -- the closure-capture loop's

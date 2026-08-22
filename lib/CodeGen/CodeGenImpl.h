@@ -60,6 +60,7 @@
 #include "SchemaLayoutEngine.h"
 #include "SchemaTypeRegistry.h"
 #include "SetOps.h"
+#include "StringCallMarshalling.h"
 #include "StringRuntime.h"
 #include "VarEntry.h"
 
@@ -111,6 +112,10 @@ struct Codegen::Impl {
     /// CodeGenExprs.cpp name them directly).
     using SchemaRef  = SchemaAccess::SchemaRef;
     using SchemaPath = SchemaAccess::SchemaPath;
+    // Call-argument marshalling + the EP string-store/address operations
+    // it and everyday string assignment both rest on; built after
+    // schemaAccess_ (needs it for strAddrAndCap).
+    std::unique_ptr<StringCallMarshalling> strCallMarshal_;
     // Procedural-parameter ABI + conformant-array marshalling; built after
     // schemaAccess_ (needs it for schemaPathOf/pushSchemaArgs).
     std::unique_ptr<ClosureAndCallABI>    closureAbi_;
@@ -992,11 +997,15 @@ struct Codegen::Impl {
     /// A string-type value as a temporary string(n), so that the runtime that
     /// already writes and compares strings can be used on it unchanged.  The
     /// length is fixed at n: every character of the array is part of the value.
-    llvm::Value* emitCharStrAsStr(const ExprNode& e);
+    llvm::Value* emitCharStrAsStr(const ExprNode& e) {
+        return strCallMarshal_->emitCharStrAsStr(e);
+    }
 
     /// Store a string value into a string-type variable of length \p n at
     /// \p dst — exactly n bytes, with no length field to update.
-    void emitCharStrStore(llvm::Value* dst, int64_t n, const ExprNode& src);
+    void emitCharStrStore(llvm::Value* dst, int64_t n, const ExprNode& src) {
+        strCallMarshal_->emitCharStrStore(dst, n, src);
+    }
 
     /// True if the expression's resolved type is a set.
     static bool exprIsSet(const ExprNode& e) {
@@ -1159,7 +1168,9 @@ struct Codegen::Impl {
     /// \p capDst.  A string is a length and a buffer, so which runtime call
     /// this takes depends on what the source is; assignment and the 'value'
     /// initializer both come through here.
-    void emitStrStore(llvm::Value* dst, llvm::Value* capDst, const ExprNode& src);
+    void emitStrStore(llvm::Value* dst, llvm::Value* capDst, const ExprNode& src) {
+        strCallMarshal_->emitStrStore(dst, capDst, src);
+    }
     void emitStrStore(llvm::Value* dst, int64_t capDst, const ExprNode& src) {
         emitStrStore(dst, i64c(capDst), src);
     }
@@ -1169,14 +1180,16 @@ struct Codegen::Impl {
     /// the expression's own storage or a temporary depends on the expression,
     /// and getting it wrong is the difference between a component and the whole
     /// structure it sits in.
-    llvm::Value* emitStrAddr(const ExprNode& e);
+    llvm::Value* emitStrAddr(const ExprNode& e) { return strCallMarshal_->emitStrAddr(e); }
     /// One argument of a call to a user-declared procedure or function, given
     /// the LLVM type the callee declared for that position: an address for a
     /// var parameter, a copy for a string, the value otherwise.  \p byRef says
     /// the formal is a variable parameter, which the LLVM type cannot: a value
     /// parameter of pointer type is declared `ptr` there as well.
     llvm::Value* emitCallArg(const ExprNode& arg, llvm::Type* paramTy,
-                             bool byRef);
+                             bool byRef) {
+        return strCallMarshal_->emitCallArg(arg, paramTy, byRef);
+    }
 
     // ====================================================================
     // Globals
