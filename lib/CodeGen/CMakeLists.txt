@@ -20,6 +20,8 @@ add_library(PlangCodeGen OBJECT
     CGAssign.cpp
     CGControlFlow.cpp
     CGWith.cpp
+    CGPackUnpack.cpp
+    CGProcCall.cpp
     CodeGen.cpp
     CodeGenTypes.cpp
     CodeGenRuntime.cpp

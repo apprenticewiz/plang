@@ -50,6 +50,8 @@
 #include "CGControlFlow.h"
 #include "CGDebugInfo.h"
 #include "CGLinkage.h"
+#include "CGPackUnpack.h"
+#include "CGProcCall.h"
 #include "CGSymbolTable.h"
 #include "CGTypes.h"
 #include "CGWith.h"
@@ -140,6 +142,14 @@ struct Codegen::Impl {
     // with-statement emission (EP §6.8.3.10); built after controlFlow_,
     // once schemaAccess_/schemaLayout_/cgTypes_/symTab_ all exist.
     std::unique_ptr<CGWith>               with_;
+    // ISO §6.7.5.4 transfer procedures (pack/unpack); built after with_,
+    // once symTab_/schemaAccess_/schemaLayout_/cgTypes_/rangeGuards_ all
+    // exist.  Built before procCall_, which holds a reference to it.
+    std::unique_ptr<CGPackUnpack>         packUnpack_;
+    // The required-procedure dispatch chain and user-declared procedure
+    // call statements; built after packUnpack_, once every sibling unit
+    // it touches already exists.
+    std::unique_ptr<CGProcCall>           procCall_;
 
     // ---- common type aliases (set in init()) ----
     llvm::IntegerType* i1Ty{nullptr};
@@ -1306,15 +1316,15 @@ struct Codegen::Impl {
     void emitWhile(const WhileStmt& s) { controlFlow_->emitWhile(s); }
     void emitFor(const ForStmt& s) { controlFlow_->emitFor(s); }
     void emitForIn(const ForInStmt& s) { controlFlow_->emitForIn(s); }
-    void emitPackUnpack(const CallStmt& s, bool isPack);
+    void emitPackUnpack(const CallStmt& s, bool isPack) { packUnpack_->emitPackUnpack(s, isPack); }
     void emitRepeat(const RepeatStmt& s) { controlFlow_->emitRepeat(s); }
     void emitCase(const CaseStmt& s) { controlFlow_->emitCase(s); }
     void emitWith(const WithStmt& s) { with_->emitWith(s); }
-    void emitCallStmt(const CallStmt& s);
+    void emitCallStmt(const CallStmt& s) { procCall_->emitCallStmt(s); }
     /// The tail of emitCallStmt: a call to a procedure the program declared,
     /// reached either by falling past the required ones or, when the name is
     /// one of theirs, directly.  See CallStmt::ResolvedBuiltin.
-    void emitUserProcCall(const CallStmt& s);
+    void emitUserProcCall(const CallStmt& s) { procCall_->emitUserProcCall(s); }
 
     // ====================================================================
     // Built-in write / writeln / read

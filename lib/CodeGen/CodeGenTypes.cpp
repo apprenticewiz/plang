@@ -262,6 +262,56 @@ void Codegen::Impl::init(const std::string& progName) {
         [this](llvm::Type* t, const std::string& n){ return createEntryAlloca(t, n); },
         [this](const StmtNode* stmt){ emitStmt(stmt); },
         [this](const TypeNode* tn){ return peelPackedNode(tn); });
+    // ISO §6.7.5.4 transfer procedures.  EmitExpr/EmitLValue/ToI64 are
+    // narrow closures into methods not yet extracted (CodeGenExprs.cpp).
+    // PeelPackedNode is bridged again here, independently of with_'s own
+    // copy -- same treatment the string-shape predicates already get
+    // across multiple units.
+    packUnpack_ = std::make_unique<CGPackUnpack>(*mod, builder,
+        *symTab_, *schemaAccess_, *schemaLayout_, *cgTypes_, *rangeGuards_,
+        i64Ty,
+        [this](const ExprNode& e){ return emitExpr(e); },
+        [this](const ExprNode& e){ return emitLValue(e); },
+        [this](llvm::Value* v){ return toI64(v); },
+        [this](const TypeNode* tn){ return peelPackedNode(tn); });
+    // The required-procedure dispatch chain and user-declared procedure
+    // calls.  EmitExpr/EmitLValue/ToI64/InitialStateShapeOf/
+    // HasInitialState/EmitInitialState/BuildStaticLinkFrame/ProcParamArg/
+    // ParamIsByRef are narrow closures into methods not yet extracted or
+    // (BuildStaticLinkFrame) deliberately staying on Impl permanently --
+    // this project's standing extra-caution zone for the closure-capture
+    // loop.  ConformantDimsOf/ParamSetBaseOf stand in for direct
+    // paramMeta_ access, the same narrow-derived-query treatment
+    // SchemaArgDiscCountOf already got in Wave 5 -- paramMeta_ itself
+    // stays on Impl, read from CodeGenExprs.cpp's parallel call-expression
+    // marshalling too.
+    procCall_ = std::make_unique<CGProcCall>(ctx, *mod, builder,
+        *fileVarHelpers_, *runtimeFns_, *builtinIO_, *closureAbi_,
+        *schemaAccess_, *cgTypes_, *symTab_, *linkage_, *setOps_,
+        *strCallMarshal_, *packUnpack_,
+        i8Ty, i64Ty, ptrTy,
+        [this](const ExprNode& e){ return emitExpr(e); },
+        [this](const ExprNode& e){ return emitLValue(e); },
+        [this](llvm::Value* v){ return toI64(v); },
+        [this](const TypeNode* tn){ return initialStateShapeOf(tn); },
+        [this](const TypeNode* tn){ return hasInitialState(tn); },
+        [this](llvm::Value* ptr, llvm::Type* ty, const TypeNode* tn){
+            emitInitialState(ptr, ty, tn); },
+        [this](const std::string& mangledName){ return buildStaticLinkFrame(mangledName); },
+        [this](const std::string& mangledName, size_t astArgIdx){
+            return procParamArg(mangledName, astArgIdx); },
+        [this](const std::string& mangledName, size_t astArgIdx){
+            return paramIsByRef(mangledName, astArgIdx); },
+        [this](const std::string& mangledName, size_t astArgIdx) -> size_t {
+            auto it = paramMeta_.find(mangledName);
+            if (it == paramMeta_.end() || astArgIdx >= it->second.size()) return 0;
+            return it->second[astArgIdx].conformantDims.size();
+        },
+        [this](const std::string& mangledName, size_t astArgIdx) -> std::optional<int64_t> {
+            auto it = paramMeta_.find(mangledName);
+            if (it == paramMeta_.end() || astArgIdx >= it->second.size()) return std::nullopt;
+            return it->second[astArgIdx].setBase;
+        });
     // DefineBuf/LookupBuf are narrow closures into defVar/findVar
     // (CGSymbolTable territory, not yet extracted) -- LookupBuf hands back
     // just the llvm::Value*, the only field of a VarEntry this engine needs.
