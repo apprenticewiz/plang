@@ -45,6 +45,7 @@
 #include "plang/Basic/StringUtil.h"
 #include "plang/Basic/Token.h"
 
+#include "BuiltinIO.h"
 #include "CGDebugInfo.h"
 #include "CGLinkage.h"
 #include "CGSymbolTable.h"
@@ -122,6 +123,9 @@ struct Codegen::Impl {
     // File-variable address/type/size helpers (ISO §6.6.5.2); built after
     // cgTypes_/symTab_/runtimeFns_ all exist.
     std::unique_ptr<FileVarHelpers>       fileVarHelpers_;
+    // Built-in write/writeln/read/readln/writestr/readstr (ISO §6.9, EP
+    // §6.7.5.5); built after fileVarHelpers_, its last real dependency.
+    std::unique_ptr<BuiltinIO>            builtinIO_;
 
     // ---- common type aliases (set in init()) ----
     llvm::IntegerType* i1Ty{nullptr};
@@ -1054,9 +1058,6 @@ struct Codegen::Impl {
                        llvm::Value* src, int64_t capSrc) {
         emitStrAssign(dst, i64c(capDst), src, i64c(capSrc));
     }
-    void emitReadArg(const ExprNode& arg, llvm::Value* fp);
-    void emitSkipLine(llvm::Value* fp);
-
     /// Runs emitFail on a cold path taken when failCond holds, then leaves the
     /// builder on the success path.  The reporters never return.
     void emitGuard(llvm::Value* failCond, const char* name,
@@ -1304,29 +1305,14 @@ struct Codegen::Impl {
     // ====================================================================
     // Built-in write / writeln / read
     // ====================================================================
-    void emitBuiltinWrite(const std::vector<std::unique_ptr<ExprNode>>& args, bool newline);
-    void emitWriteArgs(const std::vector<std::unique_ptr<ExprNode>>& args, size_t start,
-                       bool newline, llvm::Value* fp, bool binaryTyped);
-    void emitBuiltinWriteStr(const std::vector<std::unique_ptr<ExprNode>>& args);
-    void emitBuiltinReadStr(const std::vector<std::unique_ptr<ExprNode>>& args);
-    /// Whether a value should be written as 'true'/'false'.  A boolean is
-    /// normally i1, but the predefined TimeStamp holds its two flags as i8 so
-    /// that the record matches its C counterpart byte for byte, and at that
-    /// width nothing in the IR distinguishes a boolean from a char — only the
-    /// Pascal type does.
-    static bool writesAsBoolean(const llvm::Type* ty, const plang::Type* semaTy) {
-        if (ty->isIntegerTy(1)) return true;
-        return ty->isIntegerTy(8) && semaTy && semaTy->Kind == TypeKind::Boolean;
+    void emitBuiltinWrite(const std::vector<std::unique_ptr<ExprNode>>& args, bool newline) {
+        builtinIO_->emitBuiltinWrite(args, newline);
     }
-    /// Whether a value should be written as a character.  A char is normally
-    /// i8, but a subrange of char is held in an integer-width slot, and at
-    /// that width only the Pascal type says it is not a number.
-    static bool writesAsChar(const llvm::Type* ty, const plang::Type* semaTy) {
-        if (ty->isIntegerTy(8)) return true;
-        if (!ty->isIntegerTy() || !semaTy) return false;
-        const plang::Type* t = semaTy;
-        while (t->Kind == TypeKind::Subrange && t->SubBase) t = t->SubBase.get();
-        return t->Kind == TypeKind::Char;
+    void emitBuiltinWriteStr(const std::vector<std::unique_ptr<ExprNode>>& args) {
+        builtinIO_->emitBuiltinWriteStr(args);
+    }
+    void emitBuiltinReadStr(const std::vector<std::unique_ptr<ExprNode>>& args) {
+        builtinIO_->emitBuiltinReadStr(args);
     }
     /// Whether an ordinal's values are unsigned in their LLVM representation.
     /// ISO §6.4.2.2 orders every ordinal by its ordinal number, which is never
@@ -1337,14 +1323,12 @@ struct Codegen::Impl {
         return t && (t->Kind == TypeKind::Boolean || t->Kind == TypeKind::Char
                      || t->Kind == TypeKind::Enum);
     }
-    void emitWriteValue(llvm::Value* val, bool newline, llvm::Value* fp = nullptr,
-                        const plang::Type* semaTy = nullptr);
-    void emitWriteValueFormatted(llvm::Value* val, llvm::Value* w, llvm::Value* d,
-                                  bool newline, llvm::Value* fp,
-                                  const plang::Type* semaTy = nullptr);
-    static std::string readFnSuffix(llvm::Type* ty);
-    void emitBuiltinRead(const std::vector<std::unique_ptr<ExprNode>>& args);
-    void emitBuiltinReadln(const std::vector<std::unique_ptr<ExprNode>>& args);
+    void emitBuiltinRead(const std::vector<std::unique_ptr<ExprNode>>& args) {
+        builtinIO_->emitBuiltinRead(args);
+    }
+    void emitBuiltinReadln(const std::vector<std::unique_ptr<ExprNode>>& args) {
+        builtinIO_->emitBuiltinReadln(args);
+    }
 
     // ====================================================================
     // Expression emission

@@ -16,12 +16,12 @@ add_library(PlangCodeGen OBJECT
     ClosureAndCallABI.cpp
     FileVarHelpers.cpp
     StringCallMarshalling.cpp
+    BuiltinIO.cpp
     CodeGen.cpp
     CodeGenTypes.cpp
     CodeGenRuntime.cpp
     CodeGenProcs.cpp
     CodeGenStmts.cpp
-    CodeGenIO.cpp
     CodeGenExprs.cpp
     CodeGenSchema.cpp
     CodeGenProcParams.cpp

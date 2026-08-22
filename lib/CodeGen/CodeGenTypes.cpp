@@ -185,6 +185,24 @@ void Codegen::Impl::init(const std::string& progName) {
     fileVarHelpers_ = std::make_unique<FileVarHelpers>(*mod, builder,
         *symTab_, *cgTypes_, *runtimeFns_, i64Ty, i8Ty, ptrTy,
         [this](const ExprNode& e){ return emitLValue(e); });
+    // Built-in write/writeln/read/readln/writestr/readstr.  EmitExpr/
+    // EmitLValue/ToI64/CoerceToType/CreateEntryAlloca are narrow closures
+    // into methods not yet extracted (CodeGenExprs.cpp/CodeGenTypes.cpp);
+    // the three string-shape predicates stay on Impl (stateless, used far
+    // outside this unit too), same treatment SchemaAccess/
+    // StringCallMarshalling already give these same three.
+    builtinIO_ = std::make_unique<BuiltinIO>(ctx, *mod, builder,
+        *fileVarHelpers_, *runtimeFns_, *strings_, *schemaAccess_,
+        *strCallMarshal_, *complexOps_, *symTab_, *rangeGuards_, *cgTypes_,
+        i8Ty, i64Ty, dblTy, ptrTy,
+        [this](const ExprNode& e){ return emitExpr(e); },
+        [this](const ExprNode& e){ return emitLValue(e); },
+        [this](llvm::Value* v){ return toI64(v); },
+        [this](llvm::Value* v, llvm::Type* t){ return coerceToType(v, t); },
+        [this](llvm::Type* t, const std::string& n){ return createEntryAlloca(t, n); },
+        [this](const ExprNode& e){ return exprIsVarStr(e); },
+        [this](const ExprNode& e){ return exprIsCharStr(e); },
+        [this](const ExprNode& e){ return exprCharStrLen(e); });
     // DefineBuf/LookupBuf are narrow closures into defVar/findVar
     // (CGSymbolTable territory, not yet extracted) -- LookupBuf hands back
     // just the llvm::Value*, the only field of a VarEntry this engine needs.
