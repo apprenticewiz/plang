@@ -52,6 +52,7 @@
 #include "CGLinkage.h"
 #include "CGSymbolTable.h"
 #include "CGTypes.h"
+#include "CGWith.h"
 #include "ClosureAndCallABI.h"
 #include "ComplexOps.h"
 #include "ConstFold.h"
@@ -136,6 +137,9 @@ struct Codegen::Impl {
     // Structured-statement emission: if/while/for/for-in/repeat/case; built
     // after assign_, once symTab_/cgTypes_/setOps_/runtimeFns_ all exist.
     std::unique_ptr<CGControlFlow>        controlFlow_;
+    // with-statement emission (EP §6.8.3.10); built after controlFlow_,
+    // once schemaAccess_/schemaLayout_/cgTypes_/symTab_ all exist.
+    std::unique_ptr<CGWith>               with_;
 
     // ---- common type aliases (set in init()) ----
     llvm::IntegerType* i1Ty{nullptr};
@@ -1305,7 +1309,7 @@ struct Codegen::Impl {
     void emitPackUnpack(const CallStmt& s, bool isPack);
     void emitRepeat(const RepeatStmt& s) { controlFlow_->emitRepeat(s); }
     void emitCase(const CaseStmt& s) { controlFlow_->emitCase(s); }
-    void emitWith(const WithStmt& s);
+    void emitWith(const WithStmt& s) { with_->emitWith(s); }
     void emitCallStmt(const CallStmt& s);
     /// The tail of emitCallStmt: a call to a procedure the program declared,
     /// reached either by falling past the required ones or, when the name is

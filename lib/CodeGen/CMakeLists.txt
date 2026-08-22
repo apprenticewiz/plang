@@ -19,6 +19,7 @@ add_library(PlangCodeGen OBJECT
     BuiltinIO.cpp
     CGAssign.cpp
     CGControlFlow.cpp
+    CGWith.cpp
     CodeGen.cpp
     CodeGenTypes.cpp
     CodeGenRuntime.cpp

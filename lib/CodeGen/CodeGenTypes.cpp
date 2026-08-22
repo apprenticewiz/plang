@@ -249,6 +249,19 @@ void Codegen::Impl::init(const std::string& progName) {
         [this](const Type* t){ return ordinalIsUnsigned(t); },
         [this](std::function<llvm::Value*()> body) -> llvm::Value* {
             StackScope frame(*this); return body(); });
+    // with-statement emission.  EmitLValue/CreateEntryAlloca/EmitStmt are
+    // narrow closures into methods not yet extracted (CodeGenExprs.cpp,
+    // and the recursive re-entry into the shared dispatcher itself).
+    // PeelPackedNode is a stateless static Impl helper also used directly
+    // by emitPackUnpack (staying on Impl for now), so it's bridged rather
+    // than duplicated -- same call Wave 11 made for ordinalIsUnsigned.
+    with_ = std::make_unique<CGWith>(builder,
+        *schemaAccess_, *schemaLayout_, *cgTypes_, *symTab_,
+        i8Ty, i32Ty, i64Ty,
+        [this](const ExprNode& e){ return emitLValue(e); },
+        [this](llvm::Type* t, const std::string& n){ return createEntryAlloca(t, n); },
+        [this](const StmtNode* stmt){ emitStmt(stmt); },
+        [this](const TypeNode* tn){ return peelPackedNode(tn); });
     // DefineBuf/LookupBuf are narrow closures into defVar/findVar
     // (CGSymbolTable territory, not yet extracted) -- LookupBuf hands back
     // just the llvm::Value*, the only field of a VarEntry this engine needs.
