@@ -203,6 +203,26 @@ void Codegen::Impl::init(const std::string& progName) {
         [this](const ExprNode& e){ return exprIsVarStr(e); },
         [this](const ExprNode& e){ return exprIsCharStr(e); },
         [this](const ExprNode& e){ return exprCharStrLen(e); });
+    // Assignment-statement emission.  EmitExpr/EmitLValue/ToI64/
+    // CreateEntryAlloca/PackedAccessAlign are narrow closures into methods
+    // not yet extracted (CodeGenExprs.cpp); the four string-shape
+    // predicates stay on Impl (stateless, used far outside this unit too) --
+    // ExprStrCapStatic is a new fifth member of that bridged set, alongside
+    // the three ExprIsVarStr/ExprIsCharStr/ExprCharStrLen every prior unit
+    // since SchemaAccess has already bridged.
+    assign_ = std::make_unique<CGAssign>(ctx, *mod, builder,
+        *schemaAccess_, *schemaLayout_, *strCallMarshal_, *strings_,
+        *cgTypes_, *rangeGuards_, *setOps_, *complexOps_, *symTab_,
+        i8Ty, i64Ty, dblTy, ptrTy,
+        [this](const ExprNode& e){ return emitExpr(e); },
+        [this](const ExprNode& e){ return emitLValue(e); },
+        [this](llvm::Value* v){ return toI64(v); },
+        [this](llvm::Type* t, const std::string& n){ return createEntryAlloca(t, n); },
+        [this](const ExprNode& e){ return packedAccessAlign(e); },
+        [this](const ExprNode& e){ return exprIsVarStr(e); },
+        [this](const ExprNode& e){ return exprIsCharStr(e); },
+        [this](const ExprNode& e){ return exprCharStrLen(e); },
+        [this](const ExprNode& e){ return exprStrCapStatic(e); });
     // DefineBuf/LookupBuf are narrow closures into defVar/findVar
     // (CGSymbolTable territory, not yet extracted) -- LookupBuf hands back
     // just the llvm::Value*, the only field of a VarEntry this engine needs.

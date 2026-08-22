@@ -17,6 +17,7 @@ add_library(PlangCodeGen OBJECT
     FileVarHelpers.cpp
     StringCallMarshalling.cpp
     BuiltinIO.cpp
+    CGAssign.cpp
     CodeGen.cpp
     CodeGenTypes.cpp
     CodeGenRuntime.cpp

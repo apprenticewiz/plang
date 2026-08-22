@@ -46,6 +46,7 @@
 #include "plang/Basic/Token.h"
 
 #include "BuiltinIO.h"
+#include "CGAssign.h"
 #include "CGDebugInfo.h"
 #include "CGLinkage.h"
 #include "CGSymbolTable.h"
@@ -126,6 +127,11 @@ struct Codegen::Impl {
     // Built-in write/writeln/read/readln/writestr/readstr (ISO §6.9, EP
     // §6.7.5.5); built after fileVarHelpers_, its last real dependency.
     std::unique_ptr<BuiltinIO>            builtinIO_;
+    // Assignment-statement emission (ISO §6.8.2.2); built after builtinIO_,
+    // once every sibling unit it touches (schemaAccess_/schemaLayout_/
+    // strCallMarshal_/strings_/cgTypes_/rangeGuards_/setOps_/complexOps_/
+    // symTab_) already exists.
+    std::unique_ptr<CGAssign>             assign_;
 
     // ---- common type aliases (set in init()) ----
     llvm::IntegerType* i1Ty{nullptr};
@@ -1287,7 +1293,7 @@ struct Codegen::Impl {
     void emitStmt(const StmtNode* stmt);
     void resumeAfterTerminator();
     void emitCompound(const CompoundStmt& s);
-    void emitAssign(const AssignStmt& s);
+    void emitAssign(const AssignStmt& s) { assign_->emitAssign(s); }
     void emitIf(const IfStmt& s);
     void emitWhile(const WhileStmt& s);
     void emitFor(const ForStmt& s);
