@@ -312,6 +312,15 @@ void Codegen::Impl::init(const std::string& progName) {
             if (it == paramMeta_.end() || astArgIdx >= it->second.size()) return std::nullopt;
             return it->second[astArgIdx].setBase;
         });
+    // Record field access and pointer dereference.  EmitLValue/EmitExpr
+    // are narrow closures into methods not yet extracted (both still in
+    // CodeGenExprs.cpp -- emitExpr/emitLValue themselves).
+    fieldAccess_ = std::make_unique<CGFieldAccess>(builder,
+        *cgTypes_, *schemaAccess_, *symTab_, *fileVarHelpers_, *rangeGuards_,
+        typeAliases,
+        i8Ty, i32Ty, i64Ty,
+        [this](const ExprNode& e){ return emitExpr(e); },
+        [this](const ExprNode& e){ return emitLValue(e); });
     // DefineBuf/LookupBuf are narrow closures into defVar/findVar
     // (CGSymbolTable territory, not yet extracted) -- LookupBuf hands back
     // just the llvm::Value*, the only field of a VarEntry this engine needs.

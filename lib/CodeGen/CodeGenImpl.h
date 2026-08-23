@@ -49,6 +49,7 @@
 #include "CGAssign.h"
 #include "CGControlFlow.h"
 #include "CGDebugInfo.h"
+#include "CGFieldAccess.h"
 #include "CGLinkage.h"
 #include "CGPackUnpack.h"
 #include "CGProcCall.h"
@@ -150,6 +151,10 @@ struct Codegen::Impl {
     // call statements; built after packUnpack_, once every sibling unit
     // it touches already exists.
     std::unique_ptr<CGProcCall>           procCall_;
+    // Record field access and pointer dereference (ISO §6.4.3.3/§6.5.5);
+    // built after procCall_, once cgTypes_/schemaAccess_/symTab_/
+    // fileVarHelpers_/rangeGuards_ all exist.
+    std::unique_ptr<CGFieldAccess>        fieldAccess_;
 
     // ---- common type aliases (set in init()) ----
     llvm::IntegerType* i1Ty{nullptr};
@@ -1368,16 +1373,20 @@ struct Codegen::Impl {
     llvm::Value* emitUserFuncCall(const CallExpr& e);
     llvm::Value* emitIndexGEP(const IndexExpr& e);
     llvm::Value* emitIndexLoad(const IndexExpr& e);
-    llvm::StructType* resolveRecordStructType(const FieldExpr& e);
+    llvm::StructType* resolveRecordStructType(const FieldExpr& e) {
+        return fieldAccess_->resolveRecordStructType(e);
+    }
     /// The type of the field a field expression selects, which for a variant
     /// field is not the type of the struct element it shares with the others.
-    llvm::Type* fieldLlvmType(const FieldExpr& e);
-    llvm::Value* emitFieldGEP(const FieldExpr& e);
+    llvm::Type* fieldLlvmType(const FieldExpr& e) { return fieldAccess_->fieldLlvmType(e); }
+    llvm::Value* emitFieldGEP(const FieldExpr& e) { return fieldAccess_->emitFieldGEP(e); }
     /// Alignment a load/store through this expression may claim; see the
     /// definition.  nullopt means the value type's ABI alignment is honest.
-    std::optional<llvm::Align> packedAccessAlign(const ExprNode& e);
-    llvm::Value* emitFieldLoad(const FieldExpr& e);
-    llvm::Value* emitDerefLoad(const DerefExpr& e);
+    std::optional<llvm::Align> packedAccessAlign(const ExprNode& e) {
+        return fieldAccess_->packedAccessAlign(e);
+    }
+    llvm::Value* emitFieldLoad(const FieldExpr& e) { return fieldAccess_->emitFieldLoad(e); }
+    llvm::Value* emitDerefLoad(const DerefExpr& e) { return fieldAccess_->emitDerefLoad(e); }
     /// EP §6.8.7: emit a typed value constructor (array/record/set).
     /// For set constructors returns an i64 bitmask.
     /// For array/record constructors returns a ptr to a temporary alloca.
