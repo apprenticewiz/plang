@@ -404,6 +404,27 @@ void Codegen::Impl::init(const std::string& progName) {
         [this](const ExprNode& e){ return exprIsCharStr(e); },
         [this](const ExprNode& e){ return exprCharStrLen(e); },
         [this](const ExprNode& e){ return exprStrCapStatic(e); });
+    // ISO §6.7.1 expression emission -- the central recursive-descent
+    // dispatcher every other extracted unit already reaches via its own
+    // EmitExpr/EmitLValue closure (unaffected by this move, since those
+    // closures call Impl::emitExpr/emitLValue by name, which now forward
+    // here).  ResolveImportedVar is a new bridge (first use anywhere) into
+    // real, not-yet-extracted Impl logic; EnsureI1/ToI64 reuse the
+    // established shapes even though ensureI1/toI64's own bodies stay on
+    // Impl, since emitExpr/emitLValue themselves still call them directly.
+    exprCore_ = std::make_unique<CGExprCore>(ctx, *mod, builder,
+        *runtimeFns_, *symTab_, *closureAbi_, *linkage_, *funcCall_,
+        *binaryOps_, *indexAccess_, *fieldAccess_, *setOps_, *cgTypes_,
+        *strings_, *schemaAccess_, *structuredValue_, *fileVarHelpers_,
+        *rangeGuards_,
+        i64Ty, i8Ty, dblTy, ptrTy,
+        curRetAlloca, curRetType, curFuncName, consts,
+        [this](llvm::Type* t, const std::string& n){ return createEntryAlloca(t, n); },
+        [this](const std::string& n, const Type* semaTy){ return resolveImportedVar(n, semaTy); },
+        [this](llvm::Value* v){ return ensureI1(v); },
+        [this](llvm::Value* v){ return toI64(v); },
+        [this](const ExprNode& e){ return exprIsVarStr(e); },
+        [this](const ExprNode& e){ return exprStrCapStatic(e); });
     // DefineBuf/LookupBuf are narrow closures into defVar/findVar
     // (CGSymbolTable territory, not yet extracted) -- LookupBuf hands back
     // just the llvm::Value*, the only field of a VarEntry this engine needs.

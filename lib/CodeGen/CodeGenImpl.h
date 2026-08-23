@@ -50,6 +50,7 @@
 #include "CGBinaryOps.h"
 #include "CGControlFlow.h"
 #include "CGDebugInfo.h"
+#include "CGExprCore.h"
 #include "CGFieldAccess.h"
 #include "CGFuncCall.h"
 #include "CGIndexAccess.h"
@@ -175,6 +176,10 @@ struct Codegen::Impl {
     // needed for the analogous procedure-call-statement split, plus
     // linkage_/symTab_/closureAbi_/rangeGuards_ (all already exist by then).
     std::unique_ptr<CGFuncCall>           funcCall_;
+    // ISO §6.7.1 expression emission (emitExpr/emitLValue/spillToTemporary,
+    // the central recursive-descent dispatcher); built after funcCall_,
+    // needs 15 already-extracted sibling units, all already built by then.
+    std::unique_ptr<CGExprCore>           exprCore_;
 
     // ---- common type aliases (set in init()) ----
     llvm::IntegerType* i1Ty{nullptr};
@@ -1049,7 +1054,7 @@ struct Codegen::Impl {
 
     /// The value of \p e in memory, for reading a component of a function
     /// result, which is a value with nowhere of its own to live.
-    llvm::Value* spillToTemporary(const ExprNode& e);
+    llvm::Value* spillToTemporary(const ExprNode& e) { return exprCore_->spillToTemporary(e); }
 
     llvm::Function* getStrFn(const std::string& name, llvm::Type* retTy,
                               std::initializer_list<llvm::Type*> argTys) {
@@ -1343,8 +1348,8 @@ struct Codegen::Impl {
     // ====================================================================
     // Expression emission
     // ====================================================================
-    llvm::Value* emitExpr(const ExprNode& e);
-    llvm::Value* emitLValue(const ExprNode& e);
+    llvm::Value* emitExpr(const ExprNode& e) { return exprCore_->emitExpr(e); }
+    llvm::Value* emitLValue(const ExprNode& e) { return exprCore_->emitLValue(e); }
     llvm::Value* emitLValueOpt(const ExprNode& e) { return emitLValue(e); }
     llvm::Value* emitBinary(const BinaryExpr& e) { return binaryOps_->emitBinary(e); }
     llvm::Value* emitUnary(const UnaryExpr& e) { return binaryOps_->emitUnary(e); }
