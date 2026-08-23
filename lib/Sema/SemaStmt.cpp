@@ -692,9 +692,16 @@ void Sema::checkCallStmt(const CallStmt& S) {
                     error(S.Args[I]->Loc, diag::err_restricted_used, {T.Name});
                 else if (!(HasFile && I == 0) && FromText && !T.isError())
                     checkReadParamType(T, S.Args[I]->Loc);
-                    // read(v) assigns to v -- §6.9.1 makes it `v := f^` -- so a
-                    // protected variable may no more be read into than
-                    // assigned to.
+                // read(v) assigns to v -- §6.9.1 makes it `v := f^` -- so a
+                // protected variable may no more be read into than assigned
+                // to.  Gated the same way as checkReadParamType above: I == 0
+                // is the file itself when HasFile, not something read INTO,
+                // so checking whether the file variable is "protected" would
+                // ask the wrong question -- a protected file argument to
+                // read(f, v) was refused with err_protected_param_assigned,
+                // a diagnostic about assigning through v that had nothing to
+                // do with f.
+                if (!(HasFile && I == 0))
                     checkNotProtected(*S.Args[I], S.Args[I]->Loc);
             }
         }

@@ -4918,6 +4918,27 @@ TEST(EPProtected, EveryWayOfWritingToAProtectedParameterIsRefused) {
     EXPECT_EQ(n, 4u) << "all four writes must be refused:\n" << R.Stderr;
 }
 
+TEST(EPProtected, ReadingFromAProtectedFileParameterIsStillAllowed) {
+    // §6.9.1 makes read(f, v) an assignment to v, not to f -- f is what is
+    // read FROM, not written to.  checkNotProtected's call for read/readln
+    // ran once per argument with no exclusion for the file argument itself,
+    // so read(f, v) on a `protected var f: file of ...` parameter was
+    // refused with err_protected_param_assigned, a diagnostic about
+    // assigning through v that had nothing to do with f.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "var g: file of integer; v: integer;\n"
+        "procedure q(protected var f: file of integer; var x: integer);\n"
+        "begin read(f, x) end;\n"
+        "begin\n"
+        "  rewrite(g); write(g, 42); reset(g);\n"
+        "  q(g, v);\n"
+        "  writeln(v:1)\n"
+        "end.\n", kEP);
+    EXPECT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "42\n");
+}
+
 TEST(EPProtected, WithOpensANewSpellingForTheSameProtectedStorage) {
     // `with r do` rebinds each field to a fresh with-scope symbol, so
     // checkNotProtected -- looking up whatever identifier was actually
