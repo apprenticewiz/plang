@@ -47,6 +47,7 @@
 
 #include "BuiltinIO.h"
 #include "CGAssign.h"
+#include "CGBinaryOps.h"
 #include "CGControlFlow.h"
 #include "CGDebugInfo.h"
 #include "CGFieldAccess.h"
@@ -164,6 +165,10 @@ struct Codegen::Impl {
     // EP §6.8.7 typed value constructors (array/record/set); built after
     // indexAccess_, once cgTypes_/setOps_ both exist.
     std::unique_ptr<CGStructuredValue>    structuredValue_;
+    // ISO §6.7.2 binary/unary operators; built after structuredValue_,
+    // once complexOps_/schemaAccess_/strCallMarshal_/strings_/cgTypes_/
+    // setOps_/rangeGuards_/runtimeFns_ all exist.
+    std::unique_ptr<CGBinaryOps>          binaryOps_;
 
     // ---- common type aliases (set in init()) ----
     llvm::IntegerType* i1Ty{nullptr};
@@ -794,16 +799,8 @@ struct Codegen::Impl {
         return complexOps_->coerceToComplex(v);
     }
 
-    /// Inline complex addition.
-    llvm::Value* emitComplexAdd(llvm::Value* a, llvm::Value* b);
-    /// Inline complex subtraction.
-    llvm::Value* emitComplexSub(llvm::Value* a, llvm::Value* b);
     /// Inline complex multiplication.
     llvm::Value* emitComplexMul(llvm::Value* a, llvm::Value* b);
-    /// Inline complex division.
-    llvm::Value* emitComplexDiv(llvm::Value* a, llvm::Value* b);
-    /// Complex power via runtime plang_cpow_out.
-    llvm::Value* emitComplexPow(llvm::Value* a, llvm::Value* b);
     /// Call a (re_out, im_out, re_in, im_in) runtime function and return complex.
     llvm::Value* callComplexUnary(const std::string& name, llvm::Value* z);
     static bool isTextTypeName(const TypeNode* tn) {
@@ -1009,16 +1006,6 @@ struct Codegen::Impl {
         return e.ResolvedType && isCharStringType(*e.ResolvedType);
     }
 
-    /// True if the expression is a character string in any of the three shapes
-    /// one can take: a literal, ISO §6.4.3.2's packed array[1..n] of char, or
-    /// EP's string(n).  A literal is the one shape that carries no array type,
-    /// so asking only after the other two left `'farka' <= 'farkz'` to the
-    /// ordinary operators, which compared the addresses of the two constants.
-    static bool exprIsStringLike(const ExprNode& e) {
-        return exprIsVarStr(e) || exprIsCharStr(e)
-            || (e.ResolvedType && e.ResolvedType->Kind == TypeKind::String);
-    }
-
     /// The n of the expression's string-type, or 0.
     static int64_t exprCharStrLen(const ExprNode& e) {
         return exprIsCharStr(e) ? charStringLength(*e.ResolvedType) : 0;
@@ -1035,11 +1022,6 @@ struct Codegen::Impl {
     /// \p dst — exactly n bytes, with no length field to update.
     void emitCharStrStore(llvm::Value* dst, int64_t n, const ExprNode& src) {
         strCallMarshal_->emitCharStrStore(dst, n, src);
-    }
-
-    /// True if the expression's resolved type is a set.
-    static bool exprIsSet(const ExprNode& e) {
-        return e.ResolvedType && e.ResolvedType->Kind == TypeKind::Set;
     }
 
     /// Resolve the LLVM mangled name for a Pascal procedure/function call.
@@ -1362,8 +1344,8 @@ struct Codegen::Impl {
     llvm::Value* emitExpr(const ExprNode& e);
     llvm::Value* emitLValue(const ExprNode& e);
     llvm::Value* emitLValueOpt(const ExprNode& e) { return emitLValue(e); }
-    llvm::Value* emitBinary(const BinaryExpr& e);
-    llvm::Value* emitUnary(const UnaryExpr& e);
+    llvm::Value* emitBinary(const BinaryExpr& e) { return binaryOps_->emitBinary(e); }
+    llvm::Value* emitUnary(const UnaryExpr& e) { return binaryOps_->emitUnary(e); }
     llvm::Value* emitCallExpr(const CallExpr& e);
     /// The tail of emitCallExpr: a functional parameter, or a call to a
     /// function the program declared.  See CallExpr::ResolvedBuiltin.
