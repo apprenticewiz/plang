@@ -51,6 +51,7 @@
 #include "CGControlFlow.h"
 #include "CGDebugInfo.h"
 #include "CGFieldAccess.h"
+#include "CGFuncCall.h"
 #include "CGIndexAccess.h"
 #include "CGLinkage.h"
 #include "CGPackUnpack.h"
@@ -169,6 +170,11 @@ struct Codegen::Impl {
     // once complexOps_/schemaAccess_/strCallMarshal_/strings_/cgTypes_/
     // setOps_/rangeGuards_/runtimeFns_ all exist.
     std::unique_ptr<CGBinaryOps>          binaryOps_;
+    // Call-expression emission (built-in dispatch + user-function calls);
+    // built after binaryOps_, needs the same 12 sibling units CGProcCall
+    // needed for the analogous procedure-call-statement split, plus
+    // linkage_/symTab_/closureAbi_/rangeGuards_ (all already exist by then).
+    std::unique_ptr<CGFuncCall>           funcCall_;
 
     // ---- common type aliases (set in init()) ----
     llvm::IntegerType* i1Ty{nullptr};
@@ -799,10 +805,6 @@ struct Codegen::Impl {
         return complexOps_->coerceToComplex(v);
     }
 
-    /// Inline complex multiplication.
-    llvm::Value* emitComplexMul(llvm::Value* a, llvm::Value* b);
-    /// Call a (re_out, im_out, re_in, im_in) runtime function and return complex.
-    llvm::Value* callComplexUnary(const std::string& name, llvm::Value* z);
     static bool isTextTypeName(const TypeNode* tn) {
         return FileVarHelpers::isTextTypeName(tn);
     }
@@ -1346,10 +1348,10 @@ struct Codegen::Impl {
     llvm::Value* emitLValueOpt(const ExprNode& e) { return emitLValue(e); }
     llvm::Value* emitBinary(const BinaryExpr& e) { return binaryOps_->emitBinary(e); }
     llvm::Value* emitUnary(const UnaryExpr& e) { return binaryOps_->emitUnary(e); }
-    llvm::Value* emitCallExpr(const CallExpr& e);
+    llvm::Value* emitCallExpr(const CallExpr& e) { return funcCall_->emitCallExpr(e); }
     /// The tail of emitCallExpr: a functional parameter, or a call to a
     /// function the program declared.  See CallExpr::ResolvedBuiltin.
-    llvm::Value* emitUserFuncCall(const CallExpr& e);
+    llvm::Value* emitUserFuncCall(const CallExpr& e) { return funcCall_->emitUserFuncCall(e); }
     llvm::Value* emitIndexGEP(const IndexExpr& e) { return indexAccess_->emitIndexGEP(e); }
     llvm::Value* emitIndexLoad(const IndexExpr& e) { return indexAccess_->emitIndexLoad(e); }
     llvm::StructType* resolveRecordStructType(const FieldExpr& e) {

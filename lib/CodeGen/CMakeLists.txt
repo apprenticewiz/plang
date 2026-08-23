@@ -26,6 +26,7 @@ add_library(PlangCodeGen OBJECT
     CGIndexAccess.cpp
     CGStructuredValue.cpp
     CGBinaryOps.cpp
+    CGFuncCall.cpp
     CodeGen.cpp
     CodeGenTypes.cpp
     CodeGenRuntime.cpp

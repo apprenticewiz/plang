@@ -367,6 +367,43 @@ void Codegen::Impl::init(const std::string& progName) {
         [this](const ExprNode& e){ return exprCharStrLen(e); },
         [this](const ExprNode& e){ return exprStrCapStatic(e); },
         [this](const Type* t){ return ordinalIsUnsigned(t); });
+    // Call-expression emission: the built-in dispatch chain plus the tail
+    // call to a user-declared function.  Same 12-sibling-unit shape as
+    // procCall_'s analogous split; BuildStaticLinkFrame stays on Impl
+    // permanently (the closure-capture-loop extra-caution zone).
+    // ConformantDimsOf/ParamSetBaseOf/ProcParamArg/ParamIsByRef reuse
+    // procCall_'s own established closures a second, independent time.
+    funcCall_ = std::make_unique<CGFuncCall>(ctx, *mod, builder,
+        *runtimeFns_, *setOps_, *complexOps_, *fileVarHelpers_, *cgTypes_,
+        *schemaAccess_, *strings_, *strCallMarshal_, *linkage_, *symTab_,
+        *closureAbi_, *rangeGuards_,
+        i64Ty, i8Ty, dblTy, ptrTy,
+        [this](const ExprNode& e){ return emitExpr(e); },
+        [this](const ExprNode& e){ return emitLValue(e); },
+        [this](llvm::Value* v){ return toDouble(v); },
+        [this](llvm::Value* v){ return toI64(v); },
+        [this](llvm::Value* v){ return ensureI1(v); },
+        [this](llvm::Type* t, const std::string& n){ return createEntryAlloca(t, n); },
+        [this](llvm::Value* capV, const std::string& n){ return createDynStrAlloca(capV, n); },
+        [this](const std::string& mangledName){ return buildStaticLinkFrame(mangledName); },
+        [this](const std::string& mangledName, size_t astArgIdx) -> size_t {
+            auto it = paramMeta_.find(mangledName);
+            if (it == paramMeta_.end() || astArgIdx >= it->second.size()) return 0;
+            return it->second[astArgIdx].conformantDims.size();
+        },
+        [this](const std::string& mangledName, size_t astArgIdx) -> std::optional<int64_t> {
+            auto it = paramMeta_.find(mangledName);
+            if (it == paramMeta_.end() || astArgIdx >= it->second.size()) return std::nullopt;
+            return it->second[astArgIdx].setBase;
+        },
+        [this](const std::string& mangledName, size_t astArgIdx){
+            return procParamArg(mangledName, astArgIdx); },
+        [this](const std::string& mangledName, size_t astArgIdx){
+            return paramIsByRef(mangledName, astArgIdx); },
+        [this](const ExprNode& e){ return exprIsVarStr(e); },
+        [this](const ExprNode& e){ return exprIsCharStr(e); },
+        [this](const ExprNode& e){ return exprCharStrLen(e); },
+        [this](const ExprNode& e){ return exprStrCapStatic(e); });
     // DefineBuf/LookupBuf are narrow closures into defVar/findVar
     // (CGSymbolTable territory, not yet extracted) -- LookupBuf hands back
     // just the llvm::Value*, the only field of a VarEntry this engine needs.
