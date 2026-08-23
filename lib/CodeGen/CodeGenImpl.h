@@ -50,6 +50,7 @@
 #include "CGControlFlow.h"
 #include "CGDebugInfo.h"
 #include "CGFieldAccess.h"
+#include "CGIndexAccess.h"
 #include "CGLinkage.h"
 #include "CGPackUnpack.h"
 #include "CGProcCall.h"
@@ -155,6 +156,10 @@ struct Codegen::Impl {
     // built after procCall_, once cgTypes_/schemaAccess_/symTab_/
     // fileVarHelpers_/rangeGuards_ all exist.
     std::unique_ptr<CGFieldAccess>        fieldAccess_;
+    // Array indexing (ISO §6.5.3.2); built after fieldAccess_, once
+    // schemaAccess_/strCallMarshal_/rangeGuards_/strings_/runtimeFns_/
+    // symTab_/cgTypes_ all exist.
+    std::unique_ptr<CGIndexAccess>        indexAccess_;
 
     // ---- common type aliases (set in init()) ----
     llvm::IntegerType* i1Ty{nullptr};
@@ -613,20 +618,6 @@ struct Codegen::Impl {
     /// comes from the type Sema resolved for the node.
     std::optional<std::pair<int64_t, int64_t>>
     arrayIndexRange(const ArrayTypeNode& n) const { return cgTypes_->arrayIndexRange(n); }
-
-    /// The first index of \p n.  Subtracting it maps a Pascal index onto the
-    /// zero-based LLVM array, so an array whose first index is not known is one
-    /// every subscript of would land somewhere else: standing in a zero here
-    /// reads `array [5..9]` as `array [0..4]` and indexes five places past
-    /// where the element is.  Sema resolves every denoter it accepts, so
-    /// arriving with neither a bound that folds nor a resolved type is an
-    /// inconsistency and not a case to carry on from.
-    int64_t arrayIndexLow(const ArrayTypeNode& n) const {
-        auto R = arrayIndexRange(n);
-        if (!R) codegenICE("array has no first index that either its bounds or "
-                           "Sema can give");
-        return R->first;
-    }
     llvm::StructType* structTypeFor(const RecordTypeNode& rt) { return cgTypes_->structTypeFor(rt); }
 
     /// The layout of \p rt, building it if this is the first time it is asked
@@ -846,7 +837,9 @@ struct Codegen::Impl {
     /// EP §6.7.3.7: the address of an element of a conformant array parameter,
     /// or null if \p e does not subscript one.  Takes the whole subscript
     /// chain, because the dimensions can only be folded together once.
-    llvm::Value* emitConformantElemPtr(const IndexExpr& e);
+    llvm::Value* emitConformantElemPtr(const IndexExpr& e) {
+        return indexAccess_->emitConformantElemPtr(e);
+    }
     llvm::Function* getRuntimeNewFn();
     llvm::Function* getRuntimeDisposeFn();
     llvm::Function* getRuntimeHaltFn();
@@ -1371,8 +1364,8 @@ struct Codegen::Impl {
     /// The tail of emitCallExpr: a functional parameter, or a call to a
     /// function the program declared.  See CallExpr::ResolvedBuiltin.
     llvm::Value* emitUserFuncCall(const CallExpr& e);
-    llvm::Value* emitIndexGEP(const IndexExpr& e);
-    llvm::Value* emitIndexLoad(const IndexExpr& e);
+    llvm::Value* emitIndexGEP(const IndexExpr& e) { return indexAccess_->emitIndexGEP(e); }
+    llvm::Value* emitIndexLoad(const IndexExpr& e) { return indexAccess_->emitIndexLoad(e); }
     llvm::StructType* resolveRecordStructType(const FieldExpr& e) {
         return fieldAccess_->resolveRecordStructType(e);
     }

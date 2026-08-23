@@ -321,6 +321,19 @@ void Codegen::Impl::init(const std::string& progName) {
         i8Ty, i32Ty, i64Ty,
         [this](const ExprNode& e){ return emitExpr(e); },
         [this](const ExprNode& e){ return emitLValue(e); });
+    // Array indexing.  EmitExpr/EmitLValue/ToI64/DenoterOf are narrow
+    // closures into methods not yet extracted (all still in
+    // CodeGenExprs.cpp); ExprIsVarStr stays on Impl (stateless, used far
+    // outside this unit too), same treatment every prior wave gives it.
+    indexAccess_ = std::make_unique<CGIndexAccess>(ctx, builder,
+        *schemaAccess_, *strCallMarshal_, *rangeGuards_, *strings_,
+        *runtimeFns_, *symTab_, *cgTypes_,
+        i8Ty, i64Ty,
+        [this](const ExprNode& e){ return emitExpr(e); },
+        [this](const ExprNode& e){ return emitLValue(e); },
+        [this](llvm::Value* v){ return toI64(v); },
+        [this](const TypeNode* tn){ return denoterOf(tn); },
+        [this](const ExprNode& e){ return exprIsVarStr(e); });
     // DefineBuf/LookupBuf are narrow closures into defVar/findVar
     // (CGSymbolTable territory, not yet extracted) -- LookupBuf hands back
     // just the llvm::Value*, the only field of a VarEntry this engine needs.
