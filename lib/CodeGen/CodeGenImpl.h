@@ -369,7 +369,7 @@ struct Codegen::Impl {
     struct ParamMeta {
         // EP §6.7.3.7: (loVarName, hiVarName) pairs, one per conformant
         // dimension.  Empty means this argument is not conformant.
-        std::vector<std::pair<std::string,std::string>> conformantDims;
+        std::vector<std::pair<std::string,std::string>> conformantDims{};
         // EP §6.4.7: discriminant count; 0 means not a schema parameter.
         unsigned schemaDiscCount{0};
         // ISO §6.6.3.1: the declared signature, or null for an ordinary

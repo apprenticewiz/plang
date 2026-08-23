@@ -98,5 +98,5 @@ struct VarEntry {
     /// looking for an array body on the enclosing RECORD and killed the
     /// compiler on a legal program.
     const plang::Type* pathRootTy{nullptr};
-    std::vector<llvm::Value*> pathDiscs;
+    std::vector<llvm::Value*> pathDiscs{};
 };
