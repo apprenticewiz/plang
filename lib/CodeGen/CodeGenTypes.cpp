@@ -433,6 +433,18 @@ void Codegen::Impl::init(const std::string& progName) {
         [this](const std::string& n, llvm::Value* p, llvm::Type* t){ defVar(n, p, t); },
         [this](const std::string& n) -> llvm::Value* {
             const auto* ve = findVar(n); return ve ? ve->ptr : nullptr; });
+    // ISO §6.8 statement emission -- the last real logic left anywhere in
+    // Impl. IsTerminated/BrIfNeeded/WithStackScope are second, independent
+    // bridges to the same shared Impl state CGControlFlow already bridges
+    // (multi-bridge precedent, same as ordinalIsUnsigned/peelPackedNode).
+    // CGDebugInfo& is a direct reference, not a closure -- the second
+    // sibling unit to hold one, following CGSymbolTable's own precedent.
+    stmtCore_ = std::make_unique<CGStmtCore>(ctx, builder, curFunc,
+        *assign_, *controlFlow_, *procCall_, *with_, *gotoEngine_, *dbgInfo_,
+        [this](){ return isTerminated(); },
+        [this](llvm::BasicBlock* target){ brIfNeeded(target); },
+        [this](std::function<llvm::Value*()> body) -> llvm::Value* {
+            StackScope frame(*this); return body(); });
 
     scopes.clear();
     consts.clear();

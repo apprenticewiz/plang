@@ -28,11 +28,11 @@ add_library(PlangCodeGen OBJECT
     CGBinaryOps.cpp
     CGFuncCall.cpp
     CGExprCore.cpp
+    CGStmtCore.cpp
     CodeGen.cpp
     CodeGenTypes.cpp
     CodeGenRuntime.cpp
     CodeGenProcs.cpp
-    CodeGenStmts.cpp
     CodeGenExprs.cpp
     CodeGenSchema.cpp
     CodeGenProcParams.cpp

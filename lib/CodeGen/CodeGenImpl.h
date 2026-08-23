@@ -57,6 +57,7 @@
 #include "CGLinkage.h"
 #include "CGPackUnpack.h"
 #include "CGProcCall.h"
+#include "CGStmtCore.h"
 #include "CGStructuredValue.h"
 #include "CGSymbolTable.h"
 #include "CGTypes.h"
@@ -180,6 +181,12 @@ struct Codegen::Impl {
     // the central recursive-descent dispatcher); built after funcCall_,
     // needs 15 already-extracted sibling units, all already built by then.
     std::unique_ptr<CGExprCore>           exprCore_;
+    // ISO §6.8 statement emission (emitStmt/emitCompound/
+    // resumeAfterTerminator + the 5 live LabelGotoEngine forwarders);
+    // built after exprCore_, needs assign_/controlFlow_/procCall_/with_/
+    // gotoEngine_/dbgInfo_, all already built by then. The last piece of
+    // the whole Codegen::Impl decomposition with real logic to extract.
+    std::unique_ptr<CGStmtCore>           stmtCore_;
 
     // ---- common type aliases (set in init()) ----
     llvm::IntegerType* i1Ty{nullptr};
@@ -463,42 +470,29 @@ struct Codegen::Impl {
         return closureAbi_->emitProcParamCall(ve, args);
     }
 
-    /// Does \p block's label section declare \p label?
-    static bool declaresLabel(const BlockNode& block, const std::string& label);
-
-    /// The labels \p block declares that a goto inside a procedure declared in
-    /// it names.  These are the ones that need somewhere to land.
-    static std::set<std::string> nonLocalTargets(const BlockNode& block);
-
-    /// The value a longjmp passes for \p label.  Offset by one because zero is
-    /// what setjmp returns when it is first called, and longjmp turns a
-    /// requested zero into one anyway.
-    static int64_t gotoDispatchValue(const std::string& label);
-
-    llvm::BasicBlock* getOrCreateLabel(const std::string& name);
+    llvm::BasicBlock* getOrCreateLabel(const std::string& name) {
+        return stmtCore_->getOrCreateLabel(name);
+    }
 
     /// Record \p block as the owner of its labels, and, if a goto from inside
     /// one of its procedures names any of them, plant the landing pad.  Emits
     /// at the current insertion point, which must be past the block's
     /// initialization: a goto landing here resumes the block, it does not
     /// restart it.
-    void openLabelScope(const BlockNode& block, bool programBlock);
+    void openLabelScope(const BlockNode& block, bool programBlock) {
+        stmtCore_->openLabelScope(block, programBlock);
+    }
 
     /// Plant the setjmp and the switch that dispatches on what it returns.
     /// Done for a procedure by openLabelScope; the program's block registers
     /// itself before its procedures are emitted and lands here later, once
     /// main exists to hold the setjmp and its variables are initialized.
-    void emitLabelLanding();
+    void emitLabelLanding() { stmtCore_->emitLabelLanding(); }
 
     /// Point the landing pad at the label blocks the body has by now created.
-    void closeLabelScope();
+    void closeLabelScope() { stmtCore_->closeLabelScope(); }
 
-    void emitGoto(const GotoStmt& s);
-
-    /// Keep \p f's local variables in memory, so that a goto landing in it
-    /// finds what they hold rather than what the optimiser decided they must
-    /// hold on the edge from the setjmp.  See closeLabelScope.
-    void pinLocalsToMemory(llvm::Function* f);
+    void emitGoto(const GotoStmt& s) { stmtCore_->emitGoto(s); }
 
     /// Whether range checking is on where \p Loc is.
     ///
@@ -1299,9 +1293,9 @@ struct Codegen::Impl {
     // ====================================================================
     // Statement emission
     // ====================================================================
-    void emitStmt(const StmtNode* stmt);
-    void resumeAfterTerminator();
-    void emitCompound(const CompoundStmt& s);
+    void emitStmt(const StmtNode* stmt) { stmtCore_->emitStmt(stmt); }
+    void resumeAfterTerminator() { stmtCore_->resumeAfterTerminator(); }
+    void emitCompound(const CompoundStmt& s) { stmtCore_->emitCompound(s); }
     void emitAssign(const AssignStmt& s) { assign_->emitAssign(s); }
     void emitIf(const IfStmt& s) { controlFlow_->emitIf(s); }
     void emitWhile(const WhileStmt& s) { controlFlow_->emitWhile(s); }
