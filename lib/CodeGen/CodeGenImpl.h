@@ -54,6 +54,7 @@
 #include "CGLinkage.h"
 #include "CGPackUnpack.h"
 #include "CGProcCall.h"
+#include "CGStructuredValue.h"
 #include "CGSymbolTable.h"
 #include "CGTypes.h"
 #include "CGWith.h"
@@ -160,6 +161,9 @@ struct Codegen::Impl {
     // schemaAccess_/strCallMarshal_/rangeGuards_/strings_/runtimeFns_/
     // symTab_/cgTypes_ all exist.
     std::unique_ptr<CGIndexAccess>        indexAccess_;
+    // EP §6.8.7 typed value constructors (array/record/set); built after
+    // indexAccess_, once cgTypes_/setOps_ both exist.
+    std::unique_ptr<CGStructuredValue>    structuredValue_;
 
     // ---- common type aliases (set in init()) ----
     llvm::IntegerType* i1Ty{nullptr};
@@ -1386,10 +1390,10 @@ struct Codegen::Impl {
     /// EP §6.8.7: a value constructor.  `denoter` gives the shape for a
     /// component-value, which names no type of its own.
     llvm::Value* emitStructuredValue(const StructuredValueExpr& e,
-                                     const TypeNode* denoter = nullptr);
+                                     const TypeNode* denoter = nullptr) {
+        return structuredValue_->emitStructuredValue(e, denoter);
+    }
     const TypeNode* denoterOf(const TypeNode* tn) const;
-    static const TypeNode* fieldDenoter(const RecordTypeNode& rtn,
-                                        std::string_view name);
     llvm::Value* ensureI1(llvm::Value* v);
     llvm::Value* toDouble(llvm::Value* v);
     llvm::Value* toI64(llvm::Value* v);

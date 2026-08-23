@@ -334,6 +334,17 @@ void Codegen::Impl::init(const std::string& progName) {
         [this](llvm::Value* v){ return toI64(v); },
         [this](const TypeNode* tn){ return denoterOf(tn); },
         [this](const ExprNode& e){ return exprIsVarStr(e); });
+    // EP §6.8.7 typed value constructors.  EmitExpr/CoerceToType/
+    // InitialStateShapeOf/CreateEntryAlloca are narrow closures into
+    // methods not yet extracted (CodeGenExprs.cpp/CodeGenProcs.cpp/
+    // CodeGenTypes.cpp).
+    structuredValue_ = std::make_unique<CGStructuredValue>(*mod, builder,
+        *cgTypes_, *setOps_, typeAliases, consts,
+        i8Ty, i32Ty, i64Ty,
+        [this](const ExprNode& e){ return emitExpr(e); },
+        [this](llvm::Value* v, llvm::Type* t){ return coerceToType(v, t); },
+        [this](const TypeNode* tn){ return initialStateShapeOf(tn); },
+        [this](llvm::Type* t, const std::string& n){ return createEntryAlloca(t, n); });
     // DefineBuf/LookupBuf are narrow closures into defVar/findVar
     // (CGSymbolTable territory, not yet extracted) -- LookupBuf hands back
     // just the llvm::Value*, the only field of a VarEntry this engine needs.
