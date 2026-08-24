@@ -87,7 +87,11 @@ private:
     void        configureDiagnostics(int argc, char *argv[]);
 
     Options     parseArgs(int argc, char *argv[]);
-    int         compile(const Options &opts);
+    /// \p isExtraFile is true only for the recursive call this function makes
+    /// on itself to compile one of Opts.extraInputFiles to a .o (see the
+    /// -save-temps .ll naming in the .cpp file for why that distinction
+    /// matters); the top-level call from run() leaves it at the default.
+    int         compile(const Options &opts, bool isExtraFile = false);
     std::string defaultOutput(const std::string &inputFile, OutputMode mode);
 
     std::string findInstallDir() const;

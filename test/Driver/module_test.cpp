@@ -569,6 +569,155 @@ TEST(SeparateCompilation, MultiFileDriverMode) {
     EXPECT_EQ(Output, "49\n");
 }
 
+// ---------------------------------------------------------------------------
+// Issues #20 / #21 — Driver::compile's extra-file loop
+//
+// Two bugs lived together in the ~20-line loop that compiles each "extra"
+// input file (Opts.extraInputFiles) ahead of the main file: each extra
+// file's default .o (and, under -save-temps, .ll) name was its bare
+// stem() -- directory discarded -- so two extra files sharing a basename in
+// different directories silently clobbered each other's output (#20); and
+// each extra file's module search path held only its own directory, never
+// its siblings', so one extra file could not import a module a sibling extra
+// file defined even though the driver had every piece it needed (#21).
+// ---------------------------------------------------------------------------
+
+// Issue #20: unitA/foo.pas and unitB/foo.pas share a basename but live in
+// different directories.  Before the fix, both compiled to "foo.o" in the
+// cwd -- the second silently overwriting the first -- so the linker was
+// handed the same (now unitB-only) object file twice and unitA's function
+// was never linked in at all.
+TEST(MultiFileExtraFiles, SameBasenameDifferentDirectoriesDoNotCollide) {
+    CaseDir C;
+    C.write("unitA/foo.pas",
+        "module UnitA;\n"
+        "function F: integer;\n"
+        "begin F := 1 end;\n"
+        "end.\n");
+    C.write("unitB/foo.pas",
+        "module UnitB;\n"
+        "function G: integer;\n"
+        "begin G := 2 end;\n"
+        "end.\n");
+    C.write("main.pas",
+        "program p;\n"
+        "import UnitA; UnitB;\n"
+        "begin writeln(F, ' ', G) end.\n");
+
+    const auto [Rc, Out] = C.runPlangIn(
+        kEP + " main.pas unitA/foo.pas unitB/foo.pas -o prog");
+    ASSERT_EQ(Rc, 0) << Out;
+
+    // Each extra file's .o landed under its own disambiguated name rather
+    // than both racing for "foo.o".
+    EXPECT_TRUE(C.exists("unitA_foo.o"));
+    EXPECT_TRUE(C.exists("unitB_foo.o"));
+
+    const std::string Output = runCmd("cd " + C.path() + " && ./prog < /dev/null");
+    EXPECT_EQ(Output, "1 2\n");
+}
+
+// Issue #21: moduleB/b.pas imports module A, which moduleA/a.pas defines in a
+// different directory.  Before the fix, only moduleB's own directory was on
+// its module search path when the driver compiled it -- not moduleA's -- so
+// the compile failed with "no module named 'A' was found" even though
+// moduleA/a.pas was compiled first, on the same command line, and its .pmi
+// was already sitting on disk.
+TEST(MultiFileExtraFiles, SiblingExtraFileDirectoryIsOnTheSearchPath) {
+    CaseDir C;
+    C.write("moduleA/a.pas",
+        "module A;\n"
+        "function F: integer;\n"
+        "begin F := 1 end;\n"
+        "end.\n");
+    C.write("moduleB/b.pas",
+        "module B;\n"
+        "import A;\n"
+        "function G: integer;\n"
+        "begin G := F + 1 end;\n"
+        "end.\n");
+    C.write("main.pas",
+        "program p;\n"
+        "import B;\n"
+        "begin writeln(G) end.\n");
+
+    // moduleA/a.pas has to be compiled -- and its .pmi written -- before
+    // moduleB/b.pas, which is why it is listed first here: the issue's own
+    // reproduction order, and the only order that can possibly work.
+    const auto [Rc, Out] = C.runPlangIn(
+        kEP + " main.pas moduleA/a.pas moduleB/b.pas -o prog");
+    ASSERT_EQ(Rc, 0) << Out;
+
+    const std::string Output = runCmd("cd " + C.path() + " && ./prog < /dev/null");
+    EXPECT_EQ(Output, "2\n");
+}
+
+// Combined case: unitA/foo.pas and unitB/foo.pas share a basename (needs
+// #20's fix so their .o files don't collide) *and* unitB imports unitA
+// (needs #21's fix so unitB's compile can see unitA's directory) -- so this
+// only passes once both fixes are in place together, which is also why the
+// two issues were fixed as one change to the same loop instead of separately.
+TEST(MultiFileExtraFiles, SameBasenameSiblingImportNeedsBothFixes) {
+    CaseDir C;
+    C.write("unitA/foo.pas",
+        "module UnitA;\n"
+        "function F: integer;\n"
+        "begin F := 1 end;\n"
+        "end.\n");
+    C.write("unitB/foo.pas",
+        "module UnitB;\n"
+        "import UnitA;\n"
+        "function G: integer;\n"
+        "begin G := F + 1 end;\n"
+        "end.\n");
+    C.write("main.pas",
+        "program p;\n"
+        "import UnitB;\n"
+        "begin writeln(G) end.\n");
+
+    const auto [Rc, Out] = C.runPlangIn(
+        kEP + " main.pas unitA/foo.pas unitB/foo.pas -o prog");
+    ASSERT_EQ(Rc, 0) << Out;
+
+    const std::string Output = runCmd("cd " + C.path() + " && ./prog < /dev/null");
+    EXPECT_EQ(Output, "2\n");
+}
+
+// The issue also flagged the identical stem()-based collision in -save-temps'
+// kept .ll naming: an extra file's IR is written under the same bare-stem
+// name as its .o, so two extra files sharing a basename would have the
+// second's IR silently overwrite the first's on disk.  Both must survive,
+// under distinct names, each holding its own function -- not the other's.
+TEST(MultiFileExtraFiles, SaveTempsKeepsBothExtraFilesIRUnderDistinctNames) {
+    CaseDir C;
+    C.write("unitA/foo.pas",
+        "module UnitA;\n"
+        "function F: integer;\n"
+        "begin F := 1 end;\n"
+        "end.\n");
+    C.write("unitB/foo.pas",
+        "module UnitB;\n"
+        "function G: integer;\n"
+        "begin G := 2 end;\n"
+        "end.\n");
+    C.write("main.pas",
+        "program p;\n"
+        "import UnitA; UnitB;\n"
+        "begin writeln(F, ' ', G) end.\n");
+
+    const auto [Rc, Out] = C.runPlangIn(
+        kEP + " -save-temps main.pas unitA/foo.pas unitB/foo.pas -o prog");
+    ASSERT_EQ(Rc, 0) << Out;
+
+    ASSERT_TRUE(C.exists("unitA_foo.ll")) << "unitA's saved IR is missing";
+    ASSERT_TRUE(C.exists("unitB_foo.ll")) << "unitB's saved IR is missing";
+    // Each names its own function -- pas_<module>$<Function>, all lowercase
+    // module name -- proving the second extra file's IR did not overwrite the
+    // first's under a name they both would otherwise have shared.
+    EXPECT_NE(C.read("unitA_foo.ll").find("pas_unita$F"), std::string::npos);
+    EXPECT_NE(C.read("unitB_foo.ll").find("pas_unitb$G"), std::string::npos);
+}
+
 // ===========================================================================
 // EP §6.4.9: type of x
 // ===========================================================================
