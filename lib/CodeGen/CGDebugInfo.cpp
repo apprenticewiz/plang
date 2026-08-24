@@ -196,6 +196,23 @@ void CGDebugInfo::declareLocal(const std::string& name, const TypeNode* typeNode
     }
 }
 
+llvm::DILocalScope* CGDebugInfo::enterShadowScope(SourceLocation Loc) {
+    // No-op when Debug is unset, matching every other method's convention.
+    if (!DBuilder) return CurScope;
+    // Idempotent: a second shadowed name later in the same activation
+    // finds CurScope already a lexical block and reuses it -- see this
+    // method's own header comment for why sharing one block is correct
+    // here, not just convenient.  isa_and_nonnull rather than isa: this
+    // is only ever reached from inside some activation's own scope (see
+    // CGSymbolTable::defVar), so CurScope is never actually null here,
+    // but nothing about a debug-info helper should assert on a defensive
+    // caller's behalf.
+    if (llvm::isa_and_nonnull<llvm::DILexicalBlock>(CurScope)) return CurScope;
+    const unsigned line = SrcMgr ? SrcMgr->getPresumedLoc(Loc).Line : 0;
+    CurScope = DBuilder->createLexicalBlock(CurScope, DebugFile, line, 0);
+    return CurScope;
+}
+
 void CGDebugInfo::setLocation(SourceLocation Loc) {
     if (!DBuilder || !CurScope || !SrcMgr) return;
     const PresumedLoc PL = SrcMgr->getPresumedLoc(Loc);

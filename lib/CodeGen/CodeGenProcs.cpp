@@ -488,16 +488,23 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
         return;
     }
 
-    // -g: scoped under the enclosing procedure's own DISubprogram when
+    // -g: scoped under the enclosing procedure's own current scope when
     // nested, so a debugger's backtrace nests the way the Pascal source
-    // does; under the file itself for a top-level procedure.  hd is the
-    // heading the parameters and result type were written on (see above),
-    // which for a 'forward' declaration's defining occurrence is the
-    // declaration -- the body's own line is a better bet for where a
-    // breakpoint on the procedure should land than the forward heading's.
-    // dbgScope's destructor restores the enclosing scope on every exit path
-    // from here on, so nothing below needs a matching manual restore.
-    llvm::DISubprogram* enclosingScope = dbgInfo_->currentScope();
+    // does; under the file itself for a top-level procedure.  Ordinarily
+    // that current scope is the enclosing procedure's own DISubprogram,
+    // but if a sibling declared earlier in the same enclosing body already
+    // shadowed a captured variable (see CGDebugInfo::enterShadowScope),
+    // it is that sibling's DILexicalBlock instead -- still correct: this
+    // procedure really is nested inside that lexical span, and either way
+    // this procedure's own body gets its own fresh DISubprogram as ITS
+    // scope below, not the enclosing one directly.  hd is the heading the
+    // parameters and result type were written on (see above), which for a
+    // 'forward' declaration's defining occurrence is the declaration --
+    // the body's own line is a better bet for where a breakpoint on the
+    // procedure should land than the forward heading's.  dbgScope's
+    // destructor restores the enclosing scope on every exit path from
+    // here on, so nothing below needs a matching manual restore.
+    llvm::DILocalScope* enclosingScope = dbgInfo_->currentScope();
     llvm::DIScope* scope = (isNested && enclosingScope)
         ? static_cast<llvm::DIScope*>(enclosingScope)
         : static_cast<llvm::DIScope*>(dbgInfo_->getFile());

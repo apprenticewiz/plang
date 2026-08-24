@@ -416,6 +416,96 @@ TEST(Driver, DashGGivesAVarParameterAStableDebugLocationTooNotJustTheCaptureCase
     })) << R.IR;
 }
 
+TEST(Driver, DashGGivesALocalThatShadowsACapturedVariableItsOwnNestedScope) {
+    // Issue #19: a nested procedure's closure-capture loop
+    // (CodeGenProcs.cpp) registers every outer variable it can see under
+    // the nested procedure's own DISubprogram before that procedure's own
+    // locals are bound.  When a local shares a captured outer variable's
+    // name, the second defVar silently overwrites the first in
+    // CGSymbolTable's own scope map -- so the GENERATED CODE was already
+    // correct; ordinary reads/writes inside Inner always saw Inner's own
+    // x -- but nothing stopped both from also getting a DILocalVariable
+    // under the identical flat DISubprogram scope.  gdb/lldb resolving an
+    // unqualified `x` inside Inner then preferred the first-declared entry
+    // at that scope (the captured, OUTER one) regardless of which the
+    // current PC was actually inside, so a debugger showed 5 where the
+    // program itself, and a correct debugger, should show 99. Confirmed
+    // with a real gdb/lldb session (see the PR for issue #19); this is the
+    // automated half of that proof, not a substitute for it.
+    auto R = compileAndEmitIR(
+        "program p;\n"
+        "procedure Outer;\n"
+        "  var x: integer;\n"
+        "  procedure Inner;\n"
+        "    var x: integer;\n"
+        "  begin\n"
+        "    x := 99;\n"
+        "    writeln(x)\n"
+        "  end;\n"
+        "begin\n"
+        "  x := 5;\n"
+        "  Inner;\n"
+        "  writeln(x)\n"
+        "end;\n"
+        "begin\n"
+        "  Outer\n"
+        "end.\n", "-g " + kEP);
+    ASSERT_TRUE(R.Ok) << R.Stderr;
+
+    // Three DILocalVariables named "x" in all: Outer's own (K=0, an
+    // ordinary declaration this bug never touched), the capture of it
+    // inside Inner (K=1, registered first there, before Inner's own
+    // locals are bound), and Inner's own shadowing local (K=2).  The bug
+    // was never about a missing DILocalVariable -- it was about the last
+    // two landing in one flat scope.
+    const std::string CapturedScope = irNthLocalVarScope(R.IR, "x", 1);
+    const std::string ShadowScope   = irNthLocalVarScope(R.IR, "x", 2);
+    ASSERT_FALSE(CapturedScope.empty()) << R.IR;
+    ASSERT_FALSE(ShadowScope.empty()) << R.IR;
+    // Not just different: the shadowing declaration's scope has to be a
+    // lexical block genuinely NESTED inside the captured one's own scope --
+    // the DWARF construct a debugger's innermost-scope-first lookup needs
+    // in order to prefer it over the flatly-scoped outer capture.
+    EXPECT_NE(CapturedScope, ShadowScope) << R.IR;
+    EXPECT_TRUE(irIdIsLexicalBlock(R.IR, ShadowScope)) << R.IR;
+    EXPECT_EQ(irScopeOfId(R.IR, ShadowScope), CapturedScope) << R.IR;
+}
+
+TEST(Driver, DashGGivesAParameterThatShadowsACapturedVariableItsOwnNestedScopeToo) {
+    // The exact same collision as
+    // DashGGivesALocalThatShadowsACapturedVariableItsOwnNestedScope above,
+    // but the shadowing declaration is a parameter rather than a `var`
+    // local -- both bind through CGSymbolTable::defVar, so both have to go
+    // through the same fix; issue #19 reports both shapes reproduce
+    // identically.
+    auto R = compileAndEmitIR(
+        "program p;\n"
+        "procedure Outer(x: integer);\n"
+        "  procedure Inner(x: integer);\n"
+        "  begin\n"
+        "    writeln(x)\n"
+        "  end;\n"
+        "begin\n"
+        "  Inner(99);\n"
+        "  writeln(x)\n"
+        "end;\n"
+        "begin\n"
+        "  Outer(5)\n"
+        "end.\n", "-g " + kEP);
+    ASSERT_TRUE(R.Ok) << R.Stderr;
+
+    // Same three-declarations shape as the `var`-local case above: Outer's
+    // own parameter x is K=0, the capture inside Inner is K=1, Inner's own
+    // shadowing parameter is K=2.
+    const std::string CapturedScope = irNthLocalVarScope(R.IR, "x", 1);
+    const std::string ShadowScope   = irNthLocalVarScope(R.IR, "x", 2);
+    ASSERT_FALSE(CapturedScope.empty()) << R.IR;
+    ASSERT_FALSE(ShadowScope.empty()) << R.IR;
+    EXPECT_NE(CapturedScope, ShadowScope) << R.IR;
+    EXPECT_TRUE(irIdIsLexicalBlock(R.IR, ShadowScope)) << R.IR;
+    EXPECT_EQ(irScopeOfId(R.IR, ShadowScope), CapturedScope) << R.IR;
+}
+
 TEST(Driver, DashGGivesEachScalarKindItsOwnDIType) {
     auto R = compileAndEmitIR(
         "program p(output);\n"
