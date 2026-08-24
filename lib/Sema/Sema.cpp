@@ -854,6 +854,10 @@ void Sema::checkBlock(const BlockNode& Block,
             Symbol S;
             S.Kind = SymbolKind::Schema;
             S.Name = Td.Name;
+            // Borrowed pointer back to the declaration, so resolveSchemaParams
+            // can resolve SchemaDeclParams/SchemaBodyNode from it later, on
+            // demand, without this loop needing to do that work itself.
+            S.SchemaDeclTypeDef = &Td;
             if (!Symtab.define(S))
                 error(Td.Type->Loc, diag::err_duplicate_type_decl, {Td.Name});
         } else {
@@ -870,49 +874,17 @@ void Sema::checkBlock(const BlockNode& Block,
         }
     }
 
-    // Phase 3b(i) — Record every schema's parameters and BODY NODE before any
-    // type body is resolved.
-    //
-    // ISO §6.2.2.9 lets a pointer's domain type be declared later in the same
-    // type-definition-part, and `type pl = ^t; t(n: integer) = ...` did that
-    // with a schema.  Resolving in declaration order reached ^t while t's
-    // SchemaBodyNode was still null, resolveUndiscriminatedSchema took its
-    // silent error return, and the pointer kept an error pointee all the way
-    // to codegen -- which died with "array bounds did not fold" and no
-    // diagnostic before it.  Swapping the two type definitions round made the
-    // identical program compile and run.
-    //
-    // Nothing here resolves a body; it only records where each one is, which
-    // is all a pointer to it needs.
-    for (const auto& Td : Block.Types) {
-        if (Td.SchemaParams.empty()) continue;
-        Symbol* Existing = Symtab.lookupCurrent(Td.Name);
-        if (!Existing || Existing->Kind != SymbolKind::Schema) continue;
-        for (const auto& Spec : Td.SchemaParams) {
-            NamedTypeNode NtTmp;
-            NtTmp.Loc  = Td.Type->Loc;
-            NtTmp.Name = Spec.TypeName;
-            auto ParamTy = resolveNamed(NtTmp);
-            for (const auto& ParamName : Spec.Names) {
-                Symbol::SchemaParam P;
-                P.Name = ParamName;
-                P.Ty   = ParamTy;
-                Existing->SchemaDeclParams.push_back(std::move(P));
-            }
-        }
-        Existing->SchemaBodyNode = Td.Type.get();
-        Existing->DeclLoc        = Td.Type->Loc;
-    }
-
     // Phase 3b — Resolve type bodies; replace each stub pointer in the symbol table.
     // We do NOT mutate stubs in-place here so that enum-value symbols (which capture
     // the freshly-resolved shared_ptr) stay consistent.  Instead Phase 3c below
     // walks the resolved types and patches any pointer PointeeType that still holds
     // an unresolved stub (identified by Kind=Error and non-empty Name).
-    // EP §6.4.7: For schema definitions, store discriminant specs and body node.
+    // EP §6.4.7: Schema definitions were already registered in Phase 3a; their
+    // discriminants are resolved below, in Phase 3b(ii), after this loop.
     for (const auto& Td : Block.Types) {
         if (!Td.SchemaParams.empty()) {
-            // Registered in 3b(i) above, before any body was resolved.
+            // Resolved in Phase 3b(ii) below, after every ordinary type here
+            // has its real body -- see that phase's comment for why.
         } else {
             auto Resolved = resolveType(*Td.Type);
             nameNominalType(*Resolved, Td.Name);
@@ -933,6 +905,41 @@ void Sema::checkBlock(const BlockNode& Block,
                     error(Td.Type->Loc, diag::err_duplicate_type_decl, {Td.Name});
             }
         }
+    }
+
+    // Phase 3b(ii) — Resolve every schema's discriminant parameter types, now
+    // that Phase 3b above has resolved every ORDINARY type's real body.
+    //
+    // This used to run BEFORE Phase 3b (as "Phase 3b(i)"), because ISO
+    // §6.2.2.9 lets a pointer's domain type be declared later in the same
+    // type-definition-part, and `type pl = ^t; t(n: integer) = ...` needed
+    // t's SchemaBodyNode set before ^t was resolved -- otherwise
+    // resolveUndiscriminatedSchema took its silent error return and the
+    // pointer carried an error pointee all the way to codegen.  But a
+    // discriminant's TYPE NAME is not a pointer domain: EP §6.2.1(k) keeps
+    // the ordinary forward-reference prohibition for it, the same as a
+    // record field's.  Running this loop before Phase 3b meant EVERY
+    // ordinary type was still Phase 3a's Kind=Error stub whenever a
+    // discriminant named one, so `Box(c: Color) = record ... end` was
+    // rejected as "Color is used here before its declaration" even with
+    // Color declared FIRST (#17) -- resolveNamed has no way to tell
+    // "unresolved because nothing has run yet" from "unresolved because it
+    // is later in the file".
+    //
+    // resolveSchemaParams is idempotent, and is also called on demand from
+    // SchemaTypeNode resolution and resolveUndiscriminatedSchema
+    // (SemaType.cpp): an ordinary type-alias in this very block may itself
+    // instantiate a schema (`type MyBox = Box(5);`, resolved by Phase 3b
+    // above, not here), which needs SchemaDeclParams filled in before this
+    // loop would otherwise reach it.  That on-demand call is also what still
+    // keeps `type pl = ^t; t(n: integer) = ...` working: resolving ^t makes
+    // resolveUndiscriminatedSchema resolve t's params itself, the moment
+    // they are needed, independent of where this loop sits.
+    for (const auto& Td : Block.Types) {
+        if (Td.SchemaParams.empty()) continue;
+        Symbol* Existing = Symtab.lookupCurrent(Td.Name);
+        if (!Existing || Existing->Kind != SymbolKind::Schema) continue;
+        resolveSchemaParams(*Existing);
     }
 
     // Phase 3c — Recursive pointer fixup (ISO §6.4.4 forward references).
