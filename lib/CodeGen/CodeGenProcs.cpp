@@ -245,29 +245,16 @@ void Codegen::Impl::emitAllProcedures(const BlockNode& block) {
 
 void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
     // Save outer context. CGFunction snapshots curFunc/curRetAlloca/
-    // curRetType/curFuncName/namePrefix (restored unconditionally by its
-    // destructor, on every exit path including the declareOnly early
-    // return below) and owns curStaticLink/outerVarNames/outerVarBindings/
-    // valueConformantCopies_ outright, fresh for this activation -- see
-    // its own declaration for why ownership needs no save/clear/restore
-    // dance the way the four locals it replaces used to.
+    // curRetType/curFuncName/namePrefix/typeAliases/consts/
+    // requiredConsts/curFuncScopeDepth/the schema-defs snapshot (restored
+    // unconditionally by its destructor, on every exit path including the
+    // declareOnly early return below) and owns curStaticLink/
+    // outerVarNames/outerVarBindings/valueConformantCopies_ outright,
+    // fresh for this activation -- see its own declaration for why
+    // ownership needs no save/clear/restore dance the way the four
+    // locals it replaces used to.
     CGFunction curFn(*this);
     auto  savedIP         = builder.saveIP();
-    auto  savedFuncDepth  = curFuncScopeDepth;
-    // ISO §6.2.2.3: a type or constant declared in this block is invisible
-    // outside it.  Both maps are flat, so an inner declaration would otherwise
-    // outlive its block and be picked up by whatever the enclosing block
-    // declared next.  Copying in means the body still sees enclosing names.
-    auto  savedTypeAliases = typeAliases;
-    auto  savedConsts      = consts;
-    auto  savedRequired    = requiredConsts;
-    // schemaDefs_ is flat too, and was the one of these five that nobody
-    // restored.  A procedure declaring a schema of a spelling an OUTER one
-    // already used left its definition in place for every procedure emitted
-    // after it -- so a sibling's new() was sized from a stranger's body.  main
-    // escaped it by accident: emitMain re-registers the program block's
-    // schemas, putting the outer definition back before the body is emitted.
-    auto  savedSchemaDefs  = schemaTypes_->snapshotDefs();
     // Restored automatically on every exit path (the declareOnly early
     // return below, or the normal end of this function) by the destructor --
     // see FunctionLabelScope's own comment for why this one field gets RAII
@@ -905,13 +892,10 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
     popScope();
 
     // Restore outer context. curFunc/curRetAlloca/curRetType/curFuncName/
-    // namePrefix/curStaticLink/outerVarNames/outerVarBindings are restored
-    // unconditionally by curFn's destructor below, at the end of this scope.
-    curFuncScopeDepth = savedFuncDepth;
-    typeAliases   = std::move(savedTypeAliases);
-    consts        = std::move(savedConsts);
-    requiredConsts = std::move(savedRequired);
-    schemaTypes_->restoreDefs(std::move(savedSchemaDefs));
+    // namePrefix/typeAliases/consts/requiredConsts/curFuncScopeDepth/the
+    // schema-defs snapshot/curStaticLink/outerVarNames/outerVarBindings
+    // are restored unconditionally by curFn's destructor below, at the
+    // end of this scope.
     builder.restoreIP(savedIP);
 }
 

@@ -384,6 +384,28 @@ struct Codegen::Impl {
         llvm::Type*        SavedRetType;
         std::string        SavedFuncName;
         std::string        SavedNamePrefix;
+        // ISO §6.2.2.3: a type or constant declared in this block is
+        // invisible outside it.  These three maps are flat, so an inner
+        // declaration would otherwise outlive its block and be picked up
+        // by whatever the enclosing block declared next -- saving a
+        // snapshot and restoring it here is what keeps the body seeing
+        // only the enclosing names once this activation ends.  Storage
+        // itself never moves (these stay Impl fields, unlike
+        // StaticLink/OuterVarNames/OuterVarBindings/ValueConformantCopies
+        // above) -- CGSymbolTable/CGTypes hold permanent references into
+        // them, valid across the plain assignment this destructor does.
+        std::unordered_map<std::string, const TypeNode*> SavedTypeAliases;
+        std::unordered_map<std::string, llvm::Value*>    SavedConsts;
+        std::set<std::string>                             SavedRequiredConsts;
+        size_t                                             SavedFuncScopeDepth;
+        // schemaDefs_ is flat too, and was the one of these five that
+        // nobody restored, once. A procedure declaring a schema of a
+        // spelling an OUTER one already used left its definition in place
+        // for every procedure emitted after it -- so a sibling's new()
+        // was sized from a stranger's body. main escaped it by accident:
+        // emitMain re-registers the program block's schemas, putting the
+        // outer definition back before the body is emitted.
+        SchemaTypeRegistry::Snapshot                       SavedSchemaDefs;
         CGFunction*        SavedCurFn;
     };
     /// The activation CGFunction currently belongs to, or null before the
