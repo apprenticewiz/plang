@@ -4825,6 +4825,36 @@ TEST(EP7Schema, TwoSchemasSharingANameAreNotTheSameType) {
               std::string::npos) << R.Stderr;
 }
 
+// EP §6.4.7: a schema body's bound expressions (here, the array's own
+// declared extent 1..n) are written where the schema is DECLARED, so the
+// only names they may resolve are the schema's own discriminants -- never
+// whatever the ALLOCATING procedure happens to have declared under the same
+// spelling. new()'s size computation used to be vulnerable to exactly this:
+// resolving 'n' through the ordinary scope stack would have found the
+// allocating procedure's own unrelated local `n` first, sizing the object
+// from a run-time variable instead of the discriminant argument and
+// corrupting the heap. The fix (SchemaLayoutEngine's RtDiscScope/
+// boundsOfDenoter) resolves a schema's own bound expressions against the
+// discriminants alone, never touching the caller's scope at all -- proven
+// here by writing one element past the array's TRUE bound (sized from the
+// discriminant argument, 5) despite a same-named local holding a wildly
+// different value; if the vulnerability were live this would silently
+// succeed inside an oversized allocation instead of range-checking.
+TEST(EP7Schema, NewSizesFromTheDiscriminantNotFromASameNamedLocalInTheCaller) {
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type vec(n: integer) = array[1..n] of integer;\n"
+        "     vecptr = ^vec;\n"
+        "procedure makeit(var p: vecptr);\n"
+        "var n: integer;\n"
+        "begin n := 999999; new(p, 5); p^[6] := 1 end;\n"
+        "var q: vecptr;\n"
+        "begin makeit(q); writeln('not reached') end.\n", kEP);
+    EXPECT_NE(R.ExitCode, 0);
+    EXPECT_NE(R.Stderr.find("out of bounds 1..5"), std::string::npos) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "");
+}
+
 // EP §6.8.7 structured value constructors were implemented for the cases that
 // work and never given their checking.  Three findings, one cause.
 TEST(EPConstructor, ARecordComponentValueMustFitItsField) {

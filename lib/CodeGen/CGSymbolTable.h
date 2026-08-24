@@ -1,7 +1,7 @@
 // CGSymbolTable.h — the variable/constant scope stack.
 //
-// scopes/consts/shadowedConsts/requiredConsts/varLookupFloor_/
-// curFuncScopeDepth all stay owned by Codegen::Impl -- referenced here, not
+// scopes/consts/shadowedConsts/requiredConsts/curFuncScopeDepth all stay
+// owned by Codegen::Impl -- referenced here, not
 // moved -- because they are read/written directly (not through
 // defVar/findVar) from ~20 external call sites (the closure-capture loop's
 // "define, then re-find-by-name to mutate" idiom in CodeGenProcs.cpp,
@@ -35,11 +35,10 @@ public:
         std::unordered_map<std::string, llvm::Value*>& Consts,
         std::vector<std::map<std::string, llvm::Value*>>& ShadowedConsts,
         std::set<std::string>& RequiredConsts,
-        size_t& VarLookupFloor,
         size_t& CurFuncScopeDepth,
         CGDebugInfo& DbgInfo)
         : Scopes(Scopes), Consts(Consts), ShadowedConsts(ShadowedConsts),
-          RequiredConsts(RequiredConsts), VarLookupFloor(VarLookupFloor),
+          RequiredConsts(RequiredConsts),
           CurFuncScopeDepth(CurFuncScopeDepth), DbgInfo(DbgInfo) {}
 
     void pushScope() { Scopes.emplace_back(); ShadowedConsts.emplace_back(); }
@@ -51,44 +50,6 @@ public:
         }
         if (!Scopes.empty()) Scopes.pop_back();
     }
-
-    /// Hide every enclosing variable scope for the duration, leaving only the
-    /// scope just pushed.  Constants are a separate table and stay visible,
-    /// which is precisely the set of names a schema body may legally use.
-    class DeclarationScopeOnly {
-    public:
-        explicit DeclarationScopeOnly(CGSymbolTable& T)
-            : T(T), Saved(T.VarLookupFloor) {
-            T.VarLookupFloor = T.Scopes.empty() ? 0 : T.Scopes.size() - 1;
-            // Hiding the variable is not enough on its own.  defVar does not
-            // merely shadow a constant of the same spelling -- it REMOVES it
-            // from `consts` and parks it in shadowedConsts until the scope
-            // closes.  So with the variable hidden and the constant still
-            // parked, the body's name resolved to nothing at all and codegen
-            // emitted a reference to a global that never existed
-            // ("undefined symbol: pasg_k").  Put the parked constants back
-            // for the duration: they are what the declaration scope would
-            // have had.  EVERY level, not just the ones above the floor: the
-            // variable that parked the constant lives in the scope we are
-            // hiding, which is below it.  Exactly one level can hold a given
-            // constant -- once erased, an inner defVar finds nothing left to
-            // park -- so there is no ambiguity about which saved value is
-            // the original.
-            for (const auto& Level : T.ShadowedConsts)
-                for (const auto& [K, V] : Level)
-                    if (!T.Consts.count(K)) { T.Consts[K] = V; Restored.push_back(K); }
-        }
-        ~DeclarationScopeOnly() {
-            for (const auto& K : Restored) T.Consts.erase(K);
-            T.VarLookupFloor = Saved;
-        }
-        DeclarationScopeOnly(const DeclarationScopeOnly&) = delete;
-        DeclarationScopeOnly& operator=(const DeclarationScopeOnly&) = delete;
-    private:
-        CGSymbolTable& T;
-        size_t Saved;
-        std::vector<std::string> Restored;
-    };
 
     /// debugIndirectPtr: when non-null (only ever passed when debug info is
     /// active), a stable alloca holding ptr's own value, for a caller whose
@@ -120,7 +81,6 @@ private:
     std::unordered_map<std::string, llvm::Value*>& Consts;
     std::vector<std::map<std::string, llvm::Value*>>& ShadowedConsts;
     std::set<std::string>& RequiredConsts;
-    size_t& VarLookupFloor;
     size_t& CurFuncScopeDepth;
     CGDebugInfo& DbgInfo;
 };

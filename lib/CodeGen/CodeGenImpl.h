@@ -621,18 +621,16 @@ struct Codegen::Impl {
     // ====================================================================
     // Symbol table
     // ====================================================================
-    /// findVar looks no further down than this.  EP §6.4.7: a schema body's
-    /// bound expressions are written where the schema is DECLARED, and the only
-    /// names in scope there are its own discriminants and compile-time
-    /// constants.  Re-emitting them at an ALLOCATION site put the allocating
-    /// procedure's locals in front of those names, so a `const k` used in a
-    /// body was captured by any unrelated `var k` at the new() -- which sized
-    /// the object from a run-time variable and corrupted the heap.
-    size_t varLookupFloor_{0};
-
-    /// DeclarationScopeOnly moved to CGSymbolTable -- it has no construction
-    /// call sites anywhere in the current tree (confirmed by grep), so
-    /// there is nothing here to keep forwarder-compatible.
+    // EP §6.4.7: a schema body's bound expressions (its own declared
+    // extents) are written where the schema is DECLARED, so the only
+    // names they may resolve are its own discriminants -- never whatever
+    // the allocating procedure happens to have declared under the same
+    // spelling. That guarantee lives in SchemaLayoutEngine::RtDiscScope/
+    // boundsOfDenoter, which resolve a schema's own bound expressions
+    // positionally against the discriminants alone and never touch this
+    // scope stack at all -- not, historically, in a restricted floor on
+    // findVar here (deleted; confirmed superseded, not just unused, by
+    // NewSizesFromTheDiscriminantNotFromASameNamedLocalInTheCaller).
 
     void pushScope() { symTab_->pushScope(); }
     void popScope()  { symTab_->popScope(); }

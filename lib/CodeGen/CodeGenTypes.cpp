@@ -84,12 +84,12 @@ void Codegen::Impl::init(const std::string& progName) {
     dbgInfo_ = std::make_unique<CGDebugInfo>(*mod, ctx, builder, langOpts,
         srcMgr_, mainFileID_, progName);
 
-    // scopes/consts/shadowedConsts/requiredConsts/varLookupFloor_/
-    // curFuncScopeDepth stay Impl fields (see CGSymbolTable.h's own
-    // comment); symTab_ holds references into them plus a CGDebugInfo&,
-    // through which defVar makes its one -g call.
+    // scopes/consts/shadowedConsts/requiredConsts/curFuncScopeDepth stay
+    // Impl fields (see CGSymbolTable.h's own comment); symTab_ holds
+    // references into them plus a CGDebugInfo&, through which defVar
+    // makes its one -g call.
     symTab_ = std::make_unique<CGSymbolTable>(
-        scopes, consts, shadowedConsts, requiredConsts, varLookupFloor_,
+        scopes, consts, shadowedConsts, requiredConsts,
         curFuncScopeDepth, *dbgInfo_);
 
     i1Ty  = llvm::Type::getInt1Ty(ctx);

@@ -25,8 +25,7 @@ void CGSymbolTable::defVar(const std::string& name, llvm::Value* ptr, llvm::Type
 
 const VarEntry* CGSymbolTable::findVar(const std::string& name) const {
     std::string key = toLower(name);
-    // Down to VarLookupFloor and no further; see DeclarationScopeOnly.
-    for (size_t i = Scopes.size(); i-- > VarLookupFloor;) {
+    for (size_t i = Scopes.size(); i-- > 0;) {
         auto f = Scopes[i].find(key);
         if (f != Scopes[i].end()) return &f->second;
     }
