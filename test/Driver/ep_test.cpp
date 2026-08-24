@@ -4976,6 +4976,43 @@ TEST(EP7Schema, NewRejectsADiscriminantWhoseByteCountWouldOverflow) {
     EXPECT_EQ(R.Stdout, "");
 }
 
+// #16: new(p, d1..ds)'s discriminant check only asked isOrdinal(), so a value
+// of the wrong ordinal type -- here `integer` where the discriminant is
+// `boolean` -- passed straight through to codegen and was silently truncated
+// to its low bit at run time.  An ordinary `x := 42` for a boolean `x` is
+// rejected at compile time with "cannot assign 'integer' to variable of type
+// 'boolean'"; `new` has to reject the same value the same way.
+TEST(EP7Schema, NewRejectsADiscriminantOfTheWrongOrdinalType) {
+    auto R = compileAndRun(
+        "program p;\n"
+        "type Box(c: boolean) = record x: integer end;\n"
+        "var b: ^Box;\n"
+        "begin\n"
+        "  new(b, 42);\n"
+        "  if b^.c then writeln('true branch') else writeln('false branch');\n"
+        "  writeln(b^.c)\n"
+        "end.\n", kEP);
+    EXPECT_NE(R.ExitCode, 0);
+    EXPECT_NE(R.Stderr.find("cannot assign 'integer' to variable of type 'boolean'"),
+              std::string::npos) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "");
+}
+
+// #16: the companion positive case -- a discriminant argument of exactly the
+// declared type must still compile and run cleanly.
+TEST(EP7Schema, NewAcceptsADiscriminantOfTheCorrectOrdinalType) {
+    auto R = compileAndRun(
+        "program p;\n"
+        "type Box(c: boolean) = record x: integer end;\n"
+        "var b: ^Box;\n"
+        "begin\n"
+        "  new(b, true);\n"
+        "  if b^.c then writeln('true branch') else writeln('false branch')\n"
+        "end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "true branch\n");
+}
+
 // EP §6.8.7 structured value constructors were implemented for the cases that
 // work and never given their checking.  Three findings, one cause.
 TEST(EPConstructor, ARecordComponentValueMustFitItsField) {
