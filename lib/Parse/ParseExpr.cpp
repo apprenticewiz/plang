@@ -65,6 +65,15 @@ static bool isExpop(TokenKind K) {
     return K == TokenKind::StarStar || K == TokenKind::Pow;
 }
 
+// Ceiling on live parseFactor activations (Parser::ExprDepth).  500 levels of
+// nesting costs about 2500 C++ frames -- five per level through
+// parseExpression -> parseSimpleExpr -> parseTerm -> parsePower -> parseFactor
+// -- nowhere near exhausting an 8MB default stack, while no legitimate
+// Extended Pascal program nests expressions anywhere close to this deep.
+// Without a ceiling here, a source file built specifically to nest deeply (or
+// a generated/fuzzed one) drives the real call stack instead of a diagnostic.
+static constexpr unsigned MaxExprDepth = 500;
+
 // ---------------------------------------------------------------------------
 // Expressions
 // ---------------------------------------------------------------------------
@@ -208,6 +217,27 @@ std::unique_ptr<ExprNode> Parser::parsePostfix(std::unique_ptr<ExprNode> Expr) {
 // factor → literals | 'nil' | 'not' factor | '(' expression ')'
 //        | '[' set-elements ']' | identifier ( '(' args ')' | postfix* )
 std::unique_ptr<ExprNode> Parser::parseFactor() {
+    // Every recursive re-entry into expression parsing -- '(' below, which
+    // calls back into parseExpression, and 'not', which calls parseFactor
+    // directly -- funnels through this activation, so this is the one place
+    // a ceiling bounds the whole cycle.  Checked before the RAII bump a few
+    // lines down: a caller already sitting at the ceiling must return without
+    // recursing again, not recurse once more and only then stop.
+    if (ExprDepth >= MaxExprDepth) {
+        if (!ExprDepthLimitHit) {
+            ExprDepthLimitHit = true;
+            emitError(Current.toLoc(), diag::err_expr_too_deeply_nested);
+        }
+        // Deliberately does not consume Current (typically another '(') --
+        // every caller up the stack is still waiting on a matching ')' and
+        // unwinds on its own once it sees the same token still there.
+        auto Node   = std::make_unique<IntLitExpr>();
+        Node->Loc   = Current;
+        Node->Value = 0;
+        return Node;
+    }
+    ExprDepthScope DepthGuard(ExprDepth, ExprDepthLimitHit);
+
     Token Loc = Current;
 
     switch (Current.Kind) {
@@ -283,7 +313,14 @@ std::unique_ptr<ExprNode> Parser::parseFactor() {
         case TokenKind::LeftParen: {
             advance();
             auto Expr = parseExpression();
-            expect(TokenKind::RightParen);
+            // Suppressed while unwinding from the depth ceiling above: every
+            // stacked '(' between here and the ceiling is missing its ')' for
+            // the same reason, and expect()'s diagnostic once per level would
+            // bury the one diagnostic that actually explains the failure.
+            if (ExprDepthLimitHit)
+                match(TokenKind::RightParen);
+            else
+                expect(TokenKind::RightParen);
             return Expr;
         }
 

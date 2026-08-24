@@ -64,6 +64,7 @@ DIAG(err_expected_to_or_downto, Error, "expected 'to' or 'downto' in for stateme
 DIAG(err_int_literal_out_of_range, Error, "integer literal '%0' is out of range")
 DIAG(err_real_literal_out_of_range, Error, "real literal '%0' is out of range")
 DIAG(err_expected_expr, Error, "expected expression, got %0")
+DIAG(err_expr_too_deeply_nested, Error, "expression is nested too deeply")
 DIAG(err_expected_token, Error, "expected %0, got %1")
 DIAG(err_expected_token_got_lexeme, Error, "expected %0, got %1 '%2'")
 
