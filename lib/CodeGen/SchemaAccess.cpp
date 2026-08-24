@@ -238,6 +238,34 @@ llvm::Value* SchemaAccess::schemaBodySize(const plang::Type& schema,
         llvm::ConstantInt::get(I64Ty, 1), count, "sch.count.min");
     auto* elemTy = body->ElemType ? Types.llvmTypeOfSemaType(*body->ElemType) : I64Ty;
     auto  elemSz = Mod.getDataLayout().getTypeAllocSize(elemTy);
+
+    // count is a run-time value with no upper bound of its own -- Sema checks
+    // a discriminant against Integer's own domain, not against what this
+    // multiply can survive -- while elemSz is a small host-side constant.
+    // `new(p, 2305843009213693953)` on `array[1..n] of real` makes count
+    // 2^61+1 and elemSz 8: count*elemSz wraps past 2^64 and lands back on a
+    // small positive i64 (8), which is worse than going negative, since
+    // plang_new's own check (the last line of defense before calloc) only
+    // rejects negative sizes.  The wrapped allocation would then succeed at a
+    // fraction of its real size while every index up to the original,
+    // unwrapped bound still range-checks against the full declared extent --
+    // a silent heap buffer overflow on the first out-of-range-but-in-bound
+    // store.  elemSz is known here, at codegen time, so the threshold count
+    // must stay under is a compile-time constant too: no overflow intrinsic
+    // needed, just count > INT64_MAX / elemSz, guarded the same way the
+    // string-capacity check above guards its own runtime value.
+    const int64_t maxCount = static_cast<int64_t>(elemSz > 0
+        ? (static_cast<uint64_t>(INT64_MAX) / elemSz)
+        : static_cast<uint64_t>(INT64_MAX));
+    auto* overflow = B.CreateICmpSGT(count, llvm::ConstantInt::get(I64Ty, maxCount),
+                                     "sch.count.overflow");
+    RangeGuards.emitGuard(overflow, "schema.size", [&] {
+        B.CreateCall(
+            RtFns.getExternFnN("plang_err_bad_alloc_size",
+                               llvm::Type::getVoidTy(Ctx), {I64Ty}),
+            {count});
+    });
+
     return B.CreateMul(count, llvm::ConstantInt::get(I64Ty, elemSz),
                        "sch.bytes");
 }

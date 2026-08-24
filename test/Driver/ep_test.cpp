@@ -4910,6 +4910,35 @@ TEST(EP7Schema, WholeValueCopyOfASchemaArrayFieldChecksDiscriminantsMatch) {
     EXPECT_EQ(R.Stdout, "");
 }
 
+// schemaBodySize's array-body size computation (count = hi - lo + 1, bytes =
+// count * elemSz) multiplied two i64s with no overflow check. elemSz is a
+// small host-side constant (getTypeAllocSize), but count comes straight from
+// a run-time discriminant with no upper bound of its own -- Sema checks it
+// against Integer's own domain, not against what this multiply can survive.
+// new(q, 2^61+1) on array[1..n] of real (elemSz 8) made count*8 wrap past
+// 2^64 down to 8: an 8-byte header + 8-byte body allocation succeeded for a
+// declared extent of 2^61+1 reals, and q^[2] -- well inside the DECLARED
+// bound 1..2^61+1 -- still passed its range check and wrote 8 bytes past the
+// 16-byte block. A wrapped-small allocation is worse than a negative one:
+// plang_new's own check only rejects negative sizes, so the guard has to sit
+// in codegen, before the wrap, not in the runtime after it.
+TEST(EP7Schema, NewRejectsADiscriminantWhoseByteCountWouldOverflow) {
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type vec(n: integer) = array[1..n] of real;\n"
+        "     vecptr = ^vec;\n"
+        "var q: vecptr;\n"
+        "begin\n"
+        "  new(q, 2305843009213693953); { 2^61 + 1 }\n"
+        "  q^[1] := 1.0;\n"
+        "  q^[2] := 2.0;\n"
+        "  writeln(q^[1])\n"
+        "end.\n", kEP);
+    EXPECT_NE(R.ExitCode, 0);
+    EXPECT_NE(R.Stderr.find("is not usable"), std::string::npos) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "");
+}
+
 // EP §6.8.7 structured value constructors were implemented for the cases that
 // work and never given their checking.  Three findings, one cause.
 TEST(EPConstructor, ARecordComponentValueMustFitItsField) {
