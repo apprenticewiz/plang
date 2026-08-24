@@ -153,6 +153,16 @@ void CGAssign::emitAssign(const AssignStmt& s) {
     // is, and asking only for those two kinds sent `q^.e := p^.e` to the
     // ordinary typed store, which copied the probe's ent(1): sixteen bytes of a
     // nine-element record, silently, exit 0.
+    //
+    // Unlike the whole-object case, this branch sized the memcpy from the
+    // TARGET's discriminants alone and applied it to the source address with
+    // no check the two actually agree -- `r^.x := q^.x` with r sized from
+    // n=100000000 and q from n=1 read gigabytes past q's one-element
+    // allocation.  dpath->root/spath->root are each the enclosing schema
+    // instance's own SchemaRef (per schemaPathOf's descent, the SAME schema
+    // type on both sides whenever this branch is even reached), so the same
+    // emitSchemaDiscMatch call the whole-object case already makes catches it
+    // here too.
     if (const auto& tt = s.Target->ResolvedType;
             tt && tt->ExtentVaries
             && (tt->Kind == TypeKind::Array || tt->Kind == TypeKind::Record
@@ -160,6 +170,7 @@ void CGAssign::emitAssign(const AssignStmt& s) {
                 || tt->Kind == TypeKind::Schema))
         if (auto dpath = Schema.schemaPathOf(*s.Target))
             if (auto spath = Schema.schemaPathOf(*s.Value)) {
+                Schema.emitSchemaDiscMatch(dpath->root, spath->root);
                 llvm::Value* sz = nullptr;
                 {
                     SchemaLayoutEngine::RtDiscScope disc(SchemaLayout, dpath->root.discs);
