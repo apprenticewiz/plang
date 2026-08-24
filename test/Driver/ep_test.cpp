@@ -2553,6 +2553,26 @@ TEST(Substr, ReachingPastTheEndIsAnError) {
         << R.Stderr;
 }
 
+// Regression test for issue #11: the past-the-end check used to read
+// `i+n-1>ls`, computed directly -- for huge, independently-chosen i and n it
+// signed-overflows and wraps around to a value that passes the check, so the
+// out-of-range call fell through to memcpy with i taken thousands of
+// petabytes past the string, a segfault rather than the clean trap ordinary
+// out-of-range i/n already get above. i and n are read into variables, not
+// passed as literals, so the addition is a genuine runtime computation that
+// no constant-folding pass could short-circuit before the check ever runs.
+TEST(Substr, HugeIAndNDoNotOverflowThePastEndCheck) {
+    auto R = compileAndRun(
+        "program p;\n"
+        "var t: string(20); i, n: integer;\n"
+        "begin t := 'hello';\n"
+        " i := 4611686018427387904; n := 4611686018427387905;\n"
+        " writeln(substr(t, i, n)) end.\n", kEP);
+    EXPECT_EQ(R.ExitCode, 70);
+    EXPECT_NE(R.Stderr.find("outside a string of length 5"), std::string::npos)
+        << R.Stderr;
+}
+
 TEST(Substr, OmittingTheLengthTakesTheRest) {
     auto R = compileAndRun(
         "program p;\n"
