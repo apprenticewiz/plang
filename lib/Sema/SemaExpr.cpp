@@ -191,11 +191,24 @@ std::shared_ptr<Type> Sema::checkIdent(const IdentExpr& E) {
             return F->RetType ? F->RetType : TyErr;
     }
 
-    // EP §6.4.7: active schema discriminant bindings — treated as integer constants.
+    // EP §6.4.7: active schema discriminant bindings.  Most contexts that
+    // populate this map (resolving a schema's own body, or an undiscriminated
+    // schema's probe) have no matching symbol-table entry for the name at
+    // all, so TyInt -- an ordinal value good enough for compile-time bound
+    // folding -- is the best available answer there.  But `with` over a
+    // schema instance (pushWithScope) ALSO defines a real Const symbol
+    // alongside the binding, carrying the discriminant's true declared type;
+    // prefer that one, the same fallback checkField already uses, so e.g. a
+    // char- or boolean-typed discriminant does not masquerade as an integer
+    // for the rest of the with-body the way it did before (issue #18).
     if (!ActiveSchemaBindings_.empty()) {
         auto It = ActiveSchemaBindings_.find(toLower(E.Name));
-        if (It != ActiveSchemaBindings_.end())
+        if (It != ActiveSchemaBindings_.end()) {
+            if (Symbol* S = Symtab.lookup(E.Name);
+                    S && S->Kind == SymbolKind::Const && S->Ty && !S->Ty->isError())
+                return S->Ty;
             return TyInt;
+        }
     }
 
     Symbol* Sym = Symtab.lookup(E.Name);

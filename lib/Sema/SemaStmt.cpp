@@ -894,7 +894,12 @@ int Sema::pushWithScope(const WithStmt& S) {
                 // this said otherwise.
                 DS.Kind = SymbolKind::Const;
                 DS.Name = D.Name;
-                DS.Ty   = TyInt;
+                // EP §6.8.4: expose the discriminant's real declared type, the
+                // same fallback checkField already uses, not a hardcoded
+                // integer -- `with p^ do` for `Box(c: char)` must let `c`
+                // compare against a char, not force every discriminant to
+                // look like a plain integer.
+                DS.Ty   = D.Ty && !D.Ty->isError() ? D.Ty : TyInt;
                 (void)Symtab.define(std::move(DS));
             }
             // The body may itself be another schema instantiation (EP §6.4.7),
@@ -914,14 +919,17 @@ int Sema::pushWithScope(const WithStmt& S) {
         if (T->Kind == TypeKind::SchemaInstance) {
             Symtab.pushScope(/*IsBlock=*/false);
             ++Count;
-            // Expose discriminants as integer constants in both the symbol table
-            // and ActiveSchemaBindings_ (for constBound inside the with body).
+            // Expose discriminants as constants of their declared type in both
+            // the symbol table and ActiveSchemaBindings_ (for constBound
+            // inside the with body).
             for (const auto& D : T->SchemaDiscs) {
                 ActiveSchemaBindings_[toLower(D.Name)] = D.Value;
                 Symbol DS;
                 DS.Kind = SymbolKind::Const;
                 DS.Name = D.Name;
-                DS.Ty   = TyInt;
+                // EP §6.8.4: same fallback-to-declared-type idiom as
+                // checkField -- see the undiscriminated-Schema branch above.
+                DS.Ty   = D.Ty && !D.Ty->isError() ? D.Ty : TyInt;
                 (void)Symtab.define(std::move(DS));
             }
             // If the underlying body is a record, also expose its fields.  The
