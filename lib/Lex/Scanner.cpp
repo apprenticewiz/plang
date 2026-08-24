@@ -216,6 +216,20 @@ Token Scanner::scanNumber(size_t TokenStart) {
                             std::string(Text.substr(DigStart, Pos - DigStart)),
                             TokenStart);
             }
+            // Checked before the multiply, not after: once Value has
+            // wrapped there is no way to recover the true magnitude from
+            // it, so by the time an after-the-fact check saw a suspicious
+            // value the real overflow would already be unrecoverable, the
+            // same reason the bad-digit check above rejects its digit
+            // before consuming it rather than after.  Base is already
+            // known to be in [2, 36] here, so the division can't be by
+            // zero.
+            if (Value > (INT64_MAX - D) / Base) {
+                emitError(locAt(TokenStart), diag::err_nondecimal_literal_out_of_range);
+                return make(TokenKind::Error,
+                            std::string(Text.substr(DigStart, Pos - DigStart)),
+                            TokenStart);
+            }
             Value = Value * Base + D;
         }
         return make(TokenKind::IntLit, std::to_string(Value), TokenStart);

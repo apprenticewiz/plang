@@ -913,6 +913,44 @@ TEST(ScannerEP, NondecimalDigitOutOfRange) {
     EXPECT_FALSE(scanDiags.empty()) << "expected error for out-of-range digit";
 }
 
+TEST(ScannerEP, NondecimalLiteralOverflow) {
+    // Issue #14: base#digits was accumulated into int64_t with no overflow
+    // check, silently wrapping instead of being rejected like an
+    // out-of-range decimal literal is.
+    //
+    // next() never hands an Error token back to a caller (see the "Skip
+    // Error tokens" comment above) -- it swallows it and keeps scanning, so
+    // like NondecimalBadBase/NondecimalDigitOutOfRange above, this checks
+    // scanDiags rather than the returned token's kind.
+    TempFile F("36#ZZZZZZZZZZZZZZZZ");
+    auto S = makeScannerEP(F.path());
+    (void)S.next();
+    ASSERT_FALSE(scanDiags.empty())
+        << "expected error for out-of-range nondecimal literal";
+    EXPECT_NE(scanDiags[0].Message.find("out of range"), std::string::npos)
+        << scanDiags[0].Message;
+}
+
+TEST(ScannerEP, NondecimalLiteralAtInt64Max) {
+    // 16#7FFFFFFFFFFFFFFF == INT64_MAX exactly: the largest literal the
+    // overflow check must still accept, so the check itself isn't off by one.
+    TempFile F("16#7FFFFFFFFFFFFFFF");
+    auto S = makeScannerEP(F.path());
+    Token T = S.next();
+    EXPECT_EQ(T.Kind,   TokenKind::IntLit);
+    EXPECT_EQ(T.Lexeme, "9223372036854775807");
+    EXPECT_TRUE(scanDiags.empty());
+}
+
+TEST(ScannerEP, NondecimalLiteralOneAboveInt64Max) {
+    // 16#8000000000000000 == INT64_MAX + 1: the smallest literal the
+    // overflow check must reject, the other side of the same boundary.
+    TempFile F("16#8000000000000000");
+    auto S = makeScannerEP(F.path());
+    (void)S.next();
+    EXPECT_FALSE(scanDiags.empty()) << "expected error for INT64_MAX + 1";
+}
+
 // --- Underscore in identifiers ----------------------------------------------
 
 TEST(ScannerEP, UnderscoreInIdentifierEP) {
