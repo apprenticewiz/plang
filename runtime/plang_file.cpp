@@ -55,6 +55,7 @@ static const char* findBinding(PascalFile *F);
 /// Defined with the other runtime error reporters in plang_sys.cpp.
 [[noreturn]] void plang_err_bind_already_bound(void);
 [[noreturn]] void plang_err_binding_table_full(void);
+[[noreturn]] void plang_err_field_width(int64_t W);
 
 /// Look at the next character without consuming it.
 static void prime(PascalFile *F) {
@@ -440,9 +441,19 @@ void plang_write_file_str (PascalFile *F, const char *S) { abortIfClosed(F,"writ
 // value -- an accident of libc, not a considered choice.
 static int64_t noPadIfNegative(int64_t W) { return W < 0 ? 0 : W; }
 
+// printf's `%*d`/`%*c` take the field width as a plain int, but a Pascal
+// TotalWidth is int64_t -- a value computed at runtime can exceed INT32_MAX,
+// and simply truncating it (the bug in issue #15) would silently reinterpret
+// it as an unrelated, possibly huge width instead of catching the mistake.
+static int checkedWidth(int64_t W) {
+    W = noPadIfNegative(W);
+    if (W > INT32_MAX) plang_err_field_width(W);
+    return static_cast<int>(W);
+}
+
 void plang_write_file_i64_w (PascalFile *F, int64_t V, int64_t W) {
     abortIfClosed(F,"write");
-    std::fprintf(F->Fp, "%*" PRId64, static_cast<int>(noPadIfNegative(W)), V);
+    std::fprintf(F->Fp, "%*" PRId64, checkedWidth(W), V);
 }
 void plang_write_file_f64_e (PascalFile *F, double V, int64_t W) {
     abortIfClosed(F, "write");
@@ -476,7 +487,7 @@ void plang_write_file_char_w(PascalFile *F, int8_t V, int64_t W) {
     abortIfClosed(F,"write");
     if (W == 0) return;
     if (W < 0) { std::fputc(static_cast<unsigned char>(V), F->Fp); return; }
-    std::fprintf(F->Fp, "%*c", static_cast<int>(W), static_cast<unsigned char>(V));
+    std::fprintf(F->Fp, "%*c", checkedWidth(W), static_cast<unsigned char>(V));
 }
 void plang_write_file_str_w (PascalFile *F, const char *S, int64_t W)
     { abortIfClosed(F,"write"); writePadded(F, S, W); }
