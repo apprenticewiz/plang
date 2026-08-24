@@ -150,7 +150,14 @@ void plang_str_substr(void* dst, int64_t cap_dst,
                        const void* src, int64_t /*cap_src*/,
                        int64_t i, int64_t n) {
     const int64_t ls = strLen(src);
-    if (n < 0 || i < 1 || (n > 0 && i + n - 1 > ls)) plang_err_substr(i, n, ls);
+    // i+n-1>ls, done directly, can signed-overflow when a caller passes huge
+    // independent i and n (both are ordinary runtime Integer values, not
+    // trusted to be small) -- the wraparound can pass the check and send an
+    // out-of-range i on to the memcpy below.  i>=1 and n>=0 are already
+    // established by the two disjuncts before this one, so ls-i can't go
+    // negative and can't overflow either; checking i>ls first (cheap, and
+    // itself overflow-free) short-circuits before ls-i is ever computed.
+    if (n < 0 || i < 1 || (n > 0 && (i > ls || n > ls - i + 1))) plang_err_substr(i, n, ls);
     const int64_t len = std::min(n, cap_dst);
     std::memcpy(strData(dst), strData(src) + (i - 1), static_cast<size_t>(len));
     strLen(dst) = len;
