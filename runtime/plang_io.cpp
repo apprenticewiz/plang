@@ -138,6 +138,9 @@ extern "C" {
 void plang_write_f64_e(double V, int64_t W);
 void plang_write_f64_f(double V, int64_t W, int64_t D);
 
+/// Defined with the other runtime error reporters in plang_sys.cpp.
+[[noreturn]] void plang_err_field_width(int64_t W);
+
 // ISO §6.10.3.1 calls a negative TotalWidth or FracDigits "an error" (§3.2's
 // weaker class, which a processor may leave undetected) rather than saying
 // what it means.  Checked directly against FPC, in both its default and
@@ -150,6 +153,16 @@ void plang_write_f64_f(double V, int64_t W, int64_t D);
 // field set to the value's absolute value -- an accident of libc, not a
 // considered choice.
 static int64_t noPadIfNegative(int64_t W) { return W < 0 ? 0 : W; }
+
+// printf's `%*d`/`%*c` take the field width as a plain int, but a Pascal
+// TotalWidth is int64_t -- a value computed at runtime can exceed INT32_MAX,
+// and simply truncating it (the bug in issue #15) would silently reinterpret
+// it as an unrelated, possibly huge width instead of catching the mistake.
+static int checkedWidth(int64_t W) {
+    W = noPadIfNegative(W);
+    if (W > INT32_MAX) plang_err_field_width(W);
+    return static_cast<int>(W);
+}
 
 // ---- write (no trailing newline) ----
 
@@ -252,7 +265,7 @@ void plang_page() { plangOutCh('\f'); }
 // its padding.
 
 void plang_write_i64_w (int64_t V, int64_t W) {
-    plangOutFmt("%*" PRId64, static_cast<int>(noPadIfNegative(W)), V);
+    plangOutFmt("%*" PRId64, checkedWidth(W), V);
 }
 void plang_write_f64_e (double  V, int64_t W) {
     char Buf[PlangRealMaxChars];
@@ -285,7 +298,7 @@ void plang_write_bool_w(int8_t      V, int64_t W) { plangOutPadded(V ? "true" : 
 void plang_write_char_w(int8_t      V, int64_t W) {
     if (W == 0) return;
     if (W < 0) { plangOutCh(static_cast<unsigned char>(V)); return; }
-    plangOutFmt("%*c", static_cast<int>(W), static_cast<unsigned char>(V));
+    plangOutFmt("%*c", checkedWidth(W), static_cast<unsigned char>(V));
 }
 void plang_write_str_w (const char *S, int64_t W) { plangOutPadded(S, W); }
 

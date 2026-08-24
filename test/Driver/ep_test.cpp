@@ -2637,6 +2637,60 @@ TEST(WriteComplex, AnExpressionResultIsWritable) {
 }
 
 // ---------------------------------------------------------------------------
+// Regression tests for issue #15: a write field width wider than fits in the
+// `int` printf's "%*d"/"%*c" take used to be truncated by a bare
+// static_cast<int>, silently reinterpreting it as an unrelated, possibly huge
+// width instead of catching the mistake -- 5000000000 does not fit in 32
+// bits and truncated to 705032704, turning a single digit into nearly a
+// gigabyte of unwanted output.  w is read into a variable, not passed as a
+// literal, so the width is a genuine runtime computation no constant-folding
+// pass could short-circuit before the check ever runs.
+// ---------------------------------------------------------------------------
+
+TEST(FieldWidth, AHugeIntegerWidthTrapsInsteadOfTruncating) {
+    auto R = compileAndRun(
+        "program p;\n"
+        "var n, w: integer;\n"
+        "begin\n"
+        "  n := 1;\n"
+        "  w := 5000000000;\n"
+        "  write(n:w)\n"
+        "end.\n", kEP);
+    EXPECT_EQ(R.ExitCode, 70);
+    EXPECT_NE(R.Stderr.find("write field width 5000000000 is too large"),
+              std::string::npos) << R.Stderr;
+}
+
+TEST(FieldWidth, AHugeCharWidthTrapsInsteadOfTruncating) {
+    auto R = compileAndRun(
+        "program p;\n"
+        "var c: char; w: integer;\n"
+        "begin\n"
+        "  c := 'x';\n"
+        "  w := 5000000000;\n"
+        "  write(c:w)\n"
+        "end.\n", kEP);
+    EXPECT_EQ(R.ExitCode, 70);
+    EXPECT_NE(R.Stderr.find("write field width 5000000000 is too large"),
+              std::string::npos) << R.Stderr;
+}
+
+TEST(FieldWidth, AHugeWidthTrapsWhenWritingToAFile) {
+    auto R = compileAndRun(
+        "program p;\n"
+        "var f: text; n, w: integer;\n"
+        "begin\n"
+        "  rewrite(f);\n"
+        "  n := 1;\n"
+        "  w := 5000000000;\n"
+        "  write(f, n:w)\n"
+        "end.\n", kEP);
+    EXPECT_EQ(R.ExitCode, 70);
+    EXPECT_NE(R.Stderr.find("write field width 5000000000 is too large"),
+              std::string::npos) << R.Stderr;
+}
+
+// ---------------------------------------------------------------------------
 // EP §6.4.3.3 / §6.7.3: a string is a valid function result type
 // ---------------------------------------------------------------------------
 
