@@ -2922,6 +2922,23 @@ TEST(IntegerPow, ZeroToTheZeroIsReportedAtRuntime) {
     EXPECT_NE(R.Stderr.find("0 pow 0"), std::string::npos) << R.Stderr;
 }
 
+TEST(IntegerAbs, MinIntIsReportedAtRuntime) {
+    // ISO §6.6.6.2: abs(x) is x's magnitude -- minint (-2^63) has none, since
+    // the positive int64_t range tops out one short, at 2^63-1.  Reached via
+    // two subtractions rather than a literal -9223372036854775808: that
+    // literal has no positive int64_t token to negate, so this is minint's
+    // positive neighbor, decremented once more.  Before the fix, plang_abs_int
+    // computed '-X' anyway -- signed-overflow UB that, in practice, silently
+    // returned a second wrong (and still negative) number instead of trapping.
+    auto R = compileAndRun(
+        "program p(output); var n: integer;\n"
+        "begin n := -9223372036854775807; n := n - 1; writeln(abs(n)) end.\n",
+        kEP);
+    EXPECT_NE(R.ExitCode, 0);
+    EXPECT_NE(R.Stderr.find("no representable positive result"), std::string::npos)
+        << R.Stderr;
+}
+
 TEST(DoubleStarPow, RejectsAZeroBaseWithANonPositiveExponent) {
     // Same ISO §6.8.3.2 clause as ZeroToTheZeroIsReportedAtRuntime, for '**'
     // this time: std::pow's own C99 "any**0 is 1" convention answered

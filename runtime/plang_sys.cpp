@@ -296,6 +296,19 @@ void plang_err_schema_disc(const char *Name, int64_t Dst, int64_t Src) {
     std::exit(PlangRuntimeErrorStatus);
 }
 
+/// ISO §6.6.6.2: abs(x) is x's magnitude, and the one int64_t value this
+/// cannot be computed for is minint -- like plang_err_ipow_zero_zero, this
+/// fires for exactly one fixed input, so unlike most of the checks above it
+/// takes no argument: plang_abs_int (plang_math.cpp) already knows which
+/// value it is before it calls in.
+[[noreturn]] void plang_err_abs_overflow(void) {
+    std::fflush(stdout);
+    std::fprintf(stderr,
+                 "plang runtime: abs(-9223372036854775808) has no "
+                 "representable positive result\n");
+    std::exit(PlangRuntimeErrorStatus);
+}
+
 } // extern "C"
 
 } // namespace plang
