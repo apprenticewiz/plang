@@ -244,19 +244,16 @@ void Codegen::Impl::emitAllProcedures(const BlockNode& block) {
 }
 
 void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
-    // Save outer context.
-    auto* savedFunc       = curFunc;
-    auto* savedRetAlloca  = curRetAlloca;
-    auto* savedRetType    = curRetType;
-    auto  savedFuncName   = curFuncName;
-    auto  savedPrefix     = namePrefix;
+    // Save outer context. CGFunction snapshots curFunc/curRetAlloca/
+    // curRetType/curFuncName/namePrefix (restored unconditionally by its
+    // destructor, on every exit path including the declareOnly early
+    // return below) and owns curStaticLink/outerVarNames/outerVarBindings/
+    // valueConformantCopies_ outright, fresh for this activation -- see
+    // its own declaration for why ownership needs no save/clear/restore
+    // dance the way the four locals it replaces used to.
+    CGFunction curFn(*this);
     auto  savedIP         = builder.saveIP();
-    auto* savedStaticLink = curStaticLink;
     auto  savedFuncDepth  = curFuncScopeDepth;
-    auto  savedOuterVars  = outerVarNames;
-    auto  savedOuterBinds = outerVarBindings;
-    auto  savedConfCopies = std::move(valueConformantCopies_);
-    valueConformantCopies_.clear();
     // ISO §6.2.2.3: a type or constant declared in this block is invisible
     // outside it.  Both maps are flat, so an inner declaration would otherwise
     // outlive its block and be picked up by whatever the enclosing block
@@ -287,7 +284,7 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
     const ProcDecl& hd = proc.heading();
 
     // Determine whether this is a nested procedure (has an outer function).
-    bool isNested = (savedFunc != nullptr);
+    bool isNested = (curFn.OuterFunc() != nullptr);
 
     // If nested, collect all outer-scope variables that this procedure may access.
     // We collect ALL visible outer variables (conservative; avoids escape analysis).
@@ -500,14 +497,6 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
     // A forward declaration contributes its signature and stops; the body
     // arrives with the defining occurrence.
     if (declareOnly) {
-        curFunc       = savedFunc;
-        curRetAlloca  = savedRetAlloca;
-        curRetType    = savedRetType;
-        curFuncName   = savedFuncName;
-        namePrefix    = savedPrefix;
-        curStaticLink = savedStaticLink;
-        outerVarNames = savedOuterVars;
-        outerVarBindings = savedOuterBinds;
         builder.restoreIP(savedIP);
         return;
     }
@@ -557,9 +546,7 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
     // If nested, expose outer variables via the static link.
     // The frame struct is { ptr, ptr, ... } — one ptr per outer variable,
     // each pointing to the outer alloca so reads and writes go through.
-    curStaticLink = staticLinkArg;
-    outerVarNames.clear();
-    outerVarBindings.clear();
+    curFn.StaticLink = staticLinkArg;
     if (staticLinkArg && !outerVars.empty()) {
         // Frame is { ptr, ptr, ... } — one slot per outer var.
         std::vector<llvm::Type*> ptrFields(outerVars.size(), ptrTy);
@@ -642,11 +629,11 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
                 }
                 Bound = scopes.back()[toLower(nm)];
             }
-            outerVarNames.push_back(nm);
+            curFn.OuterVarNames.push_back(nm);
             // Kept apart from the scope, which a local of the same name will
             // overwrite, and keyed by depth so that two levels sharing a name
             // stay two variables.
-            outerVarBindings[{outerVarDepths[fi], toLower(nm)}] = Bound;
+            curFn.OuterVarBindings[{outerVarDepths[fi], toLower(nm)}] = Bound;
         }
         // Every capture is bound now, and nothing local has shadowed anything
         // yet, so this is where a captured conformant array's bounds are the
@@ -843,7 +830,7 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
                     auto* copy = builder.CreateCall(getRuntimeNewFn(), {bytes},
                                                     nm + ".copy");
                     builder.CreateMemCpy(copy, align, arrPtrArg, align, bytes);
-                    valueConformantCopies_.push_back(copy);
+                    curFn.ValueConformantCopies.push_back(copy);
                     dataPtr = copy;
                 }
                 defVar(nm, dataPtr, elemTy);
@@ -902,9 +889,8 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
     // The body has one exit; a non-local goto out of the procedure leaves the
     // block behind, which leaks rather than corrupts.
     if (!isTerminated())
-        for (auto* C : valueConformantCopies_)
+        for (auto* C : curFn.ValueConformantCopies)
             builder.CreateCall(getRuntimeDisposeFn(), {C});
-    valueConformantCopies_ = std::move(savedConfCopies);
 
     // Emit return if the last block is not yet terminated.
     if (!isTerminated()) {
@@ -918,16 +904,10 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
 
     popScope();
 
-    // Restore outer context.
-    curFunc       = savedFunc;
-    curRetAlloca  = savedRetAlloca;
-    curRetType    = savedRetType;
-    curFuncName   = savedFuncName;
-    namePrefix    = savedPrefix;
-    curStaticLink = savedStaticLink;
+    // Restore outer context. curFunc/curRetAlloca/curRetType/curFuncName/
+    // namePrefix/curStaticLink/outerVarNames/outerVarBindings are restored
+    // unconditionally by curFn's destructor below, at the end of this scope.
     curFuncScopeDepth = savedFuncDepth;
-    outerVarNames = savedOuterVars;
-    outerVarBindings = savedOuterBinds;
     typeAliases   = std::move(savedTypeAliases);
     consts        = std::move(savedConsts);
     requiredConsts = std::move(savedRequired);
@@ -1434,11 +1414,7 @@ void Codegen::Impl::emitModuleGlobalInits(const BlockNode& own,
 void Codegen::Impl::emitMain(const BlockNode& block,
                              const std::vector<std::string>& fileParams,
                              const std::vector<std::string>& initModules) {
-    auto* savedFunc      = curFunc;
-    auto* savedRetAlloca = curRetAlloca;
-    auto* savedRetType   = curRetType;
-    auto  savedFuncName  = curFuncName;
-    auto  savedPrefix    = namePrefix;
+    CGFunction curFn(*this);
     auto  savedIP        = builder.saveIP();
 
     curFuncName  = "main";
@@ -1509,11 +1485,8 @@ void Codegen::Impl::emitMain(const BlockNode& block,
 
     popScope();
 
-    curFunc      = savedFunc;
-    curRetAlloca = savedRetAlloca;
-    curRetType   = savedRetType;
-    curFuncName  = savedFuncName;
-    namePrefix   = savedPrefix;
+    // curFunc/curRetAlloca/curRetType/curFuncName/namePrefix are restored
+    // unconditionally by curFn's destructor, at the end of this scope.
     builder.restoreIP(savedIP);
 }
 
@@ -1540,10 +1513,11 @@ std::string Codegen::Impl::emitModuleInitFn(const ModuleNode& modNode) {
     const std::string unit   = toLower(modNode.Name);
     const std::string fnName = "__plang_init_" + unit;
 
-    auto* savedFunc      = curFunc;
-    auto* savedRetAlloca = curRetAlloca;
-    auto* savedRetType   = curRetType;
-    auto  savedFuncName  = curFuncName;
+    // namePrefix is left as the caller set it, same as
+    // emitModuleLifecycleFn below -- CGFunction still snapshots/restores
+    // it unconditionally, which is a correct no-op here since nothing in
+    // this function ever assigns to it.
+    CGFunction curFn(*this);
     auto  savedIP        = builder.saveIP();
 
     curFuncName  = fnName;
@@ -1611,25 +1585,22 @@ std::string Codegen::Impl::emitModuleInitFn(const ModuleNode& modNode) {
     builder.SetInsertPoint(ret);
     builder.CreateRetVoid();
 
-    curFunc      = savedFunc;
-    curRetAlloca = savedRetAlloca;
-    curRetType   = savedRetType;
-    curFuncName  = savedFuncName;
+    // curFunc/curRetAlloca/curRetType/curFuncName are restored
+    // unconditionally by curFn's destructor, at the end of this scope.
     builder.restoreIP(savedIP);
     return fnName;
 }
 
 void Codegen::Impl::emitModuleLifecycleFn(const std::string& fnName,
                                            const StmtNode& stmt) {
-    // Save outer context.
-    auto* savedFunc      = curFunc;
-    auto* savedRetAlloca = curRetAlloca;
-    auto* savedRetType   = curRetType;
-    auto  savedFuncName  = curFuncName;
+    // Save outer context. namePrefix is left as the caller set it: the
+    // block belongs to the module, and the procedures it calls are
+    // mangled with that module's name -- CGFunction still snapshots/
+    // restores it unconditionally, a correct no-op since nothing here
+    // ever assigns to it.
+    CGFunction curFn(*this);
     auto  savedIP        = builder.saveIP();
 
-    // namePrefix is left as the caller set it: the block belongs to the module,
-    // and the procedures it calls are mangled with that module's name.
     curFuncName  = fnName;
     curRetType   = nullptr;
     curRetAlloca = nullptr;
@@ -1658,9 +1629,7 @@ void Codegen::Impl::emitModuleLifecycleFn(const std::string& fnName,
     if (!isTerminated())
         builder.CreateRetVoid();
 
-    curFunc      = savedFunc;
-    curRetAlloca = savedRetAlloca;
-    curRetType   = savedRetType;
-    curFuncName  = savedFuncName;
+    // curFunc/curRetAlloca/curRetType/curFuncName are restored
+    // unconditionally by curFn's destructor, at the end of this scope.
     builder.restoreIP(savedIP);
 }

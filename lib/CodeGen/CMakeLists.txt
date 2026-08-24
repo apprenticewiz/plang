@@ -32,6 +32,7 @@ add_library(PlangCodeGen OBJECT
     CodeGen.cpp
     CodeGenTypes.cpp
     CodeGenRuntime.cpp
+    CGFunction.cpp
     CodeGenProcs.cpp
     CodeGenExprs.cpp
     CodeGenSchema.cpp

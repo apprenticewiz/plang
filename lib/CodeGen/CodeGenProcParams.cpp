@@ -41,9 +41,9 @@ llvm::Value* Codegen::Impl::buildStaticLinkFrame(const std::string& mangledName)
     for (size_t fi = 0; fi < varNames.size(); ++fi) {
         const VarEntry* ve = nullptr;
         if (varDepths && fi < varDepths->size()) {
-            const auto it = outerVarBindings.find(
+            const auto it = curFn_->OuterVarBindings.find(
                 {(*varDepths)[fi], toLower(varNames[fi])});
-            if (it != outerVarBindings.end()) ve = &it->second;
+            if (it != curFn_->OuterVarBindings.end()) ve = &it->second;
         }
         // A slot this activation has no capture for is one declared HERE --
         // so the search starts at this function's own scope, not at whatever

@@ -1260,6 +1260,45 @@ TEST(EP6ConformantArray, ConformantPassThrough) {
     EXPECT_EQ(R.Stdout, "10\n");
 }
 
+// A value conformant array parameter is only copied to the heap when Sema
+// finds the body actually WRITES to it (CodeGenProcs.cpp's `ByValue &&
+// Modified` check) -- an unmodified one is read straight out of the
+// caller's own storage, no copy, nothing to leak. The heap copy, when one
+// is made, is disposed where the callee's own body ends -- but that
+// disposal used to be reached by an unconditional save-and-clear at
+// prologue entry, restored only on the callee's normal exit.  A nested
+// sibling procedure forward-declared inside the SAME callee's body is
+// emitted through a recursive, declareOnly=true call to that same
+// prologue, which cleared the outer activation's pending copy without ever
+// giving it back -- silently dropping it from outer's own disposal loop.
+// The program's own output is unaffected either way (this is a leak, not a
+// functional bug); what it exercises is that outer's own
+// value-conformant-array machinery still runs correctly with a
+// forward-declared nested sibling in the same block, and (checked
+// separately, under a leak-sanitizer build) that the copy is disposed.
+TEST(EP6ConformantArray, ValueParamCopySurvivesAForwardDeclaredNestedSibling) {
+    auto R = compileAndRun(
+        "program p;\n"
+        "var arr: array [1..3] of integer;\n"
+        "procedure outer(A: array [lo..hi : integer] of integer);\n"
+        "  procedure inner(x: integer); forward;\n"
+        "  procedure inner(x: integer);\n"
+        "  begin writeln(x) end;\n"
+        "var i, s: integer;\n"
+        "begin\n"
+        "  A[lo] := A[lo] + 100;\n" // write, so Sema marks A modified -> heap copy
+        "  s := 0;\n"
+        "  for i := lo to hi do s := s + A[i];\n"
+        "  inner(s)\n"
+        "end;\n"
+        "begin\n"
+        "  arr[1] := 1; arr[2] := 2; arr[3] := 3;\n"
+        "  outer(arr)\n"
+        "end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "106\n");
+}
+
 // ISO 7185 level 1: conformant array parameters are standard Pascal, not an
 // Extended Pascal extension, and were rejected under -std=iso7185 for as long
 // as they had existed.

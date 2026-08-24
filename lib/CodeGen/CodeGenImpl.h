@@ -314,30 +314,85 @@ struct Codegen::Impl {
     }
 
     // Static link for nested procedures (ISO §6.7.1).
-    // curStaticLink: the %static_link parameter value in the current nested
-    //   function, or null when at top level.
-    // outerVarNames: ordered list of outer variable names for the current
-    //   nested function's frame struct (set by emitFunctionDef, restored on exit).
     // funcOuterVarNames_: per-function record of outer variable name lists,
     //   keyed by LLVM mangled name.  Populated at definition time; consulted at
     //   call sites so every caller uses the same slot ordering.
     // nestedFunctions_: set of mangled names that require a static-link frame.
     //   Explicit flag replaces the fragile "declaredParamCount > astArgCount"
     //   arity heuristic which conflates frame params with arity mismatches.
-    llvm::Value*                                     curStaticLink{nullptr};
-    std::vector<std::string>                         outerVarNames;
-    /// The outer variables this activation reaches through its own static
-    /// link, by name, as they were when the prologue exposed them.
+
+    /// RAII guard for one function-activation's per-activation-transient
+    /// state: the static-link value, the outer-variable capture lists, and
+    /// a value-conformant-array parameter's heap copies.  Constructed as a
+    /// local at the top of each of emitFunctionDef/emitMain/
+    /// emitModuleInitFn/emitModuleLifecycleFn (CodeGenProcs.cpp), living
+    /// exactly as long as that one activation -- unlike every
+    /// std::unique_ptr<X> sibling elsewhere in this struct, this is not a
+    /// persistent, once-constructed member. Confirmed by exhaustive grep
+    /// that no sibling class holds a reference into any of the four fields
+    /// below, so each activation owns its own independent copy outright --
+    /// no save+clear+restore dance needed, object lifetime alone provides
+    /// correct nesting for arbitrarily deep recursion (emitFunctionDef
+    /// recurses into nested procedures via emitAllProcedures before its own
+    /// body is emitted, so the live C++ call-stack depth already mirrors
+    /// Pascal nesting depth exactly).
     ///
-    /// They are also defVar'd, but a local of the same name replaces that
-    /// binding outright -- so after `procedure c; var n: integer`, the address
-    /// of the enclosing `n` was gone.  Building a frame for a sibling then
-    /// found c's own n and the callee wrote into the wrong activation.
-    std::map<std::pair<size_t, std::string>, VarEntry> outerVarBindings;
-    /// Heap blocks a value conformant array parameter was copied into,
-    /// freed where the body ends.  See the conformant branch of the
-    /// parameter prologue.
-    std::vector<llvm::Value*> valueConformantCopies_;
+    /// curFunc/curRetAlloca/curRetType/curFuncName/namePrefix stay right
+    /// here as Impl fields, unmoved -- rangeGuards_/gotoEngine_/
+    /// controlFlow_/binaryOps_/stmtCore_/exprCore_/linkage_ hold direct
+    /// references into them, reseatable only by reassigning the SAME
+    /// field's value, never by relocating its storage. This guard's
+    /// constructor/destructor instead snapshot and restore those five
+    /// fields' VALUES, replacing what used to be four separately
+    /// hand-maintained save/restore blocks with one.
+    class CGFunction {
+    public:
+        explicit CGFunction(Impl& I);
+        ~CGFunction();
+        CGFunction(const CGFunction&)            = delete;
+        CGFunction& operator=(const CGFunction&) = delete;
+
+        /// curFunc's value when this activation began (null at top level) --
+        /// the one saved snapshot a caller needs by name.
+        llvm::Function* OuterFunc() const { return SavedFunc; }
+
+        /// The %static_link parameter value in the current nested function,
+        /// or null when at top level.
+        llvm::Value* StaticLink{nullptr};
+        /// Ordered list of outer variable names for this activation's frame
+        /// struct.
+        std::vector<std::string> OuterVarNames;
+        /// The outer variables this activation reaches through its own
+        /// static link, by name, as they were when the prologue exposed
+        /// them.
+        ///
+        /// They are also defVar'd, but a local of the same name replaces
+        /// that binding outright -- so after `procedure c; var n: integer`,
+        /// the address of the enclosing `n` was gone.  Building a frame for
+        /// a sibling then found c's own n and the callee wrote into the
+        /// wrong activation.
+        std::map<std::pair<size_t, std::string>, VarEntry> OuterVarBindings;
+        /// Heap blocks a value conformant array parameter was copied into,
+        /// freed where the body ends.  See the conformant branch of the
+        /// parameter prologue.
+        std::vector<llvm::Value*> ValueConformantCopies;
+
+    private:
+        Impl&              I;
+        llvm::Function*    SavedFunc;
+        llvm::AllocaInst*  SavedRetAlloca;
+        llvm::Type*        SavedRetType;
+        std::string        SavedFuncName;
+        std::string        SavedNamePrefix;
+        CGFunction*        SavedCurFn;
+    };
+    /// The activation CGFunction currently belongs to, or null before the
+    /// first one is constructed. Set/restored by CGFunction's own
+    /// constructor/destructor; buildStaticLinkFrame (CodeGenProcParams.cpp,
+    /// staying a plain Impl method permanently) reaches OuterVarBindings
+    /// through this rather than a raw field.
+    CGFunction* curFn_{nullptr};
+
     std::map<std::string, std::vector<std::string>>  funcOuterVarNames_;
     /// The scope DEPTH each captured variable was found at, beside its name.
     ///
