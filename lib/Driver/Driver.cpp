@@ -461,6 +461,26 @@ static std::string stem(const std::string &Path) {
     return (Dot == std::string::npos) ? Base : Base.substr(0, Dot);
 }
 
+/// Like stem(), but keeps the directory instead of discarding it -- flattened
+/// into the same path component by turning every '/' into '_', e.g.
+/// "unitA/foo.pas" -> "unitA_foo".  Two extra input files that share a
+/// basename in different directories (issue #20), such as "unitA/foo.pas" and
+/// "unitB/foo.pas", must not both default to the bare stem() "foo": that
+/// collides in the cwd, silently overwriting one's default output (.o, or the
+/// -save-temps .ll) with the other's.  Used only for an *extra* file's own
+/// default output names, never for the main file's (defaultOutput, above):
+/// the main file has no sibling to collide with under its own bare stem, and
+/// changing its long-established naming is out of scope here.  Still lands
+/// flat in the cwd, matching every other default output name in this file --
+/// this is not a build-directory mechanism, just a wider stem.
+static std::string flattenedStem(const std::string &Path) {
+    auto Slash = Path.rfind('/');
+    if (Slash == std::string::npos) return stem(Path);
+    std::string Dir = Path.substr(0, Slash);
+    for (char &C : Dir) if (C == '/') C = '_';
+    return Dir + "_" + stem(Path);
+}
+
 std::string Driver::defaultOutput(const std::string &InputFile, OutputMode Mode) {
     switch (Mode) {
         case OutputMode::Executable: return "a.out";
@@ -819,7 +839,7 @@ static int link(Driver &D, const Options &Opts, const std::string &ObjFile,
     return linkELF(D, Opts, ObjFile, OutFile, RuntimeLib, Verbose, DryRun);
 }
 
-int Driver::compile(const Options &Opts) {
+int Driver::compile(const Options &Opts, bool IsExtraFile) {
     const std::string OutFile = Opts.outputFile.empty()
         ? defaultOutput(Opts.inputFile, Opts.mode)
         : Opts.outputFile;
@@ -835,9 +855,24 @@ int Driver::compile(const Options &Opts) {
         return 1;
     }
 
+    // Every extra file's own directory, deduplicated, computed once up front:
+    // both the extra-file compile loop below and the main file's own compile
+    // options (further down) need the *full* set, not just one file's own
+    // directory -- an extra file may import a module defined by a sibling
+    // extra file in a different directory (issue #21), and the driver already
+    // has everything it needs on the command line to resolve that.
+    std::vector<std::string> ExtraDirs;
+    for (const auto &ExtraFile : Opts.extraInputFiles) {
+        auto Slash = ExtraFile.rfind('/');
+        std::string Dir = (Slash == std::string::npos) ? "." : ExtraFile.substr(0, Slash);
+        if (std::find(ExtraDirs.begin(), ExtraDirs.end(), Dir) == ExtraDirs.end())
+            ExtraDirs.push_back(Dir);
+    }
+
     // Multi-file mode: compile each extra input file to a .o first.
-    // The extra files' directories are added to the module search path so PMI
-    // files written alongside them are automatically found.
+    // Every extra file's directory -- not just its own -- is added to its
+    // module search path, so PMI files written alongside any of them,
+    // including siblings, are automatically found.
     std::vector<std::string> ExtraObjs;
     for (const auto &ExtraFile : Opts.extraInputFiles) {
         if (!llvm::sys::fs::exists(ExtraFile)) {
@@ -847,15 +882,20 @@ int Driver::compile(const Options &Opts) {
         Options ExtraOpts = Opts;
         ExtraOpts.inputFile       = ExtraFile;
         ExtraOpts.mode            = OutputMode::Object;
-        ExtraOpts.outputFile      = stem(ExtraFile) + ".o";
+        // flattenedStem, not stem: two extra files that share a basename in
+        // different directories (issue #20) must not default to the same
+        // "foo.o" in the cwd, silently clobbering one with the other's.
+        ExtraOpts.outputFile      = flattenedStem(ExtraFile) + ".o";
         ExtraOpts.extraInputFiles.clear(); // avoid recursion
-        // Add the extra file's directory so its PMI files are discoverable.
-        {
-            auto Slash = ExtraFile.rfind('/');
-            std::string Dir = (Slash == std::string::npos) ? "." : ExtraFile.substr(0, Slash);
-            ExtraOpts.modulePaths.push_back(Dir);
+        // Add every extra file's directory, not just this one's, so that this
+        // file may import a module a sibling extra file defines (issue #21).
+        // Avoid duplicates the same way the main-file loop below does.
+        for (const auto &Dir : ExtraDirs) {
+            bool Already = false;
+            for (const auto &P : ExtraOpts.modulePaths) if (P == Dir) { Already = true; break; }
+            if (!Already) ExtraOpts.modulePaths.push_back(Dir);
         }
-        if (compile(ExtraOpts) != 0) return 1;
+        if (compile(ExtraOpts, /*IsExtraFile=*/true) != 0) return 1;
         ExtraObjs.push_back(ExtraOpts.outputFile);
     }
 
@@ -872,7 +912,13 @@ int Driver::compile(const Options &Opts) {
     bool OwnIr = false;
 
     if (Opts.saveTemps) {
-        IrFile = stem(Opts.inputFile) + ".ll";
+        // flattenedStem for an extra file, for the same reason as its .o
+        // above: two extra files sharing a basename in different directories
+        // would otherwise both save to the same "foo.ll", the second
+        // silently overwriting the first's kept-for-inspection IR.  The main
+        // file's own naming is untouched -- stem(), as always -- since it has
+        // no sibling to collide with.
+        IrFile = (IsExtraFile ? flattenedStem(Opts.inputFile) : stem(Opts.inputFile)) + ".ll";
     } else {
         llvm::SmallString<128> TmpPath;
         int Fd;
@@ -889,10 +935,9 @@ int Driver::compile(const Options &Opts) {
     // For multi-file builds, also add the extra files' directories to the main
     // compilation's module search paths so PMI files are discovered automatically.
     Options MainOpts = Opts;
-    for (const auto &ExtraFile : Opts.extraInputFiles) {
-        auto Slash = ExtraFile.rfind('/');
-        std::string Dir = (Slash == std::string::npos) ? "." : ExtraFile.substr(0, Slash);
-        // Avoid duplicates.
+    for (const auto &Dir : ExtraDirs) {
+        // Avoid duplicates: MainOpts starts as a copy of Opts, which may
+        // already list one of these via -I.
         bool Already = false;
         for (const auto &P : MainOpts.modulePaths) if (P == Dir) { Already = true; break; }
         if (!Already) MainOpts.modulePaths.push_back(Dir);
