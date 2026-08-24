@@ -324,6 +324,62 @@ inline int irDbgLineOf(const std::string& IR, const std::string& Needle) {
     return std::atoi(IR.substr(LineStart, LineNumEnd - LineStart).c_str());
 }
 
+/// The `!N` token of the first `scope: !N` field on the same line as (at or
+/// after) \p Pos -- shared by irNthLocalVarScope and irScopeOfId below, the
+/// same "find a marker, then a field bounded by that one line" idiom
+/// irDbgLineOf above uses for `!dbg !N`.  Empty if \p Pos is npos or the
+/// line at \p Pos has no `scope: ` field.
+inline std::string irScopeFieldAfter(const std::string& IR, size_t Pos) {
+    if (Pos == std::string::npos) return {};
+    const auto LineEnd = IR.find('\n', Pos);
+    auto ScopePos = IR.find("scope: !", Pos);
+    if (ScopePos == std::string::npos || ScopePos > LineEnd) return {};
+    ScopePos += std::string("scope: ").size();
+    const auto IdEnd = IR.find_first_of(",)", ScopePos);
+    if (IdEnd == std::string::npos) return {};
+    return IR.substr(ScopePos, IdEnd - ScopePos);
+}
+
+/// The scope id (e.g. "!18") of the Kth (0-based) `!DILocalVariable(name:
+/// "<Name>"` declaration in the IR -- e.g. K=0 and K=1 for the two
+/// DILocalVariables issue #19's shadowing-a-captured-variable case
+/// produces, one for the capture and one for the declaration that shadows
+/// it.  Empty if there is no Kth such declaration, or it has no scope
+/// field on its own line.
+inline std::string irNthLocalVarScope(const std::string& IR, const std::string& Name, int K) {
+    const std::string Marker = "!DILocalVariable(name: \"" + Name + "\"";
+    size_t Pos = 0;
+    for (int I = 0; I <= K; ++I) {
+        Pos = IR.find(Marker, Pos);
+        if (Pos == std::string::npos) return {};
+        if (I < K) Pos += Marker.size();
+    }
+    return irScopeFieldAfter(IR, Pos);
+}
+
+/// The scope id metadata node \p Id (e.g. "!18") was itself declared with
+/// -- \p Id's own PARENT scope, so a caller can confirm one scope is not
+/// just different from another but genuinely NESTED inside it.  Empty if
+/// \p Id is empty, undefined, or has no scope field of its own (as a bare
+/// DISubprogram at file scope does not).
+inline std::string irScopeOfId(const std::string& IR, const std::string& Id) {
+    if (Id.empty()) return {};
+    const auto Pos = IR.find("\n" + Id + " = ");
+    // +1: past the leading newline itself, onto the line it starts --
+    // irScopeFieldAfter finds ITS line's end via its own next '\n', which
+    // would otherwise be this same one, at this same position, giving an
+    // empty (zero-width) line and never finding a scope field on it.
+    return Pos == std::string::npos ? std::string() : irScopeFieldAfter(IR, Pos + 1);
+}
+
+/// Whether metadata id \p Id (e.g. "!18") is itself defined as a distinct
+/// DILexicalBlock node -- the DWARF construct issue #19's fix opens so a
+/// shadowing declaration has somewhere strictly innermost to live.
+inline bool irIdIsLexicalBlock(const std::string& IR, const std::string& Id) {
+    return !Id.empty()
+        && IR.find("\n" + Id + " = distinct !DILexicalBlock(") != std::string::npos;
+}
+
 /// Compile Pascal source through the full pipeline and run the resulting
 /// binary.  Returns what the program printed, on both streams, and its exit
 /// status — the ISO runtime checks report on stderr and a test that ignored

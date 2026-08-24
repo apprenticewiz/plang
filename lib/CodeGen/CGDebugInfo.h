@@ -47,9 +47,10 @@ public:
 
     llvm::DIFile* getFile() const { return DebugFile; }
     llvm::DICompileUnit* getCompileUnit() const { return DebugCU; }
-    /// The DISubprogram whatever is currently being emitted belongs to;
+    /// The DISubprogram (ordinarily) or DILexicalBlock (see
+    /// enterShadowScope) whatever is currently being emitted belongs to;
     /// null at module scope or when Debug is unset.
-    llvm::DISubprogram* currentScope() const { return CurScope; }
+    llvm::DILocalScope* currentScope() const { return CurScope; }
 
     /// The scalar DIType for \p T (integer, real, boolean, char, enum,
     /// subrange, or a pointer whose pointee is itself one of those); see
@@ -70,17 +71,23 @@ public:
     /// R3: makes \p NewScope the current scope for as long as the guard
     /// lives, restoring the previous one on destruction -- replaces the
     /// four hand-written save/restore pairs around emitFunctionDef/
-    /// emitMain/emitModuleInitFn/emitModuleLifecycleFn.
+    /// emitMain/emitModuleInitFn/emitModuleLifecycleFn.  \p NewScope is
+    /// always a DISubprogram in practice (every caller passes
+    /// emitFunctionStart's return value straight through), but the
+    /// parameter and Saved are typed DILocalScope so restoring one
+    /// activation's saved scope can put back a DILexicalBlock that
+    /// enterShadowScope opened in an OUTER activation before this one's
+    /// own ScopeGuard was constructed.
     class ScopeGuard {
     public:
-        ScopeGuard(CGDebugInfo& DI, llvm::DISubprogram* NewScope)
+        ScopeGuard(CGDebugInfo& DI, llvm::DILocalScope* NewScope)
             : DI(DI), Saved(DI.CurScope) { DI.CurScope = NewScope; }
         ~ScopeGuard() { DI.CurScope = Saved; }
         ScopeGuard(const ScopeGuard&) = delete;
         ScopeGuard& operator=(const ScopeGuard&) = delete;
     private:
         CGDebugInfo& DI;
-        llvm::DISubprogram* Saved;
+        llvm::DILocalScope* Saved;
     };
 
     /// -g: the single choke point every named Pascal variable, parameter,
@@ -94,6 +101,36 @@ public:
     /// before this split.
     void declareLocal(const std::string& name, const plang::TypeNode* typeNode,
                        llvm::Value* ptr, llvm::Value* debugIndirectPtr);
+
+    /// -g, issue #19: opens a DILexicalBlock nested inside the current
+    /// scope and makes it the current scope from now on, for a caller
+    /// that just found a name collision a flat scope cannot express --
+    /// see CGSymbolTable::defVar, the only caller.  A nested procedure's
+    /// closure-capture loop registers every outer variable it can see
+    /// under its OWN DISubprogram before that procedure's own
+    /// parameters/locals are bound, so a parameter or local spelled the
+    /// same as a captured outer variable collides with it in the same
+    /// flat scope: two DILocalVariables of one name under one
+    /// DISubprogram, which gdb/lldb resolve to the first (the captured,
+    /// outer, WRONG one) regardless of which the current PC is actually
+    /// inside. Reopening the current scope as a lexical block gives the
+    /// shadowing declaration somewhere strictly innermost to live, which
+    /// a debugger prefers over the flat outer one.
+    ///
+    /// Idempotent per activation by construction, not by tracked state:
+    /// once CurScope is a lexical block this is a no-op, so a second,
+    /// differently-named collision in the same activation reuses it
+    /// rather than nesting a second block inside the first -- both
+    /// shadowing declarations are equally "the rest of this activation
+    /// from here on", so one shared block is the correct scope for both,
+    /// not just the simpler one to build. Never explicitly closed: since
+    /// the ONLY way a collision happens is a capture rebound by this same
+    /// activation's own parameter/local, nothing legitimately re-widens
+    /// back to the flat scope afterward, so the block can simply cover
+    /// the rest of the activation -- it is discarded for free when this
+    /// activation's own ScopeGuard restores CurScope to whatever it was
+    /// before this activation began.
+    llvm::DILocalScope* enterShadowScope(plang::SourceLocation Loc);
 
     /// -g: one hook for every statement kind, called from emitStmt -- sets
     /// the IRBuilder's current debug location to \p Loc, scoped to
@@ -123,5 +160,10 @@ private:
     /// share a name.  A Type lives as long as the shared_ptr chain rooted
     /// in the AST/symbol table, which outlives this cache either way.
     std::map<const plang::Type*, llvm::DIType*> debugTypes_;
-    llvm::DISubprogram* CurScope{nullptr};
+    /// DISubprogram, ordinarily; a DILexicalBlock nested inside one for
+    /// the rest of an activation that hit the shadowing collision
+    /// enterShadowScope exists for.  DILocalScope is the common base
+    /// DILocation::get and createAutoVariable/createLexicalBlock's Scope
+    /// parameter both already accept.
+    llvm::DILocalScope* CurScope{nullptr};
 };

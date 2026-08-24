@@ -18,6 +18,24 @@ void CGSymbolTable::defVar(const std::string& name, llvm::Value* ptr, llvm::Type
             ShadowedConsts.back()[Key] = It->second;
         Consts.erase(It);
     }
+    // Issue #19: a name already bound in THIS scope frame, about to be
+    // overwritten, means a nested procedure's own parameter or local
+    // shares a captured outer variable's spelling.  The closure-capture
+    // loop (CodeGenProcs.cpp) binds every outer variable this activation
+    // can see into this same Scopes.back() before this activation's own
+    // parameters/locals are bound, and an ordinary same-block
+    // redeclaration is caught earlier, by Sema -- so this is the only
+    // shape that reaches here.  The map write below is already correct
+    // either way (findVar always answers with whichever entry was written
+    // last), but without this, the two DILocalVariables declareLocal
+    // builds -- one for the capture, one for the shadowing declaration --
+    // would land flatly under the same DISubprogram, and a debugger
+    // resolving unqualified `x` prefers the first (the captured, outer,
+    // WRONG one) regardless of which the current PC is actually inside.
+    // Opening a lexical block for the rest of this activation gives the
+    // shadowing declaration somewhere strictly innermost to live instead.
+    if (Scopes.back().count(Key))
+        DbgInfo.enterShadowScope(typeNode ? typeNode->Loc : plang::SourceLocation{});
     Scopes.back()[Key] = VarEntry{ ptr, type, typeNode, name };
 
     DbgInfo.declareLocal(name, typeNode, ptr, debugIndirectPtr);
