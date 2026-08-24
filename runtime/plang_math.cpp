@@ -22,6 +22,7 @@ extern "C" {
 
 [[noreturn]] void plang_err_ipow_negative(int64_t E);
 [[noreturn]] void plang_err_ipow_zero_zero(void);
+[[noreturn]] void plang_err_abs_overflow(void);
 
 // ---- Floating-point math (double → double) ----
 
@@ -35,7 +36,15 @@ double plang_abs_real(double X) { return std::fabs(X); }
 
 // ---- Integer math (i64 → i64) ----
 
-int64_t plang_abs_int(int64_t X) { return X < 0 ? -X : X; }
+/// ISO §6.6.6.2: abs(x) is x's magnitude, but int64_t's range is asymmetric
+/// -- minint is -2^63, which has no positive counterpart at +2^63 -- so
+/// there is exactly one input this cannot answer.  Computing '-X' for it
+/// anyway is signed-overflow UB and, in practice, silently returns a second
+/// wrong (and still negative) number, so trap on it instead.
+int64_t plang_abs_int(int64_t X) {
+    if (X == INT64_MIN) plang_err_abs_overflow();
+    return X < 0 ? -X : X;
+}
 
 /// EP §6.8.3.2: i pow j, where both are integers.  The result type follows the
 /// base, so this cannot go through std::pow: past 2^53 a double no longer holds
