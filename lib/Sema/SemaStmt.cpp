@@ -788,10 +788,24 @@ void Sema::checkCallStmt(const CallStmt& S) {
             const bool ToSchema = Pointee && Pointee->Kind == TypeKind::Schema;
             for (size_t I = 1; I < S.Args.size(); ++I) {
                 auto At = checkExpr(*S.Args[I]);
-                if (ToSchema && !At->isError() && !At->isOrdinal()
-                        && I - 1 < Pointee->SchemaDiscs.size())
-                    error(S.Args[I]->Loc, diag::err_schema_new_disc_type,
-                          {Pointee->SchemaDiscs[I - 1].Name, Pointee->SchemaName});
+                if (ToSchema && !At->isError() && I - 1 < Pointee->SchemaDiscs.size()) {
+                    const auto& Disc = Pointee->SchemaDiscs[I - 1];
+                    // The argument must be ordinal at all -- and, beyond that,
+                    // assignment-compatible with THIS discriminant's own
+                    // declared type, the same rule an ordinary assignment to
+                    // it enforces.  Without the second check, `new(b, 42)` for
+                    // `Box(c: boolean)` passed isOrdinal() on plain `integer`
+                    // and reached codegen, which truncated 42 to its low bit
+                    // and stored it -- a silent wrong answer where an ordinary
+                    // `x := 42` for a boolean `x` already reports an error.
+                    if (!At->isOrdinal())
+                        error(S.Args[I]->Loc, diag::err_schema_new_disc_type,
+                              {Disc.Name, Pointee->SchemaName});
+                    else if (Disc.Ty && !Disc.Ty->isError()
+                                 && !isAssignCompatible(*Disc.Ty, *At))
+                        error(S.Args[I]->Loc, diag::err_assign_mismatch,
+                              {At->Name, Disc.Ty->Name});
+                }
             }
             if (ToSchema && S.Args.size() - 1 != Pointee->SchemaDiscs.size())
                 error(S.Loc, diag::err_schema_new_needs_discs,
