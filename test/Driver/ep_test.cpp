@@ -4855,6 +4855,61 @@ TEST(EP7Schema, NewSizesFromTheDiscriminantNotFromASameNamedLocalInTheCaller) {
     EXPECT_EQ(R.Stdout, "");
 }
 
+// A component whole-value copy (CGAssign.cpp's ExtentVaries branch) sized its
+// memcpy from the TARGET's discriminants alone and applied it to the source
+// address with no check the two actually agree, unlike the whole-object copy
+// a few lines above it in the same function -- `r^.x := q^.x` with r sized
+// from a much larger discriminant than q read far past q's small allocation,
+// a heap over-read/segfault rather than the clean trap the whole-object case
+// already gives. This is the nested-schema-instance-field shape from the
+// bug report.
+TEST(EP7Schema, WholeValueCopyOfASchemaInstanceFieldChecksDiscriminantsMatch) {
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type inner(m: integer) = array[1..m] of integer;\n"
+        "     outer(n: integer) = record\n"
+        "       a: array[1..n] of integer;\n"
+        "       x: inner(n);\n"
+        "       k: integer\n"
+        "     end;\n"
+        "var q, r: ^outer;\n"
+        "begin\n"
+        "  new(q, 1); new(r, 100000000);\n"
+        "  q^.x[1] := 42; r^.k := 777;\n"
+        "  r^.x := q^.x;\n"
+        "  writeln(r^.k)\n"
+        "end.\n", kEP);
+    EXPECT_NE(R.ExitCode, 0);
+    EXPECT_NE(R.Stderr.find("schema discriminant m differs between the "
+                             "target (100000000) and the value (1)"),
+              std::string::npos) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "");
+}
+
+// Same defect, the plain-array-field shape the bug report also named: the
+// component itself is an ordinary array, not a nested schema instance, but
+// its extent still varies with the enclosing schema's own discriminant.
+TEST(EP7Schema, WholeValueCopyOfASchemaArrayFieldChecksDiscriminantsMatch) {
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type outer(n: integer) = record\n"
+        "       a: array[1..n] of integer;\n"
+        "       k: integer\n"
+        "     end;\n"
+        "var q, r: ^outer;\n"
+        "begin\n"
+        "  new(q, 1); new(r, 100000000);\n"
+        "  q^.a[1] := 42; r^.k := 777;\n"
+        "  r^.a := q^.a;\n"
+        "  writeln(r^.k)\n"
+        "end.\n", kEP);
+    EXPECT_NE(R.ExitCode, 0);
+    EXPECT_NE(R.Stderr.find("schema discriminant n differs between the "
+                             "target (100000000) and the value (1)"),
+              std::string::npos) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "");
+}
+
 // EP §6.8.7 structured value constructors were implemented for the cases that
 // work and never given their checking.  Three findings, one cause.
 TEST(EPConstructor, ARecordComponentValueMustFitItsField) {
