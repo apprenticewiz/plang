@@ -386,6 +386,15 @@ private:
     /// if the body cannot be given a run-time representation.
     [[nodiscard]] std::shared_ptr<Type> resolveUndiscriminatedSchema(
         Symbol& Sym, const NamedTypeNode& N);
+    /// EP §6.4.7: resolves Sym's discriminant parameter type names into
+    /// SchemaDeclParams (and records SchemaBodyNode/DeclLoc), from the
+    /// TypeDef stashed at SchemaDeclTypeDef.  Idempotent -- guarded by
+    /// SchemaParamsResolved -- because this runs both from an explicit sweep
+    /// over every schema in the block (Sema.cpp) and on demand from
+    /// SchemaTypeNode resolution and resolveUndiscriminatedSchema below,
+    /// whichever reaches a given schema first.  See Sema.cpp's Phase 3b(ii)
+    /// for why a fixed position in the phase order cannot serve both needs.
+    void resolveSchemaParams(Symbol& Sym);
 
     /// EP §6.4.3.3: `string` is a schema with one discriminant, its capacity.
     /// A bare `string` denotes it where any bare schema-name may be written --

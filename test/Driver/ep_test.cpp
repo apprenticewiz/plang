@@ -4133,6 +4133,80 @@ TEST(EP7Schema, APointerMayNameASchemaDeclaredLaterInTheSamePart) {
     EXPECT_EQ(Rev.Stdout, Fwd.Stdout);
 }
 
+TEST(EP7Schema, EnumDiscriminantDeclaredBeforeTheSchemaThatUsesIt) {
+    // #17: a schema discriminant typed with a user-declared ordinal type was
+    // rejected as a forward reference NO MATTER where its type was declared.
+    // Sema resolved every schema's discriminant type names in a pass that ran
+    // before ordinary types (enums, subranges, aliases) got their real
+    // bodies, so a discriminant naming one always found Phase 3a's
+    // Kind=Error stub and was refused as "used here before its declaration" --
+    // even here, where Color is declared textually BEFORE Box, exactly the
+    // order ISO §6.2.1(k) requires to compile.  Only built-in keyword
+    // discriminant types (integer, real, boolean, char) were immune, since
+    // resolveNamed answers those without a symbol-table lookup at all.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type Color = (Red, Green, Blue);\n"
+        "     Box(c: Color) = record x: integer end;\n"
+        "var b: Box(Green);\n"
+        "begin b.x := 5; writeln(ord(Green):1, ' ', b.x:1) end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "1 5\n");
+}
+
+TEST(EP7Schema, NamedSubrangeDiscriminantDeclaredBeforeTheSchemaThatUsesIt) {
+    // #17's other half: a discriminant typed with a NAMED subrange hit the
+    // identical bug, for the identical reason -- Digit is exactly as
+    // "ordinary" a type as Color above, and got exactly the same stub.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type Digit = 1..9;\n"
+        "     Box(d: Digit) = record x: integer end;\n"
+        "var b: Box(7);\n"
+        "begin b.x := 42; writeln(b.x:1) end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "42\n");
+}
+
+TEST(EP7Schema, OrdinaryTypeAliasInstantiatingASchemaStillSeesItsDiscriminants) {
+    // Guards the #17 fix against the regression it could so easily have
+    // been.  An ORDINARY type-alias whose denoter directly instantiates a
+    // schema (`MyBox = Box(5)`) resolves through Sema.cpp's Phase 3b -- the
+    // very loop that now runs BEFORE schema discriminants are swept in Phase
+    // 3b(ii).  A fix that simply moved that sweep to run after Phase 3b,
+    // without ALSO making resolveSchemaParams callable on demand, would have
+    // left Box's SchemaDeclParams reading back empty right here -- this
+    // works today, pre-#17-fix, only because the discriminant is built-in
+    // (`integer`, needing no symbol lookup); rejecting even that would have
+    // been a correctness regression, not a fix.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type Box(c: integer) = record x: integer end;\n"
+        "     MyBox = Box(5);\n"
+        "var b: MyBox;\n"
+        "begin b.x := 9; writeln(b.x:1) end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "9\n");
+}
+
+TEST(EP7Schema, AGenuineForwardTypeReferenceOutsideASchemaStillFails) {
+    // The #17 fix widens exactly ONE thing: WHEN a schema's discriminant
+    // type names are resolved, relative to ordinary types.  It must not
+    // touch resolveNamed's forward-reference check itself (ISO §6.2.1(k)) --
+    // an ordinary type naming another ordinary type declared LATER in the
+    // same type-definition-part, outside of any schema or pointer domain,
+    // must still be refused exactly as it always was.
+    auto R = compileAndRun(
+        "program p(output);\n"
+        "type t = record f: u end;\n"
+        "     u = integer;\n"
+        "var v: t;\n"
+        "begin writeln('unreachable') end.\n", kEP);
+    EXPECT_NE(R.ExitCode, 0);
+    EXPECT_NE(R.Stderr.find("used here before its declaration"),
+              std::string::npos) << R.Stderr;
+}
+
 TEST(EP7Schema, ANestedProcedureKeepsACapturedSchemaFormalsDiscriminants) {
     // EP §6.4.7.  A procedure nested inside one that received a schema formal
     // reaches it through the static link, which carries ADDRESSES -- and the

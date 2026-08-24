@@ -568,6 +568,12 @@ std::shared_ptr<Type> Sema::resolveTypeImpl(const TypeNode& Node) {
             error(Node.Loc, diag::err_schema_not_defined, {N->Name});
             return TyErr;
         }
+        // On-demand resolution: an ordinary type-alias in the same block may
+        // instantiate a schema (`type MyBox = Box(5);`), which resolves
+        // during Sema.cpp's Phase 3b, before Phase 3b(ii)'s sweep over every
+        // schema gets here.  A no-op if some earlier caller already resolved
+        // Sym's discriminant params.
+        resolveSchemaParams(*Sym);
         // Check discriminant count.
         if (N->Actuals.size() != Sym->SchemaDeclParams.size()) {
             auto ExpStr = std::to_string(Sym->SchemaDeclParams.size());
@@ -837,8 +843,40 @@ std::shared_ptr<Type> Sema::stringSchemaType() {
     return T;
 }
 
+void Sema::resolveSchemaParams(Symbol& Sym) {
+    // Idempotent: called both from an explicit sweep over every schema in
+    // the block (Sema.cpp's Phase 3b(ii)) and on demand from here below and
+    // from the SchemaTypeNode case in resolveTypeImpl, whichever reaches a
+    // given schema first.  See Sema.cpp's Phase 3b(ii) comment for why no
+    // single fixed position in the phase order can serve every caller.
+    if (Sym.SchemaParamsResolved) return;
+    Sym.SchemaParamsResolved = true;
+    const TypeDef* Td = Sym.SchemaDeclTypeDef;
+    if (!Td) return; // defensive: Phase 3a sets this for every Schema symbol
+    for (const auto& Spec : Td->SchemaParams) {
+        NamedTypeNode NtTmp;
+        NtTmp.Loc  = Td->Type->Loc;
+        NtTmp.Name = Spec.TypeName;
+        auto ParamTy = resolveNamed(NtTmp);
+        for (const auto& ParamName : Spec.Names) {
+            Symbol::SchemaParam P;
+            P.Name = ParamName;
+            P.Ty   = ParamTy;
+            Sym.SchemaDeclParams.push_back(std::move(P));
+        }
+    }
+    Sym.SchemaBodyNode = Td->Type.get();
+    Sym.DeclLoc        = Td->Type->Loc;
+}
+
 std::shared_ptr<Type> Sema::resolveUndiscriminatedSchema(Symbol& Sym,
                                                          const NamedTypeNode& N) {
+    // On-demand resolution: a pointer's domain type (ISO §6.2.2.9) or a
+    // formal parameter's type (EP §6.7.3.7) may name this schema before
+    // Sema.cpp's Phase 3b(ii) sweep reaches it -- e.g. `type pl = ^t;
+    // t(n: integer) = ...`, resolved during Phase 3b, well before that sweep
+    // runs at all.  A no-op if some earlier caller already resolved it.
+    resolveSchemaParams(Sym);
     if (!Sym.SchemaBodyNode) return TyErr;
 
     // One type object per schema definition, so that two spellings of `^vec`

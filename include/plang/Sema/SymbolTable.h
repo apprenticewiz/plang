@@ -7,6 +7,7 @@
 
 namespace plang { struct TypeNode; } // forward declaration for SchemaBodyNode
 namespace plang { struct ProcDecl; } // forward declaration for Symbol::Decl
+namespace plang { struct TypeDef;  } // forward declaration for Symbol::SchemaDeclTypeDef
 
 #include <concepts>
 #include <memory>
@@ -164,6 +165,18 @@ struct Symbol {
     std::vector<SchemaParam> SchemaDeclParams;
     /// Pointer to the schema body TypeNode in the AST (borrowed; not owned).
     const TypeNode* SchemaBodyNode{nullptr};
+    /// Pointer to the AST TypeDef this schema was declared from (borrowed;
+    /// not owned; same lifetime as SchemaBodyNode above).  Set as soon as the
+    /// symbol is defined, so Sema::resolveSchemaParams can resolve
+    /// SchemaDeclParams and SchemaBodyNode from it lazily, on demand, rather
+    /// than requiring a fixed position in the block-checking phase order.
+    const TypeDef* SchemaDeclTypeDef{nullptr};
+    /// Set once Sema::resolveSchemaParams has populated SchemaDeclParams (and
+    /// SchemaBodyNode) for this schema, so a later call is a no-op.  A schema
+    /// may be resolved on demand -- e.g. by a same-block ordinary type-alias
+    /// instantiating it, or by a pointer naming it as a domain type -- before
+    /// the explicit sweep over every schema in the block reaches it.
+    bool SchemaParamsResolved{false};
 };
 
 // ---------------------------------------------------------------------------
