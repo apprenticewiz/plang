@@ -5407,3 +5407,83 @@ TEST(EP7Schema, DeclaringASchemaParameterDoesNotResizeAnInstanceOfIt) {
     ASSERT_EQ(WithParam.ExitCode, 0) << WithParam.Stderr;
     EXPECT_EQ(WithParam.Stdout, Plain.Stdout);
 }
+
+// #18: pushWithScope exposed every schema discriminant inside a with-body as
+// a hardcoded TyInt, in both the branch below (an undiscriminated schema
+// reached through a pointer) and the SchemaInstance branch further down --
+// even though direct field access (`b^.c`, via checkField) already read the
+// discriminant's real declared type.  A non-integer discriminant compared
+// inside the with-body then failed with e.g. "cannot compare 'integer' with
+// 'char'", though the identical comparison spelled `b^.c = 'A'` outside the
+// with-body was accepted.  This is the issue's own reproduction.
+TEST(EP7Schema, WithOverAnUndiscriminatedSchemaPointerRespectsACharDiscriminantsType) {
+    auto R = compileAndRun(
+        "program p;\n"
+        "type Box(c: char) = record x: integer end;\n"
+        "var b: ^Box;\n"
+        "begin\n"
+        "  new(b, 'A');\n"
+        "  with b^ do\n"
+        "    if c = 'A' then writeln('A')\n"
+        "end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "A\n");
+}
+
+// #18: same branch, an enum-typed discriminant -- the issue calls this out
+// by name alongside boolean as also affected, so char alone is not enough.
+TEST(EP7Schema, WithOverAnUndiscriminatedSchemaPointerRespectsAnEnumDiscriminantsType) {
+    auto R = compileAndRun(
+        "program p;\n"
+        "type Color = (Red, Green, Blue);\n"
+        "     Box(c: Color) = record x: integer end;\n"
+        "var b: ^Box;\n"
+        "begin\n"
+        "  new(b, Green);\n"
+        "  with b^ do\n"
+        "    if c = Green then writeln(ord(c):1)\n"
+        "end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "1\n");
+}
+
+// #18: the SchemaInstance branch -- `with` over a plain, statically-declared
+// schema-instance variable (no pointer involved).  This branch had a second,
+// subtler part of the same bug: even after DS.Ty stopped being hardcoded in
+// pushWithScope, checkIdent's separate ActiveSchemaBindings_ shortcut (which
+// pushWithScope's SchemaInstance branch populates, for constBound folding
+// inside the with-body) answered every discriminant identifier's TYPE as
+// TyInt too, unconditionally, before ever consulting the symbol table --
+// so `if c then ...` for a boolean discriminant still failed with "condition
+// of 'if' must be boolean, got 'integer'" until checkIdent was also taught to
+// prefer the with-scope Const symbol's real type when one is in scope.
+TEST(EP7Schema, WithOverASchemaInstanceRespectsABooleanDiscriminantsType) {
+    auto R = compileAndRun(
+        "program p;\n"
+        "type Box(c: boolean) = record x: integer end;\n"
+        "var b: Box(true);\n"
+        "begin\n"
+        "  with b do\n"
+        "    if c then writeln('true') else writeln('false')\n"
+        "end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "true\n");
+}
+
+// #18: the SchemaInstance branch again, an enum-typed discriminant -- the
+// same double coverage (checkField's fallback idiom replicated at the
+// pushWithScope site, and checkIdent's ActiveSchemaBindings_ shortcut) as
+// the boolean case above, for the issue's other named example type.
+TEST(EP7Schema, WithOverASchemaInstanceRespectsAnEnumDiscriminantsType) {
+    auto R = compileAndRun(
+        "program p;\n"
+        "type Color = (Red, Green, Blue);\n"
+        "     Box(c: Color) = record x: integer end;\n"
+        "var b: Box(Green);\n"
+        "begin\n"
+        "  with b do\n"
+        "    if c = Green then writeln(ord(c):1)\n"
+        "end.\n", kEP);
+    ASSERT_EQ(R.ExitCode, 0) << R.Stderr;
+    EXPECT_EQ(R.Stdout, "1\n");
+}
