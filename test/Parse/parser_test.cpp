@@ -1227,6 +1227,36 @@ TEST(ParserErrors, IntegerOutOfRange) {
     EXPECT_EQ(parse("program p; var x : integer; begin x := 10000000000000000000 end."), nullptr);
 }
 
+TEST(ParserErrors, DeeplyNestedParensReportOneDiagnosticNotACrash) {
+    // Issue #13: parseFactor's LeftParen case recurses through parseExpression
+    // -> parseSimpleExpr -> parseTerm -> parsePower -> parseFactor with no
+    // depth limit, so before this test existed, deeply nested parens exhausted
+    // the real C++ stack instead of failing cleanly.  1000 levels is well past
+    // the 500-deep ceiling (MaxExprDepth, ParseExpr.cpp) while staying fast to
+    // build and parse in-process; the actual crash threshold (~20,000) is
+    // exercised end-to-end, under the real compiler's real stack, by
+    // ParserRobustness.DeeplyNestedParenthesesDoNotCrashTheCompiler in
+    // driver_test.cpp.
+    std::string Src = "program p; var x : integer; begin x := ";
+    Src += std::string(1000, '(');
+    Src += "1";
+    Src += std::string(1000, ')');
+    Src += " end.";
+    EXPECT_EQ(parse(Src), nullptr);
+    // The depth-limit diagnostic fires first, and the diagnostic count stays
+    // small and independent of nesting depth: ExprDepthLimitHit suppresses
+    // the "expected )" cascade that unwinding 500 stacked '(' frames would
+    // otherwise produce on the way out -- one per frame, i.e. ~500 of them
+    // without the suppression, not the handful seen here.  What is left is
+    // the ordinary, bounded fallout of one expression failing to consume its
+    // input: the enclosing compound-statement, program, and end-of-file check
+    // each report once that they did not see what they expected either.
+    ASSERT_FALSE(parseDiags.diagnostics().empty());
+    EXPECT_NE(parseDiags.diagnostics().front().Message.find("nested too deeply"),
+              std::string::npos) << parseDiags.diagnostics().front().Message;
+    EXPECT_LE(parseDiags.diagnostics().size(), 5u);
+}
+
 TEST(ParserErrors, InvalidTypePosition) {
     // A number where a type expression is expected is a syntax error.
     EXPECT_EQ(parse("program p; var x : 42; begin end."), nullptr);

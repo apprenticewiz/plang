@@ -487,6 +487,50 @@ TEST(Driver, MissingInputFileCorrectMessage) {
 }
 
 // ---------------------------------------------------------------------------
+// Parser robustness against pathological input
+//
+// Issue #13: parseFactor's '(' case parsed a parenthesized expression by
+// calling straight back into parseExpression, and the whole
+// parseExpression/parseSimpleExpr/parseTerm/parsePower/parseFactor cycle had
+// no recursion-depth limit anywhere in it, so a source file nesting parens
+// deeply enough drove the real C++ call stack instead of producing a
+// diagnostic.  This needs the real compiled binary running under its own real
+// (default, 8MB) stack -- an in-process unit test constructing a Parser
+// directly cannot reproduce a stack *overflow* the way an actual child
+// process with its own stack can.  See also
+// ParserErrors.DeeplyNestedParensReportOneDiagnosticNotACrash in
+// parser_test.cpp, which checks the same fix's AST-level behavior (nullptr,
+// one diagnostic) fast and in-process at a depth well short of the crash.
+// ---------------------------------------------------------------------------
+
+TEST(ParserRobustness, DeeplyNestedParenthesesDoNotCrashTheCompiler) {
+    // ~20,000 levels is the issue's own reproduction: 5,000-10,000 still
+    // parsed fine before this fix; ~20,000+ reliably overflowed the stack.
+    // Built programmatically -- nobody should have to look at 20,000 parens
+    // to read this test.
+    constexpr int Depth = 20000;
+    std::string Src = "program p;\nvar x: integer;\nbegin x := ";
+    Src += std::string(Depth, '(');
+    Src += "1";
+    Src += std::string(Depth, ')');
+    Src += " end.\n";
+
+    const std::string Dir  = makeTempDir();
+    const std::string Path = Dir + "/deepnest.pas";
+    writeFileAt(Path, Src);
+    auto [Rc, Out] = runPlangRc(Path);
+    removeTempDir(Dir);
+
+    // A crash surfaces through the intermediate shell as an exit code in the
+    // 128+signal range (e.g. 139 for SIGSEGV), not the plain 1 a diagnosed
+    // compile failure exits with -- so an exact match is what actually proves
+    // this is a controlled failure and not a crash that happens to also be
+    // "nonzero".
+    EXPECT_EQ(Rc, 1) << Out;
+    EXPECT_NE(Out.find("nested too deeply"), std::string::npos) << Out;
+}
+
+// ---------------------------------------------------------------------------
 // Diagnostic language
 //
 // qps_ploc is not a language: it is the English wrapped in [! !], generated

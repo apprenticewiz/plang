@@ -47,6 +47,30 @@ private:
     DiagnosticsEngine&       Diags;       // shared diagnostic sink
     int                      ErrorCount{}; // errors emitted by this parse pass
 
+    // Live activations of parseFactor.  Every recursive re-entry into
+    // expression parsing -- '(' via parseExpression, 'not' directly -- funnels
+    // through parseFactor, so bounding activations there (see ExprDepthScope
+    // and MaxExprDepth in ParseExpr.cpp) bounds the whole mutually-recursive
+    // parseExpression/parseSimpleExpr/parseTerm/parsePower/parseFactor cycle
+    // against adversarial input like x := ((((...(1)...)))), which used to
+    // exhaust the real C++ stack instead of failing with a diagnostic.
+    unsigned                 ExprDepth{};
+    // Set once the "too deeply nested" diagnostic has fired for the chain of
+    // parseFactor activations currently unwinding, so that the burst of
+    // "expected )" diagnostics each stacked '(' would otherwise report on the
+    // way out collapses to the single diagnostic that actually explains the
+    // failure.  Cleared by ExprDepthScope when ExprDepth returns to 0.
+    bool                     ExprDepthLimitHit{};
+
+    // RAII bump/unbump of ExprDepth across one parseFactor activation.
+    struct ExprDepthScope {
+        unsigned& N;
+        bool&     LimitHit;
+        explicit ExprDepthScope(unsigned& Counter, bool& LimitHitFlag)
+            : N(Counter), LimitHit(LimitHitFlag) { ++N; }
+        ~ExprDepthScope() { if (--N == 0) LimitHit = false; }
+    };
+
     // Appends an error diagnostic to the shared vector.
     void emitError(SourceLocation Loc, std::string Msg);
     void emitError(SourceLocation Loc, DiagID ID,
