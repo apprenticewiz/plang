@@ -385,21 +385,16 @@ jobs:
       # -O1/-O2/-O3 axis below: both known instances of this bug class are
       # allocation-size/layout defects independent of optimization level.
       #
-      # lit only, no GTest step: codegen_test.cpp, ep_test.cpp, and
-      # module_test.cpp (issue #34) have all migrated to
-      # test-lit/{CodeGen,EP,Module}/ -- single coarse-grained `lit-*` CTest
-      # entries that `ctest -R` can no longer subset by keyword, so this
-      # subset is re-run directly through `lit --filter` instead. The one
-      # remaining GTest binary, driver_test, has zero suites matching this
-      # filter (confirmed directly, not assumed) -- a `ctest -R` step here
-      # would be a silently-defunct, permanently-green no-op, so there isn't
-      # one; when driver_test.cpp migrates too (issue #34's last phase), grow
-      # this step's directory list to include Driver, same as CodeGen/EP/
-      # Module each did when they migrated.
+      # lit only, no GTest step: codegen_test.cpp, ep_test.cpp,
+      # module_test.cpp, and driver_test.cpp (issue #34) have all migrated to
+      # test-lit/{CodeGen,EP,Module,Driver}/ -- single coarse-grained `lit-*`
+      # CTest entries that `ctest -R` can no longer subset by keyword, so this
+      # subset is re-run directly through `lit --filter` instead. No GTest
+      # binary remains in test/Driver/ at all.
       - name: Test schema/variant/pointer/string subset under guardheap (lit)
         run: |
           cd build/test-lit
-          lit -sv --filter='Schema|VariantRecord|VariantPart|ConformantArray|Shadowing|Storage|String|Substr|Pointer' CodeGen EP Module
+          lit -sv --filter='Schema|VariantRecord|VariantPart|ConformantArray|Shadowing|Storage|String|Substr|Pointer' CodeGen EP Module Driver
         env:
           PLANG_TEST_RUN_WRAPPER: "bash ${{ github.workspace }}/test/tools/run-under-guardheap.sh"
 
