@@ -78,10 +78,10 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 PLANG_BIN = REPO_ROOT / "build" / "bin" / "plang"
 
 # suite key -> (source .cpp, output test-lit/ directory). codegen_test.cpp
-# is gone (deleted in PR #38); module_test.cpp's entry lands in Phase 3's
-# second PR, once compileTwoFiles/compileThreeFiles support is added.
+# and ep_test.cpp are gone (deleted in PRs #38/#39).
 SUITES = {
     "ep": (REPO_ROOT / "test" / "Driver" / "ep_test.cpp", REPO_ROOT / "test-lit" / "EP"),
+    "module": (REPO_ROOT / "test" / "Driver" / "module_test.cpp", REPO_ROOT / "test-lit" / "Module"),
 }
 
 
@@ -192,18 +192,50 @@ def decode_concatenated_strings(s: str) -> str:
 # before extract_call_args ever runs.
 KEP_PLUS_RE = re.compile(r'^(?:std::string\(kEP\)|kEP)\s*\+\s*(.+)$', re.S)
 
-CALL_RE = re.compile(r"(compileAndRun|compileAndEmitIR)\(")
+CALL_RE = re.compile(r"(compileAndRun|compileAndEmitIR|compileTwoFiles|compileThreeFiles)\(")
+
+# compileTwoFiles(ModSrc, ProgSrc, ExtraFlags="") / compileThreeFiles(ModASrc,
+# ModBSrc, ProgSrc, ExtraFlags="") -- how many leading arguments are SOURCE
+# text (as opposed to the trailing, optional ExtraFlags).
+MODULE_CALL_SOURCE_COUNT = {"compileTwoFiles": 2, "compileThreeFiles": 3}
+
+
+def resolve_flags_arg(flag_arg: str) -> str | None:
+    """Shared by every call kind: kEP -> "-std=iso10206", a plain "..."
+    literal used verbatim, kEP + "literal" / std::string(kEP) + "literal"
+    resolved the same way with the literal suffix appended (see
+    KEP_PLUS_RE), anything else raises rather than guessing."""
+    flags: str | None
+    if flag_arg == "kEP":
+        flags = "-std=iso10206"
+    elif flag_arg.startswith('"'):
+        flags = decode_concatenated_strings(flag_arg)
+        if "\n" in flags:
+            raise ValueError(f"multi-line flags argument: {flags!r}")
+    elif (m := KEP_PLUS_RE.match(flag_arg)):
+        suffix = decode_concatenated_strings(m.group(1).strip())
+        if "\n" in suffix:
+            raise ValueError(f"multi-line flags argument: {suffix!r}")
+        flags = "-std=iso10206" + suffix
+    else:
+        raise ValueError(f"unrecognized (computed?) flags argument: {flag_arg!r}")
+    return flags if flags != "" else None
 
 
 def extract_call_args(body: str):
-    """Find the first compileAndRun/compileAndEmitIR( call and return
-    (call_kind, source_text, flags_text_or_None, remainder_after_call).
+    """Find the first compileAndRun/compileAndEmitIR/compileTwoFiles/
+    compileThreeFiles( call and return (call_kind, source_text_or_list,
+    flags_text_or_None, stdin_text_or_None, remainder_after_call).
     flags_text is literal compiler-flags text (kEP resolved), never a
     %plang-vs-%plang_ep substitution choice -- see module docstring.
-    Raises if a 3rd (StdinText) argument is present (needs manual
-    conversion -- piping multi-line stdin content through lit's internal
-    shell safely is not worth the mechanical-conversion complexity for the
-    handful of cases that need it)."""
+    For compileTwoFiles/compileThreeFiles, source_text is a LIST of 2 or 3
+    decoded sources (module chunk(s) then the program) and stdin_text is
+    always None -- DriverHarness.h's TwoFileResult helpers take no stdin
+    argument at all. For compileAndRun/compileAndEmitIR, raises if a 3rd
+    (StdinText) argument is present (needs manual conversion -- piping
+    multi-line stdin content through lit's internal shell safely is not
+    worth the mechanical-conversion complexity for the handful of cases
+    that need it)."""
     m = CALL_RE.search(body)
     if not m:
         return None
@@ -234,7 +266,16 @@ def extract_call_args(body: str):
         raise ValueError("unterminated call")
 
     if not args:
-        raise ValueError("compileAndRun/compileAndEmitIR with no arguments")
+        raise ValueError(f"{call_kind} with no arguments")
+
+    if call_kind in MODULE_CALL_SOURCE_COUNT:
+        n_src = MODULE_CALL_SOURCE_COUNT[call_kind]
+        if len(args) not in (n_src, n_src + 1):
+            raise ValueError(f"{call_kind} with unexpected argument count: {len(args)}")
+        sources = [decode_concatenated_strings(a) for a in args[:n_src]]
+        flags = resolve_flags_arg(args[n_src].strip()) if len(args) == n_src + 1 else None
+        return call_kind, sources, flags, None, body[i:]
+
     src = decode_concatenated_strings(args[0])
 
     if len(args) >= 4:
@@ -242,22 +283,7 @@ def extract_call_args(body: str):
 
     flags = None
     if len(args) >= 2:
-        flag_arg = args[1].strip()
-        if flag_arg == "kEP":
-            flags = "-std=iso10206"
-        elif flag_arg.startswith('"'):
-            flags = decode_concatenated_strings(flag_arg)
-            if "\n" in flags:
-                raise ValueError(f"multi-line flags argument: {flags!r}")
-        elif (m := KEP_PLUS_RE.match(flag_arg)):
-            suffix = decode_concatenated_strings(m.group(1).strip())
-            if "\n" in suffix:
-                raise ValueError(f"multi-line flags argument: {suffix!r}")
-            flags = "-std=iso10206" + suffix
-        else:
-            raise ValueError(f"unrecognized (computed?) flags argument: {flag_arg!r}")
-        if flags == "":
-            flags = None
+        flags = resolve_flags_arg(args[1].strip())
 
     stdin_text = None
     if len(args) == 3:
@@ -313,25 +339,73 @@ def base_and_flags(suite: str, flags: str | None) -> tuple[str, str]:
     return "%plang", flags_prefix(flags)
 
 
-def compile_lines_and_body(base: str, fp: str, src: str, stdin_text: str | None):
+def module_compile_lines_and_body(base: str, fp: str, sources: list[str]):
+    """The compileTwoFiles/compileThreeFiles shape: 2 or 3 source chunks,
+    the last always the program, the rest module(s) compiled separately
+    with -c and linked in with -I. Chunk names (mod.pas/prog.pas or
+    moda.pas/modb.pas/prog.pas) are copied verbatim from DriverHarness.h's
+    own convention -- confirmed by reading lib/Frontend/Frontend.cpp
+    directly that a module's .pmi filename is always derived from its
+    DECLARED name, never the source filename, so these names are entirely
+    arbitrary and never need to match anything inside the source text."""
+    if len(sources) == 2:
+        chunk_names = ["mod.pas", "prog.pas"]
+    elif len(sources) == 3:
+        chunk_names = ["moda.pas", "modb.pas", "prog.pas"]
+    else:
+        raise ValueError(f"unexpected module source count: {len(sources)}")
+    mod_chunks, prog_chunk = chunk_names[:-1], chunk_names[-1]
+    compile_line = "RUN: split-file %s %t.dir\n"
+    for chunk in mod_chunks:
+        obj = chunk[: -len(".pas")] + ".o"
+        compile_line += f"RUN: {base} {fp}-c %t.dir/{chunk} -o %t.dir/{obj}\n"
+    obj_args = " ".join(f"%t.dir/{c[: -len('.pas')]}.o" for c in mod_chunks)
+    compile_line += f"RUN: {base} {fp}-I%t.dir %t.dir/{prog_chunk} {obj_args} -o %t\n"
+    body = "\n".join(
+        f"//--- {chunk}\n" + src.rstrip("\n") + "\n"
+        for chunk, src in zip(chunk_names, sources)
+    )
+    return compile_line, "%run %t", body
+
+
+# A program declaring a `module` writes a .pmi beside whatever file the
+# compiler actually compiles (confirmed by reading lib/Frontend/Frontend.cpp
+# directly) -- compiling %s in place would write that .pmi into the
+# checked-in source tree itself, on every test run. Matched module-first,
+# case-insensitive (Pascal keywords are), multiline so it fires wherever a
+# unit boundary ("end.\n") is followed by another "module" declaration, not
+# just at the very start of the source.
+DECLARES_MODULE_RE = re.compile(r"(?im)^\s*module\b")
+
+
+def compile_lines_and_body(base: str, fp: str, src, stdin_text: str | None):
     """Returns (compile_run_line, exec_prefix, body_text) for a case that
     compiles %s and then runs the result via %run (PLANG_TEST_RUN_WRAPPER /
     guardheap, per test-lit/README.md's documented convention -- the
     Phase-2 script this was generalized from omitted this, a gap only
     caught and swept-fixed after the fact across 282 files in commit
     c964d54; baked in from the start here instead of repeating that).
-    Without stdin, this is the plain single-file idiom every other shape
-    uses. With stdin, uses split-file (already the proven mechanism for
-    multi-file Module tests, per this project's own design work) to carry
-    the source AND the stdin content in one .pas file, `test.pas` +
-    `stdin.txt` parts -- keeping the CHECK block in the PREAMBLE, before the
-    first '//--- ' marker, is required: content after the LAST marker is
-    appended into that final part (confirmed empirically during design),
-    which would silently corrupt stdin.txt with trailing CHECK directives if
-    they were placed after it instead."""
-    if stdin_text is None:
+    `src` is a list of 2-3 sources for compileTwoFiles/compileThreeFiles
+    (see module_compile_lines_and_body), otherwise a single source string.
+    Without stdin AND without a `module` declaration, the single-source
+    case is the plain single-file idiom every other shape uses -- compiling
+    %s directly. Either stdin or a module declaration routes through
+    split-file instead (already the proven mechanism for multi-file Module
+    tests, per this project's own design work) to carry the source (plus
+    stdin content, if any) in one .pas file, `test.pas` + `stdin.txt` parts
+    -- keeping the CHECK block in the PREAMBLE, before the first '//--- '
+    marker, is required: content after the LAST marker is appended into
+    that final part (confirmed empirically during design), which would
+    silently corrupt stdin.txt with trailing CHECK directives if they were
+    placed after it instead."""
+    if isinstance(src, list):
+        return module_compile_lines_and_body(base, fp, src)
+    if stdin_text is None and not DECLARES_MODULE_RE.search(src):
         compile_line = f"RUN: {base} {fp}%s -o %t\n"
         return compile_line, "%run %t", src.rstrip("\n") + "\n"
+    if stdin_text is None:
+        compile_line = f"RUN: split-file %s %t.dir\nRUN: {base} {fp}%t.dir/test.pas -o %t\n"
+        return compile_line, "%run %t", "//--- test.pas\n" + src.rstrip("\n") + "\n"
     compile_line = f"RUN: split-file %s %t.dir\nRUN: {base} {fp}%t.dir/test.pas -o %t\n"
     exec_prefix = "%run %t < %t.dir/stdin.txt"
     body = (
@@ -384,7 +458,7 @@ EXIT_CODE_ZERO_RE = re.compile(r"(?:EXPECT|ASSERT)_EQ\(R\.ExitCode,\s*0\)")
 
 
 def build_exact_stdout_case(suite, name, call_kind, src, flags, stdin_text, remainder):
-    if call_kind != "compileAndRun":
+    if call_kind not in ("compileAndRun", "compileTwoFiles", "compileThreeFiles"):
         return None
     if not EXIT_CODE_ZERO_RE.search(remainder):
         return None
@@ -489,6 +563,12 @@ NONZERO_EXIT_RE = re.compile(r"(?:NE\(R\.ExitCode,\s*0\)|EQ\(R\.ExitCode,\s*[1-9
 
 
 def build_nonzero_exit_case(suite, name, call_kind, src, flags, stdin_text, remainder):
+    # Deliberately excludes compileTwoFiles/compileThreeFiles: compile_succeeds
+    # below assumes a single source string it can write to one file and
+    # compile in one step, which doesn't fit the module-then-program shape,
+    # and of the module suite's genuinely-failing cases every one fails at
+    # the PROGRAM-compile step specifically -- not worth generalizing this
+    # builder for the handful of cases that need it; hand-convert them.
     if call_kind != "compileAndRun":
         return None
     if not NONZERO_EXIT_RE.search(remainder):
@@ -555,7 +635,7 @@ def build_stdout_substring_case(suite, name, call_kind, src, flags, stdin_text, 
     npos) -- the original assertion was ALREADY a substring search, not an
     exact match, so plain (order-independent) CHECK-DAG is the faithful
     translation, not --strict-whitespace/--match-full-lines/CHECK-NEXT."""
-    if call_kind != "compileAndRun":
+    if call_kind not in ("compileAndRun", "compileTwoFiles", "compileThreeFiles"):
         return None
     if not EXIT_CODE_ZERO_RE.search(remainder):
         return None

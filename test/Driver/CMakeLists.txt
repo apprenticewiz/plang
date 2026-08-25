@@ -1,11 +1,10 @@
-# Two executables, not one.  These were a single driver_test.cpp of eleven
-# thousand lines, which compiled serially however many cores ctest was given
-# and left the next suite -- Turbo Pascal's -- with a choice between adding to
-# it and copying it.  DriverHarness.h is what they share; the split is by what
-# a case is about, not by what it calls.
-# codegen migrated to test-lit/CodeGen/, ep migrated to test-lit/EP/ -- see
-# issue #34.
-foreach(Suite driver module)
+# One executable now.  This was a single driver_test.cpp of eleven thousand
+# lines, which compiled serially however many cores ctest was given, and
+# split by what a case is about, not by what it calls -- DriverHarness.h is
+# what they all shared. codegen, ep, and module have all migrated to
+# test-lit/{CodeGen,EP,Module}/; driver_test.cpp is deliberately last (issue
+# #34's hardest content -- DWARF debug-info scope-graph assertions).
+foreach(Suite driver)
     add_executable(${Suite}_test ${Suite}_test.cpp)
     target_include_directories(${Suite}_test PRIVATE
         ${CMAKE_SOURCE_DIR}/test/Support
