@@ -334,6 +334,22 @@ jobs:
       - name: Install build dependencies
         run: sudo apt-get install -y ninja-build libgtest-dev
 
+      - name: Install lit (test-lit/, issue #34)
+        # CMake's own find_program(HINTS LLVM_TOOLS_BINARY_DIR) already
+        # resolves lit/FileCheck for every ctest-mediated invocation in this
+        # job (the CTest command line bakes in the fully-resolved path found
+        # at configure time), which is why the plain, unfiltered ctest runs
+        # below already exercise test-lit/ correctly with no extra step.
+        # This job also invokes `lit` directly from a bare shell (the
+        # guardheap step further down), which has no such resolution and
+        # needs lit on PATH for real -- confirmed apt.llvm.org's package
+        # does not put it there. Same fix as the macOS job's identical need:
+        # pip install unconditionally resolves it regardless of what a given
+        # LLVM package bundles.
+        run: |
+          pip3 install --user --break-system-packages lit
+          echo "$(python3 -m site --user-base)/bin" >> "$GITHUB_PATH"
+
       - name: Configure
         # plang requires C++23, and the runner image's default compiler is not
         # new enough -- it has no <print>.  Every other job selects a compiler
