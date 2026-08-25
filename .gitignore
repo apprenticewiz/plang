@@ -30,6 +30,10 @@ a.out
 *.s
 *.bc
 
+# Python bytecode cache (tools/*.py)
+__pycache__/
+*.pyc
+
 # clangd / LSP
 .cache/
 compile_commands.json

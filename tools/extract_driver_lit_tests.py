@@ -1,25 +1,38 @@
 #!/usr/bin/env python3
-"""Extract test/Driver/codegen_test.cpp's GoogleTest cases into standalone
-.pas files under test-lit/CodeGen/ (issue #34 Phase 2).
+"""Extract test/Driver/{ep,module}_test.cpp's GoogleTest cases into
+standalone .pas files under test-lit/{EP,Module}/ (issue #34 Phase 3).
+Originally written for codegen_test.cpp/test-lit/CodeGen/ (Phase 2, PR #37);
+generalized here to take a suite name (see SUITES below) since the two
+layers this script is built from -- call-shape recognition (this file's
+CALL_RE/extract_call_args/compile_lines_and_body) vs. assertion-shape
+recognition (the BUILDERS list) -- turned out to need no changes at all in
+the second layer to serve ep_test.cpp too; only the first layer's flags
+handling grew a second case (see KEP_PLUS_RE below).
 
 Unlike Phase 1's Conformance suite (machine-generated, perfectly uniform,
-raw-string-delimited), codegen_test.cpp is hand-written with genuine
-structural variety, and uses ordinary C++ string literals (auto-concatenated
-across adjacent "..." tokens, \\n as the only escape in use -- confirmed by
-grep before writing this) rather than raw strings. This script handles the
+raw-string-delimited), these files are hand-written with genuine structural
+variety, and use ordinary C++ string literals (auto-concatenated across
+adjacent "..." tokens, \\n as the only escape in use -- confirmed by grep
+before writing this) rather than raw strings. This script handles the
 common, mechanically-convertible shapes and explicitly SKIPS (reports, does
 not guess) anything with real control flow (for/while loops, more than one
-compile call, a stdin-text third argument, a computed flags expression) or
-an assertion shape it doesn't recognize -- those get converted by hand.
+compile call, a stdin-text third argument, a computed flags expression it
+doesn't recognize) or an assertion shape it doesn't recognize -- those get
+converted by hand.
 
 Flags handling: compileAndRun/compileAndEmitIR's second argument (ExtraFlags)
-is NOT specially mapped to a %plang vs %plang_ep substitution choice -- it is
-literal compiler flags text (kEP resolved to "-std=iso10206", everything else
-used verbatim), interpolated directly after %plang. This was corrected after
-an earlier draft silently dropped every non-dialect flag (-fno-range-checks
-etc.) by only special-casing the dialect value -- found for real by grepping
-every distinct second-argument value actually in use in this file, not
-assumed from a smaller sample.
+is literal compiler flags text (kEP resolved to "-std=iso10206", `kEP +
+"literal"` / `std::string(kEP) + "literal"` resolved the same way with the
+literal suffix appended -- see KEP_PLUS_RE -- everything else used verbatim).
+It is never silently dropped: an earlier draft mapped the dialect value
+straight to a %plang_ep/%plang choice and dropped every non-dialect flag
+(-fno-range-checks etc.) in the process -- found for real by grepping every
+distinct second-argument value actually in use, not assumed from a smaller
+sample. base_and_flags() below reintroduces a %plang_ep choice, but only as
+a pure DRY win for the ep suite (stripping a literal, already-matched
+leading "-std=iso10206" off the interpolated text) -- it falls back to
+%plang with the flags text unchanged whenever that isn't safe, so nothing
+is ever dropped.
 
 Shapes handled:
   1. compileAndRun + exact EXPECT_EQ(R.Stdout, "...") + ExitCode==0
@@ -62,9 +75,14 @@ import tempfile
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-SRC_FILE = REPO_ROOT / "test" / "Driver" / "codegen_test.cpp"
-OUT_ROOT = REPO_ROOT / "test-lit" / "CodeGen"
 PLANG_BIN = REPO_ROOT / "build" / "bin" / "plang"
+
+# suite key -> (source .cpp, output test-lit/ directory). codegen_test.cpp
+# is gone (deleted in PR #38); module_test.cpp's entry lands in Phase 3's
+# second PR, once compileTwoFiles/compileThreeFiles support is added.
+SUITES = {
+    "ep": (REPO_ROOT / "test" / "Driver" / "ep_test.cpp", REPO_ROOT / "test-lit" / "EP"),
+}
 
 
 def compile_succeeds(src: str, flags: str | None) -> bool:
@@ -166,6 +184,14 @@ def decode_concatenated_strings(s: str) -> str:
     return "".join(out)
 
 
+# `kEP + "literal"` / `std::string(kEP) + "literal"` -- the right side must
+# still be pure string-literal concatenation (decode_concatenated_strings
+# enforces this), so a loop-parametrized `kEP + " " + O` (a real identifier,
+# not a literal) correctly raises here too -- moot in practice, since the
+# SKIP_MARKERS for-loop check already routes that case to manual conversion
+# before extract_call_args ever runs.
+KEP_PLUS_RE = re.compile(r'^(?:std::string\(kEP\)|kEP)\s*\+\s*(.+)$', re.S)
+
 CALL_RE = re.compile(r"(compileAndRun|compileAndEmitIR)\(")
 
 
@@ -223,6 +249,11 @@ def extract_call_args(body: str):
             flags = decode_concatenated_strings(flag_arg)
             if "\n" in flags:
                 raise ValueError(f"multi-line flags argument: {flags!r}")
+        elif (m := KEP_PLUS_RE.match(flag_arg)):
+            suffix = decode_concatenated_strings(m.group(1).strip())
+            if "\n" in suffix:
+                raise ValueError(f"multi-line flags argument: {suffix!r}")
+            flags = "-std=iso10206" + suffix
         else:
             raise ValueError(f"unrecognized (computed?) flags argument: {flag_arg!r}")
         if flags == "":
@@ -260,26 +291,49 @@ def kebab_case(name: str) -> str:
 
 def flags_prefix(flags: str | None) -> str:
     """Literal compiler-flags text with a trailing space, or "" if none --
-    interpolated directly after %plang in every RUN line below."""
+    interpolated directly after the RUN-line base (%plang/%plang_ep/%plang_ir)
+    in every RUN line below."""
     return f"{flags} " if flags else ""
 
 
-def compile_lines_and_body(fp: str, src: str, stdin_text: str | None):
+def base_and_flags(suite: str, flags: str | None) -> tuple[str, str]:
+    """(base, fp) -- base is normally "%plang"; for the ep suite specifically,
+    when flags is known (by literal prefix match) to start with the dialect
+    flag, switches to "%plang_ep" and strips that literal prefix out of fp --
+    a pure DRY win (every ep RUN line otherwise repeats "-std=iso10206"),
+    never a behavior change: %plang_ep already expands to "%plang
+    -std=iso10206" (test-lit/lit.cfg.py), so dropping the now-redundant
+    literal copy is exactly equivalent. Falls back to %plang with flags
+    untouched whenever the prefix isn't there (some ep cases legitimately
+    omit the dialect flag, e.g. testing ISO 7185-under-EP-binary behavior) --
+    never silently drops anything, matching this script's own standing rule."""
+    if suite == "ep" and flags and flags.startswith("-std=iso10206"):
+        rest = flags[len("-std=iso10206"):].lstrip()
+        return "%plang_ep", (f"{rest} " if rest else "")
+    return "%plang", flags_prefix(flags)
+
+
+def compile_lines_and_body(base: str, fp: str, src: str, stdin_text: str | None):
     """Returns (compile_run_line, exec_prefix, body_text) for a case that
-    compiles %s and then runs the result. Without stdin, this is the plain
-    single-file idiom every other shape uses. With stdin, uses split-file
-    (already the proven mechanism for multi-file Module tests, per this
-    project's own design work) to carry the source AND the stdin content in
-    one .pas file, `test.pas` + `stdin.txt` parts -- keeping the CHECK block
-    in the PREAMBLE, before the first '//--- ' marker, is required: content
-    after the LAST marker is appended into that final part (confirmed
-    empirically during design), which would silently corrupt stdin.txt with
-    trailing CHECK directives if they were placed after it instead."""
+    compiles %s and then runs the result via %run (PLANG_TEST_RUN_WRAPPER /
+    guardheap, per test-lit/README.md's documented convention -- the
+    Phase-2 script this was generalized from omitted this, a gap only
+    caught and swept-fixed after the fact across 282 files in commit
+    c964d54; baked in from the start here instead of repeating that).
+    Without stdin, this is the plain single-file idiom every other shape
+    uses. With stdin, uses split-file (already the proven mechanism for
+    multi-file Module tests, per this project's own design work) to carry
+    the source AND the stdin content in one .pas file, `test.pas` +
+    `stdin.txt` parts -- keeping the CHECK block in the PREAMBLE, before the
+    first '//--- ' marker, is required: content after the LAST marker is
+    appended into that final part (confirmed empirically during design),
+    which would silently corrupt stdin.txt with trailing CHECK directives if
+    they were placed after it instead."""
     if stdin_text is None:
-        compile_line = f"RUN: %plang {fp}%s -o %t\n"
-        return compile_line, "%t", src.rstrip("\n") + "\n"
-    compile_line = f"RUN: split-file %s %t.dir\nRUN: %plang {fp}%t.dir/test.pas -o %t\n"
-    exec_prefix = "%t < %t.dir/stdin.txt"
+        compile_line = f"RUN: {base} {fp}%s -o %t\n"
+        return compile_line, "%run %t", src.rstrip("\n") + "\n"
+    compile_line = f"RUN: split-file %s %t.dir\nRUN: {base} {fp}%t.dir/test.pas -o %t\n"
+    exec_prefix = "%run %t < %t.dir/stdin.txt"
     body = (
         "//--- test.pas\n"
         + src.rstrip("\n")
@@ -316,11 +370,23 @@ def build_ir_substring_case(suite, name, call_kind, src, flags, stdin_text, rema
 
 EXACT_STDOUT_RE = re.compile(r'EXPECT_EQ\(R\.Stdout,\s*((?:"(?:[^"\\]|\\.)*"\s*)+)\)')
 
+# Anchored on the macro name, not just the "ExitCode, 0)" substring -- that
+# bare substring is ALSO present inside EXPECT_NE(R.ExitCode, 0) /
+# ASSERT_NE(R.ExitCode, 0) (a rejection test), which previously let a
+# rejection case with EXPECT_EQ(R.Stdout, "") reach EXACT_STDOUT_RE, match
+# an empty string, and raise ("empty expected stdout") -- aborting the
+# whole BUILDERS chain before build_nonzero_exit_case (the actually correct
+# builder for that case) ever ran. Found for real generalizing this script
+# to ep_test.cpp, where ASSERT_EQ (not just EXPECT_EQ) is the dominant
+# ExitCode idiom -- both accepted here, same as the original bare-substring
+# check already (accidentally) did.
+EXIT_CODE_ZERO_RE = re.compile(r"(?:EXPECT|ASSERT)_EQ\(R\.ExitCode,\s*0\)")
+
 
 def build_exact_stdout_case(suite, name, call_kind, src, flags, stdin_text, remainder):
     if call_kind != "compileAndRun":
         return None
-    if "ExitCode, 0)" not in remainder:
+    if not EXIT_CODE_ZERO_RE.search(remainder):
         return None
     m = EXACT_STDOUT_RE.search(remainder)
     if not m:
@@ -328,7 +394,6 @@ def build_exact_stdout_case(suite, name, call_kind, src, flags, stdin_text, rema
     stdout = decode_concatenated_strings(m.group(1))
     if stdout == "":
         raise ValueError("empty expected stdout, nothing to CHECK")
-    fp = flags_prefix(flags)
     lines = stdout.split("\n")
     if lines and lines[-1] == "":
         lines.pop()  # trailing '\n' produces one empty trailing element
@@ -347,7 +412,24 @@ def build_exact_stdout_case(suite, name, call_kind, src, flags, stdin_text, rema
     if any(l == "" for l in lines):
         raise ValueError("a blank expected output line -- FileCheck rejects an empty CHECK pattern")
     checks = [f"CHECK:{lines[0]}"] + [f"CHECK-NEXT:{l}" for l in lines[1:]]
-    compile_line, exec_prefix, body = compile_lines_and_body(fp, src, stdin_text)
+    base, fp = base_and_flags(suite, flags)
+    compile_line, exec_prefix, body = compile_lines_and_body(base, fp, src, stdin_text)
+    # A successful run can ALSO assert stderr silence on a specific message
+    # (EXPECT_EQ(R.Stderr.find(...), npos)) -- e.g. "must not warn about X
+    # while also producing this exact output." Dropping that half silently
+    # (as an earlier version of this builder did) is a real coverage loss,
+    # so when present, stdout/stderr are captured to separate files and
+    # checked with two FileCheck passes rather than piping stdout alone.
+    err_not_msgs = find_all_substring_checks(remainder, STDERR_NOT_FIND_RES)
+    if err_not_msgs:
+        run = (
+            f"(*\n{compile_line}"
+            f"RUN: {exec_prefix} > %t.out 2> %t.err\n"
+            f"RUN: FileCheck --strict-whitespace --match-full-lines %s < %t.out\n"
+            f"RUN: FileCheck --allow-empty --check-prefix=ERR-ABSENT %s < %t.err\n*)\n\n"
+        )
+        err_absent_checks = "\n".join(f"ERR-ABSENT-NOT: {m}" for m in err_not_msgs)
+        return run + "(*\n" + "\n".join(checks) + "\n" + err_absent_checks + "\n*)\n\n" + body
     run = (
         f"(*\n{compile_line}"
         f"RUN: {exec_prefix} | FileCheck --strict-whitespace --match-full-lines %s\n*)\n\n"
@@ -414,7 +496,7 @@ def build_nonzero_exit_case(suite, name, call_kind, src, flags, stdin_text, rema
     msgs = find_all_substring_checks(remainder, STDERR_FIND_RES)
     if not msgs:
         return None  # no message check -- flagged for manual review upstream
-    fp = flags_prefix(flags)
+    base, fp = base_and_flags(suite, flags)
     # Each original .find() call was checked independently, not in a
     # sequence dependent on the others' position, so multiple stderr
     # substrings are exactly as order-independent as multiple stdout ones.
@@ -433,7 +515,7 @@ def build_nonzero_exit_case(suite, name, call_kind, src, flags, stdin_text, rema
         raise ValueError("stdout check on a compile-time rejection is unexpected")
 
     if is_runtime:
-        compile_line, exec_prefix, body = compile_lines_and_body(fp, src, stdin_text)
+        compile_line, exec_prefix, body = compile_lines_and_body(base, fp, src, stdin_text)
         run = (
             f"(*\n{compile_line}"
             f"RUN: not {exec_prefix} > %t.out 2> %t.err\n"
@@ -451,7 +533,7 @@ def build_nonzero_exit_case(suite, name, call_kind, src, flags, stdin_text, rema
         # the original C++ test's own unused 3rd argument in this case.
         body = src.rstrip("\n") + "\n"
         run = (
-            f"(*\nRUN: not %plang {fp}%s -o %t 2> %t.err\n"
+            f"(*\nRUN: not {base} {fp}%s -o %t 2> %t.err\n"
             f"RUN: FileCheck --check-prefix=ERR %s < %t.err\n"
             + ("RUN: FileCheck --check-prefix=ERR-ABSENT %s < %t.err\n" if err_not_msgs else "")
             + "*)\n\n"
@@ -475,13 +557,13 @@ def build_stdout_substring_case(suite, name, call_kind, src, flags, stdin_text, 
     translation, not --strict-whitespace/--match-full-lines/CHECK-NEXT."""
     if call_kind != "compileAndRun":
         return None
-    if "ExitCode, 0)" not in remainder:
+    if not EXIT_CODE_ZERO_RE.search(remainder):
         return None
     msgs = find_all_substring_checks(remainder, STDOUT_FIND_RES)
     if not msgs:
         return None
-    fp = flags_prefix(flags)
-    compile_line, exec_prefix, body = compile_lines_and_body(fp, src, stdin_text)
+    base, fp = base_and_flags(suite, flags)
+    compile_line, exec_prefix, body = compile_lines_and_body(base, fp, src, stdin_text)
     run = f"(*\n{compile_line}RUN: {exec_prefix} | FileCheck %s\n*)\n\n"
     checks = "\n".join(f"CHECK-DAG: {m}" for m in msgs)
     return run + "(*\n" + checks + "\n*)\n\n" + body
@@ -523,7 +605,12 @@ SKIP_MARKERS = ("for (", "while (")
 
 def main() -> int:
     check_only = "--check" in sys.argv
-    text = SRC_FILE.read_text()
+    positional = [a for a in sys.argv[1:] if not a.startswith("--")]
+    if len(positional) != 1 or positional[0] not in SUITES:
+        print(f"usage: {sys.argv[0]} <{'|'.join(SUITES)}> [--check]", file=sys.stderr)
+        return 2
+    src_file, out_root = SUITES[positional[0]]
+    text = src_file.read_text()
     written = 0
     skipped = []
     for suite, name, body in find_test_bodies(text):
@@ -559,7 +646,7 @@ def main() -> int:
             skipped.append((suite, name, "unrecognized assertion shape"))
             continue
 
-        out_dir = OUT_ROOT / suite
+        out_dir = out_root / suite
         out_path = out_dir / (kebab_case(name) + ".pas")
         if check_only:
             existing = out_path.read_text() if out_path.exists() else None
