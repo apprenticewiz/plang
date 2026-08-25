@@ -1,5 +1,11 @@
 (*
-RUN: %plang -std=iso10206 %s -o %t
+Compiled from a copy in %t.dir, not %s directly: this program declares a
+module, and the compiler writes its .pmi beside whatever file it compiled
+-- compiling %s in place would write the .pmi into the checked-in source
+tree itself, on every test run.
+
+RUN: split-file %s %t.dir
+RUN: %plang -std=iso10206 %t.dir/test.pas -o %t
 RUN: %run %t | FileCheck --strict-whitespace --match-full-lines %s
 *)
 
@@ -7,6 +13,7 @@ RUN: %run %t | FileCheck --strict-whitespace --match-full-lines %s
 CHECK:0 0.0
 *)
 
+//--- test.pas
 module widget_module interface;
 export widgets = (widget, copy_widget, increment_widget, print_widget);
 type real_widget = record f1: integer; f2: real end;
