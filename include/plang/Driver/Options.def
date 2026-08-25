@@ -42,6 +42,8 @@ OPTION("-S",         "-S",                Flag,             Driver,   "Emit nati
 OPTION("-c",         "-c",                Flag,             Driver,   "Compile to object file (default: <source>.o)")
 OPTION("-emit-llvm", "-emit-llvm",        Flag,             Driver,   "Emit LLVM IR text (default: <source>.ll)")
 OPTION("-dump-ast",  "-dump-ast",         Flag,             Both,     "Print the typed AST and stop (default: stdout)")
+OPTION("-dump-tokens", "-dump-tokens",         Flag,        Both,     "Print the token stream and stop (default: stdout)")
+OPTION("-dump-parse-tree", "-dump-parse-tree", Flag,        Both,     "Print the pre-Sema parse tree and stop (default: stdout)")
 
 //===----------------------------------------------------------------------===//
 // Code generation
