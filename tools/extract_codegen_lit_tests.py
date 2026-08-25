@@ -238,14 +238,19 @@ def extract_call_args(body: str):
     return call_kind, src, flags, stdin_text, body[i:]
 
 
-STR_LIST_RE = re.compile(r"\{\s*((?:\"(?:[^\"\\]|\\.)*\"\s*,?\s*)+)\}")
-
-
 def extract_str_list(text: str) -> list[str]:
-    m = STR_LIST_RE.search(text)
-    if not m:
+    """Return the double-quoted string literals in a {"...", ...}
+    initializer list. `text` is already brace-delimited by the caller's own
+    `\\{[^}]*\\}` match (see the one call site), with no nested braces
+    possible, so a plain STRING_LIT_RE.findall over it is sufficient --
+    unlike the nested-quantifier regex this replaced
+    (`\\{\\s*((?:"..."\\s*,?\\s*)+)\\}`), which CodeQL flagged for
+    exponential-backtracking blowup on long runs of whitespace between
+    adjacent `\\s*`/`,?\\s*` repetitions."""
+    items = STRING_LIT_RE.findall(text)
+    if not items:
         raise ValueError('expected a {"...", ...} list')
-    return STRING_LIT_RE.findall(m.group(1))
+    return items
 
 
 def kebab_case(name: str) -> str:
@@ -301,7 +306,11 @@ def build_ir_substring_case(suite, name, call_kind, src, flags, stdin_text, rema
             checks.append(f"{directive}: {item}")
     if not checks:
         raise ValueError("irContainsAll/None found but no patterns extracted")
-    run = f"(*\nRUN: %plang {fp}-emit-llvm %s -o %t.ll\nRUN: FileCheck %s < %t.ll\n*)\n\n"
+    # %plang_ir, not %plang: compileAndEmitIR's GTest harness never read
+    # PLANG_TEST_EXTRA_FLAGS (see lit.cfg.py's own comment), so the checked
+    # IR patterns below are unoptimized-shape by design -- %plang would
+    # silently make them -O1/-O2/-O3-sensitive under the `optimized` CI job.
+    run = f"(*\nRUN: %plang_ir {fp}-emit-llvm %s -o %t.ll\nRUN: FileCheck %s < %t.ll\n*)\n\n"
     return run + src.rstrip("\n") + "\n\n(*\n" + "\n".join(checks) + "\n*)\n"
 
 
@@ -493,8 +502,9 @@ def build_emit_ir_rejection_case(suite, name, call_kind, src, flags, stdin_text,
     if len(msgs) != 1:
         return None
     fp = flags_prefix(flags)
+    # %plang_ir, not %plang -- see build_ir_substring_case's identical note.
     run = (
-        f"(*\nRUN: not %plang {fp}-emit-llvm %s -o %t.ll 2> %t.err\n"
+        f"(*\nRUN: not %plang_ir {fp}-emit-llvm %s -o %t.ll 2> %t.err\n"
         f"RUN: FileCheck %s < %t.err\n*)\n\n"
     )
     return run + src.rstrip("\n") + f"\n\n(*\nCHECK: {msgs[0]}\n*)\n"

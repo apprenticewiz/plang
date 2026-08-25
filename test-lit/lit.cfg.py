@@ -60,7 +60,18 @@ plang_exe = os.path.join(config.plang_tools_dir, "plang")
 # exact ordering backwards). Longest/most-specific first, always -- inserted
 # as one block so the list reads top-to-bottom in match order, not scattered
 # insert(0, ...) calls whose net order isn't obvious from the diff.
+# %plang_ir: deliberately excludes plang_extra_flags. The GTest harness's
+# compileFileToIR() (what every compileAndEmitIR-based test used) never read
+# PLANG_TEST_EXTRA_FLAGS at all -- only compileAndRunFile() did -- so the
+# `optimized` CI job's -O1/-O2/-O3 re-run never touched raw-IR-shape checks
+# before this migration. %plang's own extra_flags substring would silently
+# start doing so if IR-substring tests used it instead: found for real when
+# the -O1/-O2/-O3 job broke on 3 CHECK-DAG tests expecting unoptimized
+# `phi i1`/`icmp sge` patterns that -O1 had already simplified away. Must be
+# registered before %plang below -- same longest/most-specific-first reason
+# %plang_ep is.
 config.substitutions[0:0] = [
+    ("%plang_ir", f"{plang_exe}".strip()),
     ("%plang_ep_run", f"{plang_exe} -std=iso10206 {plang_extra_flags} %s -o %t && %t".strip()),
     ("%plang_run", f"{plang_exe} {plang_extra_flags} %s -o %t && %t".strip()),
     ("%plang_ep", f"{plang_exe} -std=iso10206 {plang_extra_flags}".strip()),

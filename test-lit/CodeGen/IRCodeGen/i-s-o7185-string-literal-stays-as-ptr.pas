@@ -1,5 +1,5 @@
 (*
-RUN: %plang -emit-llvm %s -o %t.ll
+RUN: %plang_ir -emit-llvm %s -o %t.ll
 RUN: FileCheck %s < %t.ll
 *)
 

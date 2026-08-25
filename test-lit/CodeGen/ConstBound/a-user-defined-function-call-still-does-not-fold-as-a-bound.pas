@@ -1,5 +1,5 @@
 (*
-RUN: not %plang -std=iso10206 -emit-llvm %s -o %t.ll 2> %t.err
+RUN: not %plang_ir -std=iso10206 -emit-llvm %s -o %t.ll 2> %t.err
 RUN: FileCheck %s < %t.err
 *)
 
