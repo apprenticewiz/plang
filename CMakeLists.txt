@@ -86,6 +86,18 @@ include_directories(${CMAKE_SOURCE_DIR}/include)
 include_directories(${LLVM_INCLUDE_DIRS})
 add_definitions(${LLVM_DEFINITIONS})
 
+# Every built executable (plang, plang-po, and the GoogleTest binaries under
+# test/) lands in one directory with a configure-time-known path, rather than
+# scattered across each target's own source-mirroring build subdirectory.
+# test-lit/'s lit.site.cfg.py needs to name plang's path in a plain
+# configure_file() substitution, which cannot evaluate the
+# $<TARGET_FILE:plang> generator expression every target already used before
+# this existed -- collecting outputs here is what makes that substitution
+# possible without a second CMake generation pass.
+if(NOT CMAKE_RUNTIME_OUTPUT_DIRECTORY)
+    set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif()
+
 add_subdirectory(lib)
 add_subdirectory(runtime)
 add_subdirectory(tools)
@@ -199,6 +211,16 @@ option(PLANG_ENABLE_TESTS "Build the test suite" OFF)
 enable_testing()
 if(PLANG_ENABLE_TESTS)
     add_subdirectory(test)
+    # lit-based tests (see test-lit/README.md): a sibling tree, not a
+    # replacement -- the two coexist for as long as the migration tracked by
+    # issue #34 takes, so nothing has to be deleted before its replacement is
+    # verified.  test-lit/CMakeLists.txt itself skips gracefully (a WARNING,
+    # not a configure failure) when lit/FileCheck aren't found, since
+    # PLANG_ENABLE_TESTS is already opt-in for exactly the "don't force a
+    # dependency on someone who has no other reason to install it" reason,
+    # and a developer who only wants the GoogleTest tier shouldn't be blocked
+    # by one lit tool's absence.
+    add_subdirectory(test-lit)
 else()
     message(STATUS "Tests: disabled (-DPLANG_ENABLE_TESTS=ON to build them)")
 endif()
