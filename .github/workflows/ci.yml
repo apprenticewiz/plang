@@ -334,6 +334,22 @@ jobs:
       - name: Install build dependencies
         run: sudo apt-get install -y ninja-build libgtest-dev
 
+      - name: Install lit (test-lit/, issue #34)
+        # CMake's own find_program(HINTS LLVM_TOOLS_BINARY_DIR) already
+        # resolves lit/FileCheck for every ctest-mediated invocation in this
+        # job (the CTest command line bakes in the fully-resolved path found
+        # at configure time), which is why the plain, unfiltered ctest runs
+        # below already exercise test-lit/ correctly with no extra step.
+        # This job also invokes `lit` directly from a bare shell (the
+        # guardheap step further down), which has no such resolution and
+        # needs lit on PATH for real -- confirmed apt.llvm.org's package
+        # does not put it there. Same fix as the macOS job's identical need:
+        # pip install unconditionally resolves it regardless of what a given
+        # LLVM package bundles.
+        run: |
+          pip3 install --user --break-system-packages lit
+          echo "$(python3 -m site --user-base)/bin" >> "$GITHUB_PATH"
+
       - name: Configure
         # plang requires C++23, and the runner image's default compiler is not
         # new enough -- it has no <print>.  Every other job selects a compiler
@@ -362,14 +378,28 @@ jobs:
       # Runs a schema/variant/pointer/string-heavy subset of emitted programs
       # under the guard-page allocator above -- this is the only thing in CI
       # that would catch a regression of the bug class documented at
-      # test/Driver/codegen_test.cpp's Shadowing.AnInitialStateComesFrom...
+      # test-lit/CodeGen/Shadowing/an-initial-state-comes-from-the-component-type-that-was-written.pas
       # and test/Driver/ep_test.cpp's EP7Schema.ANestedInstantiationSmaller...:
       # an over-run into heap nothing else reads exits 0 printing the right
       # value everywhere except here. Default flags, not folded into the
       # -O1/-O2/-O3 axis below: both known instances of this bug class are
       # allocation-size/layout defects independent of optimization level.
-      - name: Test schema/variant/pointer/string subset under guardheap
+      #
+      # Two invocations, not one: codegen_test.cpp (issue #34) migrated to
+      # test-lit/CodeGen/, a single coarse-grained `lit-CodeGen` CTest entry
+      # that `ctest -R` can no longer subset by keyword, so its share of this
+      # matrix is re-run directly through `lit --filter` instead; the
+      # remaining GTest binaries (ep_test, module_test, driver_test) are
+      # still reached by `ctest -R` as before.
+      - name: Test schema/variant/pointer/string subset under guardheap (GTest)
         run: ctest --test-dir build -j"$(nproc)" --output-on-failure -R 'Schema|VariantRecord|VariantPart|ConformantArray|Shadowing|Storage|String|Substr|Pointer'
+        env:
+          PLANG_TEST_RUN_WRAPPER: "bash ${{ github.workspace }}/test/tools/run-under-guardheap.sh"
+
+      - name: Test schema/variant/pointer/string subset under guardheap (lit CodeGen)
+        run: |
+          cd build/test-lit
+          lit -sv --filter='Schema|VariantRecord|VariantPart|ConformantArray|Shadowing|Storage|String|Substr|Pointer' CodeGen
         env:
           PLANG_TEST_RUN_WRAPPER: "bash ${{ github.workspace }}/test/tools/run-under-guardheap.sh"
 

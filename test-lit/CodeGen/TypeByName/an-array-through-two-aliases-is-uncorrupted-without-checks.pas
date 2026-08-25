@@ -1,6 +1,6 @@
 (*
 RUN: %plang -fno-range-checks %s -o %t
-RUN: %t | FileCheck --strict-whitespace --match-full-lines %s
+RUN: %run %t | FileCheck --strict-whitespace --match-full-lines %s
 *)
 
 (*

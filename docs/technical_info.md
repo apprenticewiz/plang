@@ -330,45 +330,60 @@ and the two cannot disagree.
 
 ## The test suite
 
-1890 tests, in thirteen binaries:
+1941 tests, split across two harnesses (issue #34) — GoogleTest for
+in-process, C++-API-level tests, and LLVM's `lit`+`FileCheck` for CLI-driven,
+black-box tests that spawn the real `plang` binary — mirroring how Clang
+splits `clang/unittests/` from `clang/test/`. `test-lit/README.md` covers the
+lit side's own conventions in full; this section covers both.
 
-| Binary                              | Tests | What it covers                        |
-|-------------------------------------|-------|---------------------------------------|
-| `test/Lex/scanner_test`             | 143   | Tokens, literals, keywords, EP gating |
-| `test/Parse/parser_test`            | 130   | Declarations, statements, expressions |
-| `test/Sema/sema_test`               | 165   | Name resolution and type checking     |
-| `test/Basic/catalog_test`           | 46    | The `.po` reader and locale selection |
-| `test/Basic/source_manager_test`    | 4     | Source-buffer coordinate overflow     |
-| `test/Driver/driver_test`           | 111   | The driver and the command line       |
-| `test/Driver/codegen_test`          | 346   | What the generated code does when run |
-| `test/Driver/ep_test`               | 299   | Extended Pascal, end to end           |
-| `test/Driver/module_test`           | 227   | Modules and separate compilation      |
-| `test/CodeGen/codegen_switches_test`| 15    | Positional compiler-switch state      |
-| `test/CodeGen/codegen_storage_test` | 26    | Type widths, layout, one SizeOf       |
-| `test/Conformance/conformance_test` | 377   | The Pascal-P5 ISO 7185 suite          |
-| `test/Acceptance/acceptance_test`   | 1     | The Pascal Acceptance Test            |
+### GoogleTest (`test/`) — 1198 tests, in ten binaries
 
-The first four are unit tests over one phase each.  The four in `test/Driver`
-are the end-to-end suites: each compiles a program, links it, runs it, and
-checks what it printed and what it exited with, which is the only way to test
-code generation and the runtime.  They share `test/Driver/DriverHarness.h`,
-which is also where a case that needs several named files goes through
-`CaseDir` — a directory of its own, cleaned up with the case, and the working
-directory the program runs in, so that a relative name in a source means a file
-this case wrote.
+| Binary                               | Tests | What it covers                        |
+|---------------------------------------|-------|---------------------------------------|
+| `test/Lex/scanner_test`               | 146   | Tokens, literals, keywords, EP gating |
+| `test/Parse/parser_test`              | 131   | Declarations, statements, expressions |
+| `test/Sema/sema_test`                 | 165   | Name resolution and type checking     |
+| `test/Basic/catalog_test`             | 46    | The `.po` reader and locale selection |
+| `test/Basic/source_manager_test`      | 4     | Source-buffer coordinate overflow     |
+| `test/Driver/driver_test`             | 114   | The driver and the command line       |
+| `test/Driver/ep_test`                 | 320   | Extended Pascal, end to end           |
+| `test/Driver/module_test`             | 231   | Modules and separate compilation      |
+| `test/CodeGen/codegen_switches_test`  | 15    | Positional compiler-switch state      |
+| `test/CodeGen/codegen_storage_test`   | 26    | Type widths, layout, one SizeOf       |
 
-### The Pascal-P5 conformance suite
+The first five are unit tests over one phase each, constructing
+`Scanner`/`Parser`/`Sema`/etc. objects directly and in-process. The three in
+`test/Driver` are end-to-end suites: each compiles a program, links it, runs
+it, and checks what it printed and what it exited with. They share
+`test/Driver/DriverHarness.h`, which is also where a case that needs several
+named files goes through `CaseDir` — a directory of its own, cleaned up with
+the case, and the working directory the program runs in, so that a relative
+name in a source means a file this case wrote. `driver_test`/`ep_test`/
+`module_test` are slated to migrate to `test-lit/` too (issue #34's remaining
+phases); `codegen_test.cpp` already has (below), and the five unit-test
+binaries are staying GoogleTest permanently.
+
+### lit + FileCheck (`test-lit/`) — 743 tests, in four suites
+
+| Suite                      | Tests | What it covers                                    |
+|-----------------------------|-------|----------------------------------------------------|
+| `test-lit/Smoke`            | 1     | The toolchain itself is wired up correctly          |
+| `test-lit/Conformance`      | 377   | The Pascal-P5 ISO 7185 suite                        |
+| `test-lit/Acceptance`       | 1     | The Pascal Acceptance Test                          |
+| `test-lit/CodeGen`          | 364   | What the generated code does when run               |
+
+#### The Pascal-P5 conformance suite
 
 377 tests derived from the Pascal-P5 ISO 7185 conformance suite, now in the
 public domain.  319 of them are programs that break a rule the standard states,
 and pass when plang rejects them for the right reason; 58 are programs that
 conform, and pass when plang accepts them.  They exercise the scanner, the
-parser and semantic analysis — a rejection test is answered before any code is
-generated — so a result here is a statement about conformance in that sense and
-not about the correctness of the code produced.  That is what the end-to-end
-suites and the acceptance test are for.
+parser and semantic analysis via `plang -dump-ast` — a rejection test is
+answered before any code is generated — so a result here is a statement about
+conformance in that sense and not about the correctness of the code produced.
+That is what the CodeGen suite and the acceptance test are for.
 
-### The acceptance test
+#### The acceptance test
 
 From the same suite, one standard program of three thousand lines that uses
 nearly all of ISO 7185 at once.  It is compiled, executed, and compared line
@@ -382,9 +397,9 @@ questions do not have the same answer.
 
 ### Building and running it
 
-The suite is off by default, since it needs GoogleTest and is the larger part
-of the build; a release build takes about 9 seconds without it and about 59
-with.
+The suite is off by default, since it needs GoogleTest and `lit`/`FileCheck`
+and is the larger part of the build; a release build takes about 9 seconds
+without it and about 59 with.
 
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DPLANG_ENABLE_TESTS=ON
@@ -393,12 +408,23 @@ ctest --test-dir build -j$(getconf _NPROCESSORS_ONLN)
 ```
 
 `ctest` works in a build configured without the tests as well, and reports that
-it found none.
+it found none. It also works without `lit`/`FileCheck` on `PATH` — the
+`check-lit-*` targets and their `lit-*` CTest entries are simply unavailable,
+with a CMake-configure-time warning saying so (`pip install lit` and
+reconfigure to pick them up).
 
-To run one binary directly, with the usual GoogleTest filters:
+To run one GoogleTest binary directly, with the usual GoogleTest filters:
 
 ```bash
-./build/test/Driver/codegen_test --gtest_filter='CodegenSets.*'
+./build/test/Driver/ep_test --gtest_filter='EP7Schema.*'
+```
+
+To run one lit suite, or filter within it, the way LLVM contributors iterate
+day to day:
+
+```bash
+lit build/test-lit/CodeGen
+lit --filter='SemaTypeIdentity' build/test-lit/CodeGen
 ```
 
 ### Sanitizers

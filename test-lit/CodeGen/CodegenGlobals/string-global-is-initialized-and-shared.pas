@@ -1,6 +1,6 @@
 (*
 RUN: %plang -std=iso10206 %s -o %t
-RUN: %t | FileCheck %s
+RUN: %run %t | FileCheck %s
 *)
 
 (*

@@ -1,6 +1,6 @@
 (*
 RUN: %plang -std=iso7185 %s -o %t
-RUN: %t | FileCheck --strict-whitespace --match-full-lines %s
+RUN: %run %t | FileCheck --strict-whitespace --match-full-lines %s
 *)
 
 (*
