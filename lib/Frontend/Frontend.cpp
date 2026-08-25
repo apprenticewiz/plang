@@ -669,6 +669,8 @@ int frontendPC1Main(int Argc, char *Argv[]) {
     unsigned                 OptLevel         = 0;
     bool                     Debug            = false;
     bool                     DumpAst          = false;
+    bool                     DumpTokens       = false;
+    bool                     DumpParseTree    = false;
     std::vector<std::string> ModuleSearchPaths;
     std::vector<std::string> DisabledWarnings;
     unsigned                 ErrorLimit = 0;
@@ -728,6 +730,10 @@ int frontendPC1Main(int Argc, char *Argv[]) {
             OptLevel = static_cast<unsigned>(Arg[2] - '0');
         } else if (Arg == "-dump-ast") {
             DumpAst = true;
+        } else if (Arg == "-dump-tokens") {
+            DumpTokens = true;
+        } else if (Arg == "-dump-parse-tree") {
+            DumpParseTree = true;
         } else if (Arg == "-g") {
             Debug = true;
         } else if (Arg.starts_with("-I") && Arg.size() > 2) {
@@ -809,27 +815,10 @@ int frontendPC1Main(int Argc, char *Argv[]) {
         for (const auto &D : Diags) std::cerr << Printer.print(D) << "\n";
     };
 
-    Scanner Sc(SrcMgr, InputFile, Diags, Opts);
-    if (!Diags.empty()) { emitAll(); return 1; }
-    // Captured before the move below takes Sc apart; -g's DIFile/DICompileUnit
-    // need it and have no other way to ask which buffer was the main one.
-    const FileID MainFileID = Sc.fileID();
-
-    Parser P(std::move(Sc), Diags, Opts);
-    auto Program = P.parse();
-    if (!Program) { emitAll(); return 1; }
-
-    Sema Sem(Diags, Opts);
-    bool Ok = Sem.check(*Program);
-    emitAll();
-    if (!Ok) return 1;
-
-    // Write .pmi files for any module bodies found in this compilation unit.
-    // This is a no-op for pure-program files (no OwnedModules).
-    if (!Program->OwnedModules.empty())
-        writePMIFiles(*Program, InputFile);
-
-    // Route output: AST dump or LLVM IR, to stdout or a named file.
+    // Route output: a dump mode or LLVM IR, to stdout or a named file.  Moved
+    // above the Scanner/Parser/Sema pipeline so -dump-tokens (Scanner-only)
+    // and -dump-parse-tree (Scanner+Parser, no Sema) can both use it to stop
+    // the pipeline early, the same way -dump-ast already does further down.
     auto withOutput = [&](auto action) -> int {
         if (OutputFile.empty()) {
             action(std::cout);
@@ -843,6 +832,43 @@ int frontendPC1Main(int Argc, char *Argv[]) {
         action(F);
         return 0;
     };
+
+    Scanner Sc(SrcMgr, InputFile, Diags, Opts);
+    if (!Diags.empty()) { emitAll(); return 1; }
+    // Captured before the move below takes Sc apart; -g's DIFile/DICompileUnit
+    // need it and have no other way to ask which buffer was the main one.
+    const FileID MainFileID = Sc.fileID();
+
+    if (DumpTokens) {
+        const int Rc = withOutput([&](std::ostream& Os) {
+            for (;;) {
+                const Token T = Sc.next();
+                const PresumedLoc PL = SrcMgr.getPresumedLoc(T.Loc);
+                Os << PL.Line << ':' << PL.Column << ": " << kindName(T.Kind)
+                   << " \"" << T.Lexeme << "\"\n";
+                if (T.Kind == TokenKind::Eof) break;
+            }
+        });
+        if (!Diags.empty()) { emitAll(); return 1; }
+        return Rc;
+    }
+
+    Parser P(std::move(Sc), Diags, Opts);
+    auto Program = P.parse();
+    if (!Program) { emitAll(); return 1; }
+
+    if (DumpParseTree)
+        return withOutput([&](std::ostream& Os) { printAst(*Program, Os); });
+
+    Sema Sem(Diags, Opts);
+    bool Ok = Sem.check(*Program);
+    emitAll();
+    if (!Ok) return 1;
+
+    // Write .pmi files for any module bodies found in this compilation unit.
+    // This is a no-op for pure-program files (no OwnedModules).
+    if (!Program->OwnedModules.empty())
+        writePMIFiles(*Program, InputFile);
 
     if (DumpAst)
         return withOutput([&](std::ostream& Os) { printAst(*Program, Os); });

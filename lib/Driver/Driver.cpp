@@ -488,6 +488,8 @@ std::string Driver::defaultOutput(const std::string &InputFile, OutputMode Mode)
         case OutputMode::Object:     return stem(InputFile) + ".o";
         case OutputMode::LLVMIr:     return stem(InputFile) + ".ll";
         case OutputMode::DumpAst:    return "";
+        case OutputMode::DumpTokens:    return "";
+        case OutputMode::DumpParseTree: return "";
     }
     return "a.out";
 }
@@ -586,6 +588,10 @@ Options Driver::parseArgs(int Argc, char *Argv[]) {
             Opts.mode = OutputMode::LLVMIr;
         } else if (Arg == "-dump-ast") {
             Opts.mode = OutputMode::DumpAst;
+        } else if (Arg == "-dump-tokens") {
+            Opts.mode = OutputMode::DumpTokens;
+        } else if (Arg == "-dump-parse-tree") {
+            Opts.mode = OutputMode::DumpParseTree;
         } else if (Arg == "-o") {
             if (I + 1 >= Argc) { diag(diag::err_arg_requires_value, {"-o"}); continue; }
             Opts.outputFile = Argv[++I];
@@ -699,13 +705,15 @@ static std::string llcTriple(const Options &Opts) {
     return Opts.target;
 }
 
-/// Build the argv for a -pc1 front-end invocation.
+/// Build the argv for a -pc1 front-end invocation.  \p DumpFlag, if given, is
+/// one of the front-end-only dump modes ("-dump-ast", "-dump-tokens",
+/// "-dump-parse-tree") that stop the pipeline before code generation.
 static std::vector<std::string> makeFEArgs(const Options &Opts,
                                             const std::string &Out,
-                                            bool DumpAst = false) {
+                                            const char *DumpFlag = nullptr) {
     std::vector<std::string> Args = {"-pc1"};
     if (!Out.empty())          { Args.push_back("-o"); Args.push_back(Out); }
-    if (DumpAst)                 Args.push_back("-dump-ast");
+    if (DumpFlag)                Args.push_back(DumpFlag);
     Args.push_back(Opts.inputFile);
     if (!Opts.std.empty())     { Args.push_back("-std=" + Opts.std); }
     if (Opts.suppressWarnings)   Args.push_back("-w");
@@ -899,9 +907,13 @@ int Driver::compile(const Options &Opts, bool IsExtraFile) {
         ExtraObjs.push_back(ExtraOpts.outputFile);
     }
 
-    // DumpAst mode: front end only.
+    // DumpAst/DumpTokens/DumpParseTree modes: front end only.
     if (Opts.mode == OutputMode::DumpAst)
-        return runTool(Self, makeFEArgs(Opts, OutFile, /*DumpAst=*/true), V, DR);
+        return runTool(Self, makeFEArgs(Opts, OutFile, "-dump-ast"), V, DR);
+    if (Opts.mode == OutputMode::DumpTokens)
+        return runTool(Self, makeFEArgs(Opts, OutFile, "-dump-tokens"), V, DR);
+    if (Opts.mode == OutputMode::DumpParseTree)
+        return runTool(Self, makeFEArgs(Opts, OutFile, "-dump-parse-tree"), V, DR);
 
     // LLVMIr mode: front end only.
     if (Opts.mode == OutputMode::LLVMIr)

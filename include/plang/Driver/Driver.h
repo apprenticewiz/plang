@@ -17,6 +17,8 @@ enum class OutputMode {
     Assembly,   ///< -S        compile to native assembly
     LLVMIr,     ///< -emit-llvm   emit textual LLVM IR
     DumpAst,    ///< -dump-ast    print the typed AST and stop
+    DumpTokens,    ///< -dump-tokens      print the token stream and stop
+    DumpParseTree, ///< -dump-parse-tree  print the pre-Sema parse tree and stop
 };
 
 /// Parsed command-line options for the plang driver.
