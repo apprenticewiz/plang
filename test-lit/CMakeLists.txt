@@ -68,3 +68,5 @@ add_custom_target(check-lit
 # test-lit/<Category>/ content.
 add_plang_lit_suite(Smoke)
 add_plang_lit_suite(Conformance)
+add_plang_lit_suite(Acceptance)
+add_plang_lit_suite(CodeGen)
