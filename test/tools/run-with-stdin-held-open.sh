@@ -23,10 +23,28 @@ mkfifo "$fifo" || exit 2
 exec 9<>"$fifo"
 "$@" <"$fifo" &
 pid=$!
-(sleep 5; kill -9 "$pid" 2>/dev/null) >/dev/null 2>&1 &
-guard=$!
-wait "$pid"
+# A plain polling loop, not a backgrounded sleep-then-kill watchdog: two
+# earlier attempts both leaked a real, separate `sleep` PROCESS that
+# outlived this script (killing a wrapping subshell/job does not kill the
+# `sleep` running underneath it -- `wait` for an arbitrary pid only works
+# for the CALLING shell's own direct children, so a second shell can't
+# even wait on it to arrange a clean handoff either). A leaked sleep gets
+# reparented, keeps running, and fires its delayed kill -9 against
+# whatever the kernel has since reused $pid for -- confirmed for real on
+# CI: an orphaned "sleep" process got reported, and a wholly unrelated
+# later test in the same job failed, exactly the shape a stray delayed
+# SIGKILL against a reused pid would produce. A loop of plain, FOREGROUND
+# `sleep 1` calls in this same shell has nothing left running once the
+# loop exits, by construction -- no separate process to leak.
+i=0
+while [ "$i" -lt 5 ] && kill -0 "$pid" 2>/dev/null; do
+    sleep 1
+    i=$((i + 1))
+done
+if kill -0 "$pid" 2>/dev/null; then
+    kill -9 "$pid" 2>/dev/null
+fi
+wait "$pid" 2>/dev/null
 rc=$?
-kill "$guard" 2>/dev/null
 exec 9>&-
 exit "$rc"
