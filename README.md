@@ -92,7 +92,7 @@ encountered.
 - CMake ≥ 3.16
 - LLVM (any recent release; tested with 22.x) — `llc` must be on `PATH`
 - GCC ≥ 14 or Clang ≥ 18 (C++23 required)
-- Google Test — only to build the test suite, which is off by default
+- Google Test — only to build the test suite, which is off by default.  v0.3.0 will migrate to LLVM's lit tool, so this requirement will be dropped.
 
 Linking prerequisites vary by platform:
 
@@ -130,6 +130,10 @@ plang -S hello.pas -o hello.s
 
 # Optimization
 plang -O2 program.pas -o program
+
+# Debugging
+plang -g program.pas -o program
+gdb program
 
 # Dialect selection (iso7185 is the default; turbo, delphi and fpc are planned)
 plang -std=iso10206 program.pas -o program   # Extended Pascal
