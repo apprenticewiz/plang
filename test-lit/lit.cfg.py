@@ -88,6 +88,19 @@ config.substitutions[0:0] = [
 config.substitutions.insert(0,
     ("%run", os.environ.get("PLANG_TEST_RUN_WRAPPER", "")))
 
+# %hold_stdin_open: the one case this suite's own %t/%run idiom can't
+# express directly -- connecting a compiled program's stdin to a pipe that
+# never sends EOF and never has anything queued (a real terminal's own
+# behavior before a keystroke, unlike /dev/null's immediate EOF), with a
+# watchdog in case the program under test actually does block forever.
+# Needs real job control (&, $!, wait) lit's own restricted internal shell
+# doesn't implement, so it's a real, external bash script (matching
+# test/tools/run-under-guardheap.sh's own precedent) rather than an
+# in-line RUN: sequence.
+config.substitutions.insert(0,
+    ("%hold_stdin_open",
+     "bash " + os.path.join(config.plang_source_dir, "test", "tools", "run-with-stdin-held-open.sh")))
+
 # ---- available_features ------------------------------------------------
 #
 # fpc-binary, not bare "fpc": include/plang/Basic/Dialects.def already
