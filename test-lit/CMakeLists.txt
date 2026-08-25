@@ -63,7 +63,8 @@ add_custom_target(check-lit
     COMMENT "Running all lit-based test suites"
 )
 
-# Phase 0: the toolchain smoke test only. Real categories are added one
-# add_plang_lit_suite() line per migration phase (issue #34), in the same
-# commit that adds that phase's test-lit/<Category>/ content.
+# Real categories are added one add_plang_lit_suite() line per migration
+# phase (issue #34), in the same commit that adds that phase's
+# test-lit/<Category>/ content.
 add_plang_lit_suite(Smoke)
+add_plang_lit_suite(Conformance)
