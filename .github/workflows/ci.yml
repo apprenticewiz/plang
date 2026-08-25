@@ -201,22 +201,55 @@ jobs:
         run: |
           echo "$(brew --prefix "llvm@$LLVM_VERSION")/bin" >> "$GITHUB_PATH"
 
+      - name: Install lit and locate FileCheck (test-lit/, issue #34)
+        # Confirmed for real (not assumed) that this keg's bin/ -- the one
+        # directory the step above already puts on PATH -- does not contain
+        # FileCheck, so test-lit/'s find_program(HINTS LLVM_TOOLS_BINARY_DIR)
+        # falls back to a graceful WARNING-and-skip here today: this job
+        # currently runs 0 lit tests. lit itself is a pure Python package, so
+        # `pip install` unconditionally resolves it regardless of what a given
+        # Homebrew formula bundles. FileCheck is a real compiled tool
+        # somewhere inside the keg, just not directly under bin/ -- `find`
+        # locates it wherever Homebrew's own layout actually put it rather
+        # than guessing a specific subdirectory, and CMake is told the exact
+        # path directly rather than depending on PATH search order.
+        run: |
+          pip3 install --user --break-system-packages lit
+          echo "$(python3 -m site --user-base)/bin" >> "$GITHUB_PATH"
+          FILECHECK_PATH="$(find "$(brew --prefix "llvm@$LLVM_VERSION")" -name FileCheck -type f 2>/dev/null | head -1)"
+          if [ -n "$FILECHECK_PATH" ]; then
+            echo "PLANG_CI_FILECHECK=$FILECHECK_PATH" >> "$GITHUB_ENV"
+          else
+            echo "::warning::FileCheck not found anywhere under the llvm@$LLVM_VERSION keg; test-lit/'s suites will be skipped on this job."
+          fi
+
       - name: Show the toolchain
         run: |
           c++ --version
           llc --version | head -3
           xcrun --show-sdk-path
           xcrun --show-sdk-version
+          lit --version
+          [ -n "${PLANG_CI_FILECHECK:-}" ] && "$PLANG_CI_FILECHECK" --version || true
 
       - name: Configure
         # CMAKE_PREFIX_PATH so that find_package(GTest) looks in the Homebrew
         # prefix, which is not one of the places CMake searches by default.
+        # FILECHECK_EXECUTABLE: only passed when the previous step actually
+        # located one (see its own comment) -- an empty -D would tell CMake
+        # "use this literal empty path," not "keep searching," so the flag
+        # itself is conditional rather than passing a maybe-empty value.
         run: |
+          FILECHECK_ARG=()
+          if [ -n "${PLANG_CI_FILECHECK:-}" ]; then
+            FILECHECK_ARG=(-DFILECHECK_EXECUTABLE="$PLANG_CI_FILECHECK")
+          fi
           cmake -S . -B build \
             -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
             -DPLANG_ENABLE_TESTS=ON \
             -DCMAKE_PREFIX_PATH="$(brew --prefix)" \
-            -DLLVM_DIR="$(brew --prefix "llvm@$LLVM_VERSION")/lib/cmake/llvm"
+            -DLLVM_DIR="$(brew --prefix "llvm@$LLVM_VERSION")/lib/cmake/llvm" \
+            "${FILECHECK_ARG[@]}"
 
       - name: Build
         run: cmake --build build -j"$(sysctl -n hw.ncpu)"
