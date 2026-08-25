@@ -330,13 +330,13 @@ and the two cannot disagree.
 
 ## The test suite
 
-1941 tests, split across two harnesses (issue #34) — GoogleTest for
+1952 tests, split across two harnesses (issue #34) — GoogleTest for
 in-process, C++-API-level tests, and LLVM's `lit`+`FileCheck` for CLI-driven,
 black-box tests that spawn the real `plang` binary — mirroring how Clang
 splits `clang/unittests/` from `clang/test/`. `test-lit/README.md` covers the
 lit side's own conventions in full; this section covers both.
 
-### GoogleTest (`test/`) — 1198 tests, in ten binaries
+### GoogleTest (`test/`) — 878 tests, in nine binaries
 
 | Binary                               | Tests | What it covers                        |
 |---------------------------------------|-------|---------------------------------------|
@@ -346,24 +346,23 @@ lit side's own conventions in full; this section covers both.
 | `test/Basic/catalog_test`             | 46    | The `.po` reader and locale selection |
 | `test/Basic/source_manager_test`      | 4     | Source-buffer coordinate overflow     |
 | `test/Driver/driver_test`             | 114   | The driver and the command line       |
-| `test/Driver/ep_test`                 | 320   | Extended Pascal, end to end           |
 | `test/Driver/module_test`             | 231   | Modules and separate compilation      |
 | `test/CodeGen/codegen_switches_test`  | 15    | Positional compiler-switch state      |
 | `test/CodeGen/codegen_storage_test`   | 26    | Type widths, layout, one SizeOf       |
 
 The first five are unit tests over one phase each, constructing
-`Scanner`/`Parser`/`Sema`/etc. objects directly and in-process. The three in
-`test/Driver` are end-to-end suites: each compiles a program, links it, runs
-it, and checks what it printed and what it exited with. They share
-`test/Driver/DriverHarness.h`, which is also where a case that needs several
-named files goes through `CaseDir` — a directory of its own, cleaned up with
-the case, and the working directory the program runs in, so that a relative
-name in a source means a file this case wrote. `driver_test`/`ep_test`/
-`module_test` are slated to migrate to `test-lit/` too (issue #34's remaining
-phases); `codegen_test.cpp` already has (below), and the five unit-test
-binaries are staying GoogleTest permanently.
+`Scanner`/`Parser`/`Sema`/etc. objects directly and in-process. The two in
+`test/Driver`/`test/CodeGen` below them are end-to-end suites: each compiles
+a program, links it, runs it, and checks what it printed and what it exited
+with. They share `test/Driver/DriverHarness.h`, which is also where a case
+that needs several named files goes through `CaseDir` — a directory of its
+own, cleaned up with the case, and the working directory the program runs
+in, so that a relative name in a source means a file this case wrote.
+`driver_test`/`module_test` are slated to migrate to `test-lit/` too (issue
+#34's remaining phases); `codegen_test.cpp` and `ep_test.cpp` already have
+(below), and the five unit-test binaries are staying GoogleTest permanently.
 
-### lit + FileCheck (`test-lit/`) — 743 tests, in four suites
+### lit + FileCheck (`test-lit/`) — 1074 tests, in five suites
 
 | Suite                      | Tests | What it covers                                    |
 |-----------------------------|-------|----------------------------------------------------|
@@ -371,6 +370,7 @@ binaries are staying GoogleTest permanently.
 | `test-lit/Conformance`      | 377   | The Pascal-P5 ISO 7185 suite                        |
 | `test-lit/Acceptance`       | 1     | The Pascal Acceptance Test                          |
 | `test-lit/CodeGen`          | 364   | What the generated code does when run               |
+| `test-lit/EP`               | 331   | Extended Pascal, end to end                         |
 
 #### The Pascal-P5 conformance suite
 
@@ -416,7 +416,7 @@ reconfigure to pick them up).
 To run one GoogleTest binary directly, with the usual GoogleTest filters:
 
 ```bash
-./build/test/Driver/ep_test --gtest_filter='EP7Schema.*'
+./build/test/Driver/module_test --gtest_filter='SeparateCompilation.*'
 ```
 
 To run one lit suite, or filter within it, the way LLVM contributors iterate
