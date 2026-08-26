@@ -68,8 +68,13 @@ void CGProcCall::emitCallStmt(const CallStmt& s) {
     }
     if ((lo == "reset" || lo == "rewrite") && !s.Args.empty()) {
         auto* fp = FileVars.fileVarPtr(*s.Args[0]);
+        // A string(n) filename has no NUL terminator of its own -- only the
+        // { length, bytes } struct every EP string carries -- and
+        // plang_reset/plang_rewrite take `const char *`, so it has to be
+        // marshalled into one the same way a var-string reaches any other
+        // C-string-shaped runtime entry point.
         auto* nm = s.Args.size() > 1
-            ? EmitExpr(*s.Args[1])
+            ? StrCall.emitCStrArg(*s.Args[1])
             : llvm::ConstantPointerNull::get(PtrTy);
         // §6.4.3.5 makes a text file a sequence of lines, each ended by a line
         // marker.  Turning one round to read it has to finish the line the
@@ -101,8 +106,11 @@ void CGProcCall::emitCallStmt(const CallStmt& s) {
     // EP §6.7.5.2: extend / update
     if ((lo == "extend" || lo == "update") && !s.Args.empty()) {
         auto* fp = FileVars.fileVarPtr(*s.Args[0]);
+        // Same filename marshalling reset/rewrite need just above -- a
+        // string(n) actual is a { length, bytes } struct, and plang_extend/
+        // plang_update take `const char *`.
         auto* nm = s.Args.size() > 1
-            ? EmitExpr(*s.Args[1])
+            ? StrCall.emitCStrArg(*s.Args[1])
             : llvm::ConstantPointerNull::get(PtrTy);
         auto* fn = RtFns.getExternFnN("plang_" + lo,
             llvm::Type::getVoidTy(Ctx), {PtrTy, PtrTy});
