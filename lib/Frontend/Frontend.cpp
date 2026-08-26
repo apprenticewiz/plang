@@ -27,6 +27,7 @@
 #include "plang/Lex/Scanner.h"
 #include "plang/Sema/Sema.h"
 
+#include <charconv>
 #include <cstdio>
 #include <fstream>
 #include <iostream>
@@ -787,7 +788,21 @@ int frontendPC1Main(int Argc, char *Argv[]) {
                 std::cerr << "plang -pc1: -ferror-limit= requires a number\n";
                 return 1;
             }
-            ErrorLimit = static_cast<unsigned>(std::stoul(N));
+            // N is all-digits and non-empty, but that alone does not mean it
+            // fits in ErrorLimit's unsigned range -- std::stoul would throw
+            // std::out_of_range on a value like that, and this build is
+            // -fno-exceptions (see the from_chars use in ParseExpr.cpp's
+            // integer-literal handling for the same reason), so parse with
+            // std::from_chars and check its error code instead of a type
+            // that can throw.
+            unsigned Parsed = 0;
+            auto [Ptr, Ec] = std::from_chars(N.data(), N.data() + N.size(), Parsed);
+            if (Ec != std::errc{}) {
+                std::cerr << "plang -pc1: -ferror-limit= value '" << N
+                           << "' is too large\n";
+                return 1;
+            }
+            ErrorLimit = Parsed;
         } else if (Arg == "-Wall") {
             // Every warning is on already; -Wall is accepted so that a command
             // line written for another compiler does not have to be edited.
