@@ -891,18 +891,36 @@ std::shared_ptr<Type> Sema::checkSetLit(const SetLiteralExpr& E) {
     T->Name     = "set literal";
     T->ElemType = BaseType ? BaseType : TyInt;
     // With no context to name a set type, `card([-1, 3])` still has to put
-    // ordinal -1 somewhere, so read a window off the elements themselves.  A
+    // ordinal -1 somewhere, so read a window off the elements themselves. A
     // context that does name a type replaces this wholesale via adoptSetType.
+    //
+    // The same window also has to be checked against PlangMaxSetElements the
+    // way a named `set of` base type is in checkSetBaseRange: a literal like
+    // `[0, 300]` never gets a subrange window at all under the old rule below
+    // (nothing here is negative), so nothing ever caught it spanning more
+    // than a set can represent, and codegen's bitmask silently dropped 300.
     if (T->ElemType && T->ElemType->Kind == TypeKind::Integer) {
-        if (auto Window = literalSetWindow(E))
-            T->ElemType = Ctx_.getSubrange(TyInt, Window->first, Window->second);
+        if (auto Window = literalSetWindow(E)) {
+            // A negative low bound shifts the window rather than widening it,
+            // same as setBaseOffset for a named base type.
+            const int64_t Offset = Window->first < 0 ? Window->first : 0;
+            if (Window->second - Offset >= PlangMaxSetElements) {
+                error(E.Loc, diag::err_set_lit_too_wide,
+                      {std::to_string(Window->first), std::to_string(Window->second),
+                       std::to_string(PlangMaxSetElements)});
+            } else if (Window->first < 0) {
+                T->ElemType = Ctx_.getSubrange(TyInt, Window->first, Window->second);
+            }
+        }
     }
     return T;
 }
 
-/// The span of a set-constructor's ordinals, when every one of them folds and
-/// the span reaches below zero.  Nothing otherwise: a window is only worth
-/// deriving when the default of zero would be wrong.
+/// The span of a set-constructor's ordinals, when every one of them folds.
+/// Nothing otherwise: an element that doesn't fold (a variable, say) leaves
+/// no compile-time window to derive, the same as an unfoldable named-type
+/// bound in checkSetBaseRange -- codegen clamps such sets at run time
+/// instead.
 std::optional<std::pair<int64_t, int64_t>>
 Sema::literalSetWindow(const SetLiteralExpr& E) {
     int64_t Lo = 0, Hi = 0;
@@ -921,7 +939,7 @@ Sema::literalSetWindow(const SetLiteralExpr& E) {
             return std::nullopt;
         }
     }
-    if (!Any || Lo >= 0) return std::nullopt;
+    if (!Any) return std::nullopt;
     return std::make_pair(Lo, Hi);
 }
 
