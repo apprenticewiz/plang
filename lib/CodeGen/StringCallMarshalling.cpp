@@ -77,6 +77,34 @@ llvm::Value* StringCallMarshalling::emitStrAddr(const ExprNode& e) {
     return EmitExpr(e);
 }
 
+llvm::Value* StringCallMarshalling::emitCStrArg(const ExprNode& e) {
+    // Only a string(n) value needs converting -- everything else EmitExpr
+    // returns for a string-shaped argument (a plain string literal outside
+    // Extended Pascal, an already-null-terminated `String`) is already a
+    // `char *`.
+    if (!ExprIsVarStr(e)) return EmitExpr(e);
+    auto* addr = emitStrAddr(e);
+    if (!addr) codegenICE("a string value with no address");
+    auto* len  = Strings.strLoadLen(addr);
+    auto* data = Strings.strDataPtr(addr);
+    // ExprStrCap is exprStrCapStatic: a discriminant-fixed capacity is not a
+    // compile-time constant (that's the whole point of a discriminant), so it
+    // widens to PlangMaxStringCapacity rather than under-sizing the buffer
+    // against a runtime length that can exceed the probe capacity on the
+    // static type.  With a real constant capacity this is exact, so the
+    // buffer -- unlike the runtime length that fills it -- can be a reused
+    // entry-block alloca the same way every other string temporary in this
+    // file is.
+    auto* i8Ty = llvm::Type::getInt8Ty(Ctx);
+    auto* buf  = CreateEntryAlloca(
+        llvm::ArrayType::get(i8Ty, static_cast<uint64_t>(ExprStrCap(e)) + 1),
+        "str.cstr");
+    B.CreateMemCpy(buf, llvm::MaybeAlign(), data, llvm::MaybeAlign(), len);
+    auto* nulAt = B.CreateInBoundsGEP(i8Ty, buf, len, "str.cstr.nul");
+    B.CreateStore(llvm::ConstantInt::get(i8Ty, 0), nulAt);
+    return buf;
+}
+
 llvm::Value* StringCallMarshalling::emitCharStrAsStr(const ExprNode& e) {
     const int64_t n = ExprCharStrLen(e);
     auto* src = EmitLValue(e);

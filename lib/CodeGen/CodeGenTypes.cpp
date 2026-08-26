@@ -163,7 +163,8 @@ void Codegen::Impl::init(const std::string& progName) {
         [this](llvm::Value* v, llvm::Type* t){ return coerceToType(v, t); },
         [](const ExprNode& e){ return exprIsCharStr(e); },
         [](const ExprNode& e){ return exprIsVarStr(e); },
-        [](const ExprNode& e){ return exprCharStrLen(e); });
+        [](const ExprNode& e){ return exprCharStrLen(e); },
+        [](const ExprNode& e){ return exprStrCapStatic(e); });
     // Procedural-parameter ABI + conformant-array marshalling.
     // BuildStaticLinkFrame/IsNestedFunction deliberately don't absorb
     // buildStaticLinkFrame/nestedFunctions_ -- the closure-capture loop's

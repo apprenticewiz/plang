@@ -42,7 +42,8 @@ public:
         std::function<llvm::Value*(llvm::Value*, llvm::Type*)> CoerceToType,
         std::function<bool(const plang::ExprNode&)> ExprIsCharStr,
         std::function<bool(const plang::ExprNode&)> ExprIsVarStr,
-        std::function<int64_t(const plang::ExprNode&)> ExprCharStrLen)
+        std::function<int64_t(const plang::ExprNode&)> ExprCharStrLen,
+        std::function<int64_t(const plang::ExprNode&)> ExprStrCap)
         : Ctx(Ctx), B(B), Strings(Strings), RangeGuards(RangeGuards),
           RtFns(RtFns), Types(Types), Schema(Schema), I64Ty(I64Ty), PtrTy(PtrTy),
           EmitExpr(std::move(EmitExpr)), EmitLValue(std::move(EmitLValue)),
@@ -50,7 +51,8 @@ public:
           CoerceToType(std::move(CoerceToType)),
           ExprIsCharStr(std::move(ExprIsCharStr)),
           ExprIsVarStr(std::move(ExprIsVarStr)),
-          ExprCharStrLen(std::move(ExprCharStrLen)) {}
+          ExprCharStrLen(std::move(ExprCharStrLen)),
+          ExprStrCap(std::move(ExprStrCap)) {}
 
     /// One argument of a call to a user-declared procedure or function,
     /// given the LLVM type the callee declared for that position: an
@@ -63,6 +65,15 @@ public:
     /// The address of the { length, bytes } struct a string expression
     /// denotes, which is what every string runtime entry point takes.
     llvm::Value* emitStrAddr(const plang::ExprNode& e);
+    /// A NUL-terminated C string for a call argument whose runtime
+    /// signature is `const char *` rather than the { length, bytes } ABI --
+    /// EP §6.7.5.2's optional reset/rewrite/extend/update file name is the
+    /// one user today.  A string(n) value has no terminator of its own (only
+    /// a length field in front of its bytes), so it is copied into one here;
+    /// anything else (a plain string literal outside Extended Pascal, or an
+    /// already-null-terminated `String`) already IS a `char *` and is
+    /// returned unchanged.
+    llvm::Value* emitCStrArg(const plang::ExprNode& e);
     /// Wraps a §6.4.3.2 char-array value as a temporary `string(n)` struct.
     llvm::Value* emitCharStrAsStr(const plang::ExprNode& e);
     /// Stores \p src into the fixed-\p n-byte char-array at \p dst.
@@ -94,6 +105,7 @@ private:
     std::function<bool(const plang::ExprNode&)> ExprIsCharStr;
     std::function<bool(const plang::ExprNode&)> ExprIsVarStr;
     std::function<int64_t(const plang::ExprNode&)> ExprCharStrLen;
+    std::function<int64_t(const plang::ExprNode&)> ExprStrCap;
 
     llvm::Constant* i64c(int64_t v) const {
         return llvm::ConstantInt::get(I64Ty, static_cast<uint64_t>(v), true);
