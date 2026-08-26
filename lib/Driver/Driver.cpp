@@ -625,14 +625,33 @@ Options Driver::parseArgs(int Argc, char *Argv[]) {
         } else if (Arg == "-fno-nil-checks") {
             Opts.nilChecks = false;
         } else if (Arg.starts_with("-W") && Arg.size() > 2) {
-            if (Arg.size() <= 3 || Arg[2] != 'l' || Arg[3] != ',')
+            if (Arg.size() <= 3 || Arg[2] != 'l' || Arg[3] != ',') {
                 Opts.frontendArgs.push_back(Arg);
-            else
-                Opts.linkerArgs.push_back(Arg);
+            } else {
+                // gcc/clang convention: everything after "-Wl," is a
+                // comma-separated list of arguments to hand the linker
+                // verbatim, each becoming its own argv entry — not the
+                // literal "-Wl,..." string, which ld.lld (invoked
+                // directly, with no gcc in between to strip it) rejects
+                // outright as an unknown argument.
+                std::string_view Rest(Arg.data() + 4, Arg.size() - 4);
+                size_t Pos = 0;
+                while (Pos <= Rest.size()) {
+                    size_t Comma = Rest.find(',', Pos);
+                    if (Comma == std::string_view::npos) {
+                        Opts.linkerArgs.emplace_back(Rest.substr(Pos));
+                        break;
+                    }
+                    Opts.linkerArgs.emplace_back(Rest.substr(Pos, Comma - Pos));
+                    Pos = Comma + 1;
+                }
+            }
 
         } else if (Arg == "-Xlinker") {
             if (I + 1 >= Argc) { diag(diag::err_arg_requires_value, {"-Xlinker"}); continue; }
-            Opts.linkerArgs.push_back("-Xlinker");
+            // Forward the single following argument as-is: unlike -Wl,,
+            // gcc/clang do not comma-split it, and the "-Xlinker" marker
+            // itself is never passed to the linker.
             Opts.linkerArgs.push_back(Argv[++I]);
         } else if (Arg.size() > 2 && Arg[0] == '-' && Arg[1] == 'I') {
             Opts.modulePaths.push_back(Arg.substr(2));
