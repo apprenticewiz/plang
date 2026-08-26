@@ -7,6 +7,13 @@
 /// happen; tested here with hypothetical sizes rather than by actually
 /// allocating gigabytes of text, since the check itself is pure arithmetic
 /// on the size a buffer WOULD be.
+///
+/// A deliberate, permanent GoogleTest exception (issue #43's GTest->lit
+/// migration): there is no CLI path that could trigger this at all, short
+/// of actually compiling a multi-gigabyte source file to make NextBase
+/// approach UINT32_MAX, which no lit test in this repo does or should do.
+/// wouldOverflow's own arithmetic has no Pascal-source-observable trigger
+/// even in principle.
 
 #include "plang/Basic/SourceManager.h"
 

@@ -10,6 +10,16 @@
 /// that matters most: that a location *before* the change still gets the old
 /// state.  A directive can only ever be read in source order, so a scanner
 /// cannot produce the case where the search has to go backwards.
+///
+/// Deferred wholesale from issue #43's GTest->lit migration, not a
+/// permanent exception: SwitchTable/CompilerSwitches build a table by hand
+/// in C++ and query it directly, which has no .pas source to write until
+/// the Tier 1 `{$R+}`-style directive scanner exists to produce one for
+/// real.  Two of SwitchConsumer's three cases are already meaningfully
+/// duplicated by test-lit/CodeGen/RuntimeChecks/*.pas's existing
+/// -frange-checks/-fno-range-checks coverage and should be dropped, not
+/// ported, once this file migrates; the third should migrate normally.
+/// Revisit this whole file once Tier 1 ships.
 
 #include "plang/Basic/SwitchTable.h"
 #include "plang/Basic/LangOptions.h"
