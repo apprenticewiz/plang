@@ -205,6 +205,14 @@ DIAG(err_duplicate_field, Error, "duplicate field name '%0' in record")
 DIAG(err_set_base_not_ordinal, Error, "set base type must be ordinal; got '%0'")
 DIAG(err_set_base_too_wide, Error,
      "set base type '%0' exceeds the %1-element limit on sets")
+// An untyped set-constructor (no adopting named set type) has no declared
+// base type to check, so its window is read off its own elements instead --
+// see literalSetWindow.  Without this, `x in [0, 300]` or `card([0, 300])`
+// derived a window from the elements but never checked it against the same
+// PlangMaxSetElements limit a named `set of` type is held to, so codegen's
+// bitmask silently dropped whichever elements fell outside it.
+DIAG(err_set_lit_too_wide, Error,
+     "set constructor spans %0..%1, which exceeds the %2-element limit on sets")
 DIAG(err_file_component_is_file, Error, "file component type must not itself be a file type")
 DIAG(err_file_field_has_file, Error, "file component type must not contain a file field (field '%0' is a file type)")
 DIAG(err_string_cap_not_int, Error, "string capacity must be an integer constant expression")

@@ -577,8 +577,8 @@ private:
     [[nodiscard]] std::shared_ptr<Type> checkSetLit  (const SetLiteralExpr& E);
     [[nodiscard]] std::shared_ptr<Type> checkStructuredValue(const StructuredValueExpr& E);
 
-    /// The span of a set-constructor's ordinals, when they all fold and the
-    /// span reaches below zero; nothing otherwise.  See checkSetLit.
+    /// The span of a set-constructor's ordinals, when they all fold; nothing
+    /// otherwise.  See checkSetLit.
     [[nodiscard]] std::optional<std::pair<int64_t, int64_t>>
     literalSetWindow(const SetLiteralExpr& E);
 
