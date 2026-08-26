@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Extract test/Conformance/cases/*.cpp (377 GoogleTest cases, one per file,
-issue #34 Phase 1) into standalone .pas files under test-lit/Conformance/.
+issue #34 Phase 1) into standalone .pas files under test/Conformance/.
 
 Every input file has one fixed, machine-generated shape (see
 test/Conformance/CMakeLists.txt's own comment: produced by the now-lost
@@ -12,7 +12,7 @@ tools/gen_conformance_tests.py):
     )plang").Ok);
     }
 
-check() (test/Support/TestHelper.h) runs Scanner->Parser->Sema only, with
+check() (test/unittests/Support/TestHelper.h) runs Scanner->Parser->Sema only, with
 default LangOptions -- Standard::ISO7185, the same as plang's own bare
 no-flag default -- and answers a single Ok bool. `plang -dump-ast` was
 confirmed (Phase 0 design work) to run that identical pipeline and exit
@@ -36,7 +36,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CASES_DIR = REPO_ROOT / "test" / "Conformance" / "cases"
-OUT_ROOT = REPO_ROOT / "test-lit" / "Conformance"
+OUT_ROOT = REPO_ROOT / "test" / "Conformance"
 
 CASE_RE = re.compile(
     r'TEST\((?P<suite>ConformanceClean|ConformanceError),\s*(?P<name>\w+)\)\s*\{\s*'

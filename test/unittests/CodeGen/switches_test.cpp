@@ -16,7 +16,7 @@
 /// in C++ and query it directly, which has no .pas source to write until
 /// the Tier 1 `{$R+}`-style directive scanner exists to produce one for
 /// real.  Two of SwitchConsumer's three cases are already meaningfully
-/// duplicated by test-lit/CodeGen/RuntimeChecks/*.pas's existing
+/// duplicated by test/CodeGen/RuntimeChecks/*.pas's existing
 /// -frange-checks/-fno-range-checks coverage and should be dropped, not
 /// ported, once this file migrates; the third should migrate normally.
 /// Revisit this whole file once Tier 1 ships.

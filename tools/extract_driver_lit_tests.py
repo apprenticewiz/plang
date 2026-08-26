@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Extract test/Driver/{ep,module}_test.cpp's GoogleTest cases into
-standalone .pas files under test-lit/{EP,Module}/ (issue #34 Phase 3).
-Originally written for codegen_test.cpp/test-lit/CodeGen/ (Phase 2, PR #37);
+standalone .pas files under test/{EP,Module}/ (issue #34 Phase 3).
+Originally written for codegen_test.cpp/test/CodeGen/ (Phase 2, PR #37);
 generalized here to take a suite name (see SUITES below) since the two
 layers this script is built from -- call-shape recognition (this file's
 CALL_RE/extract_call_args/compile_lines_and_body) vs. assertion-shape
@@ -77,14 +77,14 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PLANG_BIN = REPO_ROOT / "build" / "bin" / "plang"
 
-# suite key -> (source .cpp, output test-lit/ directory). codegen_test.cpp,
+# suite key -> (source .cpp, output test/ directory). codegen_test.cpp,
 # ep_test.cpp, and module_test.cpp are gone (deleted in PRs #38/#39/#40).
 # driver_test.cpp's own GTest suite is literally named "Driver" (19 cases),
-# so those land at test-lit/Driver/Driver/<kebab-name>.pas -- the category
+# so those land at test/Driver/Driver/<kebab-name>.pas -- the category
 # dir and the sub-suite dir both being "Driver" is a real, harmless artifact
 # of the existing out_dir = out_root / suite convention, not a bug.
 SUITES = {
-    "driver": (REPO_ROOT / "test" / "Driver" / "driver_test.cpp", REPO_ROOT / "test-lit" / "Driver"),
+    "driver": (REPO_ROOT / "test" / "Driver" / "driver_test.cpp", REPO_ROOT / "test" / "Driver"),
 }
 
 
@@ -355,7 +355,7 @@ def base_and_flags(suite: str, flags: str | None) -> tuple[str, str]:
     flag, switches to "%plang_ep" and strips that literal prefix out of fp --
     a pure DRY win (every ep RUN line otherwise repeats "-std=iso10206"),
     never a behavior change: %plang_ep already expands to "%plang
-    -std=iso10206" (test-lit/lit.cfg.py), so dropping the now-redundant
+    -std=iso10206" (test/lit.cfg.py), so dropping the now-redundant
     literal copy is exactly equivalent. Falls back to %plang with flags
     untouched whenever the prefix isn't there (some ep cases legitimately
     omit the dialect flag, e.g. testing ISO 7185-under-EP-binary behavior) --
@@ -408,7 +408,7 @@ DECLARES_MODULE_RE = re.compile(r"(?im)^\s*module\b")
 def compile_lines_and_body(base: str, fp: str, src, stdin_text: str | None, compile_stderr_to: str | None = None):
     """Returns (compile_run_line, exec_prefix, body_text) for a case that
     compiles %s and then runs the result via %run (PLANG_TEST_RUN_WRAPPER /
-    guardheap, per test-lit/README.md's documented convention -- the
+    guardheap, per test/README.md's documented convention -- the
     Phase-2 script this was generalized from omitted this, a gap only
     caught and swept-fixed after the fact across 282 files in commit
     c964d54; baked in from the start here instead of repeating that).

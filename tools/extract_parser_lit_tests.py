@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Extract test/Parse/parser_test.cpp's TEST() cases into test-lit/Parse/*.pas.
+"""Extract test/Parse/parser_test.cpp's TEST() cases into test/Parse/*.pas.
 
 Every case in parser_test.cpp does one of three things:
 
@@ -49,7 +49,7 @@ from dataclasses import dataclass, field
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SRC_FILE = os.path.join(REPO_ROOT, "test", "Parse", "parser_test.cpp")
-OUT_ROOT = os.path.join(REPO_ROOT, "test-lit", "Parse")
+OUT_ROOT = os.path.join(REPO_ROOT, "test", "Parse")
 PLANG_BIN = os.path.join(REPO_ROOT, "build", "bin", "plang")
 
 SKIP = {
@@ -283,7 +283,7 @@ def build_structural(name: str, body: str) -> str | None:
         # a literal space here would require a leading space in the real
         # output line that isn't actually there (confirmed empirically --
         # matches this project's own established convention elsewhere,
-        # e.g. test-lit/CodeGen's exact-stdout idiom).
+        # e.g. test/CodeGen's exact-stdout idiom).
         lines.append(f"{prefix}:{out_line}")
     lines.append("*)")
     lines.append("")

@@ -92,7 +92,7 @@ encountered.
 - CMake ≥ 3.16
 - LLVM (any recent release; tested with 22.x) — `llc` must be on `PATH`
 - GCC ≥ 14 or Clang ≥ 18 (C++23 required)
-- Google Test — only to build the test suite, which is off by default.  v0.3.0 will migrate to LLVM's lit tool, so this requirement will be dropped.
+- Google Test — only to build the test suite, which is off by default.  Most of the suite is LLVM's `lit`+`FileCheck`; Google Test covers a small, permanent set of unit tests over internals with no CLI-visible surface, the same split Clang itself uses between `clang/test/` and `clang/unittests/`.
 
 Linking prerequisites vary by platform:
 

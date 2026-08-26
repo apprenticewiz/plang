@@ -1,4 +1,4 @@
-// The rest of this file's TEST() cases migrated to test-lit/Basic/Catalog/
+// The rest of this file's TEST() cases migrated to test/Basic/Catalog/
 // (issue #43, Phase E) -- each drives the real plang CLI (-fdiagnostics-language=,
 // -fdiagnostics-show-fuzzy, --version, PLANG_LOCALE_DIR) against a synthetic or
 // real shipped .po catalog and checks the translated (or English-fallback)

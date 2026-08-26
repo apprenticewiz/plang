@@ -1,23 +1,24 @@
-# `test-lit/` — lit-based tests
+# `test/` — lit-based tests
 
 This tree holds plang's `lit`+`FileCheck`-based tests: standalone `.pas`
 files with `RUN:`/`CHECK:` directives embedded in comments, run by LLVM's
 `lit` test runner. It mirrors how Clang splits `clang/test/` (lit,
 black-box, drives the compiler as a subprocess) from `clang/unittests/`
-(GoogleTest, tests internal C++ APIs directly, in-process).
+(GoogleTest, tests internal C++ APIs directly, in-process) — plang's own
+counterpart to `clang/unittests/` is [`test/unittests/`](unittests/), not
+a separate top-level tree, the same relative nesting Clang itself uses.
 
-**`test/` (GoogleTest) is not being replaced — it's being split.** Tests
-that construct `Scanner`/`Parser`/`Sema`/etc. objects directly and inspect
-them in-process stay under `test/` as GoogleTest, unchanged. Tests that
-spawn the real `plang` binary and assert on its exit code, stdout, stderr,
-or emitted IR are migrating here, category by category. See
-[issue #34](https://github.com/apprenticewiz/plang/issues/34) for the full
-rationale, phased rollout, and per-category conversion idioms.
-
-`test-lit/` and `test/` coexist deliberately for the length of the
-migration — nothing is deleted from `test/` until the corresponding
-`test-lit/` category has been verified to reproduce identical pass/fail
-results, category by category, not all at once.
+**`test/unittests/` (GoogleTest) is not a leftover — it's a permanent,
+deliberate tier**, not something migrating away. Tests that construct
+`Scanner`/`Parser`/`Sema`/etc. objects directly and inspect them
+in-process live there as GoogleTest, by design; nothing under
+`test/unittests/` today is a candidate for further conversion. Tests that
+spawn the real `plang` binary and assert on its exit code, stdout,
+stderr, or emitted IR live here, under `test/`. See
+[issue #34](https://github.com/apprenticewiz/plang/issues/34) and
+[issue #43](https://github.com/apprenticewiz/plang/issues/43) for the
+full rationale, phased rollout, and per-category conversion idioms behind
+this split.
 
 ## A load-bearing syntax constraint
 
@@ -51,7 +52,7 @@ to the same-terminator rule above.
   directory here, not per test file (LLVM-idiomatic granularity)
 - A single test or pattern during development, the way LLVM contributors
   actually iterate day to day:
-  `lit --filter='<regex>' build/test-lit/<Category>`
+  `lit --filter='<regex>' build/test/<Category>`
 
 ## Substitutions available in `RUN:` lines
 

@@ -13,4 +13,4 @@ config.plang_tools_dir  = r"@PLANG_TOOLS_DIR@"
 config.llvm_tools_dir   = r"@LLVM_TOOLS_BINARY_DIR@"
 
 lit_config.load_config(
-    config, os.path.join(config.plang_source_dir, "test-lit", "lit.cfg.py"))
+    config, os.path.join(config.plang_source_dir, "test", "lit.cfg.py"))

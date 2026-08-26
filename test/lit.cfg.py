@@ -1,5 +1,5 @@
 # lit.cfg.py -- static config for plang's lit-based test suite (see
-# test-lit/README.md and issue #34 for what lives here vs. in test/).
+# test/README.md and issue #34 for what lives here vs. in test/unittests/).
 #
 # Built on lit.llvm, the same helper Clang/MLIR/Flang use in their own
 # out-of-tree lit.cfg.py: it wires FileCheck/not/split-file onto PATH and
@@ -30,7 +30,7 @@ config.suffixes = [".pas"]
 config.test_format = lit.formats.ShTest(execute_external=False)
 
 config.test_source_root = os.path.dirname(__file__)
-config.test_exec_root = os.path.join(config.plang_binary_dir, "test-lit")
+config.test_exec_root = os.path.join(config.plang_binary_dir, "test")
 
 lit.llvm.initialize(lit_config, config)
 llvm_config = lit.llvm.llvm_config  # a global set by initialize(), not a class to construct
@@ -40,8 +40,9 @@ llvm_config.add_tool_substitutions(
 
 # ---- %plang and friends -----------------------------------------------
 #
-# PLANG_TEST_EXTRA_FLAGS / PLANG_TEST_RUN_WRAPPER: the same two env vars
-# test/Driver/DriverHarness.h's compileAndRunFile() already reads, so the CI
+# PLANG_TEST_EXTRA_FLAGS / PLANG_TEST_RUN_WRAPPER: the same two env vars the
+# original GoogleTest harness's compileAndRunFile() read (DriverHarness.h,
+# since deleted along with the GTest files it served), so the CI
 # jobs that re-run the whole suite at -O1/-O2/-O3, and the guardheap-wrapped
 # subset, keep working across the migration with no change to those jobs'
 # env -- only which suite answers to it changes.  --param is lit's own more

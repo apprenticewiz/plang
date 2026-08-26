@@ -10,22 +10,22 @@
 /// The cases that compiled a real program and just checked it didn't ICE
 /// (the size-agreement assertion between Sema::byteSizeOf and
 /// DataLayout::getTypeAllocSize aborts the process on disagreement, so
-/// merely finishing is the whole test) migrated to test-lit/CodeGen/ (issue
+/// merely finishing is the whole test) migrated to test/CodeGen/ (issue
 /// #43, Phase F) -- 7 became new lit files, 1 was folded next to an existing
 /// VariantRecord case that was missing its exact wide-sibling ingredient,
 /// and 4 turned out to already be covered, more thoroughly (by round-tripped
 /// runtime values, not just a successful compile), by existing
-/// test-lit/CodeGen/VariantRecord/ and Storage/ content -- confirmed by a
+/// test/CodeGen/VariantRecord/ and Storage/ content -- confirmed by a
 /// dedicated research pass reading every candidate file on both sides, not
 /// assumed from similar-looking Pascal:
 ///   - TheAlternativesOfAVariantShareTheirStorage is subsumed by
-///     test-lit/CodeGen/VariantRecord/the-alternatives-share-their-storage.pas
+///     test/CodeGen/VariantRecord/the-alternatives-share-their-storage.pas
 ///   - AVariantWithNothingInItsAlternativesReservesNothing is subsumed by
-///     test-lit/CodeGen/VariantRecord/empty-alternatives-reserve-nothing.pas
+///     test/CodeGen/VariantRecord/empty-alternatives-reserve-nothing.pas
 ///   - SemaSizesAPackedRecordWithoutPaddingOrATail is subsumed (as a strict
 ///     superset -- it needs both inter-field AND tail padding elided, with a
 ///     16-aligned member) by
-///     test-lit/CodeGen/Storage/a-packed-field-does-not-claim-an-alignment-it-cannot-keep.pas
+///     test/CodeGen/Storage/a-packed-field-does-not-claim-an-alignment-it-cannot-keep.pas
 ///   - APackedRecordRoundTripsItsFields is subsumed by that same file
 ///
 /// What remains here is a deliberate, permanent GoogleTest exception for two

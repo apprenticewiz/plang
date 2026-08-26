@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Extract test/Sema/sema_test.cpp's TEST() cases into test-lit/Sema/*.pas.
+"""Extract test/unittests/Sema/sema_test.cpp's TEST() cases into test/Sema/*.pas.
 
 Every case in sema_test.cpp calls check(Src[, Opts]) (test/Sema/TestHelper.h),
 which runs Scanner+Parser+Sema in-process and returns a SemaResult with:
@@ -53,8 +53,8 @@ import sys
 import tempfile
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SRC_FILE = os.path.join(REPO_ROOT, "test", "Sema", "sema_test.cpp")
-OUT_ROOT = os.path.join(REPO_ROOT, "test-lit", "Sema")
+SRC_FILE = os.path.join(REPO_ROOT, "test", "unittests", "Sema", "sema_test.cpp")
+OUT_ROOT = os.path.join(REPO_ROOT, "test", "Sema")
 PLANG_BIN = os.path.join(REPO_ROOT, "build", "bin", "plang")
 
 # Permanent GoogleTest exceptions -- X-macro loops over Builtins.def, no
@@ -316,14 +316,14 @@ def build_case(content: str, is_ep: bool, ok_true: bool, ok_false: bool,
     # .pmi file next to whatever path it was given, as a side effect of a
     # successful Sema run -- confirmed the hard way once already (Phase 3's
     # EP/Module migration hit the identical issue: real .pmi files landing in
-    # the checked-in test-lit/ tree). split-file relocates the compile into
+    # the checked-in test/ tree). split-file relocates the compile into
     # %t.dir so that side effect lands in the build tree, never the source
     # tree, even for a single-chunk "file" -- same idiom
-    # test-lit/Module/EP13Modules/*.pas already established.
+    # test/Module/EP13Modules/*.pas already established.
     declares_module = bool(re.search(r"^\s*module\s", content, re.MULTILINE))
     input_path = "%t.dir/test.pas" if declares_module else "%s"
 
-    # %plang_ep already bakes in -std=iso10206 (test-lit/lit.cfg.py) -- the
+    # %plang_ep already bakes in -std=iso10206 (test/lit.cfg.py) -- the
     # dialect_flag above is only for the raw-binary probe() call, which
     # doesn't go through that substitution.
     run_lines = []
