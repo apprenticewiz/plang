@@ -8,6 +8,192 @@ version numbers follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-08-26
+
+A foundation release rather than a features release, aside from one
+exception: real `-g` debug info. The rest is a large internal-quality
+investment — a code generator that had grown into a single ~1,800-line
+class was decomposed into focused pieces, a from-scratch adversarial
+review swept the whole compiler for bugs the existing suite couldn't see,
+and the test suite was restructured to mirror how Clang splits its own —
+plus a handful of further correctness fixes found along the way. Every
+fix here carries a regression test verified to fail against the code it
+fixes; the debug-info work additionally carries live gdb/lldb verification
+passes, not just IR-text checks, per this project's own experience that
+the two can disagree.
+
+### Added
+
+- **`-g` compiles debug information.** DWARF debug info covering real
+  breakpoints, source-line stepping, and variable inspection under
+  gdb/lldb: locals, parameters, and captured variables inside nested
+  procedures, including `var` parameters and closures resolved correctly
+  across static-link frames, plus an LLDB pointer-summary formatter for
+  plang binaries. Previously `-g` was accepted and cleanly rejected with
+  a "not supported" diagnostic (0.2.0); this replaces that rejection with
+  the real thing.
+
+### Changed
+
+- **The code generator's internals were decomposed.** `Codegen::Impl` had
+  grown to roughly 1,800 lines and 260 methods, mixing state from four
+  different lifetimes — whole-program, per-module, per-function, and
+  per-schema-instantiation — into one object. It is now around thirty
+  focused, single-responsibility classes (a symbol table, a debug-info
+  builder, a schema layout engine, and so on), each scoped to one
+  lifetime or concern instead of all of them at once. Done as many small,
+  independently-verified steps rather than one rewrite, and
+  behavior-preserving by design: the full suite stayed green after every
+  step, and steps touching captured-variable or closure debug info got an
+  additional live-debugger verification pass rather than relying on the
+  test suite alone, given this exact code's history of casing and
+  debug-location bugs. No user-visible change from this on its own.
+
+- **The test suite mirrors Clang's own split.** Most of it moved from
+  GoogleTest to LLVM's `lit`+`FileCheck` — black-box tests that drive the
+  real `plang` binary rather than constructing compiler objects directly
+  in-process — matching how `clang/test/` relates to `clang/unittests/`.
+  A small, permanent set of GoogleTest unit tests remains for internals
+  with no CLI-visible surface (message-catalog bucket counts, pointer
+  identity, an X-macro loop over builtin coverage). No effect on the
+  compiler itself.
+
+### Fixed
+
+- **Assigning one schema instance's field to another's could read far past
+  the source's allocation, corrupting memory or crashing.** A schema
+  component copy such as `q^.x := p^.x`, where `x`'s own extent varies
+  with the enclosing schema's discriminant, sized its `memcpy` purely from
+  the *destination*'s runtime discriminants and applied it to the source
+  address with no check that the two sides' discriminants actually agree
+  — unlike the whole-object copy path a few lines above it in the same
+  function, which already guards this with a discriminant-match check.
+
+- **Allocating a schema array with a sufficiently large discriminant could
+  silently allocate far too little memory, so the very next in-bounds
+  write overflowed the heap.** `new(p, n)`'s body-size computation —
+  `count = hi - lo + 1`, `bytes = count * elemSz` — multiplied two 64-bit
+  runtime values with no overflow check before using the result both as
+  the allocation size and as the `memcpy` length for whole-schema
+  assignment, so a sufficiently large discriminant wrapped the byte count
+  around to a small number while an index well within the declared extent
+  still passed its range check.
+
+- **A procedure with its own by-value conformant-array parameter, whose
+  body forward-declares a nested sibling procedure, leaked that
+  parameter's heap copy instead of disposing it.** Found while giving the
+  code generator's per-activation state a real RAII owner: the copy was
+  saved-and-cleared at function entry but only restored on the normal
+  exit path, never on the early return a forward declaration takes.
+  Confirmed with AddressSanitizer/LeakSanitizer before and after.
+
+- **A schema whose body resolves to a var-string could reach the runtime
+  allocator with a negative byte count.** The one existing guard against
+  this was gated on the schema having exactly one discriminant; a second,
+  unrelated discriminant bypassed it, previously caught only by luck
+  (`calloc` rejecting the resulting huge size) with a misleading
+  "out of memory" message rather than the real cause.
+
+- **`substr` with very large index and count arguments could segfault
+  instead of reporting a range error.** Its past-the-end check computed
+  `i + n - 1 > ls` directly; for large enough operands the addition itself
+  signed-overflows and wraps to a value that passes the check, letting an
+  out-of-range call fall through to a `memcpy` with a source pointer far
+  outside the string. Rewritten algebraically (`i>ls || n>ls-i+1`) so
+  every operand stays bounded by the string's own length before use.
+
+- **`abs()` of the smallest representable integer returned a negative
+  number instead of a magnitude.** `minint`'s true magnitude has no
+  positive representation in the same width, so negating it is
+  signed-integer-overflow undefined behavior — in practice, a second,
+  still-negative wrong answer. Now traps, matching the convention this
+  runtime's own `plang_ipow` already uses for its undefined cases.
+
+- **A source file with deeply nested parenthesized expressions crashed the
+  compiler instead of producing a diagnostic.** Expression parsing
+  recurses with no depth limit; around 20,000 levels of nesting reliably
+  overran the real call stack. A depth counter now reports "expression
+  too deeply nested" and unwinds cleanly well before that.
+
+- **An out-of-range nondecimal integer literal silently wrapped to a
+  meaningless value instead of being rejected.** Only the decimal literal
+  path was checked for overflow; the `base#digits` path (§6.1.7)
+  accumulated its value with no bound of its own and had already wrapped
+  by the time the parser's overflow check ran.
+
+- **A `write` call with a large runtime-computed field width could
+  produce hundreds of megabytes of unintended output instead of a clean
+  error.** The field width reached `printf`'s `%*d`/`%*c` through a bare
+  cast to 32 bits with no range check first, so a width beyond what 32
+  bits can hold silently reinterpreted as whatever the truncation landed
+  on.
+
+- **Two independent schema-layout bugs, found by finally enabling the
+  cross-check meant to catch them.** Discriminant bindings were sorted
+  alphabetically by name while nested schema bodies index them
+  positionally by declaration order, so a multi-discriminant schema whose
+  alphabetical and declaration orders disagreed bound every runtime
+  discriminant to the wrong value; and a program that only ever writes
+  concrete schema instantiations, never a bare reference, left a nested
+  field's own discriminant resolved against a stale instantiation.
+
+- **`new()` accepted a schema discriminant argument of the wrong ordinal
+  type and silently truncated it instead of rejecting it at compile
+  time.** Checked only for *some* ordinal type, never against that
+  specific discriminant's own declared type the way an ordinary
+  assignment already is.
+
+- **A schema discriminant typed with a user-declared enum, named
+  subrange, or type alias was always wrongly rejected as an illegal
+  forward reference**, even when declared textually before the schema
+  using it — only built-in keyword types worked. Discriminant type
+  resolution ran in a Sema pass that always preceded the pass resolving
+  ordinary type declarations' real bodies, regardless of source order.
+
+- **Inside a `with` statement, a schema discriminant of any type other
+  than plain `integer` failed type-checking against its own declared
+  type**, though identical code written outside the `with` already
+  worked correctly.
+
+- **An identifier inside a `value` clause could resolve against the wrong
+  scope.** It resolved against whatever scope codegen currently happened
+  to be lowering rather than the scope the clause was textually written
+  in, silently producing the wrong value wherever the two disagreed.
+
+- **A `read`/`readln` call wrongly refused a protected `var` file
+  parameter as its first argument.** A missing pair of braces made a
+  protectedness check run over every argument including the file itself,
+  though `read(f, v)` assigns to `v`, not `f`.
+
+- **Under a debugger, a nested procedure's own local variable or
+  parameter could show the captured outer variable's value instead of
+  its own, whenever the two shared a name.** The compiled program itself
+  was always correct; debug-info generation registered the captured
+  variable's location under the nested procedure's scope before its own
+  locals were bound, with nothing to disambiguate the two once both
+  existed in that same scope.
+
+- **Two "extra" input files sharing a filename in different directories
+  silently clobbered each other's object file during multi-file
+  compilation**, each defaulting to the same basename-only `.o` name with
+  its directory discarded — the second compile overwrote the first's
+  object file, and the linker read the same file twice.
+
+- **An "extra" input file in multi-file compilation could not import a
+  module declared by another extra file in a different directory**, even
+  though both were given on the same command line and the first had
+  already compiled successfully — each extra file's module search path
+  was built from only its own directory.
+
+- **A syntactically broken or wrong-module `.pmi` file was indistinguishable
+  from a missing one, and could silently shadow a working `.pmi` later on
+  the search path.** Module search stopped at the first candidate file
+  that existed, not the first that actually loaded.
+
+- **A 65th distinct bindable file variable silently lost its binding, with
+  no error at all.** The binding table's fixed-size overflow case was a
+  comment saying to ignore it; it now reports a real diagnostic.
+
 ## [0.2.1] - 2026-08-18
 
 A second correctness sweep of 0.2.0's Extended Pascal support, this time for
