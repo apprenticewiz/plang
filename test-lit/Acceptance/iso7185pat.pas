@@ -1,6 +1,6 @@
 (*
 RUN: %plang -std=iso7185 %s -o %t
-RUN: %t < /dev/null 2> %t.err | diff -u %S/iso7185pat.expected -
+RUN: %run %t < /dev/null 2> %t.err | diff -u %S/iso7185pat.expected -
 RUN: test ! -s %t.err
 *)
 
