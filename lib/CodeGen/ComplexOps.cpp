@@ -1,5 +1,7 @@
 #include "ComplexOps.h"
 
+#include "llvm/IR/Intrinsics.h"
+
 llvm::StructType* ComplexOps::complexTy() {
     if (!Ty) Ty = llvm::StructType::get(Ctx, {DblTy, DblTy});
     return Ty;
@@ -52,19 +54,50 @@ llvm::Value* ComplexOps::emitComplexMul(llvm::Value* a, llvm::Value* b) {
 }
 
 llvm::Value* ComplexOps::emitComplexDiv(llvm::Value* a, llvm::Value* b) {
-    // (ar+ai*i)/(br+bi*i) = ((ar*br+ai*bi) + (ai*br-ar*bi)*i) / (br^2+bi^2)
+    // The textbook (ar+ai*i)/(br+bi*i) = ((ar*br+ai*bi) + (ai*br-ar*bi)*i) /
+    // (br^2+bi^2) squares the divisor's components before anything else, so
+    // it silently hands back a garbage-but-finite answer wherever br^2+bi^2
+    // over- or underflows double range even though the true quotient is
+    // perfectly representable (e.g. dividing by 1e155+1e155*i: 1e155 alone
+    // is fine, but its square overflows to +Inf, and a finite numerator
+    // divided by an infinite denominator silently rounds to 0).
+    //
+    // Smith's algorithm (the same approach glibc's __divdc3 uses) avoids
+    // squaring the larger-magnitude divisor component at all: it scales by
+    // the *ratio* of the divisor's components, which stays in [-1, 1] and
+    // so never overflows, and only ever multiplies that ratio back against
+    // values already known to be in-range.
     auto* ar = B.CreateExtractValue(a, 0, "a.re");
     auto* ai = B.CreateExtractValue(a, 1, "a.im");
     auto* br = B.CreateExtractValue(b, 0, "b.re");
     auto* bi = B.CreateExtractValue(b, 1, "b.im");
-    auto* denom = B.CreateFAdd(B.CreateFMul(br, br, "br2"),
-                                      B.CreateFMul(bi, bi, "bi2"), "denom");
-    auto* numRe = B.CreateFAdd(B.CreateFMul(ar, br, "ar.br"),
-                                      B.CreateFMul(ai, bi, "ai.bi"), "num.re");
-    auto* numIm = B.CreateFSub(B.CreateFMul(ai, br, "ai.br"),
-                                      B.CreateFMul(ar, bi, "ar.bi"), "num.im");
-    return makeComplex(B.CreateFDiv(numRe, denom, "c.re"),
-                       B.CreateFDiv(numIm, denom, "c.im"));
+
+    auto* absBr = B.CreateUnaryIntrinsic(llvm::Intrinsic::fabs, br, nullptr, "b.re.abs");
+    auto* absBi = B.CreateUnaryIntrinsic(llvm::Intrinsic::fabs, bi, nullptr, "b.im.abs");
+    auto* brGE  = B.CreateFCmpOGE(absBr, absBi, "b.re.ge.im");
+
+    // |br| >= |bi|: r = bi/br (|r| <= 1), den = br + bi*r.
+    auto* rBr   = B.CreateFDiv(bi, br, "r.brge");
+    auto* denBr = B.CreateFAdd(br, B.CreateFMul(bi, rBr, "bi.r.brge"), "den.brge");
+    auto* reBr  = B.CreateFDiv(
+        B.CreateFAdd(ar, B.CreateFMul(ai, rBr, "ai.r.brge"), "num.re.brge"),
+        denBr, "c.re.brge");
+    auto* imBr  = B.CreateFDiv(
+        B.CreateFSub(ai, B.CreateFMul(ar, rBr, "ar.r.brge"), "num.im.brge"),
+        denBr, "c.im.brge");
+
+    // |bi| > |br|: r = br/bi (|r| < 1), den = bi + br*r.
+    auto* rBi   = B.CreateFDiv(br, bi, "r.bigt");
+    auto* denBi = B.CreateFAdd(bi, B.CreateFMul(br, rBi, "br.r.bigt"), "den.bigt");
+    auto* reBi  = B.CreateFDiv(
+        B.CreateFAdd(B.CreateFMul(ar, rBi, "ar.r.bigt"), ai, "num.re.bigt"),
+        denBi, "c.re.bigt");
+    auto* imBi  = B.CreateFDiv(
+        B.CreateFSub(B.CreateFMul(ai, rBi, "ai.r.bigt"), ar, "num.im.bigt"),
+        denBi, "c.im.bigt");
+
+    return makeComplex(B.CreateSelect(brGE, reBr, reBi, "c.re"),
+                       B.CreateSelect(brGE, imBr, imBi, "c.im"));
 }
 
 llvm::Value* ComplexOps::callComplexUnary(const std::string& name, llvm::Value* z) {

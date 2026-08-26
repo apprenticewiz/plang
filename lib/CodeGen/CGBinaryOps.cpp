@@ -63,7 +63,35 @@ llvm::Value* CGBinaryOps::emitBinary(const BinaryExpr& e) {
         if (lCplx || rCplx) {
             auto* lv = EmitExpr(*e.Left);
             auto* rv = EmitExpr(*e.Right);
-            return Complex.emitComplexPow(Complex.coerceToComplex(lv), Complex.coerceToComplex(rv));
+            auto* lc = Complex.coerceToComplex(lv);
+            auto* rc = Complex.coerceToComplex(rv);
+            // EP §6.8.3.2's "an error if x is zero and y is less than or
+            // equal to zero" is shared with the real path above (guarded
+            // there via plang_err_pow_domain), but this complex path
+            // skipped it entirely: cmplx(0,0) ** cmplx(-1,0) silently rode
+            // std::pow down to Inf/NaN instead of trapping.  Complex values
+            // have no "negative base" case to add (they aren't ordered), so
+            // only the zero-base check applies, keyed off the exponent's
+            // real part -- the same shape as the zero-zero case already
+            // caught for a real/integer base.
+            auto* zero  = llvm::ConstantFP::get(DblTy, 0.0);
+            auto* are   = B.CreateExtractValue(lc, 0, "cpow.a.re");
+            auto* aim   = B.CreateExtractValue(lc, 1, "cpow.a.im");
+            auto* bre   = B.CreateExtractValue(rc, 0, "cpow.b.re");
+            auto* bim   = B.CreateExtractValue(rc, 1, "cpow.b.im");
+            auto* aZero = B.CreateAnd(B.CreateFCmpOEQ(are, zero, "cpow.a.re.eq0"),
+                                       B.CreateFCmpOEQ(aim, zero, "cpow.a.im.eq0"),
+                                       "cpow.a.eq0");
+            auto* bad   = B.CreateAnd(aZero,
+                                       B.CreateFCmpOLE(bre, zero, "cpow.b.re.le0"),
+                                       "cpow.bad");
+            RangeGuards.emitGuard(bad, "cpow.domain", [&] {
+                B.CreateCall(
+                    RtFns.getExternFnN("plang_err_cpow_domain", llvm::Type::getVoidTy(Ctx),
+                                 {DblTy, DblTy, DblTy, DblTy}),
+                    {are, aim, bre, bim});
+            });
+            return Complex.emitComplexPow(lc, rc);
         }
         // EP §6.8.3.2: an integer base with pow keeps an integer result, so it
         // must not make the round trip through double that '**' does.
