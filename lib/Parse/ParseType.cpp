@@ -15,7 +15,40 @@
 
 using namespace plang;
 
+// Ceiling on live parseTypeExpr activations (Parser::TypeDepth).  Mirrors
+// MaxExprDepth in ParseExpr.cpp: 500 levels of nesting is nowhere near
+// exhausting an 8MB default stack -- every construct that recurses through
+// parseTypeExpr (array of array of ..., ^^^^...T, record fields nested
+// arbitrarily deep, set of/file of chains) crashes only tens of thousands of
+// levels deeper than this on this machine -- while no legitimate Extended
+// Pascal program nests type denoters anywhere close to this deep.  Without a
+// ceiling here, a source file built specifically to nest deeply (or a
+// generated/fuzzed one) drives the real call stack instead of a diagnostic.
+static constexpr unsigned MaxTypeDepth = 500;
+
 std::unique_ptr<TypeNode> Parser::parseTypeExpr() {
+    // Every recursive re-entry into type parsing -- an array's element type,
+    // a pointer's base type, a record field's type, a set-of/file-of base
+    // type, a packed type's tail -- funnels through this activation, so this
+    // is the one place a ceiling bounds the whole cycle.  Checked before the
+    // RAII bump a few lines down: a caller already sitting at the ceiling
+    // must return without recursing again, not recurse once more and only
+    // then stop.
+    if (TypeDepth >= MaxTypeDepth) {
+        if (!TypeDepthLimitHit) {
+            TypeDepthLimitHit = true;
+            emitError(Current.toLoc(), diag::err_type_too_deeply_nested);
+        }
+        // Deliberately does not consume Current -- every caller up the stack
+        // is still waiting on its own closing token ('end', ']', etc.) and
+        // unwinds on its own once it sees the same token still there.
+        auto Node  = std::make_unique<NamedTypeNode>();
+        Node->Loc  = Current;
+        Node->Name = "<error>";
+        return Node;
+    }
+    TypeDepthScope DepthGuard(TypeDepth, TypeDepthLimitHit);
+
     Token Loc = Current;
 
     // EP §6.4.1: 'bindable' qualifies the denoter without changing the type it
@@ -593,7 +626,14 @@ std::unique_ptr<RecordTypeNode> Parser::parseRecordType(bool Packed) {
         match(TokenKind::Semicolon); // optional trailing semicolon after last variant
     }
 
-    expect(TokenKind::End);
+    // Suppressed while unwinding from the depth ceiling above: every
+    // enclosing 'record' between here and the ceiling is missing its 'end'
+    // for the same reason, and expect()'s diagnostic once per level would
+    // bury the one diagnostic that actually explains the failure.
+    if (TypeDepthLimitHit)
+        match(TokenKind::End);
+    else
+        expect(TokenKind::End);
     return Node;
 }
 
