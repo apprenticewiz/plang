@@ -312,12 +312,25 @@ def build_case(content: str, is_ep: bool, ok_true: bool, ok_false: bool,
     expect_nonzero = ok_false or bool(err_subs) or rc != 0
     needs_stderr = bool(err_subs) or bool(warn_subs)
 
+    # A module-declaring source makes -dump-ast's own Frontend.cpp write a
+    # .pmi file next to whatever path it was given, as a side effect of a
+    # successful Sema run -- confirmed the hard way once already (Phase 3's
+    # EP/Module migration hit the identical issue: real .pmi files landing in
+    # the checked-in test-lit/ tree). split-file relocates the compile into
+    # %t.dir so that side effect lands in the build tree, never the source
+    # tree, even for a single-chunk "file" -- same idiom
+    # test-lit/Module/EP13Modules/*.pas already established.
+    declares_module = bool(re.search(r"^\s*module\s", content, re.MULTILINE))
+    input_path = "%t.dir/test.pas" if declares_module else "%s"
+
     # %plang_ep already bakes in -std=iso10206 (test-lit/lit.cfg.py) -- the
     # dialect_flag above is only for the raw-binary probe() call, which
     # doesn't go through that substitution.
     run_lines = []
+    if declares_module:
+        run_lines.append("RUN: split-file %s %t.dir")
     if needs_stderr:
-        cmd = f"{plang} -dump-ast %s 2> %t.err"
+        cmd = f"{plang} -dump-ast {input_path} 2> %t.err"
         if not (ok_true or ok_false):
             # Original test never asserted on the exit path's shape, only on
             # a stderr fact -- don't invent an exit-code expectation for it.
@@ -327,7 +340,7 @@ def build_case(content: str, is_ep: bool, ok_true: bool, ok_false: bool,
         run_lines.append(f"RUN: {cmd}")
         run_lines.append("RUN: FileCheck %s < %t.err")
     else:
-        cmd = f"{plang} -dump-ast %s"
+        cmd = f"{plang} -dump-ast {input_path}"
         if expect_nonzero:
             cmd = f"not {cmd}"
         run_lines.append(f"RUN: {cmd}")
@@ -336,6 +349,8 @@ def build_case(content: str, is_ep: bool, ok_true: bool, ok_false: bool,
     out.extend(run_lines)
     out.append("*)")
     out.append("")
+    if declares_module:
+        out.append("//--- test.pas")
     out.append(content.rstrip("\n"))
     out.append("")
     if needs_stderr:

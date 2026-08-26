@@ -1,8 +1,10 @@
 (*
-RUN: not %plang_ep -dump-ast %s 2> %t.err
+RUN: split-file %s %t.dir
+RUN: not %plang_ep -dump-ast %t.dir/test.pas 2> %t.err
 RUN: FileCheck %s < %t.err
 *)
 
+//--- test.pas
 module M;
   function f(x: integer): integer;
   begin f := x end;
