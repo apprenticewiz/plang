@@ -589,7 +589,15 @@ private:
     [[nodiscard]] bool checkEPOnly(const Symbol& Sym, SourceLocation Loc);
     /// Diagnoses a read-parameter of a type §6.9.2 does not read into.
     void checkReadParamType(const Type& T, SourceLocation Loc);
-    [[nodiscard]] std::shared_ptr<Type> checkSetLit  (const SetLiteralExpr& E);
+    /// TargetHint: a bounded Set type this literal is known to be assigned
+    /// into (e.g. from checkAssignStmt), even though it has no E.TypeName of
+    /// its own -- suppresses the loose-literal element-count check below,
+    /// since the runtime representation will use TargetHint's own bounds,
+    /// not a window derived from the literal's raw element values. nullptr
+    /// (the default, used by checkExpr's generic dispatch) preserves the
+    /// original context-free behavior.
+    [[nodiscard]] std::shared_ptr<Type> checkSetLit  (const SetLiteralExpr& E,
+                                                       const std::shared_ptr<Type>& TargetHint = nullptr);
     [[nodiscard]] std::shared_ptr<Type> checkStructuredValue(const StructuredValueExpr& E);
 
     /// The span of a set-constructor's ordinals, when they all fold; nothing

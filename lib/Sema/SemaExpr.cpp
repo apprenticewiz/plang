@@ -839,7 +839,7 @@ std::shared_ptr<Type> Sema::checkCallExpr(const CallExpr& E) {
     return checkUserDefinedCall(*Sym, E.Loc, E.Args, /*expectFunction=*/true);
 }
 
-std::shared_ptr<Type> Sema::checkSetLit(const SetLiteralExpr& E) {
+std::shared_ptr<Type> Sema::checkSetLit(const SetLiteralExpr& E, const std::shared_ptr<Type>& TargetHint) {
     if (E.Elements.empty()) {
         // Empty set: type is indeterminate; use a generic set-of-integer.
         auto T = std::make_shared<Type>();
@@ -888,6 +888,16 @@ std::shared_ptr<Type> Sema::checkSetLit(const SetLiteralExpr& E) {
         if (Named->ElemType) warnIfSetLitOutOfRange(*Named->ElemType, E);
         return Named;
     }
+    // A caller-supplied target (checkAssignStmt, for a literal with no
+    // E.TypeName of its own) suppresses the element-count check below the
+    // same way Named does: that check exists only because an unadopted
+    // literal's runtime representation has nothing but its own raw values to
+    // size a bitmask from, and once a real bounded target is known, that
+    // concern doesn't apply. Unlike Named, this doesn't also call
+    // warnIfSetLitOutOfRange itself -- the caller (checkAssignStmt) already
+    // does that against Dst after this returns, and doing it here too would
+    // warn twice for one out-of-range element.
+    if (TargetHint) return TargetHint;
 
     auto T = std::make_shared<Type>();
     T->Kind     = TypeKind::Set;
