@@ -76,3 +76,12 @@ add_plang_lit_suite(Driver)
 add_plang_lit_suite(Lex)
 add_plang_lit_suite(Parse)
 add_plang_lit_suite(Sema)
+add_plang_lit_suite(Basic)
+# Basic/Catalog exercises the real shipped locale catalogs (fr.po, es_MX.po,
+# qps_ploc.po, ...) via -fdiagnostics-language=, which live in the build
+# tree only once plang_catalogs (an `ALL`-target, so a full build already
+# includes it) has actually run -- unlike every other suite here, which only
+# needs the plang binary itself. Without this, `ninja check-lit-Basic` run on
+# its own, the same one-suite dev shortcut every other add_plang_lit_suite()
+# call already supports, fails on the catalogs that were never generated.
+add_dependencies(check-lit-Basic plang_catalogs)
