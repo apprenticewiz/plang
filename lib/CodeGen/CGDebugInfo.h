@@ -52,6 +52,33 @@ public:
     /// null at module scope or when Debug is unset.
     llvm::DILocalScope* currentScope() const { return CurScope; }
 
+    /// currentScope(), but walked up past any DILexicalBlock
+    /// enterShadowScope opened until it reaches the nearest enclosing
+    /// DISubprogram (or null, at module scope / when Debug is unset).
+    /// A nested PROCEDURE DECLARATION's own DISubprogram must always
+    /// parent under another DISubprogram, never under a DILexicalBlock:
+    /// DISubprogram -> DILexicalBlock -> DISubprogram is a scope shape
+    /// llc's DWARF AsmPrinter cannot handle once any optimization pass
+    /// runs (SIGSEGV in getOrCreateAbstractSubprogramContextDIE), even
+    /// though the identical metadata is accepted fine at -O0.  A
+    /// shadowing lexical block exists purely to disambiguate a captured
+    /// variable's OWN DILocalVariable from the same-named local that
+    /// shadows it (see enterShadowScope) -- it says nothing about where
+    /// a child procedure declared inside that activation belongs, since
+    /// a procedure declaration itself is never subject to that same-name
+    /// collision. Use this instead of currentScope() at the one call
+    /// site that scopes a nested procedure's own DISubprogram; leave
+    /// every DILocalVariable call site (declareLocal) reading
+    /// currentScope() exactly as before.
+    llvm::DILocalScope* nearestSubprogramScope() const {
+        llvm::DILocalScope* S = CurScope;
+        while (S && !llvm::isa<llvm::DISubprogram>(S))
+            S = llvm::isa<llvm::DILexicalBlockBase>(S)
+                ? llvm::cast<llvm::DILexicalBlockBase>(S)->getScope()
+                : nullptr;
+        return S;
+    }
+
     /// The scalar DIType for \p T (integer, real, boolean, char, enum,
     /// subrange, or a pointer whose pointee is itself one of those); see
     /// the definition for what a record/array/set/etc. pointee gets
