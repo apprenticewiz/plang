@@ -167,6 +167,22 @@ void plang_err_mod_divisor(int64_t D) {
     std::exit(PlangRuntimeErrorStatus);
 }
 
+/// EP §6.8.3.2's "an error if x is zero and y is less than or equal to
+/// zero" is shared by a complex base -- complex values are not ordered, so
+/// there is no "negative base" case to add alongside it the way plain '**'
+/// has above, only the zero-base one, checked against the exponent's real
+/// part.  CGBinaryOps.cpp's complex '**'/pow dispatch skipped this guard
+/// entirely, so a zero complex base with a non-positive-real-part exponent
+/// silently rode std::pow down to Inf/NaN instead of trapping.
+[[noreturn]] void plang_err_cpow_domain(double ARe, double AIm, double BRe, double BIm) {
+    std::fflush(stdout);
+    std::fprintf(stderr,
+                 "plang runtime: (%g,%g) ** (%g,%g) is undefined (a zero "
+                 "base requires a positive-real-part exponent)\n",
+                 ARe, AIm, BRe, BIm);
+    std::exit(PlangRuntimeErrorStatus);
+}
+
 /// ISO §6.5.4: the identifying value of a pointer variable being dereferenced
 /// shall not be nil.
 [[noreturn]] void plang_err_nil_deref(void) {
