@@ -371,9 +371,14 @@ llvm::Value* CGBinaryOps::emitBinary(const BinaryExpr& e) {
         case TokenKind::Divide:
             return B.CreateFDiv(ToDouble(lv), ToDouble(rv), "fdiv");
         case TokenKind::Div: {
+            auto* n = ToI64(lv);
             auto* d = ToI64(rv);
             RangeGuards.emitDivZeroCheck(d, "div");
-            return B.CreateSDiv(ToI64(lv), d, "sdiv");
+            // minint div -1: the one nonzero-divisor case that still
+            // overflows, since minint's magnitude has no positive int64_t
+            // representation (same UB shape as abs(minint)).
+            RangeGuards.emitDivOverflowCheck(n, d);
+            return B.CreateSDiv(n, d, "sdiv");
         }
         case TokenKind::Mod: {
             auto* d = ToI64(rv);

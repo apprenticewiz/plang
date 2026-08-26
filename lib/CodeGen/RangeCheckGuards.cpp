@@ -30,6 +30,28 @@ void RangeCheckGuards::emitDivZeroCheck(llvm::Value* divisor, const char* op) {
     });
 }
 
+void RangeCheckGuards::emitDivOverflowCheck(llvm::Value* dividend,
+                                             llvm::Value* divisor) {
+    // -2^63 (minint) has no positive int64_t counterpart at +2^63, so div
+    // overflows for this one dividend/divisor pair despite the divisor being
+    // nonzero.  Unguarded, SDiv here is signed-overflow UB: in practice
+    // either a hardware SIGFPE (x86 idiv traps on overflow, same as it does
+    // on a zero divisor) or a value the optimizer is free to fold away,
+    // which is exactly the SIGFPE-vs-wrong-answer split this guard closes.
+    auto* isMinInt = B.CreateICmpEQ(dividend,
+        llvm::ConstantInt::get(i64Ty(), llvm::APInt::getSignedMinValue(64)),
+        "div.ismin");
+    auto* isNegOne = B.CreateICmpEQ(divisor,
+        llvm::ConstantInt::getSigned(i64Ty(), -1), "div.isnegone");
+    auto* bad = B.CreateAnd(isMinInt, isNegOne, "div.overflow");
+    emitGuard(bad, "divoverflow", [&] {
+        B.CreateCall(
+            RtFns.getExternFnN("plang_err_div_overflow",
+                         llvm::Type::getVoidTy(Ctx), {}),
+            {});
+    });
+}
+
 void RangeCheckGuards::emitModDivisorCheck(llvm::Value* divisor) {
     // ISO §6.7.2.2 defines mod only for a positive divisor, so this subsumes
     // the div-by-zero test rather than sitting alongside it.
