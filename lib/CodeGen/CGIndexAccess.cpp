@@ -55,12 +55,15 @@ llvm::Value* CGIndexAccess::emitConformantElemPtr(const IndexExpr& e) {
                            ? ve->conformantDimPtrs[d].first : nullptr,
                        ve->conformantDims[d].first);
     };
-    auto extentOf = [&](size_t d) -> llvm::Value* {
+    auto hiOf = [&](size_t d) -> llvm::Value* {
         if (d >= ve->conformantDims.size()) return nullptr;
+        return boundAt(d < ve->conformantDimPtrs.size()
+                           ? ve->conformantDimPtrs[d].second : nullptr,
+                       ve->conformantDims[d].second);
+    };
+    auto extentOf = [&](size_t d) -> llvm::Value* {
         auto* lo = loOf(d);
-        auto* hi = boundAt(d < ve->conformantDimPtrs.size()
-                               ? ve->conformantDimPtrs[d].second : nullptr,
-                           ve->conformantDims[d].second);
+        auto* hi = hiOf(d);
         if (!lo || !hi) return nullptr;
         return B.CreateAdd(B.CreateSub(hi, lo, "conf.span"),
                                  llvm::ConstantInt::get(I64Ty, 1), "conf.ext");
@@ -80,9 +83,20 @@ llvm::Value* CGIndexAccess::emitConformantElemPtr(const IndexExpr& e) {
     const size_t nflat = std::min(subs.size(), dims);
     for (size_t d = 0; d < nflat; ++d) {
         auto* idx = ToI64(EmitExpr(*subs[d]));
-        if (d < ve->conformantDims.size())
-            if (auto* lo = loOf(d))
+        if (d < ve->conformantDims.size()) {
+            // EP §6.7.3.7: every other indexing path (plain arrays, schema
+            // arrays, arrays through pointers) range-checks the subscript;
+            // a conformant array's own bounds are only known at run time, so
+            // this is the dynamic form -- checked against the RAW subscript,
+            // before the lower-bound adjustment, so the reported value and
+            // range are the ones the source actually wrote.
+            auto* lo = loOf(d);
+            auto* hi = hiOf(d);
+            if (lo && hi)
+                RangeGuards.emitRangeCheckDyn(idx, lo, hi, /*isIndex=*/true, e.Loc);
+            if (lo)
                 idx = B.CreateSub(idx, lo, "idx.adj.conf");
+        }
         if (d > 0)
             if (auto* ext = extentOf(d))
                 flat = B.CreateMul(flat, ext, "conf.row");
@@ -111,6 +125,14 @@ llvm::Value* CGIndexAccess::emitConformantElemPtr(const IndexExpr& e) {
         if (at) at = schemaUnderlying(at);
         auto* idx = ToI64(EmitExpr(*subs[d]));
         if (at && at->Kind == TypeKind::Array) {
+            // This dimension's bounds are fixed by the element type's own
+            // declaration rather than by anything the caller passed at run
+            // time, so -- like the plain-array path in emitIndexGEP -- the
+            // check is against constants, before the lower-bound adjustment.
+            if (at->IndexType)
+                RangeGuards.emitRangeCheck(idx, at->IndexType->SubLo,
+                                            at->IndexType->SubHi,
+                                            /*isIndex=*/true, e.Loc);
             if (at->IndexType && at->IndexType->SubLo != 0)
                 idx = B.CreateSub(
                     idx, llvm::ConstantInt::get(I64Ty, at->IndexType->SubLo),
