@@ -201,27 +201,57 @@ jobs:
         run: |
           echo "$(brew --prefix "llvm@$LLVM_VERSION")/bin" >> "$GITHUB_PATH"
 
-      - name: Install lit and locate FileCheck (test-lit/, issue #34)
-        # Confirmed for real (not assumed) that this keg's bin/ -- the one
-        # directory the step above already puts on PATH -- does not contain
-        # FileCheck, so test-lit/'s find_program(HINTS LLVM_TOOLS_BINARY_DIR)
-        # falls back to a graceful WARNING-and-skip here today: this job
-        # currently runs 0 lit tests. lit itself is a pure Python package, so
-        # `pip install` unconditionally resolves it regardless of what a given
-        # Homebrew formula bundles. FileCheck is a real compiled tool
-        # somewhere inside the keg, just not directly under bin/ -- `find`
-        # locates it wherever Homebrew's own layout actually put it rather
-        # than guessing a specific subdirectory, and CMake is told the exact
-        # path directly rather than depending on PATH search order.
+      - name: Install lit
+        # A pure Python package, so `pip install` unconditionally resolves it
+        # regardless of what a given Homebrew formula bundles.
         run: |
           pip3 install --user --break-system-packages lit
           echo "$(python3 -m site --user-base)/bin" >> "$GITHUB_PATH"
-          FILECHECK_PATH="$(find "$(brew --prefix "llvm@$LLVM_VERSION")" -name FileCheck -type f 2>/dev/null | head -1)"
-          if [ -n "$FILECHECK_PATH" ]; then
-            echo "PLANG_CI_FILECHECK=$FILECHECK_PATH" >> "$GITHUB_ENV"
-          else
-            echo "::warning::FileCheck not found anywhere under the llvm@$LLVM_VERSION keg; test-lit/'s suites will be skipped on this job."
-          fi
+
+      - name: Build FileCheck, not, split-file from LLVM source (test-lit/, issue #34)
+        # Confirmed for real, not assumed: Homebrew's llvm formula is built
+        # with LLVM_INCLUDE_UTILS effectively off (no `find` across the whole
+        # keg locates any of the three), and the official upstream release
+        # tarball for this exact platform/version omits them too (downloaded
+        # and inspected it directly -- 163 other tools present, none of
+        # these three) -- neither distribution channel ships LLVM's own
+        # testing utilities anywhere on macOS. No amount of searching harder
+        # finds a binary that was never built. A pure-Python FileCheck
+        # reimplementation exists on PyPI, but would behave slightly
+        # differently from the real tool every other CI platform uses --
+        # rejected in favor of building the actual thing, which turns out to
+        # be cheap: a sparse, blob-filtered, depth-1 clone of just the
+        # pieces these 3 small utilities need (not the whole llvm-project
+        # monorepo, and deliberately not llvm/test/, which alone is >1 GB)
+        # configures in ~4s and builds in ~8s (measured locally on Linux;
+        # comparable order of magnitude expected on macOS, and dwarfed by
+        # the ~2 GB / 3+ minute Homebrew llvm install this same job already
+        # pays for). Pinned to the exact version Homebrew just installed --
+        # not a hardcoded version -- so this can never silently drift out of
+        # sync with the rest of the toolchain this job builds against.
+        run: |
+          LLVM_FULL_VERSION="$(brew list --versions "llvm@$LLVM_VERSION" | awk '{print $NF}')"
+          git clone --depth 1 --filter=blob:none --sparse \
+            --branch "llvmorg-$LLVM_FULL_VERSION" \
+            https://github.com/llvm/llvm-project.git llvm-filecheck-src
+          git -C llvm-filecheck-src sparse-checkout set \
+            cmake llvm/cmake llvm/utils llvm/include llvm/lib \
+            llvm/tools llvm/projects llvm/runtimes third-party/siphash
+          cmake -S llvm-filecheck-src/llvm -B llvm-filecheck-build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DLLVM_ENABLE_PROJECTS="" \
+            -DLLVM_TARGETS_TO_BUILD="" \
+            -DLLVM_INCLUDE_UTILS=ON \
+            -DLLVM_INCLUDE_TESTS=OFF \
+            -DLLVM_INCLUDE_EXAMPLES=OFF \
+            -DLLVM_INCLUDE_BENCHMARKS=OFF \
+            -DLLVM_INCLUDE_DOCS=OFF \
+            -DLLVM_ENABLE_ASSERTIONS=OFF \
+            -DLLVM_BUILD_TOOLS=OFF
+          ninja -C llvm-filecheck-build FileCheck not split-file
+          echo "PLANG_CI_FILECHECK=$PWD/llvm-filecheck-build/bin/FileCheck" >> "$GITHUB_ENV"
+          echo "PLANG_CI_NOT=$PWD/llvm-filecheck-build/bin/not" >> "$GITHUB_ENV"
+          echo "PLANG_CI_SPLIT_FILE=$PWD/llvm-filecheck-build/bin/split-file" >> "$GITHUB_ENV"
 
       - name: Show the toolchain
         run: |
@@ -230,26 +260,27 @@ jobs:
           xcrun --show-sdk-path
           xcrun --show-sdk-version
           lit --version
-          [ -n "${PLANG_CI_FILECHECK:-}" ] && "$PLANG_CI_FILECHECK" --version || true
+          "$PLANG_CI_FILECHECK" --version
 
       - name: Configure
         # CMAKE_PREFIX_PATH so that find_package(GTest) looks in the Homebrew
         # prefix, which is not one of the places CMake searches by default.
-        # FILECHECK_EXECUTABLE: only passed when the previous step actually
-        # located one (see its own comment) -- an empty -D would tell CMake
-        # "use this literal empty path," not "keep searching," so the flag
-        # itself is conditional rather than passing a maybe-empty value.
+        # FILECHECK_EXECUTABLE/NOT_EXECUTABLE/SPLIT_FILE_EXECUTABLE: point
+        # test-lit/CMakeLists.txt's own find_program() calls straight at the
+        # three binaries the previous step just built, matching those
+        # variables' real names in that file exactly -- a CMake variable
+        # that's already set short-circuits find_program's own search, so
+        # there's no PATH-ordering ambiguity with whatever else might be
+        # named "not" on a stock macOS image.
         run: |
-          FILECHECK_ARG=()
-          if [ -n "${PLANG_CI_FILECHECK:-}" ]; then
-            FILECHECK_ARG=(-DFILECHECK_EXECUTABLE="$PLANG_CI_FILECHECK")
-          fi
           cmake -S . -B build \
             -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
             -DPLANG_ENABLE_TESTS=ON \
             -DCMAKE_PREFIX_PATH="$(brew --prefix)" \
             -DLLVM_DIR="$(brew --prefix "llvm@$LLVM_VERSION")/lib/cmake/llvm" \
-            "${FILECHECK_ARG[@]}"
+            -DFILECHECK_EXECUTABLE="$PLANG_CI_FILECHECK" \
+            -DNOT_EXECUTABLE="$PLANG_CI_NOT" \
+            -DSPLIT_FILE_EXECUTABLE="$PLANG_CI_SPLIT_FILE"
 
       - name: Build
         run: cmake --build build -j"$(sysctl -n hw.ncpu)"
