@@ -15,6 +15,17 @@
 
 using namespace plang;
 
+// Ceiling on live parseBlock activations (Parser::BlockDepth).  Mirrors
+// MaxExprDepth in ParseExpr.cpp: 500 levels of nesting is nowhere near
+// exhausting an 8MB default stack -- a procedure declared inside a procedure
+// declared inside another, arbitrarily deep, crashes only tens of thousands
+// of levels deeper than this on this machine -- while no legitimate Extended
+// Pascal program nests procedure or function declarations anywhere close to
+// this deep.  Without a ceiling here, a source file built specifically to
+// nest deeply (or a generated/fuzzed one) drives the real call stack instead
+// of a diagnostic.
+static constexpr unsigned MaxBlockDepth = 500;
+
 // ---------------------------------------------------------------------------
 // Program and block
 // ---------------------------------------------------------------------------
@@ -48,6 +59,27 @@ std::unique_ptr<ProgramNode> Parser::parseProgram() {
 // block → label-section* const-section* type-section* var-section*
 //         proc-section* compound-stmt
 std::unique_ptr<BlockNode> Parser::parseBlock() {
+    // A block recurses into another block only through a nested procedure or
+    // function's own body (parseProcDecl below), so this is the one place a
+    // ceiling bounds that whole mutually-recursive cycle.  Checked before the
+    // RAII bump a few lines down: a caller already sitting at the ceiling
+    // must return without recursing again, not recurse once more and only
+    // then stop.
+    if (BlockDepth >= MaxBlockDepth) {
+        if (!BlockDepthLimitHit) {
+            BlockDepthLimitHit = true;
+            emitError(Current.toLoc(), diag::err_proc_too_deeply_nested);
+        }
+        // Deliberately does not consume Current, and returns a block with no
+        // declarations and no body -- every caller up the stack is a
+        // parseProcDecl still waiting on its own trailing ';' and unwinds on
+        // its own once it sees the same token still there (suppressed below).
+        auto Node = std::make_unique<BlockNode>();
+        Node->Loc = Current;
+        return Node;
+    }
+    BlockDepthScope DepthGuard(BlockDepth, BlockDepthLimitHit);
+
     auto Node = std::make_unique<BlockNode>();
     Node->Loc  = Current;
 
@@ -270,7 +302,15 @@ std::unique_ptr<ProcDecl> Parser::parseProcDecl(bool IsFunction,
     }
 
     Node->Body = parseBlock();
-    expect(TokenKind::Semicolon);
+    // Suppressed while unwinding from the depth ceiling above: every
+    // enclosing procedure or function between here and the ceiling is
+    // missing its trailing ';' for the same reason, and expect()'s
+    // diagnostic once per level would bury the one diagnostic that actually
+    // explains the failure.
+    if (BlockDepthLimitHit)
+        match(TokenKind::Semicolon);
+    else
+        expect(TokenKind::Semicolon);
     return Node;
 }
 

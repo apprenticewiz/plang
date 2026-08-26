@@ -15,6 +15,17 @@
 
 using namespace plang;
 
+// Ceiling on live parseStatement activations (Parser::StmtDepth).  Mirrors
+// MaxExprDepth in ParseExpr.cpp: 500 levels of nesting is nowhere near
+// exhausting an 8MB default stack -- every construct that recurses through
+// parseStatement (nested 'begin ... end', if-then-else chains, while/for/
+// repeat/with bodies, case arms) crashes only tens of thousands of levels
+// deeper than this on this machine -- while no legitimate Extended Pascal
+// program nests statements anywhere close to this deep.  Without a ceiling
+// here, a source file built specifically to nest deeply (or a generated/
+// fuzzed one) drives the real call stack instead of a diagnostic.
+static constexpr unsigned MaxStmtDepth = 500;
+
 // ---------------------------------------------------------------------------
 // Statements
 // ---------------------------------------------------------------------------
@@ -23,6 +34,27 @@ using namespace plang;
 //           | repeat-stmt | with-stmt | goto-stmt | labeled-stmt
 //           | call-stmt | ε
 std::unique_ptr<StmtNode> Parser::parseStatement() {
+    // Every recursive re-entry into statement parsing -- a compound
+    // statement's members, an if/while/for/repeat/with statement's body, a
+    // case arm, a labeled statement's target -- funnels through this
+    // activation, so this is the one place a ceiling bounds the whole cycle.
+    // Checked before the RAII bump a few lines down: a caller already sitting
+    // at the ceiling must return without recursing again, not recurse once
+    // more and only then stop.
+    if (StmtDepth >= MaxStmtDepth) {
+        if (!StmtDepthLimitHit) {
+            StmtDepthLimitHit = true;
+            emitError(Current.toLoc(), diag::err_stmt_too_deeply_nested);
+        }
+        // Deliberately does not consume Current, and returns nullptr the same
+        // way the ordinary ε production does -- every caller already handles
+        // a null statement, and every caller up the stack is still waiting on
+        // its own closing token ('end', 'until', etc.) and unwinds on its own
+        // once it sees the same token still there.
+        return nullptr;
+    }
+    StmtDepthScope DepthGuard(StmtDepth, StmtDepthLimitHit);
+
     switch (Current.Kind) {
         case TokenKind::Begin:
             return parseCompoundStmt();
@@ -159,7 +191,14 @@ std::unique_ptr<CompoundStmt> Parser::parseCompoundStmt() {
         if (S) Node->Stmts.push_back(std::move(S));
     }
 
-    expect(TokenKind::End);
+    // Suppressed while unwinding from the depth ceiling above: every
+    // enclosing 'begin' between here and the ceiling is missing its 'end'
+    // for the same reason, and expect()'s diagnostic once per level would
+    // bury the one diagnostic that actually explains the failure.
+    if (StmtDepthLimitHit)
+        match(TokenKind::End);
+    else
+        expect(TokenKind::End);
     return Node;
 }
 

@@ -71,6 +71,62 @@ private:
         ~ExprDepthScope() { if (--N == 0) LimitHit = false; }
     };
 
+    // Live activations of parseTypeExpr.  Every recursive re-entry into type
+    // parsing -- an array's element type, a pointer's base type, a record
+    // field's type, a set-of/file-of base type -- funnels through
+    // parseTypeExpr, so bounding activations there (see TypeDepthScope and
+    // MaxTypeDepth in ParseType.cpp) bounds all of it against adversarial
+    // input like 'array of array of array of ...', '^^^^...integer', or
+    // 'record f: record f: record f: ... end end end', which used to exhaust
+    // the real C++ stack instead of failing with a diagnostic.  Same shape as
+    // ExprDepth immediately above; see its comment for the rationale.
+    unsigned                 TypeDepth{};
+    bool                     TypeDepthLimitHit{};
+    struct TypeDepthScope {
+        unsigned& N;
+        bool&     LimitHit;
+        explicit TypeDepthScope(unsigned& Counter, bool& LimitHitFlag)
+            : N(Counter), LimitHit(LimitHitFlag) { ++N; }
+        ~TypeDepthScope() { if (--N == 0) LimitHit = false; }
+    };
+
+    // Live activations of parseStatement.  Every recursive re-entry into
+    // statement parsing -- a compound statement's members, an if/while/for/
+    // repeat/with statement's body, a case arm, a labeled statement's target
+    // -- funnels through parseStatement, so bounding activations there (see
+    // StmtDepthScope and MaxStmtDepth in ParseStmt.cpp) bounds all of it
+    // against adversarial input like deeply nested 'begin ... end' or
+    // 'if true then if true then ...', which used to exhaust the real C++
+    // stack instead of failing with a diagnostic.  Same shape as ExprDepth
+    // above; see its comment for the rationale.
+    unsigned                 StmtDepth{};
+    bool                     StmtDepthLimitHit{};
+    struct StmtDepthScope {
+        unsigned& N;
+        bool&     LimitHit;
+        explicit StmtDepthScope(unsigned& Counter, bool& LimitHitFlag)
+            : N(Counter), LimitHit(LimitHitFlag) { ++N; }
+        ~StmtDepthScope() { if (--N == 0) LimitHit = false; }
+    };
+
+    // Live activations of parseBlock.  A block recurses into another block
+    // only through a nested procedure or function's own body -- 'procedure p;
+    // procedure q; ... begin end; begin end.' -- so bounding activations of
+    // parseBlock itself (see BlockDepthScope and MaxBlockDepth in
+    // ParseDecl.cpp) bounds the whole mutually-recursive parseBlock/
+    // parseProcDecl cycle against a source file built to nest procedure or
+    // function declarations arbitrarily deep.  Same shape as ExprDepth above;
+    // see its comment for the rationale.
+    unsigned                 BlockDepth{};
+    bool                     BlockDepthLimitHit{};
+    struct BlockDepthScope {
+        unsigned& N;
+        bool&     LimitHit;
+        explicit BlockDepthScope(unsigned& Counter, bool& LimitHitFlag)
+            : N(Counter), LimitHit(LimitHitFlag) { ++N; }
+        ~BlockDepthScope() { if (--N == 0) LimitHit = false; }
+    };
+
     // Appends an error diagnostic to the shared vector.
     void emitError(SourceLocation Loc, std::string Msg);
     void emitError(SourceLocation Loc, DiagID ID,

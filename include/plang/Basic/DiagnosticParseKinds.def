@@ -65,6 +65,10 @@ DIAG(err_int_literal_out_of_range, Error, "integer literal '%0' is out of range"
 DIAG(err_real_literal_out_of_range, Error, "real literal '%0' is out of range")
 DIAG(err_expected_expr, Error, "expected expression, got %0")
 DIAG(err_expr_too_deeply_nested, Error, "expression is nested too deeply")
+DIAG(err_type_too_deeply_nested, Error, "type is nested too deeply")
+DIAG(err_stmt_too_deeply_nested, Error, "statement is nested too deeply")
+DIAG(err_proc_too_deeply_nested, Error,
+     "procedure or function declaration is nested too deeply")
 DIAG(err_expected_token, Error, "expected %0, got %1")
 DIAG(err_expected_token_got_lexeme, Error, "expected %0, got %1 '%2'")
 
