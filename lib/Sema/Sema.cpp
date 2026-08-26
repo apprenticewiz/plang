@@ -321,6 +321,13 @@ void Sema::processModuleInterface(const ModuleNode& Mod) {
         List.insert(List.end(), Mod.Exports.begin(), Mod.Exports.end());
     }
 
+    // Remembered so that the implementation module, checked separately below
+    // (and possibly with none of its own import-part, EP §6.11.1's usual
+    // abbreviation), can still resolve a name this interface's own headings
+    // were written against.
+    if (!Mod.Imports.empty() && !ModuleInterfaceImports_.count(Key))
+        ModuleInterfaceImports_[Key] = Mod.Imports;
+
     // The headings in the interface are the signatures an importer needs when
     // the implementation is compiled separately, so they are resolved here in
     // exactly the way the implementation's own declarations would be.
@@ -445,6 +452,18 @@ void Sema::processModuleBody(const ModuleNode& Mod) {
                 Iface != ModuleInterfaceDecls_.end()) {
             for (const auto& Sym : Iface->second) (void)Symtab.define(Sym);
             InModuleImplementation_ = true;
+            // EP §6.11.1: a heading the interface declared (most notably one
+            // repeated here only as its bare name, "function DoubleIt;") is
+            // re-checked against the block that gives it a body, and that
+            // re-check resolves the heading's parameter and result types all
+            // over again.  Those types may name something the interface
+            // reached only through an import of its own, one this
+            // implementation is not written to repeat — so the interface's
+            // import-part goes into scope here too, alongside its
+            // declarations, rather than being silently unavailable.
+            if (auto IfaceImports = ModuleInterfaceImports_.find(CurrentUnit_);
+                    IfaceImports != ModuleInterfaceImports_.end())
+                processImports(IfaceImports->second);
         }
 
     if (!Mod.Imports.empty()) processImports(Mod.Imports);
