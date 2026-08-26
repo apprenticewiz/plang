@@ -1,0 +1,4 @@
+{ plang module interface: Vector }
+module Vector interface;
+function Scale(x: real; k: integer): real;
+end.

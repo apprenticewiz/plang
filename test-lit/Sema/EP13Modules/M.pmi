@@ -1,0 +1,4 @@
+{ plang module interface: M }
+module M interface;
+function f(x: integer): integer;
+end.
