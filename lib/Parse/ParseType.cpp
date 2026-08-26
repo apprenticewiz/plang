@@ -127,6 +127,15 @@ std::unique_ptr<TypeNode> Parser::parseTypeExpr() {
         case TokenKind::Identifier: {
             std::string Name = Current.Lexeme;
             advance();
+            // EP §6.11.3: a name imported `qualified` denotes a TYPE the same
+            // way it denotes anything else — as M.name, one identifier rather
+            // than a field selection — so a type-denoter reads it exactly as
+            // an expression does.
+            if (check(TokenKind::Dot)
+                    && QualifiedModules_.count(toLower(Name))) {
+                advance(); // consume '.'
+                Name += "." + expect(TokenKind::Identifier).Lexeme;
+            }
             if (check(TokenKind::DotDot)) {
                 // subrange: name '..' high
                 advance();

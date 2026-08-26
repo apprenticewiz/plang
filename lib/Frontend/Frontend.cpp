@@ -473,6 +473,34 @@ static std::string exportPartText(const ModuleNode& Iface) {
     return Text + ");\n";
 }
 
+/// \p Imports, written as an import-part (EP §6.11.3).  A .pmi is read back
+/// through the same parser that reads a module heading in source, so a type
+/// or var the interface declares in terms of a name it imports needs that
+/// import written out here too — without it, the identifier the declaration
+/// names is one the reloaded interface has never heard of.
+static std::string importPartText(const std::vector<ImportClause>& Imports) {
+    std::string Text;
+    for (const auto& Clause : Imports) {
+        Text += "import " + Clause.ModuleName;
+        if (Clause.Qualified) Text += " qualified";
+        if (!Clause.Names.empty()) {
+            Text += Clause.Selective ? " only (" : " (";
+            for (size_t I = 0; I < Clause.Names.size(); ++I) {
+                if (I) Text += ", ";
+                Text += Clause.Names[I];
+                for (const auto& [From, To] : Clause.Renames)
+                    if (eqCI(From, Clause.Names[I])) {
+                        Text += " => " + To;
+                        break;
+                    }
+            }
+            Text += ")";
+        }
+        Text += ";\n";
+    }
+    return Text;
+}
+
 /// Build the Pascal text of a .pmi file for one module body.
 ///
 /// A .pmi is the module's interface written out as Extended Pascal, so that
@@ -503,11 +531,19 @@ static std::string buildPMIContent(const ModuleNode& Mod,
         return false;
     };
 
+    // The imports the interface declarations above were resolved against: the
+    // interface's own import-part when there is a separate interface, else
+    // the one body standing in for it (module Foo; ... end. with no separate
+    // heading) — the same choice Decls just made above, for the same reason.
+    const std::vector<ImportClause>& RelevantImports =
+        (Iface && Iface->Body) ? Iface->Imports : Mod.Imports;
+
     std::string PMI;
     PMI += "{ plang module interface: ";
     PMI += Mod.Name;
     PMI += " }\n";
     PMI += "module " + Mod.Name + " interface;\n";
+    PMI += importPartText(RelevantImports);
     if (Iface && !Iface->Exports.empty()) PMI += exportPartText(*Iface);
 
     // Constants before the types, which may be written in terms of them: the

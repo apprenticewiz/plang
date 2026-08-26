@@ -134,6 +134,13 @@ private:
     /// which its own block is given so that it need not be written twice.
     std::map<std::string, std::vector<Symbol>> ModuleInterfaceDecls_;
 
+    /// EP §6.11.3: the import-part an interface wrote for itself, kept so that
+    /// re-checking a heading the interface declared — most notably a module
+    /// implementation's abbreviated repeat of a routine heading — can see the
+    /// same names the interface resolved that heading against, whether or not
+    /// the implementation repeats the import itself.
+    std::map<std::string, std::vector<ImportClause>> ModuleInterfaceImports_;
+
     /// EP §6.11.2: the export-list of a module, keyed by lowercased module
     /// name.  A module with an entry here exports exactly what the list names,
     /// under the names the list gives them; one without exports everything it
