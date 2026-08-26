@@ -1,4 +1,4 @@
-/// storage_test.cpp — how wide a type is, and where its parts sit
+/// storage_test.cpp -- how wide a type is, and where its parts sit
 ///
 /// Sema works sizes out without a DataLayout, because Turbo writes
 /// `const BufSize = 4 * SizeOf(Integer)` and a constant has to fold long before
@@ -7,12 +7,52 @@
 /// layout sizes a GetMem or a BlockRead buffer wrong, and nothing says so
 /// until the memory past the end of it is read back.
 ///
-/// What holds them together is not a test but an assertion in the compiler:
-/// codegen checks `Sema::byteSizeOf` against `DataLayout::getTypeAllocSize` for
-/// every type it lowers, in every program it compiles, and a disagreement is
-/// an ICE.  So the cases below that compile a program are not asserting on
-/// what they print — they are putting a shape through that assertion.  Each
-/// one is a shape that has already been found to break it.
+/// The cases that compiled a real program and just checked it didn't ICE
+/// (the size-agreement assertion between Sema::byteSizeOf and
+/// DataLayout::getTypeAllocSize aborts the process on disagreement, so
+/// merely finishing is the whole test) migrated to test-lit/CodeGen/ (issue
+/// #43, Phase F) -- 7 became new lit files, 1 was folded next to an existing
+/// VariantRecord case that was missing its exact wide-sibling ingredient,
+/// and 4 turned out to already be covered, more thoroughly (by round-tripped
+/// runtime values, not just a successful compile), by existing
+/// test-lit/CodeGen/VariantRecord/ and Storage/ content -- confirmed by a
+/// dedicated research pass reading every candidate file on both sides, not
+/// assumed from similar-looking Pascal:
+///   - TheAlternativesOfAVariantShareTheirStorage is subsumed by
+///     test-lit/CodeGen/VariantRecord/the-alternatives-share-their-storage.pas
+///   - AVariantWithNothingInItsAlternativesReservesNothing is subsumed by
+///     test-lit/CodeGen/VariantRecord/empty-alternatives-reserve-nothing.pas
+///   - SemaSizesAPackedRecordWithoutPaddingOrATail is subsumed (as a strict
+///     superset -- it needs both inter-field AND tail padding elided, with a
+///     16-aligned member) by
+///     test-lit/CodeGen/Storage/a-packed-field-does-not-claim-an-alignment-it-cannot-keep.pas
+///   - APackedRecordRoundTripsItsFields is subsumed by that same file
+///
+/// What remains here is a deliberate, permanent GoogleTest exception for two
+/// reasons: 7 cases (TheScalarsAreTheSizeTheyAreLoweredAt through
+/// WhatOnlyCodegenCanSizeIsNotGuessedAt) call Sema::byteSizeOf/byteAlignOf
+/// directly on TypeContext-constructed Type objects with no compilation step
+/// at all -- there is no SizeOf()/AlignOf() builtin exposed to Pascal, so
+/// nothing here has a CLI-observable proxy even in principle. Two
+/// (TwoIntegersOfOneWidthAreOneType, ThePredefinedIntegerIsTheInternedOne)
+/// check raw C++ pointer identity on TypeContext's interning cache, which no
+/// compiled program can observe. Two (TheDialectDecidesHowWideAnIntegerIs,
+/// MaxintIsTheLargestValueTheDialectsIntegerHolds) are deliberately deferred
+/// whole, not partially converted: -std=turbo doesn't exist yet, and the
+/// ISO7185/EP halves are provably the same branch of the same ternary in
+/// LangOptions::defaultIntWidth() today, so converting just those two would
+/// add a full-pipeline test to reconfirm a fact that's structurally
+/// guaranteed rather than actually at risk -- revisit both together as a
+/// real 3-way (18/EP/Turbo) lit test once the Turbo milestone lands (see
+/// project memory). One (ASubrangeSaysWhetherItsValuesCanBeNegative) checks
+/// Type::IsSigned, which is confirmed (by grep across lib/ and include/) to
+/// be write-only today -- nothing in the compiler reads it yet, so there is
+/// no compiled-program behavior it could possibly affect; revisit once
+/// something (again, almost certainly the Turbo widening rule) actually
+/// consumes it. Two (CodegenReuse's cases) test that a SECOND in-process
+/// Codegen object in the same process doesn't reuse the first's stale LLVM
+/// types -- structurally unreachable from any CLI invocation, which always
+/// compiles exactly once per process.
 
 #include "plang/AST/TypeContext.h"
 #include "plang/Basic/LangOptions.h"
@@ -169,194 +209,12 @@ TEST(Storage, TheDialectDecidesHowWideAnIntegerIs) {
 }
 
 // ---------------------------------------------------------------------------
-// Aggregates, put through the agreement check
-//
-// Each of these is a shape that broke it.  They assert that compilation
-// finishes, because the thing being tested aborts the process when it fails.
-// ---------------------------------------------------------------------------
-
-TEST(Storage, ARecordEndingInASetIsPaddedToTheSetsAlignment) {
-    // Found in the acceptance test: eight bytes short, all of it in the tail
-    // padding, where no field would ever have shown it.
-    EXPECT_FALSE(irFor(
-        "program p(output);\n"
-        "type r = record i: integer; s: set of char; p: ^integer end;\n"
-        "var v: r;\n"
-        "begin v.i := 1; writeln(v.i) end.\n").empty());
-}
-
-TEST(Storage, TheAlternativesOfAVariantShareTheirStorage) {
-    // ISO §6.4.3.3 lets a variant field be selected by name like any other, so
-    // Sema's flat field list holds every alternative's fields.  Summing that
-    // list counts storage the alternatives share, and a record of two
-    // four-byte alternatives came out twice the size it was laid out at.
-    EXPECT_FALSE(irFor(
-        "program p(output);\n"
-        "type r = record\n"
-        "  tag: boolean;\n"
-        "  case b: boolean of\n"
-        "    true:  (i: integer; j: integer);\n"
-        "    false: (c: char)\n"
-        "end;\n"
-        "var v: r;\n"
-        "begin v.tag := true; writeln(v.tag) end.\n").empty());
-}
-
-TEST(Storage, ANestedVariantStartsAfterTheAlternativeThatHoldsIt) {
-    EXPECT_FALSE(irFor(
-        "program p(output);\n"
-        "type r = record\n"
-        "  case a: boolean of\n"
-        "    true:  (i: integer;\n"
-        "            case b: boolean of\n"
-        "              true:  (x: real);\n"
-        "              false: (y: char));\n"
-        "    false: (s: set of char)\n"
-        "end;\n"
-        "var v: r;\n"
-        "begin v.a := false; writeln(v.a) end.\n").empty());
-}
-
-TEST(Storage, AVariantPartIsAlignedForTheWidestThingInIt) {
-    // `set of char` is i256, which this data layout aligns to 16, and codegen
-    // emits set accesses with the alignment of the TYPE.  The blob a variant
-    // part reserves used to cap its cell at i64, so the run was 8-aligned and
-    // sat at offset 8 of an 8-aligned object -- and the compiler then promised
-    // LLVM `align 16` on every load and store of the set inside it.  An
-    // aligned vector access is within its rights to fault on that.
-    //
-    // Three implementations had to be taught this, which is the R4 point: the
-    // cap was written into Codegen::variantBlobType, into Sema's
-    // variantBlobBytes, and a THIRD time as an explicit min(BlobAlign, 8) in
-    // Sema::byteSizeOf.  The run-time walk was the only one that had it right,
-    // and nothing compared it to the other two until now.
-    const std::string Ir = irFor(
-        "program p(output);\n"
-        "type r = record\n"
-        "  case a: boolean of\n"
-        "    true:  (i: integer);\n"
-        "    false: (s: set of char)\n"
-        "end;\n"
-        "var v: r;\n"
-        "begin v.s := ['x']; if 'x' in v.s then writeln('yes') end.\n");
-    ASSERT_FALSE(Ir.empty());
-    // The cell carries the alignment, so the blob has to be made of something
-    // that wants 16 -- an i64 array would be a 16-byte promise on an 8-byte
-    // object however many elements it had.
-    EXPECT_NE(Ir.find("{ i1, [2 x i128] }"), std::string::npos) << Ir;
-    EXPECT_EQ(Ir.find("{ i1, [4 x i64] }"), std::string::npos) << Ir;
-}
-
-TEST(Storage, AVariantWithNothingInItsAlternativesReservesNothing) {
-    // `case b: boolean of true: (); false: ()` is a record with a tag and no
-    // more, and there is no blob to reserve or to align to.
-    EXPECT_FALSE(irFor(
-        "program p(output);\n"
-        "type r = record i: integer; case b: boolean of true: (); false: () end;\n"
-        "var v: r;\n"
-        "begin v.i := 2; writeln(v.i) end.\n").empty());
-}
-
-TEST(Storage, ARecordOfMixedWidthsIsPaddedFieldByField) {
-    EXPECT_FALSE(irFor(
-        "program p(output);\n"
-        "type r = record a: char; b: integer; c: boolean; d: real;\n"
-        "                e: packed array[1..3] of char; f: integer end;\n"
-        "var v: r;\n"
-        "begin v.b := 3; writeln(v.b) end.\n").empty());
-}
-
-// ---------------------------------------------------------------------------
-// packed
-//
-// ISO §6.4.3.1 leaves what `packed` does to the implementation, and plang used
-// to do nothing with it — SemaType resolved it away as a storage hint and
-// codegen never built a packed struct.  It packs now, in every dialect: Turbo
-// needs it for {$PACKRECORDS 1} and for a record image a real Turbo program can
-// read, and a `packed` that packs nothing is a word the language has that means
-// nothing.
-// ---------------------------------------------------------------------------
-
-TEST(Packed, APackedRecordIsBuiltAsAPackedStruct) {
-    const std::string IR = irFor(
-        "program p(output);\n"
-        "type k = packed record a: char; b: integer; c: char end;\n"
-        "var v: k;\n"
-        "begin v.b := 1; writeln(v.b) end.\n");
-    ASSERT_FALSE(IR.empty());
-    // <{ }> is LLVM's spelling of a struct with no padding in it.
-    EXPECT_NE(IR.find("<{ i8, i64, i8 }>"), std::string::npos) << IR;
-}
-
-TEST(Packed, AnUnpackedRecordIsStillPadded) {
-    // The other half: packing one record must not pack every record.
-    const std::string IR = irFor(
-        "program p(output);\n"
-        "type u = record a: char; b: integer; c: char end;\n"
-        "var v: u;\n"
-        "begin v.b := 1; writeln(v.b) end.\n");
-    ASSERT_FALSE(IR.empty());
-    EXPECT_NE(IR.find("{ i8, i64, i8 }"), std::string::npos) << IR;
-    EXPECT_EQ(IR.find("<{ i8, i64, i8 }>"), std::string::npos) << IR;
-}
-
-TEST(Packed, TwoRecordsThatDifferOnlyInPackingAreTwoLayouts) {
-    // The struct-type cache keys on the field types, so without packing in the
-    // key these two would share one struct — and whichever was built second
-    // would take the first's offsets.
-    const std::string IR = irFor(
-        "program p(output);\n"
-        "type u =        record a: char; b: integer end;\n"
-        "     k = packed record a: char; b: integer end;\n"
-        "var vu: u; vk: k;\n"
-        "begin vu.b := 1; vk.b := 2; writeln(vu.b + vk.b) end.\n");
-    ASSERT_FALSE(IR.empty());
-    EXPECT_NE(IR.find("<{ i8, i64 }>"), std::string::npos) << IR;
-    EXPECT_NE(IR.find(" { i8, i64 }"), std::string::npos) << IR;
-}
-
-TEST(Packed, SemaSizesAPackedRecordWithoutPaddingOrATail) {
-    // Compiles, so the size-agreement check found Sema and the layout saying
-    // the same thing about a record with no padding in it and none on the end.
-    EXPECT_FALSE(irFor(
-        "program p(output);\n"
-        "type k = packed record a: char; b: integer; c: boolean; d: real end;\n"
-        "var v: k;\n"
-        "begin v.b := 1; writeln(v.b) end.\n").empty());
-}
-
-TEST(Packed, APackedVariantSharesStorageWithoutPaddingEither) {
-    EXPECT_FALSE(irFor(
-        "program p(output);\n"
-        "type k = packed record\n"
-        "  a: char;\n"
-        "  case b: boolean of\n"
-        "    true:  (i: integer);\n"
-        "    false: (c: char; d: char)\n"
-        "end;\n"
-        "var v: k;\n"
-        "begin v.a := 'x'; writeln(v.a) end.\n").empty());
-}
-
-TEST(Packed, APackedRecordRoundTripsItsFields) {
-    // Offsets, not just sizes.  A packed layout that agreed on the total and
-    // put the fields in the wrong places would pass everything above.
-    const std::string IR = irFor(
-        "program p(output);\n"
-        "type k = packed record a: char; b: integer; c: char end;\n"
-        "var v: k;\n"
-        "begin v.a := 'x'; v.b := 42; v.c := 'y';\n"
-        "  writeln(v.a, v.b:3, v.c) end.\n");
-    EXPECT_FALSE(IR.empty());
-}
-
-// ---------------------------------------------------------------------------
 // Compiling more than once in one process
 //
 // Not about storage, but this is where it was found: the cases above were the
 // first thing to build two Codegen objects in one process, and the second one
 // segfaulted.  The front end is a shared library so that other things can read
-// Pascal — a language server, for one — and those compile repeatedly.  The
+// Pascal -- a language server, for one -- and those compile repeatedly.  The
 // driver never does, which is why nothing had noticed.
 // ---------------------------------------------------------------------------
 
@@ -383,6 +241,10 @@ TEST(CodegenReuse, ThirdAndFourthCompilationsAreStillFine) {
         EXPECT_FALSE(irFor(Src).empty()) << "compilation " << I;
 }
 
+// ---------------------------------------------------------------------------
+// Dialect-derived limits, deferred to the Turbo milestone
+// ---------------------------------------------------------------------------
+
 TEST(Storage, MaxintIsTheLargestValueTheDialectsIntegerHolds) {
     // Sema and codegen each know maxint, from the same LangOptions.  They have
     // to agree or `for i := 1 to maxint` wraps instead of terminating, and they
@@ -398,6 +260,10 @@ TEST(Storage, MaxintIsTheLargestValueTheDialectsIntegerHolds) {
     EXPECT_EQ(maxintOf(LangOptions::Standard::Turbo),    32767);
 }
 
+// ---------------------------------------------------------------------------
+// Write-only metadata, waiting for its first reader
+// ---------------------------------------------------------------------------
+
 TEST(Storage, ASubrangeSaysWhetherItsValuesCanBeNegative) {
     // IsSigned defaults to true, and a subrange over a char, a boolean or an
     // enumeration has values that are ordinal numbers and never negative.  A
@@ -411,3 +277,4 @@ TEST(Storage, ASubrangeSaysWhetherItsValuesCanBeNegative) {
     EXPECT_FALSE(C.getSubrange(C.getInt(8, /*Signed=*/false), 0, 255)->IsSigned);
     EXPECT_TRUE(C.getSubrange(C.getInt(16, /*Signed=*/true), -5, 5)->IsSigned);
 }
+
