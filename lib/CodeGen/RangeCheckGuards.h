@@ -33,6 +33,12 @@ public:
     void emitGuard(llvm::Value* failCond, const char* name,
                    llvm::function_ref<void()> emitFail);
     void emitDivZeroCheck(llvm::Value* divisor, const char* op);
+    /// minint div -1 is the one div with a nonzero divisor that still has no
+    /// representable result (2^63 does not fit a positive int64_t) -- a
+    /// sibling to emitDivZeroCheck, not a replacement for it, since the two
+    /// guard different divisor values.  Not needed for mod: emitModDivisorCheck
+    /// already rejects every negative divisor, -1 included.
+    void emitDivOverflowCheck(llvm::Value* dividend, llvm::Value* divisor);
     /// ISO §6.7.2.2 mod is defined only for a positive divisor; folds the
     /// negatives together and replaces emitDivZeroCheck for that operator.
     void emitModDivisorCheck(llvm::Value* divisor);

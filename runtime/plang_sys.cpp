@@ -119,6 +119,23 @@ void plang_err_mod_divisor(int64_t D) {
     std::exit(PlangRuntimeErrorStatus);
 }
 
+/// ISO §6.7.2.2: div is defined for a nonzero divisor, but minint (-2^63) div
+/// -1 is the one nonzero-divisor case that still has no answer -- like
+/// abs(minint) (plang_err_abs_overflow), the mathematical result (+2^63) has
+/// no positive int64_t representation.  Left alone this is signed-overflow
+/// UB that, in practice, either raises SIGFPE in hardware (x86 idiv traps on
+/// overflow the same way it traps on a zero divisor) or is folded away
+/// entirely by the optimizer, depending on optimization level; like
+/// plang_err_abs_overflow and plang_err_ipow_zero_zero, this fires for
+/// exactly one fixed pair of operands, so it takes no argument.
+[[noreturn]] void plang_err_div_overflow(void) {
+    std::fflush(stdout);
+    std::fprintf(stderr,
+                 "plang runtime: -9223372036854775808 div -1 has no "
+                 "representable result\n");
+    std::exit(PlangRuntimeErrorStatus);
+}
+
 /// EP §6.9.2.2: the length of a string value assigned to a string variable
 /// shall not exceed the variable's capacity.
 [[noreturn]] void plang_err_str_capacity(int64_t Len, int64_t Cap) {
