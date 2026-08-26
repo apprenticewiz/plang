@@ -16,8 +16,15 @@ RUN: %run %t | FileCheck --check-prefix=RUNS %s
 *)
 
 (*
+Deliberately not anchored to a variable name or the word "global" --
+optimized builds insert extra keywords (e.g. local_unnamed_addr) between
+"=" and "global" that a more specific pattern would miss.  The type
+spelling itself, unlike what precedes it, is stable across -O0..-O3; the
+leading space is what keeps this from also matching inside the packed
+form's "<{...}>", which has no space before its brace.
+
 CHECK-DAG: <{ i8, i64 }>
-CHECK-DAG: pasg_vu = global { i8, i64 }
+CHECK-DAG:{{ }}{ i8, i64 }
 RUNS: 3
 *)
 
