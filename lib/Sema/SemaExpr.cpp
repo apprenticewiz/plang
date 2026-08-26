@@ -884,7 +884,10 @@ std::shared_ptr<Type> Sema::checkSetLit(const SetLiteralExpr& E) {
         }
     }
     // A named constructor IS that type, whatever its elements happened to be.
-    if (Named) return Named;
+    if (Named) {
+        if (Named->ElemType) warnIfSetLitOutOfRange(*Named->ElemType, E);
+        return Named;
+    }
 
     auto T = std::make_shared<Type>();
     T->Kind     = TypeKind::Set;
@@ -914,6 +917,46 @@ std::shared_ptr<Type> Sema::checkSetLit(const SetLiteralExpr& E) {
         }
     }
     return T;
+}
+
+// §6.4.6, §6.7.2.4: a set's members lie in its base type, and a member that
+// is a compile-time constant is checked now the same way
+// warnIfConstantOutOfRange checks one assigned to a scalar subrange variable
+// -- assignment-compatibility alone (checked above, per element) accepts any
+// integer literal for a `set of 1..10`, constant 999 included, so the value
+// itself still has to be checked against ElemBase's own range.
+void Sema::warnIfSetLitOutOfRange(const Type& ElemBase, const ExprNode& E) {
+    if (auto* B = llvm::dyn_cast<BinaryExpr>(&E)) {
+        warnIfSetLitOutOfRange(ElemBase, *B->Left);
+        warnIfSetLitOutOfRange(ElemBase, *B->Right);
+        return;
+    }
+    auto* SL = llvm::dyn_cast<SetLiteralExpr>(&E);
+    if (!SL) return;
+    // A typed constructor (`cs[999]`) already had this same check made
+    // against its OWN named type, from inside checkSetLit -- against
+    // ElemBase here too would warn twice for one `999`, since isLooseSet
+    // (and so adoptSetType, and the caller in checkAssignStmt that also
+    // calls this) does not distinguish a typed set-literal from an untyped
+    // one.
+    if (!SL->TypeName.empty()) return;
+    auto Range = ordinalRange(ElemBase);
+    if (!Range) return;
+    auto warnIfOOR = [&](const ExprNode& X) {
+        auto V = constBound(X);
+        if (!V || (*V >= Range->first && *V <= Range->second)) return;
+        warning(X.Loc, diag::warn_const_out_of_range,
+                {spellOrdinal(ElemBase, *V), spellOrdinal(ElemBase, Range->first),
+                 spellOrdinal(ElemBase, Range->second)});
+    };
+    for (const auto& Elem : SL->Elements) {
+        if (auto* Rng = llvm::dyn_cast<SetRangeExpr>(Elem.get())) {
+            warnIfOOR(*Rng->Low);
+            warnIfOOR(*Rng->High);
+        } else {
+            warnIfOOR(*Elem);
+        }
+    }
 }
 
 /// The span of a set-constructor's ordinals, when every one of them folds.

@@ -255,6 +255,13 @@ void Sema::checkAssign(const AssignStmt& S) {
     }
     checkStringCapacity(*Dst, *S.Value);
     warnIfConstantOutOfRange(*Dst, *S.Value);
+    // warnIfConstantOutOfRange only looks at Dst.Kind == Subrange; a set's own
+    // constant-out-of-range members are checked here instead, against the
+    // base type Dst names -- an untyped `[999]` only learns it is a TinySet
+    // (set of 1..10) from Dst, so this has to wait for Dst the same way
+    // adoptSetType below does.
+    if (Dst->Kind == TypeKind::Set && Dst->ElemType)
+        warnIfSetLitOutOfRange(*Dst->ElemType, *S.Value);
     adoptSetType(*S.Value, Dst);
 }
 

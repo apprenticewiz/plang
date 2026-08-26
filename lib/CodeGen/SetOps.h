@@ -17,16 +17,20 @@
 #include "llvm/IR/Module.h"
 
 #include "plang/AST/Ast.h"
+#include "plang/Basic/SourceLocation.h"
 #include "plang/Basic/Token.h"
 #include "plang/Sema/Type.h"
+
+#include "RangeCheckGuards.h"
 
 namespace plang { struct ExprNode; }
 
 class SetOps {
 public:
     SetOps(llvm::LLVMContext& Ctx, llvm::Module& Mod, llvm::IRBuilder<>& B,
+           RangeCheckGuards& RangeGuards,
            std::function<llvm::Value*(llvm::Value*)> ToI64)
-        : Ctx(Ctx), Mod(Mod), B(B), ToI64(std::move(ToI64)) {}
+        : Ctx(Ctx), Mod(Mod), B(B), RangeGuards(RangeGuards), ToI64(std::move(ToI64)) {}
 
     /// Sets are a flat bitmask of PlangMaxSetElements bits.  Bit 0 stands for
     /// the base type's origin rather than for ordinal 0, so a base type
@@ -43,6 +47,14 @@ public:
     /// The ordinal that bit 0 of e's set type stands for; 0 when e has no set
     /// type, which is the layout every non-negative base type uses anyway.
     int64_t setBaseOf(const plang::ExprNode& e);
+    /// e's set type's own base type's ordinal range -- e.g. {1, 10} for a
+    /// `set of 1..10` -- or nothing when e has no set type or that base type
+    /// has no bounded range (plain `integer`). Passed to emitSetSingleton/
+    /// emitSetRange so a member can be checked against the range the set's
+    /// declared TYPE promises, not merely against PlangMaxSetElements, the
+    /// representation's own width.
+    std::optional<std::pair<int64_t, int64_t>>
+    declaredRangeOf(const plang::ExprNode& e);
     /// Moves a set value from the window based at `from` into the one based
     /// at `to`.  Two compatible set types may be based at different
     /// ordinals, and a value crossing between them has to be shifted to
@@ -57,8 +69,18 @@ public:
                               std::optional<int64_t> destSetBase);
     /// Bit index for an ordinal in a set based at `base`.
     llvm::Value* setBitIndex(llvm::Value* ordinal, int64_t base);
-    llvm::Value* emitSetSingleton(llvm::Value* ordinal, int64_t base);
-    llvm::Value* emitSetRange(llvm::Value* lo, llvm::Value* hi, int64_t base);
+    /// \p declaredRange, when given, is checked against \p ordinal (or, for
+    /// emitSetRange, against both \p lo and \p hi) with a RangeCheckGuards
+    /// trap at \p Loc before the value is folded into the bitmask -- ISO
+    /// §6.4.6/§6.7.2.4: a set member has to lie in the set's base type, and
+    /// PlangMaxSetElements alone (what clampOrdinal/emitSetRange's own
+    /// emptiness test enforce) is the representation's width, not that.
+    llvm::Value* emitSetSingleton(llvm::Value* ordinal, int64_t base,
+        std::optional<std::pair<int64_t, int64_t>> declaredRange = std::nullopt,
+        plang::SourceLocation Loc = {});
+    llvm::Value* emitSetRange(llvm::Value* lo, llvm::Value* hi, int64_t base,
+        std::optional<std::pair<int64_t, int64_t>> declaredRange = std::nullopt,
+        plang::SourceLocation Loc = {});
     llvm::Value* emitSetMember(llvm::Value* ordinal, llvm::Value* set, int64_t base);
     /// Lowers a set-valued or set-comparing binary operator; returns null if
     /// op is not one of them.
@@ -68,6 +90,7 @@ private:
     llvm::LLVMContext& Ctx;
     llvm::Module& Mod;
     llvm::IRBuilder<>& B;
+    RangeCheckGuards& RangeGuards;
     std::function<llvm::Value*(llvm::Value*)> ToI64;
     llvm::IntegerType* i64Ty() const { return llvm::Type::getInt64Ty(Ctx); }
 };

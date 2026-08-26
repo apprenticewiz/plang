@@ -487,6 +487,14 @@ private:
     /// which the run-time check is certain to catch wherever it is reached.
     void warnIfConstantOutOfRange(const Type& Dst, const ExprNode& Src);
 
+    /// warnIfConstantOutOfRange's sibling for a set's members: a set-literal
+    /// element (or range endpoint) that is a compile-time constant, and lies
+    /// outside ElemBase's own ordinal range, is certain to trap once codegen's
+    /// RangeCheckGuards check runs. Recurses through E the way adoptSetType
+    /// does, so a loose set combined with `+`/`*`/etc. is covered the same as
+    /// a bare set-literal.
+    void warnIfSetLitOutOfRange(const Type& ElemBase, const ExprNode& E);
+
     /// Warns when one operand's type settles a comparison on its own, so that
     /// the other operand is not being consulted: `i > 99` where i is a 1..10.
     /// Quiet unless the range was written into the program — a subrange or an

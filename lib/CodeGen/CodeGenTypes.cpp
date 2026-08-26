@@ -110,7 +110,7 @@ void Codegen::Impl::init(const std::string& progName) {
     rangeGuards_ = std::make_unique<RangeCheckGuards>(ctx, builder, curFunc,
         *runtimeFns_, *strings_, langOpts, nilChecks,
         [this](llvm::Value* v){ return toI64(v); });
-    setOps_ = std::make_unique<SetOps>(ctx, *mod, builder,
+    setOps_ = std::make_unique<SetOps>(ctx, *mod, builder, *rangeGuards_,
         [this](llvm::Value* v){ return toI64(v); });
     // Built after complexOps_/setOps_ (needs ComplexOps&/SetOps& directly,
     // not closures, since both already exist by this point) and after the
