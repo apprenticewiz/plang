@@ -2,32 +2,78 @@ cmake_minimum_required(VERSION 3.16)
 
 # ---- Version ----------------------------------------------------------------
 #
-# The version is written here and nowhere else.  It used to be written in four
-# places by hand — this file's library VERSION, Version.h, the man page header
-# and the changelog — and cutting 0.1.2 updated two of them, so that release
-# shipped a compiler calling itself 0.1.2, a shared library built as 0.1.1 and a
-# man page whose header agreed with the library.
+# The numeric version lives in one place, the top-level VERSION file, and
+# nowhere else -- it used to be written by hand in four places (this file's
+# library VERSION, Version.h, the man page header, and the changelog), and
+# cutting 0.1.2 updated two of them, so that release shipped a compiler
+# calling itself 0.1.2, a shared library built as 0.1.1, and a man page whose
+# header agreed with the library.
 #
-# CMake will not accept a pre-release suffix in a project version, and a shared
-# library named libplang-frontend.so.0.2.0-pre is not something anyone wants
-# either, so the two are separate: PROJECT_VERSION is the numeric one, and only
-# what a human reads carries the suffix.
+# VERSION holds a bare MAJOR.MINOR.PATCH, no suffix -- CMake will not accept
+# one in project(VERSION ...), and a shared library named
+# libplang-frontend.so.0.3.1-pre is not something anyone wants either. What a
+# human actually reads (PLANG_VERSION_STRING, below) is never hand-maintained
+# at all: it is git-describe's own answer to "how far is the working tree
+# from the last release tag," computed fresh at every configure. Sitting
+# exactly on a release tag with a clean tree gives the bare number back
+# ("0.3.0"); N commits past it gives "0.3.0+N.g<hash>" (SemVer build
+# metadata, which per the spec's own §10 carries no precedence meaning --
+# exactly right here, since this string is diagnostic, not a promise about
+# what the next real release will be numbered); a dirty tree appends
+# ".dirty". No git, or no matching tag (a source tarball export, say), falls
+# back to VERSION's bare number with no suffix.
 #
-# To cut a release:
-#   1. set the suffix below to ""      (a development build says 0.2.0-pre;
-#                                       the release says 0.2.0)
-#   2. set PLANG_MANPAGE_DATE to the release date
-#   3. move the changelog's [Unreleased] section under the new version
-#   4. after tagging, bump VERSION here and set the suffix back to "-pre"
+# Recomputed at configure time only, not on every incremental build --
+# `cmake`'s own version string has the identical property (its git-hash
+# suffix is likewise configure-time-cached). CI always configures fresh, so
+# this only means a local incremental build's --version can lag one commit
+# behind until the next `cmake -S . -B build`.
 #
-project(plang VERSION 0.3.1 LANGUAGES C CXX)
+# The direct consequence, and the reason this replaced a hand-bumped "-pre"
+# suffix: VERSION does not need to change the moment a release ships, or get
+# guessed at in advance. It just sits at the last real release for as long as
+# `main` is between releases, however long that takes or whatever the next
+# one turns out to be numbered -- nothing here commits to that early. It only
+# changes when a release is actually being prepared:
+#
+#   1. cut the release branch (or reuse an existing one, for a patch release)
+#   2. on that branch, set VERSION to the exact target number
+#   3. set PLANG_MANPAGE_DATE to the release date
+#   4. move the changelog's [Unreleased] section under the new version
+#   5. tag from that branch once ready; `main` is untouched throughout
+#
+file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/VERSION" PLANG_BASE_VERSION LIMIT_COUNT 1)
+string(STRIP "${PLANG_BASE_VERSION}" PLANG_BASE_VERSION)
 
-# Empty in a release, "-pre" between them, so that a development snapshot
-# cannot be mistaken for the release it is heading towards.  Semantic
-# Versioning §9 gives a pre-release lower precedence than the version it
-# qualifies, which is the right way round: 0.1.3 < 0.2.0-pre < 0.2.0.
-set(PLANG_VERSION_SUFFIX "-pre")
-set(PLANG_VERSION_STRING "${PROJECT_VERSION}${PLANG_VERSION_SUFFIX}")
+project(plang VERSION ${PLANG_BASE_VERSION} LANGUAGES C CXX)
+
+set(PLANG_VERSION_STRING "${PLANG_BASE_VERSION}")
+find_package(Git QUIET)
+if(GIT_EXECUTABLE AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.git")
+    execute_process(
+        COMMAND ${GIT_EXECUTABLE} describe --tags --dirty --match "v[0-9]*"
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+        OUTPUT_VARIABLE PLANG_GIT_DESCRIBE
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+        RESULT_VARIABLE PLANG_GIT_DESCRIBE_RESULT
+    )
+    # Matches e.g. "v0.3.0" (exactly on the tag), "v0.3.0-12-gabc1234" (12
+    # commits past it), either optionally followed by "-dirty". A tarball
+    # export or a shallow clone with no reachable tag makes describe fail
+    # (nonzero exit, or no match) -- PLANG_VERSION_STRING keeps its plain
+    # VERSION-file fallback from above in that case.
+    if(PLANG_GIT_DESCRIBE_RESULT EQUAL 0 AND PLANG_GIT_DESCRIBE MATCHES
+       "^v?([0-9]+\\.[0-9]+\\.[0-9]+)(-([0-9]+)-g([0-9a-f]+))?(-dirty)?$")
+        set(PLANG_VERSION_STRING "${CMAKE_MATCH_1}")
+        if(CMAKE_MATCH_3)
+            set(PLANG_VERSION_STRING "${PLANG_VERSION_STRING}+${CMAKE_MATCH_3}.g${CMAKE_MATCH_4}")
+        endif()
+        if(CMAKE_MATCH_5)
+            set(PLANG_VERSION_STRING "${PLANG_VERSION_STRING}.dirty")
+        endif()
+    endif()
+endif()
 
 # The date in the man page header, which by convention is when the page last
 # changed rather than when it was built — a build date would make two builds of
