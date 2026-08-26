@@ -146,3 +146,15 @@ llvm::Function* Codegen::Impl::getRuntimeDisposeFn() {
 llvm::Function* Codegen::Impl::getRuntimeHaltFn() {
     return runtimeFns_->getRuntimeHaltFn();
 }
+
+llvm::Function* Codegen::Impl::getConfArrMarkFn() {
+    return runtimeFns_->getConfArrMarkFn();
+}
+
+llvm::Function* Codegen::Impl::getConfArrPushFn() {
+    return runtimeFns_->getConfArrPushFn();
+}
+
+llvm::Function* Codegen::Impl::getConfArrUnwindFn() {
+    return runtimeFns_->getConfArrUnwindFn();
+}

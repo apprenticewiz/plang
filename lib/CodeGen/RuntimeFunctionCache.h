@@ -30,6 +30,13 @@ public:
     llvm::Function* getRuntimeNewFn();     // ptr plang_new(i64)
     llvm::Function* getRuntimeDisposeFn(); // void plang_dispose(ptr)
     llvm::Function* getRuntimeHaltFn();    // void plang_halt(i64) noreturn
+    // The value-conformant-array-copy shadow stack (runtime/plang_sys.cpp)
+    // that lets a non-local goto's landing pad find and free copies made by
+    // activations it skipped straight past -- see ConfArrStack's own comment
+    // there.
+    llvm::Function* getConfArrMarkFn();    // i64 plang_confarr_mark(void)
+    llvm::Function* getConfArrPushFn();    // void plang_confarr_push(ptr)
+    llvm::Function* getConfArrUnwindFn();  // void plang_confarr_unwind(i64)
 
 private:
     llvm::LLVMContext& Ctx;

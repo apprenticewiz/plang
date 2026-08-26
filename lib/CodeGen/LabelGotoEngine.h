@@ -118,6 +118,14 @@ private:
         const plang::BlockNode* Block{nullptr};
         std::string             BufName; ///< scope name of its jump buffer
         llvm::SwitchInst*       Dispatch{nullptr};
+        /// The value-conformant-array-copy shadow stack's depth (runtime/
+        /// plang_sys.cpp), taken right before this owner's own _setjmp --
+        /// after its parameter prologue has pushed its own by-value
+        /// conformant array copies, so those are never above this mark, and
+        /// before its body can call anything that might push more.  Set by
+        /// emitLabelLanding, read by closeLabelScope to free what a longjmp
+        /// landing here abandoned.
+        llvm::Value*             ConfArrMark{nullptr};
     };
     std::vector<LabelOwner> LabelOwners;
 
