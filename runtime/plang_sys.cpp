@@ -256,6 +256,45 @@ void plang_err_mod_divisor(int64_t D) {
     std::exit(PlangRuntimeErrorStatus);
 }
 
+/// ISO §6.6.6.3: round/trunc convert a real value to an integer, but not
+/// every real has a representable int64_t counterpart -- round(1e30) has no
+/// integer answer at all.  static_cast<int64_t> of an out-of-range double is
+/// undefined behaviour, and in practice (x86-64 cvttsd2si) silently produces
+/// INT64_MIN for every such input, indistinguishable from the one real
+/// integer value that actually converts to it.  plang_math.cpp's
+/// plang_trunc/plang_round check the range before the cast and call in here
+/// instead of letting that sentinel escape as if it were a real answer.
+[[noreturn]] void plang_err_real_to_int_range(const char *Op, double X) {
+    std::fflush(stdout);
+    std::fprintf(stderr,
+                 "plang runtime: %s(%g) has no representable integer result\n",
+                 Op, X);
+    std::exit(PlangRuntimeErrorStatus);
+}
+
+/// ISO §6.6.6.2: sqrt(x) is defined only for x >= 0 -- std::sqrt answers a
+/// silent NaN for a negative argument instead, which (like the pow domain
+/// errors just above) would otherwise flow into program output undetected
+/// rather than being reported the way the standard's "error" calls for.
+[[noreturn]] void plang_err_sqrt_domain(double X) {
+    std::fflush(stdout);
+    std::fprintf(stderr,
+                 "plang runtime: sqrt(%g) is undefined (the argument must be "
+                 "non-negative)\n", X);
+    std::exit(PlangRuntimeErrorStatus);
+}
+
+/// ISO §6.6.6.2: ln(x) is defined only for x > 0 -- std::log silently answers
+/// NaN for a negative argument and -inf at exactly zero, the same
+/// undetected-domain-error gap plang_err_sqrt_domain closes for sqrt.
+[[noreturn]] void plang_err_ln_domain(double X) {
+    std::fflush(stdout);
+    std::fprintf(stderr,
+                 "plang runtime: ln(%g) is undefined (the argument must be "
+                 "positive)\n", X);
+    std::exit(PlangRuntimeErrorStatus);
+}
+
 /// ISO §6.5.4: the identifying value of a pointer variable being dereferenced
 /// shall not be nil.
 [[noreturn]] void plang_err_nil_deref(void) {
