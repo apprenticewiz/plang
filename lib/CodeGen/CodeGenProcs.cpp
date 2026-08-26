@@ -858,8 +858,26 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
                     }
                     defVar(nm, &*it, vt, tn, debugAddr);
                 } else {
+                    // ISO §6.6.3.2: a value parameter is a variable of its
+                    // own that the actual argument is assigned to, so
+                    // §6.4.6's requirement that a subrange-typed
+                    // destination's value lie within its declared bounds
+                    // applies here exactly as it does to an ordinary
+                    // assignment (see CGAssign.cpp) -- nothing enforced it
+                    // here, so an out-of-range actual arrived in the copy
+                    // uncaught.  A var parameter is excluded: it aliases the
+                    // caller's own storage rather than copying into one of
+                    // its own, so it is not an assignment and nothing new is
+                    // checked here for that path.
+                    llvm::Value* argVal = &*it;
+                    if (const auto& rt = tn ? tn->ResolvedType : nullptr;
+                            rt && rt->Kind == TypeKind::Subrange
+                            && rt->SubLo != rt->SubHi
+                            && argVal->getType()->isIntegerTy())
+                        emitRangeCheck(argVal, rt->SubLo, rt->SubHi,
+                                       /*isIndex=*/false, tn->Loc);
                     auto* a = createEntryAlloca(vt, nm + ".addr");
-                    builder.CreateStore(&*it, a);
+                    builder.CreateStore(argVal, a);
                     defVar(nm, a, vt, tn); // pass typeNode so bounds are known
                 }
                 ++it;
