@@ -490,3 +490,19 @@ jobs:
         run: ctest --test-dir build-asan -j"$(nproc)" --output-on-failure
         env:
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+
+  lint-test-lit:
+    name: lint test-lit/
+    runs-on: ubuntu-latest
+    # No C++ build needed: pure Python text analysis over test-lit/**/*.pas
+    # (issue #43's own repeat-offense history -- a stray '}' closing a
+    # directive comment early, hit at least 4 times; a bare %t defeating
+    # PLANG_TEST_RUN_WRAPPER, hit at scale once, 282 files). Deliberately
+    # its own job, not a step tacked onto `build`: it has nothing to do
+    # with any compiler/arch/build_type axis, and it should fail fast
+    # without waiting on a full compiler matrix to say so.
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Lint test-lit/
+        run: python3 tools/lint_test_lit.py --strict
