@@ -488,23 +488,31 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
         return;
     }
 
-    // -g: scoped under the enclosing procedure's own current scope when
+    // -g: scoped under the enclosing procedure's own DISubprogram when
     // nested, so a debugger's backtrace nests the way the Pascal source
-    // does; under the file itself for a top-level procedure.  Ordinarily
-    // that current scope is the enclosing procedure's own DISubprogram,
-    // but if a sibling declared earlier in the same enclosing body already
-    // shadowed a captured variable (see CGDebugInfo::enterShadowScope),
-    // it is that sibling's DILexicalBlock instead -- still correct: this
-    // procedure really is nested inside that lexical span, and either way
-    // this procedure's own body gets its own fresh DISubprogram as ITS
-    // scope below, not the enclosing one directly.  hd is the heading the
-    // parameters and result type were written on (see above), which for a
-    // 'forward' declaration's defining occurrence is the declaration --
-    // the body's own line is a better bet for where a breakpoint on the
-    // procedure should land than the forward heading's.  dbgScope's
-    // destructor restores the enclosing scope on every exit path from
-    // here on, so nothing below needs a matching manual restore.
-    llvm::DILocalScope* enclosingScope = dbgInfo_->currentScope();
+    // does; under the file itself for a top-level procedure.  Deliberately
+    // nearestSubprogramScope(), not currentScope(): if a sibling declared
+    // earlier in the same enclosing body already shadowed a captured
+    // variable (see CGDebugInfo::enterShadowScope), currentScope() would
+    // be that sibling's DILexicalBlock, and parenting THIS procedure's own
+    // DISubprogram under it produces DISubprogram -> DILexicalBlock ->
+    // DISubprogram nesting -- a scope shape llc's DWARF AsmPrinter
+    // SIGSEGVs on once any optimization pass runs (confirmed only at -O0
+    // by luck: -O0 emits the identical metadata but never walks the path
+    // that crashes).  A shadowing lexical block only disambiguates a
+    // DILocalVariable's parent (see enterShadowScope's own comment); it
+    // has no bearing on where a child PROCEDURE DECLARATION's DISubprogram
+    // attaches, so skip straight past it to the nearest real DISubprogram.
+    // This procedure really is nested inside that lexical span either way,
+    // and either way this procedure's own body gets its own fresh
+    // DISubprogram as ITS scope below, not the enclosing one directly.  hd
+    // is the heading the parameters and result type were written on (see
+    // above), which for a 'forward' declaration's defining occurrence is
+    // the declaration -- the body's own line is a better bet for where a
+    // breakpoint on the procedure should land than the forward heading's.
+    // dbgScope's destructor restores the enclosing scope on every exit
+    // path from here on, so nothing below needs a matching manual restore.
+    llvm::DILocalScope* enclosingScope = dbgInfo_->nearestSubprogramScope();
     llvm::DIScope* scope = (isNested && enclosingScope)
         ? static_cast<llvm::DIScope*>(enclosingScope)
         : static_cast<llvm::DIScope*>(dbgInfo_->getFile());
