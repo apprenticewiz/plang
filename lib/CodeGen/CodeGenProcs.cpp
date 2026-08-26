@@ -438,6 +438,20 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
         }
     }
 
+    // ISO §6.6.3.3: whether the prologue below may copy at least one
+    // parameter to the heap -- a conformant array taken by value.  (Whether
+    // it actually does also depends on Sema's ModifiedParams, checked per
+    // parameter below; over-approximating here just means an unused mark and
+    // a no-op unwind for a value conformant array that is only ever read,
+    // which is cheaper than re-deriving that check twice.)  Gates capturing
+    // the shadow-stack mark this activation's own copies -- and only
+    // theirs -- get disposed from, at the end of this function.
+    const bool hasValueConformantParam = std::any_of(
+        paramMeta.begin(), paramMeta.end(),
+        [](const ParamMeta& pm) {
+            return !pm.conformantDims.empty() && !pm.byRef;
+        });
+
     // Return type.
     llvm::Type* retTy = llvm::Type::getVoidTy(ctx);
     if (hd.IsFunction && hd.ReturnType) {
@@ -681,6 +695,14 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
         curRetAlloca = nullptr;
     }
 
+    // Taken before any of this activation's own by-value conformant array
+    // copies (below) are made, so unwinding back to it at the end of this
+    // function's body frees exactly those and nothing another activation
+    // pushed -- see ConfArrStack's own comment (runtime/plang_sys.cpp).
+    llvm::Value* confArrEntryMark = nullptr;
+    if (hasValueConformantParam)
+        confArrEntryMark = builder.CreateCall(getConfArrMarkFn(), {}, "vcc.mark");
+
     // Copy Pascal-declared parameters to allocas.
     // paramMeta has one entry per Pascal param name; each LLVM arg sequence
     // consumed depends on whether the param is conformant or not.
@@ -832,7 +854,13 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
                     auto* copy = builder.CreateCall(getRuntimeNewFn(), {bytes},
                                                     nm + ".copy");
                     builder.CreateMemCpy(copy, align, arrPtrArg, align, bytes);
-                    curFn.ValueConformantCopies.push_back(copy);
+                    // Recorded on the shadow stack, not just locally: a
+                    // non-local goto out of this procedure (ISO §6.8.1)
+                    // abandons this activation via _longjmp, skipping the
+                    // disposal at the end of this function entirely, and
+                    // only that stack lets the landing pad it jumps to find
+                    // this copy anyway (LabelGotoEngine::closeLabelScope).
+                    builder.CreateCall(getConfArrPushFn(), {copy});
                     dataPtr = copy;
                 }
                 defVar(nm, dataPtr, elemTy);
@@ -888,11 +916,18 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
     }
 
     // Give back the heap a value conformant array parameter was copied into.
-    // The body has one exit; a non-local goto out of the procedure leaves the
-    // block behind, which leaks rather than corrupts.
-    if (!isTerminated())
-        for (auto* C : curFn.ValueConformantCopies)
-            builder.CreateCall(getRuntimeDisposeFn(), {C});
+    // Unwinding to the mark taken before this activation's own copies were
+    // pushed frees exactly those and nothing else: whatever this body called
+    // has, by now, either returned normally and unwound its own copies the
+    // same way, or left by a non-local goto whose landing pad already
+    // unwound what it abandoned (LabelGotoEngine::closeLabelScope) -- so
+    // nothing but this activation's own copies can still be above the mark
+    // here.  A non-local goto out of THIS procedure skips this call
+    // entirely (isTerminated() is false only on the fall-through path), but
+    // that is fine: the same copies are still on the shadow stack for
+    // whichever ancestor's landing pad the goto reaches to free instead.
+    if (!isTerminated() && confArrEntryMark)
+        builder.CreateCall(getConfArrUnwindFn(), {confArrEntryMark});
 
     // Emit return if the last block is not yet terminated.
     if (!isTerminated()) {

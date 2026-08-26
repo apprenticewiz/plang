@@ -920,6 +920,9 @@ struct Codegen::Impl {
     llvm::Function* getRuntimeNewFn();
     llvm::Function* getRuntimeDisposeFn();
     llvm::Function* getRuntimeHaltFn();
+    llvm::Function* getConfArrMarkFn();
+    llvm::Function* getConfArrPushFn();
+    llvm::Function* getConfArrUnwindFn();
 
     // ====================================================================
     // Basic block helpers

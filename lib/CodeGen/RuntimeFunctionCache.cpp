@@ -72,3 +72,23 @@ llvm::Function* RuntimeFunctionCache::getRuntimeHaltFn() {
     f->addFnAttr(llvm::Attribute::NoReturn);
     return f;
 }
+
+llvm::Function* RuntimeFunctionCache::getConfArrMarkFn() {
+    auto* i64Ty = llvm::Type::getInt64Ty(Ctx);
+    auto* ty = llvm::FunctionType::get(i64Ty, {}, false);
+    return getExternFn("plang_confarr_mark", ty);
+}
+
+llvm::Function* RuntimeFunctionCache::getConfArrPushFn() {
+    auto* ptrTy = llvm::PointerType::get(Ctx, 0);
+    auto* voidTy = llvm::Type::getVoidTy(Ctx);
+    auto* ty = llvm::FunctionType::get(voidTy, {ptrTy}, false);
+    return getExternFn("plang_confarr_push", ty);
+}
+
+llvm::Function* RuntimeFunctionCache::getConfArrUnwindFn() {
+    auto* i64Ty = llvm::Type::getInt64Ty(Ctx);
+    auto* voidTy = llvm::Type::getVoidTy(Ctx);
+    auto* ty = llvm::FunctionType::get(voidTy, {i64Ty}, false);
+    return getExternFn("plang_confarr_unwind", ty);
+}

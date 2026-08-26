@@ -23,6 +23,24 @@ constexpr int PlangRuntimeErrorStatus = 70;
 void (**ModuleFinalisers)(void) = nullptr;
 std::size_t ModuleFinaliserCount = 0;
 std::size_t ModuleFinaliserCap   = 0;
+
+/// Heap blocks a by-value conformant-array parameter (ISO §6.6.3.3) was
+/// copied into, across every activation on the call stack that has not yet
+/// given its own back -- LIFO, in the order the copies were actually made,
+/// not in C-stack order, which is what lets one mechanism serve both a
+/// normal return and a non-local goto (§6.8.1) that unwinds past several
+/// activations at once with a single _longjmp.  Codegen::Impl::emitFunctionDef
+/// marks the top of this before copying its own parameters and unwinds back
+/// to that mark where its body ends; LabelGotoEngine::emitLabelLanding marks
+/// it (after that same prologue) right before its _setjmp, and
+/// LabelGotoEngine::closeLabelScope unwinds back to THAT mark on every edge a
+/// longjmp can land on -- the one place execution goes on a non-local jump,
+/// so it is the one place that is guaranteed to run regardless of how many
+/// activations, or how much recursion, the goto skipped past.  A plain array
+/// rather than a std::vector: see ModuleFinalisers just above.
+void       **ConfArrStack = nullptr;
+std::size_t  ConfArrTop   = 0;
+std::size_t  ConfArrCap   = 0;
 } // namespace
 
 extern "C" {
@@ -59,6 +77,44 @@ void *plang_new(int64_t Bytes) {
 /// Release a pointer previously obtained from plang_new (Pascal \c dispose).
 void plang_dispose(void *P) {
     std::free(P);
+}
+
+// ---- ISO §6.6.3.3 / §6.8.1: value-conformant-array copies vs. non-local
+// goto ----
+//
+// See ConfArrStack's own comment above for the shape of the problem these
+// three answer together; CodeGenProcs.cpp and LabelGotoEngine.cpp are the
+// two call sites.
+
+/// The stack's current depth, to hand back to plang_confarr_unwind later.
+int64_t plang_confarr_mark(void) {
+    return static_cast<int64_t>(ConfArrTop);
+}
+
+/// Record \p P -- a block plang_new returned for a by-value conformant-array
+/// parameter's copy -- so it can still be found and freed even if the
+/// activation that made it is later abandoned by a non-local goto rather
+/// than reached again itself.
+void plang_confarr_push(void *P) {
+    if (ConfArrTop == ConfArrCap) {
+        std::size_t NewCap = ConfArrCap ? ConfArrCap * 2 : 16;
+        auto *Grown = static_cast<void **>(
+            std::realloc(ConfArrStack, NewCap * sizeof(void *)));
+        if (!Grown) {
+            std::fflush(stdout);
+            std::fprintf(stderr, "plang runtime: out of memory\n");
+            std::exit(PlangRuntimeErrorStatus);
+        }
+        ConfArrStack = Grown;
+        ConfArrCap   = NewCap;
+    }
+    ConfArrStack[ConfArrTop++] = P;
+}
+
+/// Free every block pushed since \p Mark and drop them off the stack.
+void plang_confarr_unwind(int64_t Mark) {
+    while (ConfArrTop > static_cast<std::size_t>(Mark))
+        std::free(ConfArrStack[--ConfArrTop]);
 }
 
 // ---- EP §6.11.2: module finalization order ----

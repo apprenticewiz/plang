@@ -85,6 +85,17 @@ void LabelGotoEngine::emitLabelLanding() {
     llvm::Value* buf = LookupBuf(LabelOwners.back().BufName);
     if (!buf) return;
 
+    // Taken here, before the _setjmp below: the parameter prologue that
+    // copies this owner's own by-value conformant array parameters
+    // (CodeGenProcs.cpp) already ran, so those copies are safely below this
+    // mark and closeLabelScope's unwind-on-landing never touches them --
+    // only what gets pushed after this point, by calls this body goes on to
+    // make and does not itself unwind.  See ConfArrStack's own comment
+    // (runtime/plang_sys.cpp) for why one mark/unwind mechanism serves both
+    // this and the ordinary end-of-body case.
+    LabelOwners.back().ConfArrMark =
+        B.CreateCall(RtFns.getConfArrMarkFn(), {}, "goto.vcc.mark");
+
     // ISO §6.8.1 permits the jump only to a label at the outermost level of
     // the statement part, so the landing pad may sit here, ahead of the body,
     // and reach every target with a branch.  It sits after the block's
@@ -103,10 +114,32 @@ void LabelGotoEngine::emitLabelLanding() {
 
 void LabelGotoEngine::closeLabelScope() {
     if (auto* dispatch = LabelOwners.back().Dispatch) {
-        for (const auto& label : nonLocalTargets(*LabelOwners.back().Block))
+        llvm::Value* mark = LabelOwners.back().ConfArrMark;
+        for (const auto& label : nonLocalTargets(*LabelOwners.back().Block)) {
+            llvm::BasicBlock* target = getOrCreateLabel("lbl_" + label);
+            // A switch case is the only way execution reaches a label this
+            // way -- a local goto to the same block branches to `target`
+            // directly (emitGoto), never through here -- so it is the one
+            // place guaranteed to run on every non-local arrival, regardless
+            // of how many activations the _longjmp skipped or how deep the
+            // recursion was.  Splicing a trampoline in here that frees
+            // whatever those abandoned activations' own by-value conformant
+            // array copies left behind (mark, taken in emitLabelLanding) is
+            // what closes the leak a longjmp used to carry straight past the
+            // disposal at the bottom of every one of their bodies
+            // (CodeGenProcs.cpp).
+            llvm::BasicBlock* landing = target;
+            if (mark) {
+                landing = llvm::BasicBlock::Create(
+                    Ctx, "goto.unwind." + label, CurFn);
+                llvm::IRBuilder<> tramp(landing);
+                tramp.CreateCall(RtFns.getConfArrUnwindFn(), {mark});
+                tramp.CreateBr(target);
+            }
             dispatch->addCase(
                 llvm::ConstantInt::get(i32Ty(), gotoDispatchValue(label)),
-                getOrCreateLabel("lbl_" + label));
+                landing);
+        }
         pinLocalsToMemory(CurFn);
     }
     LabelOwners.pop_back();
