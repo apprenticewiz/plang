@@ -1,4 +1,4 @@
-// The rest of this file's TEST() cases migrated to test-lit/Sema/ (issue
+// The rest of this file's TEST() cases migrated to test/Sema/ (issue
 // #43, Phase D) -- each is one program run through `plang -dump-ast`, with
 // the exit code and/or a diagnostic-substring FileCheck covering exactly
 // what its `check(...).Ok`/`.hasError(...)`/`.hasWarning(...)` assertion did.

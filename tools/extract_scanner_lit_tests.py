@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Extract test/Lex/scanner_test.cpp's TEST() cases into test-lit/Lex/*.pas.
+"""Extract test/Lex/scanner_test.cpp's TEST() cases into test/Lex/*.pas.
 
 Every case in scanner_test.cpp does one thing: construct a Scanner (via
 makeScanner()/makeScannerEP(), i.e. default ISO 7185 or -std=iso10206) over
@@ -41,7 +41,7 @@ from dataclasses import dataclass
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SRC_FILE = os.path.join(REPO_ROOT, "test", "Lex", "scanner_test.cpp")
-OUT_ROOT = os.path.join(REPO_ROOT, "test-lit", "Lex")
+OUT_ROOT = os.path.join(REPO_ROOT, "test", "Lex")
 
 # Cases this script deliberately does not attempt -- hand-converted instead.
 SKIP = {
@@ -74,7 +74,7 @@ SKIP = {
     # literals and quoted-string literals, not arbitrary member access, so
     # this produces zero slots-with-checks if auto-converted (caught by the
     # zero-check-lines guard in main(), not silently). Also near-fully
-    # redundant with test-lit/Lex/Smoke/dump-tokens-prints-a-token-per-line.pas
+    # redundant with test/Lex/Smoke/dump-tokens-prints-a-token-per-line.pas
     # (Phase A), which already exercises this exact "whole small program"
     # token-stream shape -- dropped rather than hand-converted.
     ("ScannerIntegration", "SmallProgram"),

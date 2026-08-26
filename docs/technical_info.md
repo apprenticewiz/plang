@@ -142,7 +142,7 @@ would mean transcribing an Extended Pascal column by hand, and a mistranscribed
 cell changes Extended Pascal silently: both conformance corpora are ISO 7185
 programs, so an ISO 7185 mode that grew an extension — or an Extended Pascal
 mode that lost one — passes all 377 of them. The `DialectGating` suite in
-`test/Sema/sema_test.cpp` is what covers that direction: one program per shared
+`test/unittests/Sema/sema_test.cpp` is what covers that direction: one program per shared
 capability, accepted under a dialect that has it and refused with a *named*
 diagnostic under one that does not. The named diagnostic matters — written as a
 bare "was rejected", the `case ... else` pair passed with its gate deliberately
@@ -223,7 +223,7 @@ are byte-identical either side of the change that introduced this.
 The consumer today is range checking.  There are no directives yet to fill a
 table in — that is the Turbo Pascal front end — so the positional behavior is
 tested by building a table by hand and compiling through it in process, in
-`test/CodeGen/switches_test.cpp`.  Doing it by hand is also the only way to
+`test/unittests/CodeGen/switches_test.cpp`.  Doing it by hand is also the only way to
 reach the case that matters most: a location *before* a change still gets the
 old state, which a scanner reading in source order cannot produce.
 
@@ -330,48 +330,46 @@ and the two cannot disagree.
 
 ## The test suite
 
-1967 tests, split across two harnesses (issue #34) — GoogleTest for
-in-process, C++-API-level tests, and LLVM's `lit`+`FileCheck` for CLI-driven,
-black-box tests that spawn the real `plang` binary — mirroring how Clang
-splits `clang/unittests/` from `clang/test/`. `test-lit/README.md` covers the
-lit side's own conventions in full; this section covers both.
+2025 tests, split across two harnesses (issue #34, issue #43) — GoogleTest
+for in-process, C++-API-level tests, and LLVM's `lit`+`FileCheck` for
+CLI-driven, black-box tests that spawn the real `plang` binary — mirroring
+how Clang splits `clang/unittests/` from `clang/test/`. `test/README.md`
+covers the lit side's own conventions in full; this section covers both.
 
-### GoogleTest (`test/`) — 647 tests, in eight binaries
+### GoogleTest (`test/unittests/`) — 51 tests, in five binaries
 
-| Binary                               | Tests | What it covers                        |
-|---------------------------------------|-------|---------------------------------------|
-| `test/Lex/scanner_test`               | 146   | Tokens, literals, keywords, EP gating |
-| `test/Parse/parser_test`              | 131   | Declarations, statements, expressions |
-| `test/Sema/sema_test`                 | 165   | Name resolution and type checking     |
-| `test/Basic/catalog_test`             | 46    | The `.po` reader and locale selection |
-| `test/Basic/source_manager_test`      | 4     | Source-buffer coordinate overflow     |
-| `test/Driver/driver_test`             | 114   | The driver and the command line       |
-| `test/CodeGen/codegen_switches_test`  | 15    | Positional compiler-switch state      |
-| `test/CodeGen/codegen_storage_test`   | 26    | Type widths, layout, one SizeOf       |
+| Binary                                         | Tests | What it covers                                          |
+|--------------------------------------------------|-------|-----------------------------------------------------------|
+| `test/unittests/Basic/catalog_test`               | 16    | `.po`-reader/locale-selection internals the CLI can't observe |
+| `test/unittests/Basic/source_manager_test`        | 4     | Source-buffer coordinate overflow                        |
+| `test/unittests/Sema/sema_test`                   | 2     | The `Builtins` X-macro loop, driven over every entry in one in-process pass |
+| `test/unittests/CodeGen/codegen_storage_test`     | 14    | `byteSizeOf`/`byteAlignOf` unit cases with no CLI-observable proxy |
+| `test/unittests/CodeGen/codegen_switches_test`    | 15    | Positional `LangOptions` state no command-line flag re-derives |
 
-The first five are unit tests over one phase each, constructing
-`Scanner`/`Parser`/`Sema`/etc. objects directly and in-process. `driver_test`
-below them is the last end-to-end suite of this kind: it compiles a program,
-links it, runs it, and checks what it printed and what it exited with, via
-`test/Driver/DriverHarness.h` — also where a case that needs several named
-files goes through `CaseDir`, a directory of its own, cleaned up with the
-case, and the working directory the program runs in, so that a relative name
-in a source means a file this case wrote. `driver_test` is deliberately the
-last one slated to migrate to `test-lit/` (issue #34's hardest content —
-DWARF debug-info scope-graph assertions); `codegen_test.cpp`, `ep_test.cpp`,
-and `module_test.cpp` already have (below), and the five unit-test binaries
-are staying GoogleTest permanently.
+Each is a permanent exception, not a migration backlog: every case
+constructs a `Scanner`/`Parser`/`Sema`/`Codegen`/`MessageCatalog` object
+directly and asserts on internal state the CLI has no way to observe, or
+drives a loop over compile-time data too fine-grained to spawn a process
+per entry. Everything else that once lived under GoogleTest —
+`scanner_test`, `parser_test`, the bulk of the five binaries above, plus
+`driver_test`, `codegen_test`, `ep_test`, `module_test`, and the 377-file
+`Conformance/cases/` suite — has migrated to `test/`, below.
 
-### lit + FileCheck (`test-lit/`) — 1320 tests, in six suites
+### lit + FileCheck (`test/`) — 1974 tests, in eleven suites
 
-| Suite                      | Tests | What it covers                                    |
-|-----------------------------|-------|----------------------------------------------------|
-| `test-lit/Smoke`            | 1     | The toolchain itself is wired up correctly          |
-| `test-lit/Conformance`      | 377   | The Pascal-P5 ISO 7185 suite                        |
-| `test-lit/Acceptance`       | 1     | The Pascal Acceptance Test                          |
-| `test-lit/CodeGen`          | 364   | What the generated code does when run               |
-| `test-lit/EP`               | 331   | Extended Pascal, end to end                         |
-| `test-lit/Module`           | 246   | Modules and separate compilation                    |
+| Suite              | Tests | What it covers                                        |
+|---------------------|-------|----------------------------------------------------------|
+| `test/Smoke`        | 1     | The toolchain itself is wired up correctly              |
+| `test/Lex`          | 145   | Tokens, literals, keywords, EP gating                    |
+| `test/Parse`        | 133   | Declarations, statements, expressions                    |
+| `test/Sema`         | 178   | Name resolution and type checking                        |
+| `test/Basic`        | 30    | Message-catalog selection and locale-chain fallback, via the CLI paths that surface them |
+| `test/Conformance`  | 377   | The Pascal-P5 ISO 7185 suite                             |
+| `test/Acceptance`   | 1     | The Pascal Acceptance Test                               |
+| `test/CodeGen`      | 372   | What the generated code does when run                    |
+| `test/EP`           | 331   | Extended Pascal, end to end                              |
+| `test/Module`       | 246   | Modules and separate compilation                          |
+| `test/Driver`       | 160   | The driver and the command line, including DWARF debug-info scope-graph assertions |
 
 #### The Pascal-P5 conformance suite
 
@@ -417,15 +415,15 @@ reconfigure to pick them up).
 To run one GoogleTest binary directly, with the usual GoogleTest filters:
 
 ```bash
-./build/test/Driver/driver_test --gtest_filter='DashG*'
+./build/test/unittests/CodeGen/codegen_storage_test --gtest_filter='*'
 ```
 
 To run one lit suite, or filter within it, the way LLVM contributors iterate
 day to day:
 
 ```bash
-lit build/test-lit/CodeGen
-lit --filter='SemaTypeIdentity' build/test-lit/CodeGen
+lit build/test/CodeGen
+lit --filter='SemaTypeIdentity' build/test/CodeGen
 ```
 
 ### Sanitizers

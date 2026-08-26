@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""lint_test_lit.py -- standing hygiene checks over test-lit/**/*.pas.
+"""lint_test.py -- standing hygiene checks over test/**/*.pas.
 
 Manifest-free (see project memory: verify_lit_migration.py's original
 count/pass-parity-against-a-manifest design was never built, since no
@@ -42,15 +42,15 @@ import re
 import sys
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TEST_LIT_ROOT = os.path.join(REPO_ROOT, "test-lit")
+TEST_ROOT = os.path.join(REPO_ROOT, "test")
 
 # Files whose whole point is to exercise the ISO 7185 Sec6.1.8
 # either-terminator-closes-either rule directly -- check 1 firing on these
 # is it working correctly, not a hazard to fix. Documented here, not
 # silently swallowed, so a real new hazard in either file still surfaces.
 BRACE_CHECK_EXEMPT = {
-    "test-lit/Lex/ScannerLexicalAlternatives/either-terminator-closes-either-comment.pas",
-    "test-lit/Conformance/Error/prt1622.pas",
+    "test/Lex/ScannerLexicalAlternatives/either-terminator-closes-either-comment.pas",
+    "test/Conformance/Error/prt1622.pas",
 }
 
 
@@ -283,7 +283,7 @@ def main():
     ap.add_argument("--only", choices=["brace", "runwrapper", "midline"],
                      action="append",
                      help="run only this check (repeatable); default: all")
-    ap.add_argument("paths", nargs="*", default=[TEST_LIT_ROOT])
+    ap.add_argument("paths", nargs="*", default=[TEST_ROOT])
     args = ap.parse_args()
 
     checks = set(args.only) if args.only else {"brace", "runwrapper", "midline"}
