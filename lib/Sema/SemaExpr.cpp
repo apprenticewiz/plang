@@ -161,8 +161,23 @@ std::shared_ptr<Type> Sema::checkExpr(const ExprNode& E) {
     else if (auto* N = llvm::dyn_cast<StructuredValueExpr>(&E)) T = checkStructuredValue(*N);
     else if (auto* N = llvm::dyn_cast<WriteParam>(&E)) {
         T = checkExpr(*N->Value);
-        if (N->Width)    (void)checkExpr(*N->Width);
-        if (N->Decimals) (void)checkExpr(*N->Decimals);
+        // ISO §6.9.3.1 / EP §6.10.3.1: TotalWidth and FracDigits are
+        // integer-expressions.  Left unchecked, a char or real here reached
+        // CodeGen's toI64, which has no diagnostic of its own: a char widens
+        // by its ordinal value (write(x:'a') asks for a field 97 wide) and a
+        // real truncates silently (write(x:2.5) asks for a field 2 wide).
+        if (N->Width) {
+            auto WidthTy = checkExpr(*N->Width);
+            if (!WidthTy->isError() && !WidthTy->isIntegral())
+                error(N->Width->Loc, diag::err_write_field_not_integer,
+                      {"width", WidthTy->Name});
+        }
+        if (N->Decimals) {
+            auto DecimalsTy = checkExpr(*N->Decimals);
+            if (!DecimalsTy->isError() && !DecimalsTy->isIntegral())
+                error(N->Decimals->Loc, diag::err_write_field_not_integer,
+                      {"decimals", DecimalsTy->Name});
+        }
     }
     else if (auto* N = llvm::dyn_cast<SetRangeExpr>(&E)) {
         (void)checkExpr(*N->Low);
