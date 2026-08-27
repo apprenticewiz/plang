@@ -251,7 +251,7 @@ llvm::Value* CGBinaryOps::emitBinary(const BinaryExpr& e) {
                     if (!llvm::isa<StringLitExpr>(&expr))
                         codegenICE("a string comparison operand whose capacity "
                                    "comes from neither its type nor a literal");
-                    Strings.emitStrFromCStr(tmp, i64c(cap), val);
+                    Strings.emitStrFromBytes(tmp, i64c(cap), val, i64c(cap));
                 }
                 return {tmp, i64c(cap)};
             };

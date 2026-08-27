@@ -32,9 +32,13 @@ namespace plang {
 inline constexpr int PlangExpDigits = 3;
 
 /// The default TotalWidth for a real written without one (§6.9.3.1).  Also
-/// implementation-defined.  This one leaves DecPlaces = 14, so fifteen
-/// significant digits are written.
-inline constexpr int PlangRealWidth = 22;
+/// implementation-defined.  This one leaves DecPlaces = 16, so seventeen
+/// significant digits are written -- the minimum needed (Steele & White) to
+/// round-trip any IEEE-754 double exactly, and what FPC itself writes by
+/// default.  Fewer digits (this used to be 15) lets a value near DBL_MAX
+/// round up past the representable range when printed, so reading it back
+/// produces +Infinity instead of the original value.
+inline constexpr int PlangRealWidth = 24;
 
 /// The smallest field the representation fits in: the sign, a digit, the point,
 /// one decimal, the exponent character, its sign and its digits.

@@ -170,7 +170,8 @@ void StringCallMarshalling::emitStrStore(llvm::Value* dst, llvm::Value* capDst,
     // A literal is already a run of bytes; going through emitExpr would build
     // a string temporary first and copy it twice.
     if (auto* sl = llvm::dyn_cast<StringLitExpr>(&src)) {
-        Strings.emitStrFromCStr(dst, capDst, Strings.internStrPtr(sl->Value));
+        Strings.emitStrFromBytes(dst, capDst, Strings.internStrPtr(sl->Value),
+                                 i64c(static_cast<int64_t>(sl->Value.size())));
         return;
     }
     // A string-type is n bytes with no length in front, so it has to be given

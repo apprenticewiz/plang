@@ -61,6 +61,21 @@ void plang_str_from_cstr(void* dst, int64_t cap, const char* src) {
     std::memcpy(strData(dst), src, static_cast<size_t>(len));
 }
 
+// Length-aware counterpart to plang_str_from_cstr: for a source whose extent
+// is already known (a string literal, materialized with its compile-time
+// byte count) rather than discovered by scanning for a terminator.  ISO
+// 7185 §6.1.7/EP §6.1.8 place no restriction on which characters may appear
+// between the quotes of a string-literal -- a literal is free to contain the
+// NUL character like any other -- so going through strlen() here silently
+// truncated any literal with an embedded NUL at the NUL, instead of keeping
+// every byte the source actually wrote.
+void plang_str_from_bytes(void* dst, int64_t cap, const char* src, int64_t len) {
+    if (!src || len <= 0) { strLen(dst) = 0; return; }
+    if (len > cap) plang_err_str_capacity(len, cap);
+    strLen(dst) = len;
+    std::memcpy(strData(dst), src, static_cast<size_t>(len));
+}
+
 void plang_str_from_char(void* dst, int64_t cap, int8_t c) {
     if (cap < 1) { strLen(dst) = 0; return; }
     strLen(dst)     = 1;

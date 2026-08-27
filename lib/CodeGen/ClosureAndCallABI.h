@@ -25,6 +25,7 @@
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/LLVMContext.h"
 
+#include "CGDebugInfo.h"
 #include "CGLinkage.h"
 #include "CGSymbolTable.h"
 #include "CGTypes.h"
@@ -51,7 +52,7 @@ public:
     ClosureAndCallABI(
         llvm::LLVMContext& Ctx, llvm::Module& Mod, llvm::IRBuilder<>& B,
         SchemaAccess& Schema, SchemaLayoutEngine& SchemaLayout, CGTypes& Types,
-        CGSymbolTable& SymTab, CGLinkage& Linkage,
+        CGSymbolTable& SymTab, CGLinkage& Linkage, CGDebugInfo& DbgInfo,
         llvm::IntegerType* I32Ty, llvm::IntegerType* I64Ty, llvm::PointerType* PtrTy,
         std::function<llvm::Value*(const plang::ExprNode&)> EmitLValue,
         std::function<llvm::Value*(const plang::ExprNode&, llvm::Type*, bool)> EmitCallArg,
@@ -59,7 +60,7 @@ public:
         std::function<llvm::Value*(const std::string&)> BuildStaticLinkFrame,
         std::function<bool(const std::string&)> IsNestedFunction)
         : Ctx(Ctx), Mod(Mod), B(B), Schema(Schema), SchemaLayout(SchemaLayout),
-          Types(Types), SymTab(SymTab), Linkage(Linkage),
+          Types(Types), SymTab(SymTab), Linkage(Linkage), DbgInfo(DbgInfo),
           I32Ty(I32Ty), I64Ty(I64Ty), PtrTy(PtrTy),
           EmitLValue(std::move(EmitLValue)), EmitCallArg(std::move(EmitCallArg)),
           CreateEntryAlloca(std::move(CreateEntryAlloca)),
@@ -102,6 +103,7 @@ private:
     CGTypes& Types;
     CGSymbolTable& SymTab;
     CGLinkage& Linkage;
+    CGDebugInfo& DbgInfo;
     llvm::IntegerType* I32Ty;
     llvm::IntegerType* I64Ty;
     llvm::PointerType* PtrTy;

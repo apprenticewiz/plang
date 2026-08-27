@@ -35,6 +35,19 @@ DIAG(err_label_as_value, Error, "label '%0' cannot be used as a value")
 DIAG(err_subscript_non_array, Error, "subscript operator applied to non-array type '%0'")
 DIAG(err_index_not_ordinal, Error, "array index must be ordinal, got '%0'")
 DIAG(err_index_type_mismatch, Error, "array index type mismatch: index type is '%0' but array expects '%1'")
+// A global (or module-level) variable is emitted as a single object in the
+// program's .data/.bss, and every reference to it -- from plang's own
+// generated code and from the runtime library it links against -- is a
+// 32-bit PC-relative relocation.  An object large enough to push other
+// symbols more than 2GiB away overflows that relocation at link time with a
+// confusing "relocation R_X86_64_PC32 out of range" from ld.lld, naming some
+// unrelated runtime function rather than this declaration.  Caught here,
+// conservatively, well under that limit -- comfortably below what any
+// supported target's addressing can reach, whatever else ends up sharing the
+// same image.
+DIAG(err_global_var_too_large, Error,
+     "'%0' is too large to be a global variable (%1 bytes; the limit is %2 "
+     "bytes) -- declare it on the heap (New/GetMem) instead")
 DIAG(err_field_on_non_record, Error, "field access '.%0' on non-record type '%1'")
 DIAG(err_no_such_field, Error, "record type '%0' has no field '%1'")
 DIAG(err_deref_non_pointer, Error, "dereference operator '^' applied to non-pointer type '%0'")
@@ -359,6 +372,14 @@ DIAG(err_export_range_not_constants, Error,
 // where it is imported.
 DIAG(err_protected_import_assigned, Error,
      "'%0' is exported protected and cannot be assigned to here")
+// EP §6.11.1: a module interface part promises a body; this file never
+// supplies one (module Foo interface; ... end. with no matching
+// module Foo; ... end. anywhere in it).  Left unchecked this compiled
+// silently -- no .pmi under -c, or an undefined __plang_init_<name> at link
+// time from whatever later imported it -- so the mistake surfaced far from
+// where it was made.
+DIAG(err_module_interface_without_implementation, Error,
+     "module '%0' has an interface part but no matching implementation part")
 
 // --------------------------------------------------------------------------
 // Warnings

@@ -337,8 +337,13 @@ private:
     // block's scope is still current.  A module body needs that: its exports
     // and its 'to begin do' / 'to end do' statements are written in terms of
     // names the scope is about to discard.
+    // IsGlobalScope: true for a program block or a module body, where every
+    // variable becomes a single linked object subject to the relocation-range
+    // check in Phase 4 below; false for a procedure/function body, whose
+    // locals are stack storage and never hit that limit.
     void checkBlock(const BlockNode& Block,
-                    llvm::function_ref<void()> BeforePop = {});
+                    llvm::function_ref<void()> BeforePop = {},
+                    bool IsGlobalScope = false);
     void checkProcSignature(const ProcDecl& Proc);
     void checkProcBody     (const ProcDecl& Proc);
     /// Records which value parameters a body modifies; see ProcDecl::ModifiedParams.

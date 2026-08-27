@@ -31,13 +31,26 @@
 namespace plang {
 struct TypeNode;
 struct Type;
+struct ProcedureTypeNode;
 }
+
+class CGTypes;
 
 class CGDebugInfo {
 public:
     CGDebugInfo(llvm::Module& Mod, llvm::LLVMContext& Ctx, llvm::IRBuilder<>& B,
                 const plang::LangOptions& Opts, const plang::SourceManager* SrcMgr,
                 plang::FileID MainFileID, const std::string& ProgName);
+
+    /// Bound after construction, once CGTypes itself exists (CGDebugInfo is
+    /// built before CGTypes in Codegen::Impl::init(), so this can't be a
+    /// constructor argument -- same "leaf unit built later, wired in after"
+    /// shape as the llvmTypeOfNode closures SchemaLayoutEngine is handed).
+    /// Record/Array/Set/Complex/String/VarString DIType construction below
+    /// reads CGTypes's own field-offset/layout machinery through this rather
+    /// than recomputing it, so there is exactly one place that knows a
+    /// field's offset, not two that can drift apart.
+    void setCGTypes(CGTypes& T) { Types = &T; }
 
     /// False when LangOptions::Debug was unset -- every other method is a
     /// safe no-op (returns null / does nothing) when this is false, exactly
@@ -79,10 +92,12 @@ public:
         return S;
     }
 
-    /// The scalar DIType for \p T (integer, real, boolean, char, enum,
-    /// subrange, or a pointer whose pointee is itself one of those); see
-    /// the definition for what a record/array/set/etc. pointee gets
-    /// instead.  Null when Debug is unset.
+    /// The DIType for \p T -- covers every TypeKind that reaches codegen,
+    /// scalar and composite alike (see the definition for the strategy
+    /// each composite kind uses).  Null only when Debug is unset or \p T
+    /// is a kind with no runtime representation to describe (Error,
+    /// ConformantArray -- passed by reference with bounds threaded
+    /// separately, so there is no one fixed shape to name).
     llvm::DIType* debugTypeOfSemaType(const plang::Type& T);
 
     /// Builds Fn's DISubprogram, attaches it, and sets the IRBuilder's
@@ -94,6 +109,26 @@ public:
     llvm::DISubprogram* emitFunctionStart(llvm::Function* Fn, llvm::DIScope* Scope,
                                            const std::string& Name,
                                            plang::SourceLocation Loc);
+
+    /// Builds a minimal DISubprogram for a compiler-synthesized shim (e.g.
+    /// the uniform-signature procedural-parameter thunk in
+    /// ClosureAndCallABI::procParamThunk) that has no Pascal-level source
+    /// identity of its own to attribute lines to.  Marked
+    /// DIFlagArtificial -- the standard DWARF way to say
+    /// "this frame exists but isn't user code" -- rather than left with no
+    /// DISubprogram at all: an unattributed thunk gets no line-table
+    /// entries whatsoever, so a debugger's "step into" a call made through
+    /// a procedural parameter silently jumps clean over the thunk AND the
+    /// real target (confirmed with gdb: `step` on the call site runs the
+    /// whole call to completion instead of entering anything), rather than
+    /// stopping in either the thunk or, transparently through it, the real
+    /// target.  Attaches Fn->setSubprogram like emitFunctionStart, but
+    /// deliberately does NOT touch the IRBuilder's current debug location
+    /// -- procParamThunk sets each instruction's location itself (all of
+    /// them line 0, this SP's own scope), since a thunk has no notion of
+    /// "current statement" to advance through.
+    llvm::DISubprogram* emitThunkStart(llvm::Function* Fn, llvm::DIScope* Scope,
+                                        const std::string& Name);
 
     /// R3: makes \p NewScope the current scope for as long as the guard
     /// lives, restoring the previous one on destruction -- replaces the
@@ -128,6 +163,22 @@ public:
     /// before this split.
     void declareLocal(const std::string& name, const plang::TypeNode* typeNode,
                        llvm::Value* ptr, llvm::Value* debugIndirectPtr);
+
+    /// -g, ISO §6.6.3.1: a procedural/functional parameter's own storage is
+    /// a two-pointer closure pair (ClosureAndCallABI::procPairTy -- the
+    /// entry point and the static-link frame its body reads outer
+    /// variables through), which has no TypeNode of ITS OWN shape for the
+    /// ordinary declareLocal path to walk: paramMeta.procType's
+    /// ResolvedType is the SIGNATURE (what buildSubroutineDIType below
+    /// builds), not this pair's own two-member storage.  Builds that pair
+    /// type directly -- {code: pointer to the signature's own
+    /// DISubroutineType, frame: an untyped pointer} -- and declares
+    /// against it, rather than mismatching the DISubroutineType itself
+    /// against storage it doesn't describe.  A no-op under every condition
+    /// declareLocal already bails under (Debug unset, no current scope /
+    /// insertion point), plus an unresolved \p PT.
+    void declareProcParam(const std::string& name, const plang::ProcedureTypeNode* PT,
+                           llvm::Value* ptr);
 
     /// -g, issue #19: opens a DILexicalBlock nested inside the current
     /// scope and makes it the current scope from now on, for a caller
@@ -173,10 +224,45 @@ public:
     void finalize() { if (DBuilder) DBuilder->finalize(); }
 
 private:
+    /// Record, Array, Set, Complex, String and VarString DIType construction
+    /// (see debugTypeOfSemaType.cpp -- each has its own builder below) reads
+    /// field offsets/sizes/element types out of here rather than
+    /// re-deriving them, so there is one computation of a field's offset,
+    /// not a second one that can silently drift from CGTypes's own.
+    llvm::DIType* buildRecordDIType(const plang::Type& T);
+    llvm::DIType* buildArrayDIType(const plang::Type& T);
+    llvm::DIType* buildSetDIType(const plang::Type& T);
+    llvm::DIType* buildComplexDIType(const plang::Type& T);
+    /// Shared by String (wrapped in a pointer -- see the TypeKind::String
+    /// case) and VarString (used directly): both are the runtime's
+    /// { i64 length; [cap x i8] data } shape (StringRuntime/CGTypes::
+    /// strStructType); a bare `string` has no declared capacity, so this
+    /// falls back to PlangMaxStringCapacity for it, which is honest about
+    /// being a representative shape, not the exact runtime allocation size
+    /// of any one instance -- see the concerns note where this is called.
+    llvm::DIType* buildStringDIType(int64_t cap);
+    llvm::DISubroutineType* buildSubroutineDIType(const plang::Type& T);
+    /// A record field's own DIType via debugTypeOfSemaType(*SemaTy) where
+    /// that resolves to something (the ordinary case); otherwise -- no
+    /// matching Sema::Type::Field found, or that field's own type has no
+    /// DWARF encoding of its own (a nested kind this pass still leaves
+    /// null) -- a same-sized DW_ATE_unsigned basic type named for the
+    /// field, built off its LLVM storage type directly, so the member is
+    /// still visible (raw bytes) rather than silently dropped from the
+    /// struct.
+    llvm::DIType* fieldOrFallbackDIType(const plang::Type* SemaTy, llvm::Type* LLTy,
+                                         const std::string& DisplayName);
+
+    llvm::Module& Mod;
     llvm::LLVMContext& Ctx;
     llvm::IRBuilder<>& B;
     const plang::LangOptions& Opts;
     const plang::SourceManager* SrcMgr;
+    /// Null until setCGTypes runs (always before any real codegen; see its
+    /// own comment). Composite DIType builders bail to null, exactly like
+    /// the pre-existing default: break, if asked to run before then --
+    /// defensive only, every real caller goes through Codegen::Impl::init().
+    CGTypes* Types{nullptr};
 
     std::unique_ptr<llvm::DIBuilder> DBuilder;
     llvm::DICompileUnit* DebugCU{nullptr};

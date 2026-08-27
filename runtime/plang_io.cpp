@@ -276,7 +276,7 @@ void plang_write_f64_e (double  V, int64_t W) {
 // per-component formatting already did before it started calling this.
 void plang_write_f64_f (double  V, int64_t W, int64_t D) {
     if (D < 0) { plang_write_f64_e(V, W); return; }
-    plangOutFmt("%*.*f", checkedWidth(W), static_cast<int>(D), V);
+    plangOutFmt("%*.*f", checkedWidth(W), checkedWidth(D), V);
 }
 // §6.9.3.6: the field is exactly TotalWidth characters wide, so a string
 // longer than the field loses its tail rather than widening it — the `%*s` a

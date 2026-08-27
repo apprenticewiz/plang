@@ -121,6 +121,11 @@ void Codegen::Impl::init(const std::string& progName) {
     cgTypes_ = std::make_unique<CGTypes>(ctx, *mod, langOpts, *schemaLayout_,
         *complexOps_, *setOps_, typeAliases, consts,
         i1Ty, i8Ty, i32Ty, i64Ty, dblTy, ptrTy);
+    // -g: Record/Array/String DIType construction reads field layout out of
+    // cgTypes_ (see CGDebugInfo::setCGTypes's own comment for why this
+    // can't be a constructor argument -- dbgInfo_ is built before this
+    // exists).
+    dbgInfo_->setCGTypes(*cgTypes_);
     // Schema value/access-path resolution.  scopes stays an Impl field,
     // referenced -- touched directly by setVarStrCap/setVarSchemaPath from
     // outside this unit too.  EmitExpr/EmitLValue/EmitStrAddr/ToI64 and the
@@ -173,7 +178,7 @@ void Codegen::Impl::init(const std::string& progName) {
     // methods not yet extracted (CodeGenExprs.cpp/CodeGenRuntime.cpp/
     // CodeGenTypes.cpp).
     closureAbi_ = std::make_unique<ClosureAndCallABI>(ctx, *mod, builder,
-        *schemaAccess_, *schemaLayout_, *cgTypes_, *symTab_, *linkage_,
+        *schemaAccess_, *schemaLayout_, *cgTypes_, *symTab_, *linkage_, *dbgInfo_,
         i32Ty, i64Ty, ptrTy,
         [this](const ExprNode& e){ return emitLValue(e); },
         [this](const ExprNode& e, llvm::Type* t, bool byRef){

@@ -224,6 +224,19 @@ void plang_err_mod_divisor(int64_t D) {
     std::exit(PlangRuntimeErrorStatus);
 }
 
+/// EP §6.8.3.2: an integer base keeps an integer result, but int64_t cannot
+/// represent every such result -- like minint div -1 (plang_err_div_overflow)
+/// and abs(minint) (plang_err_abs_overflow), an out-of-range result is
+/// signed-overflow UB left uncaught, and in practice wraps to a silently
+/// wrong value instead of the error the language expects here.
+[[noreturn]] void plang_err_ipow_overflow(int64_t Base, int64_t Exp) {
+    std::fflush(stdout);
+    std::fprintf(stderr,
+                 "plang runtime: %" PRId64 " pow %" PRId64
+                 " has no representable result\n", Base, Exp);
+    std::exit(PlangRuntimeErrorStatus);
+}
+
 /// EP §6.8.3.2: "a factor of the form x**y shall be an error if x is zero
 /// and y is less than or equal to zero"; and, separately, for a real or
 /// integer (non-complex) base, "an error if x is negative" -- x**y is

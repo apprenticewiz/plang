@@ -167,6 +167,7 @@ void Sema::registerBuiltins() {
         S.IsFunction  = builtinIsFunction(BuiltinID::Id_);                     \
         S.ReturnType  = resultType(builtinResult(BuiltinID::Id_));             \
         S.NotInDialect= !Opts.inDialect(builtinDialects(BuiltinID::Id_));      \
+        S.IsRequiredIdentifier = true;                                         \
         (void)Symtab.define(std::move(S));                                     \
     }
 #include "plang/Basic/Builtins.def"
@@ -189,6 +190,7 @@ void Sema::registerBuiltins() {
         Maxint.ConstOrdinal    = static_cast<int64_t>(
             (~0ULL >> (64 - Opts.defaultIntWidth() + 1)));
         Maxint.HasConstOrdinal = true;
+        Maxint.IsRequiredIdentifier = true;
         (void)Symtab.define(std::move(Maxint));
     }
     {
@@ -196,6 +198,7 @@ void Sema::registerBuiltins() {
         Pi.Kind = SymbolKind::Const;
         Pi.Name = "pi";
         Pi.Ty = TyReal;
+        Pi.IsRequiredIdentifier = true;
         (void)Symtab.define(std::move(Pi));
     }
 
@@ -210,6 +213,7 @@ void Sema::registerBuiltins() {
             // An ordinal constant carries its value so that a bound written with
             // it folds; the real ones have no ordinal value to carry.
             if (Ord) { S.ConstOrdinal = *Ord; S.HasConstOrdinal = true; }
+            S.IsRequiredIdentifier = true;
             return S;
         };
         (void)Symtab.define(makeConst("maxchar", TyChar, 255));
@@ -247,6 +251,7 @@ void Sema::registerBuiltins() {
             TSym.Kind = SymbolKind::TypeAlias;
             TSym.Name = "TimeStamp";
             TSym.Ty   = TyTS;
+            TSym.IsRequiredIdentifier = true;
             (void)Symtab.define(std::move(TSym));
         }
         // The BindingType record itself is built at the top, because the
@@ -257,6 +262,7 @@ void Sema::registerBuiltins() {
             BTSym.Kind = SymbolKind::TypeAlias;
             BTSym.Name = "BindingType";
             BTSym.Ty   = TyBindingType;
+            BTSym.IsRequiredIdentifier = true;
             (void)Symtab.define(std::move(BTSym));
         }
     }
@@ -288,6 +294,30 @@ bool Sema::check(const ProgramNode& Prog) {
             List.insert(List.end(), Mod->Exports.begin(), Mod->Exports.end());
         }
 
+    // EP §6.11.1: an interface part promises a body somewhere.  Both parts
+    // are ordinarily written in the same file (module-declaration lets them
+    // come in either order, but not one alone) -- unlike an *implementation*
+    // with no interface part in this file, which is the legitimate
+    // "module-identification" form a module compiled apart from its own
+    // interface, or a self-contained module with an implicit interface,
+    // legitimately uses.  Left unchecked, an interface with no matching
+    // implementation anywhere in this file compiled clean with no
+    // diagnostic and no useful output (no .pmi under -c, since nothing was
+    // ever `processModuleBody`'d to emit one; a confusing undefined
+    // `__plang_init_*` at link time otherwise) -- catching the real mistake
+    // only far downstream of where it was actually made.
+    for (const auto* Mod : Prog.Modules)
+        if (Mod->IsInterface) {
+            const bool HasImpl = std::any_of(
+                Prog.Modules.begin(), Prog.Modules.end(),
+                [&](const ModuleNode* M) {
+                    return !M->IsInterface && eqCI(M->Name, Mod->Name);
+                });
+            if (!HasImpl)
+                error(Mod->Loc, diag::err_module_interface_without_implementation,
+                      {Mod->Name});
+        }
+
     // EP §6.11: process module definitions before the program block.
     // Module interfaces register export stubs; bodies register full symbols.
     for (auto* Mod : Prog.Modules) {
@@ -301,7 +331,7 @@ bool Sema::check(const ProgramNode& Prog) {
     if (!Prog.Imports.empty())
         processImports(Prog.Imports);
 
-    checkBlock(*Prog.Block);
+    checkBlock(*Prog.Block, /*BeforePop=*/{}, /*IsGlobalScope=*/true);
     Symtab.popScope();
     return !hasErrors();
 }
@@ -478,7 +508,7 @@ void Sema::processModuleBody(const ModuleNode& Mod) {
         if (Mod.InitStmt)  checkStmt(Mod.InitStmt.get());
         if (Mod.FinalStmt) checkStmt(Mod.FinalStmt.get());
         harvestModuleExports(Mod);
-    });
+    }, /*IsGlobalScope=*/true);
 
     InModuleImplementation_ = SavedInImpl;
     CurrentUnit_ = SavedUnit;
@@ -801,7 +831,8 @@ void Sema::scanLabelNesting(const StmtNode* S,
 }
 
 void Sema::checkBlock(const BlockNode& Block,
-                      llvm::function_ref<void()> BeforePop) {
+                      llvm::function_ref<void()> BeforePop,
+                      bool IsGlobalScope) {
     Symtab.pushScope();
 
     // A block nested in this one checks its own body before this one does, and
@@ -836,7 +867,33 @@ void Sema::checkBlock(const BlockNode& Block,
     // A type may be as wide as a constant says (array[1..max]), so constants
     // come first.  EP §6.8.7 then lets a constant be a structured value, which
     // names a type — the one thing here that has to wait for the types below.
+    //
+    // EP §6.2.1 also lets const and type sections interleave in any order, so
+    // a constant may just as well name an enum value whose type section
+    // appears LATER in this same block -- textual position within the
+    // free-order declaration part carries no meaning.  Phase 3 below is what
+    // actually defines those enum-value symbols, so any const that reaches
+    // for one not yet in scope has to wait for it too, the same as a
+    // structured-value const waits for the type it names.  Collecting the
+    // pending names up front (rather than just catching "undefined
+    // identifier" after the fact) is what tells that case apart from a
+    // genuinely undefined identifier, which must still be reported here.
     std::vector<const ConstDef*> StructuredConsts;
+    std::set<std::string> PendingEnumNames;
+    for (const auto& Td : Block.Types)
+        if (auto* En = llvm::dyn_cast<EnumTypeNode>(Td.Type.get()))
+            for (const auto& Val : En->Values)
+                PendingEnumNames.insert(toLower(Val));
+    auto refsPendingEnum = [&](const ExprNode* E) {
+        bool Found = false;
+        walkExprs(E, [&](const ExprNode* X) {
+            if (Found) return;
+            if (auto* Id = llvm::dyn_cast<IdentExpr>(X))
+                if (!Symtab.lookup(Id->Name) && PendingEnumNames.count(toLower(Id->Name)))
+                    Found = true;
+        });
+        return Found;
+    };
     auto defineConst = [&](const ConstDef& Cd) {
         auto ValType = checkExpr(*Cd.Value);
         Symbol S;
@@ -855,7 +912,8 @@ void Sema::checkBlock(const BlockNode& Block,
             error(Cd.Value->Loc, diag::err_duplicate_declaration, {Cd.Name});
     };
     for (const auto& Cd : Block.Consts) {
-        if (llvm::isa<StructuredValueExpr>(Cd.Value.get()))
+        if (llvm::isa<StructuredValueExpr>(Cd.Value.get())
+                || refsPendingEnum(Cd.Value.get()))
             StructuredConsts.push_back(&Cd);
         else
             defineConst(Cd);
@@ -995,12 +1053,32 @@ void Sema::checkBlock(const BlockNode& Block,
         // Schema symbols: skip (lazily resolved)
     }
 
-    // Phase 3d — The constants that name a type, now that the types exist.
+    // Phase 3d — The constants deferred above: ones that name a type, and
+    // ones that reach for an enum value whose type section sits later in
+    // this block, now that the types exist.
     for (const ConstDef* Cd : StructuredConsts) defineConst(*Cd);
 
     // Phase 4 — Variables
     for (const auto& Vg : Block.Vars) {
         auto T = resolveType(*Vg.Type);
+
+        // A global (program- or module-level) variable becomes one linked
+        // object, and every access to it -- including ones from the runtime
+        // library plang links against -- is a 32-bit PC-relative relocation.
+        // Past a couple of GiB those relocations overflow at link time with a
+        // confusing ld.lld error pointing at some unrelated runtime function
+        // rather than at this declaration.  Caught here instead, well under
+        // that ceiling: see err_global_var_too_large's comment for why 1 GiB.
+        if (IsGlobalScope && !T->isError()) {
+            constexpr uint64_t GlobalVarByteLimit = 1ull << 30; // 1 GiB
+            if (auto Sz = byteSizeOf(*T); Sz && *Sz > GlobalVarByteLimit) {
+                for (const auto& Nm : Vg.Names)
+                    error(Vg.Type->Loc, diag::err_global_var_too_large,
+                          {Nm, std::to_string(*Sz),
+                           std::to_string(GlobalVarByteLimit)});
+            }
+        }
+
         const bool Bindable = isBindableDenoter(*Vg.Type);
         for (const auto& Nm : Vg.Names) {
             Symbol S;

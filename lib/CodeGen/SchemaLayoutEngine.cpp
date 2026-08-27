@@ -294,11 +294,18 @@ llvm::Value* SchemaLayoutEngine::rtSizeOfTypeNode(const TypeNode* tn) {
 /// allocation.
 llvm::Value* SchemaLayoutEngine::rtWalkFields(const std::vector<FieldDecl>& fields,
                                                llvm::Value* off, bool packed,
-                                               const std::string* stopAt, bool* found) {
+                                               const std::string* stopAt, bool* found,
+                                               std::vector<std::pair<std::string, llvm::Value*>>* collect) {
     for (const auto& fd : fields) {
         const uint64_t a = packed ? 1 : rtAlignOfTypeNode(fd.Type.get());
         for (const auto& nm : fd.Names) {
             off = alignUpV(off, a);
+            // rtAllFieldOffsets wants every field's offset from the SAME walk
+            // rtFieldOffset(rt, name) would otherwise redo from zero for each
+            // name in turn -- one walk here instead of one per field is what
+            // keeps a caller totalling every field's offset from being
+            // quadratic in the field count.
+            if (collect) collect->emplace_back(nm, off);
             if (stopAt && eqCI(nm, *stopAt)) { if (found) *found = true; return off; }
             off = B.CreateAdd(off, rtSizeOfTypeNode(fd.Type.get()),
                               "rec.off");
@@ -317,7 +324,8 @@ llvm::Value* SchemaLayoutEngine::rtWalkFields(const std::vector<FieldDecl>& fiel
 llvm::Value* SchemaLayoutEngine::rtWalkVariant(const VariantPart& vp,
                                                 llvm::Value* off, bool packed,
                                                 const std::string* stopAt, bool* found,
-                                                bool nested) {
+                                                bool nested,
+                                                std::vector<std::pair<std::string, llvm::Value*>>* collect) {
     // ISO §6.4.3.3 makes the tag-field OPTIONAL: `case boolean of` selects on a
     // type with no field to store it in.  This gated on TagType alone while the
     // static layout gates on the field having a NAME, so a tagless selector
@@ -326,6 +334,7 @@ llvm::Value* SchemaLayoutEngine::rtWalkVariant(const VariantPart& vp,
     if (vp.TagType && !vp.TagField.empty()) {
         const uint64_t a = packed ? 1 : rtAlignOfTypeNode(vp.TagType.get());
         off = alignUpV(off, a);
+        if (collect) collect->emplace_back(vp.TagField, off);
         if (stopAt && eqCI(vp.TagField, *stopAt)) { *found = true; return off; }
         off = B.CreateAdd(off, rtSizeOfTypeNode(vp.TagType.get()), "tag.off");
     }
@@ -348,11 +357,11 @@ llvm::Value* SchemaLayoutEngine::rtWalkVariant(const VariantPart& vp,
         // which is the same number the size walk wants.  The search used to
         // walk the alternative a SECOND time to get that end, emitting every
         // field's size arithmetic twice.
-        llvm::Value* end = rtWalkFields(vc.Fields, off, packed, stopAt, found);
+        llvm::Value* end = rtWalkFields(vc.Fields, off, packed, stopAt, found, collect);
         if (found && *found) return end;
         if (vc.NestedVariant) {
             end = rtWalkVariant(*vc.NestedVariant, end, packed, stopAt, found,
-                                /*nested=*/true);
+                                /*nested=*/true, collect);
             if (found && *found) return end;
         }
         widest = B.CreateSelect(B.CreateICmpUGT(end, widest),
@@ -397,6 +406,25 @@ uint64_t SchemaLayoutEngine::rtVariantAlign(const VariantPart& vp) {
     uint64_t a = (vp.TagType && !vp.TagField.empty())
                      ? rtAlignOfTypeNode(vp.TagType.get()) : 1;
     return std::max(a, rtVariantRunAlign(vp));
+}
+
+/// Every field's offset, from ONE walk of \p rt.  A caller that wants more
+/// than one field's offset (checkFieldOffsetAgreement, checking all of them)
+/// used to ask rtFieldOffset once per field, and rtFieldOffset restarts its
+/// walk from the top every time -- an O(fields) walk run once per field is
+/// O(fields^2). This does the one walk rtFieldOffset itself already does for
+/// a single field, but keeps every field's offset from it instead of
+/// discarding all but the one asked for.
+std::vector<std::pair<std::string, llvm::Value*>>
+SchemaLayoutEngine::rtAllFieldOffsets(const RecordTypeNode& rt) {
+    std::vector<std::pair<std::string, llvm::Value*>> offsets;
+    llvm::Value* off = rtWalkFields(rt.Fields, i64c(0), rt.Packed,
+                                     /*stopAt=*/nullptr, /*found=*/nullptr,
+                                     &offsets);
+    if (rt.Variant)
+        rtWalkVariant(*rt.Variant, off, rt.Packed, /*stopAt=*/nullptr,
+                      /*found=*/nullptr, /*nested=*/false, &offsets);
+    return offsets;
 }
 
 llvm::Value* SchemaLayoutEngine::rtFieldOffset(const RecordTypeNode& rt,

@@ -1,18 +1,39 @@
 #include "CGDebugInfo.h"
 
+#include <algorithm>
 #include <filesystem>
 
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/BinaryFormat/Dwarf.h"
 #include "llvm/IR/Constants.h"
+#include "llvm/IR/DataLayout.h"
 #include "llvm/IR/GlobalVariable.h"
 #include "llvm/Support/Casting.h"
 
 #include "plang/AST/Ast.h"
 #include "plang/Basic/SourceManager.h"
+#include "plang/Basic/StringUtil.h"
 #include "plang/Basic/Version.h"
 #include "plang/Sema/Type.h"
 
+#include "CGTypes.h"
+
 using namespace plang;
+
+namespace {
+/// The Sema::Type::Field \p T's flattened field list holds for \p LowerName
+/// (already folded, matching CGTypes::RecordLayout::Fields's own key), or
+/// null.  Record/schema field names are matched case-insensitively
+/// everywhere else in codegen (see CGTypes::semaFieldType); this is the
+/// same lookup, used here to recover a field's ORIGINAL declared spelling
+/// and its own Sema type (CGTypes::FieldPlace only keeps the LLVM type,
+/// which has no field-name-worthy encoding of its own).
+const plang::Type::Field* findSemaField(const plang::Type& T, std::string_view LowerName) {
+    for (const auto& F : T.RecordFields)
+        if (plang::eqCI(F.Name, LowerName)) return &F;
+    return nullptr;
+}
+} // namespace
 
 namespace {
 /// Splits a source buffer's name into the (filename, directory) pair
@@ -35,7 +56,7 @@ std::pair<std::string, std::string> splitDebugFilePath(std::string_view Name) {
 CGDebugInfo::CGDebugInfo(llvm::Module& Mod, llvm::LLVMContext& Ctx, llvm::IRBuilder<>& B,
                           const LangOptions& Opts, const SourceManager* SrcMgr,
                           FileID MainFileID, const std::string& ProgName)
-    : Ctx(Ctx), B(B), Opts(Opts), SrcMgr(SrcMgr) {
+    : Mod(Mod), Ctx(Ctx), B(B), Opts(Opts), SrcMgr(SrcMgr) {
     if (!Opts.Debug) return;
     DBuilder = std::make_unique<llvm::DIBuilder>(Mod);
     std::string Filename = ProgName, Directory;
@@ -53,13 +74,21 @@ CGDebugInfo::CGDebugInfo(llvm::Module& Mod, llvm::LLVMContext& Ctx, llvm::IRBuil
                        llvm::DEBUG_METADATA_VERSION);
 }
 
-// -g.  Composite kinds (Record, Array, Set, File, ...) fall through to
-// null: field-level detail for them is explicitly out of scope for this
-// pass (a natural, clearly-separated fast-follow -- see the phase this
-// shipped in), and a pointer to one gets no DIType for its pointee rather
-// than a placeholder invented for the occasion.  A null pointee is a
-// documented, ordinary createPointerType input (a C `void*`'s own DIType
-// is built the same way), not a special case this function has to guard.
+// -g.  Every TypeKind that reaches codegen gets a real DIType now (Record/
+// Array/Set/Complex/String/VarString/Procedure/Function/Schema/
+// SchemaInstance below, alongside the seven scalar/pointer kinds this
+// switch always had).  File and ConformantArray still fall through to
+// null -- a file variable's own storage is an implementation-defined
+// runtime handle (ISO §6.5) nothing describes usefully, and a conformant
+// array parameter has no one fixed shape (passed by reference, its bounds
+// threaded as separate hidden arguments; see CGTypes::llvmTypeOfSemaTypeImpl's
+// own ConformantArray case) -- both documented gaps, not oversights.  A
+// pointer to a kind that DOES get a DIType now gets that DIType for its
+// pointee; a pointer to one that still doesn't gets no DIType for its
+// pointee rather than a placeholder invented for the occasion.  A null
+// pointee is a documented, ordinary createPointerType input (a C `void*`'s
+// own DIType is built the same way), not a special case this function has
+// to guard.
 llvm::DIType* CGDebugInfo::debugTypeOfSemaType(const Type& T) {
     if (!DBuilder) return nullptr;
     if (auto it = debugTypes_.find(&T); it != debugTypes_.end()) return it->second;
@@ -112,11 +141,273 @@ llvm::DIType* CGDebugInfo::debugTypeOfSemaType(const Type& T) {
             DT = DBuilder->createPointerType(PointeeDT, 64);
             break;
         }
+        case TypeKind::Array:
+            DT = buildArrayDIType(T);
+            break;
+        case TypeKind::Set:
+            DT = buildSetDIType(T);
+            break;
+        case TypeKind::Complex:
+            DT = buildComplexDIType(T);
+            break;
+        case TypeKind::VarString:
+            DT = buildStringDIType(T.StrCapacity);
+            break;
+        case TypeKind::String:
+            // ISO 7185 unbounded string: a pointer at the LLVM level (see
+            // CGTypes::llvmTypeOfSemaTypeImpl's own String case) to
+            // storage shaped like VarString's -- but with no declared
+            // capacity to size it by, buildStringDIType's
+            // PlangMaxStringCapacity fallback is only ever a
+            // REPRESENTATIVE shape here, not this particular instance's
+            // real allocation size.
+            DT = DBuilder->createPointerType(buildStringDIType(T.StrCapacity), 64);
+            break;
+        case TypeKind::Record:
+            DT = buildRecordDIType(T);
+            break;
+        case TypeKind::Procedure:
+        case TypeKind::Function:
+            DT = buildSubroutineDIType(T);
+            break;
+        case TypeKind::Schema:
+        case TypeKind::SchemaInstance:
+            // EP §6.4.7.  SchemaBody is the body resolved against either
+            // the real discriminants (a SchemaInstance whose extent is
+            // fixed: this recursion lands on an ordinary, fully accurate
+            // Record/Array DIType) or a PROBE binding (T.ExtentVaries, or
+            // an undiscriminated Schema with no fixed layout at all --
+            // CodeGenSchema lays the real, per-instance storage out at run
+            // time and nothing here can predict its size).  Recursing into
+            // the probe body regardless is a deliberate, documented
+            // partial fix: it is only accurate for the fixed portion of the
+            // type and can UNDER- or OVER-state a varying field's real
+            // extent, but it is a real DIType with real field names rather
+            // than nothing, which is what every schema-typed variable had
+            // before this.  Full runtime-varying DWARF (a location
+            // expression that reads the object's own stored discriminants)
+            // is real design work left undone -- see this change's commit
+            // message.
+            DT = T.SchemaBody ? debugTypeOfSemaType(*T.SchemaBody) : nullptr;
+            break;
         default:
             break;
     }
     debugTypes_[&T] = DT;
     return DT;
+}
+
+llvm::DIType* CGDebugInfo::fieldOrFallbackDIType(const Type* SemaTy, llvm::Type* LLTy,
+                                                  const std::string& DisplayName) {
+    if (SemaTy)
+        if (auto* DT = debugTypeOfSemaType(*SemaTy)) return DT;
+    return DBuilder->createBasicType(DisplayName, Mod.getDataLayout().getTypeSizeInBits(LLTy),
+                                      llvm::dwarf::DW_ATE_unsigned);
+}
+
+llvm::DIType* CGDebugInfo::buildArrayDIType(const Type& T) {
+    if (!Types || !T.IndexType || !T.ElemType) return nullptr;
+    llvm::DIType* ElemDT = debugTypeOfSemaType(*T.ElemType);
+    if (!ElemDT) return nullptr;
+    llvm::Type* ArrTy = Types->llvmTypeOfSemaType(T);
+    const auto& DL = Mod.getDataLayout();
+    const int64_t lo    = T.IndexType->SubLo;
+    const int64_t hi    = T.IndexType->SubHi;
+    const int64_t count = (hi - lo + 1 > 0) ? (hi - lo + 1) : 0;
+    auto* Sub = DBuilder->getOrCreateSubrange(lo, count);
+    return DBuilder->createArrayType(
+        DL.getTypeSizeInBits(ArrTy), DL.getABITypeAlign(ArrTy).value() * 8,
+        ElemDT, DBuilder->getOrCreateArray({Sub}));
+}
+
+llvm::DIType* CGDebugInfo::buildSetDIType(const Type&) {
+    // ISO §6.7.2.4: every set, regardless of base type, is the SAME flat
+    // PlangMaxSetElements-bit bitmask (SetOps::setTy) -- one bit per
+    // ordinal, bit 0 standing for the base type's own origin.  DWARF has
+    // no native "Pascal set" primitive, so this shows the real runtime
+    // storage honestly: a fixed-size array of bytes, which a debugger
+    // prints as a raw hex/byte dump rather than a decoded {lo..hi} view.
+    // That is still infinitely better than the variable being invisible,
+    // and is exactly the representation this project's own review of this
+    // gap called for.
+    const uint64_t bytes = static_cast<uint64_t>(PlangMaxSetElements) / 8;
+    auto* ByteTy = DBuilder->createBasicType("byte", 8, llvm::dwarf::DW_ATE_unsigned_char);
+    auto* Sub = DBuilder->getOrCreateSubrange(0, static_cast<int64_t>(bytes));
+    return DBuilder->createArrayType(bytes * 8, 8, ByteTy, DBuilder->getOrCreateArray({Sub}));
+}
+
+llvm::DIType* CGDebugInfo::buildComplexDIType(const Type&) {
+    // EP §6.4.2.2: { double re, double im }, matching ComplexOps::complexTy()
+    // exactly (two adjacent doubles, no padding) -- built directly here
+    // rather than through CGTypes/Types since the shape never varies with
+    // T and needs no field-offset computation to get right.
+    auto* Dbl = DBuilder->createBasicType("real", 64, llvm::dwarf::DW_ATE_float);
+    std::vector<llvm::Metadata*> Elems{
+        DBuilder->createMemberType(DebugFile, "re", DebugFile, 0, 64, 64, 0,
+                                    llvm::DINode::FlagZero, Dbl),
+        DBuilder->createMemberType(DebugFile, "im", DebugFile, 0, 64, 64, 64,
+                                    llvm::DINode::FlagZero, Dbl),
+    };
+    return DBuilder->createStructType(DebugFile, "complex", DebugFile, 0, 128, 64,
+                                       llvm::DINode::FlagZero, nullptr,
+                                       DBuilder->getOrCreateArray(Elems));
+}
+
+llvm::DIType* CGDebugInfo::buildStringDIType(int64_t cap) {
+    // StringRuntime/CGTypes::strStructType's own shape: { i64 length;
+    // [cap x i8] data }, no padding -- built directly (as buildComplexDIType
+    // is) rather than through Types, since the shape is a fixed formula in
+    // cap alone.  cap<=0 (a bare, capacity-less `string`, or a VarString
+    // whose capacity did not resolve) falls back to PlangMaxStringCapacity,
+    // same as CGTypes::llvmTypeOfNode's own probe-type fallback -- an
+    // honestly-labelled REPRESENTATIVE shape, not this particular
+    // instance's real allocation.
+    if (cap <= 0) cap = PlangMaxStringCapacity;
+    const uint64_t capBits = static_cast<uint64_t>(cap) * 8;
+    auto* CharTy = DBuilder->createBasicType("char", 8, llvm::dwarf::DW_ATE_unsigned_char);
+    auto* LenTy  = DBuilder->createBasicType("integer", 64, llvm::dwarf::DW_ATE_signed);
+    auto* Sub    = DBuilder->getOrCreateSubrange(0, cap);
+    auto* DataTy = DBuilder->createArrayType(capBits, 8, CharTy, DBuilder->getOrCreateArray({Sub}));
+    std::vector<llvm::Metadata*> Elems{
+        DBuilder->createMemberType(DebugFile, "length", DebugFile, 0, 64, 64, 0,
+                                    llvm::DINode::FlagZero, LenTy),
+        DBuilder->createMemberType(DebugFile, "data", DebugFile, 0, capBits, 8, 64,
+                                    llvm::DINode::FlagZero, DataTy),
+    };
+    return DBuilder->createStructType(DebugFile, "string", DebugFile, 0, 64 + capBits, 64,
+                                       llvm::DINode::FlagZero, nullptr,
+                                       DBuilder->getOrCreateArray(Elems));
+}
+
+llvm::DISubroutineType* CGDebugInfo::buildSubroutineDIType(const Type& T) {
+    // ISO §6.6.3.1 procedural/functional parameter type.  Element 0 is the
+    // return type (null for a Procedure), matching createSubroutineType's
+    // own convention -- the same one emitFunctionStart already relies on
+    // for every real DISubprogram.
+    std::vector<llvm::Metadata*> Params;
+    Params.push_back(T.RetType ? debugTypeOfSemaType(*T.RetType) : nullptr);
+    for (const auto& P : T.Params) {
+        llvm::DIType* PDT = P.Ty ? debugTypeOfSemaType(*P.Ty) : nullptr;
+        // A var parameter is passed by reference at the LLVM level (an
+        // address, not a value); wrap in a pointer so the DWARF signature
+        // reflects the real calling convention, the same treatment every
+        // by-reference parameter elsewhere in this pass gets.
+        if (PDT && P.IsVar) PDT = DBuilder->createPointerType(PDT, 64);
+        Params.push_back(PDT);
+    }
+    return DBuilder->createSubroutineType(DBuilder->getOrCreateTypeArray(Params));
+}
+
+llvm::DIType* CGDebugInfo::buildRecordDIType(const Type& T) {
+    if (!Types) return nullptr;
+    const auto& DL = Mod.getDataLayout();
+
+    // EP §6.4.3.4's two runtime-only records (TimeStamp, BindingType) carry
+    // no RecordDecl -- see CGTypes::llvmTypeOfSemaTypeImpl's own Record
+    // case -- so layoutOfRecord (which walks a RecordTypeNode) has nothing
+    // to walk for them; every other record goes through it, since it alone
+    // knows which fields share storage under a variant part.
+    const CGTypes::RecordLayout* RL = Types->layoutOfRecord(T);
+
+    auto* Fwd = DBuilder->createReplaceableCompositeType(
+        llvm::dwarf::DW_TAG_structure_type, T.Name, DebugFile, DebugFile, 0);
+    // Cached BEFORE any field is resolved: an ordinary Pascal linked-list
+    // shape (`PNode = ^Node; Node = record next: PNode end`) has a field
+    // whose type is a pointer back to this same record, and resolving
+    // that field recurses into debugTypeOfSemaType(Node) again from
+    // inside this very call -- this makes that recursive call see the
+    // (temporarily incomplete) forward declaration instead of looping
+    // forever.  A DWARF pointer only ever needs SOME DIType for its
+    // pointee, not a complete one, so a forward declaration is a
+    // legitimate, ordinary answer here, not a workaround.
+    debugTypes_[&T] = Fwd;
+
+    std::vector<llvm::Metadata*> Elements;
+    uint64_t sizeBits  = 0;
+    uint32_t alignBits = 8;
+
+    if (RL) {
+        std::vector<std::pair<std::string, CGTypes::FieldPlace>> Fixed, Variant;
+        for (const auto& kv : RL->Fields) (kv.second.InVariant ? Variant : Fixed).push_back(kv);
+        std::sort(Fixed.begin(), Fixed.end(),
+                  [](const auto& a, const auto& b) { return a.second.Index < b.second.Index; });
+        std::sort(Variant.begin(), Variant.end(),
+                  [](const auto& a, const auto& b) { return a.second.Offset < b.second.Offset; });
+
+        const auto* SL = DL.getStructLayout(RL->Ty);
+        for (const auto& [lname, fp] : Fixed) {
+            const Type::Field* SF = findSemaField(T, lname);
+            const std::string disp = SF ? SF->Name : lname;
+            llvm::DIType* MDT = fieldOrFallbackDIType(SF ? SF->Ty.get() : nullptr, fp.Ty, disp);
+            Elements.push_back(DBuilder->createMemberType(
+                Fwd, disp, DebugFile, 0, DL.getTypeSizeInBits(fp.Ty),
+                DL.getABITypeAlign(fp.Ty).value() * 8, SL->getElementOffsetInBits(fp.Index),
+                llvm::DINode::FlagZero, MDT));
+        }
+        if (!Variant.empty()) {
+            const unsigned blobIdx = Variant.front().second.Index;
+            llvm::Type* blobTy     = RL->Ty->getElementType(blobIdx);
+            std::vector<llvm::Metadata*> UElems;
+            for (const auto& [lname, fp] : Variant) {
+                const Type::Field* SF = findSemaField(T, lname);
+                const std::string disp = SF ? SF->Name : lname;
+                llvm::DIType* MDT = fieldOrFallbackDIType(SF ? SF->Ty.get() : nullptr, fp.Ty, disp);
+                UElems.push_back(DBuilder->createMemberType(
+                    Fwd, disp, DebugFile, 0, DL.getTypeSizeInBits(fp.Ty),
+                    DL.getABITypeAlign(fp.Ty).value() * 8, fp.Offset * 8,
+                    llvm::DINode::FlagZero, MDT));
+            }
+            // ISO §6.4.3.3: every alternative of a variant part shares this
+            // one run of storage.  DWARF has no native discriminated-union
+            // primitive; a DW_TAG_union_type nested at the blob's own
+            // offset -- one member per field of every alternative,
+            // flattened, each at its own byte offset within the blob -- is
+            // the standard approximation (the same shape LLVM's own C
+            // frontend gives a C union).  A debugger can read
+            // `record.$variant.whichever`, but nothing here tells it which
+            // alternative is actually live -- that answer lives in the
+            // tag field, an ordinary member right alongside this one.
+            auto* UnionTy = DBuilder->createUnionType(
+                Fwd, T.Name + ".$variant", DebugFile, 0, DL.getTypeSizeInBits(blobTy),
+                DL.getABITypeAlign(blobTy).value() * 8, llvm::DINode::FlagZero,
+                DBuilder->getOrCreateArray(UElems));
+            Elements.push_back(DBuilder->createMemberType(
+                Fwd, "$variant", DebugFile, 0, DL.getTypeSizeInBits(blobTy),
+                DL.getABITypeAlign(blobTy).value() * 8, SL->getElementOffsetInBits(blobIdx),
+                llvm::DINode::FlagZero, UnionTy));
+        }
+        sizeBits  = DL.getTypeSizeInBits(RL->Ty);
+        alignBits = DL.getABITypeAlign(RL->Ty).value() * 8;
+    } else {
+        // TimeStamp/BindingType: built straight off the flattened field
+        // list, one struct element per field in declaration order -- see
+        // CGTypes::llvmTypeOfSemaTypeImpl's own fallback, mirrored exactly
+        // (same "skip a null Ty" rule) so the indices line up.
+        auto* ST = llvm::dyn_cast_or_null<llvm::StructType>(Types->llvmTypeOfSemaType(T));
+        if (ST) {
+            const auto* SL = DL.getStructLayout(ST);
+            unsigned idx = 0;
+            for (const auto& F : T.RecordFields) {
+                if (!F.Ty) continue;
+                llvm::Type* ft = ST->getElementType(idx);
+                llvm::DIType* MDT = fieldOrFallbackDIType(F.Ty.get(), ft, F.Name);
+                Elements.push_back(DBuilder->createMemberType(
+                    Fwd, F.Name, DebugFile, 0, DL.getTypeSizeInBits(ft),
+                    DL.getABITypeAlign(ft).value() * 8, SL->getElementOffsetInBits(idx),
+                    llvm::DINode::FlagZero, MDT));
+                ++idx;
+            }
+            sizeBits  = DL.getTypeSizeInBits(ST);
+            alignBits = DL.getABITypeAlign(ST).value() * 8;
+        }
+    }
+
+    auto* Full = DBuilder->createStructType(
+        DebugFile, T.Name, DebugFile, 0, sizeBits, alignBits, llvm::DINode::FlagZero,
+        nullptr, DBuilder->getOrCreateArray(Elements));
+    DBuilder->replaceTemporary(llvm::TempDIType(Fwd), Full);
+    debugTypes_[&T] = Full;
+    return Full;
 }
 
 llvm::DISubprogram* CGDebugInfo::emitFunctionStart(llvm::Function* Fn, llvm::DIScope* Scope,
@@ -143,6 +434,21 @@ llvm::DISubprogram* CGDebugInfo::emitFunctionStart(llvm::Function* Fn, llvm::DIS
     // misattributes a line -- caught by compiling a program with more than
     // one procedure under -g, which no test before this one exercised.
     B.SetCurrentDebugLocation(llvm::DILocation::get(Ctx, Line, 0, SP));
+    return SP;
+}
+
+llvm::DISubprogram* CGDebugInfo::emitThunkStart(llvm::Function* Fn, llvm::DIScope* Scope,
+                                                 const std::string& Name) {
+    if (!DBuilder) return nullptr;
+    auto* SubTy = DBuilder->createSubroutineType(
+        DBuilder->getOrCreateTypeArray({}));
+    auto* SP = DBuilder->createFunction(
+        Scope, Name, Fn->getName(), DebugFile, /*LineNo=*/0, SubTy, /*ScopeLine=*/0,
+        llvm::DINode::FlagArtificial,
+        llvm::DISubprogram::SPFlagDefinition
+            | (Opts.OptLevel > 0 ? llvm::DISubprogram::SPFlagOptimized
+                                  : llvm::DISubprogram::SPFlagZero));
+    Fn->setSubprogram(SP);
     return SP;
 }
 
@@ -179,10 +485,38 @@ void CGDebugInfo::declareLocal(const std::string& name, const TypeNode* typeNode
     if (!DT) return;
     const unsigned line = SrcMgr ? SrcMgr->getPresumedLoc(typeNode->Loc).Line : 0;
     if (auto* GV = llvm::dyn_cast<llvm::GlobalVariable>(ptr)) {
-        auto* GVE = DBuilder->createGlobalVariableExpression(
-            DebugCU, name, /*LinkageName=*/"", DebugFile, line, DT,
-            /*IsLocalToUnit=*/false);
-        GV->addDebugInfo(GVE);
+        // A module's own global is declared exactly once, through its own
+        // defVar -- but an EP module importing it (Codegen::Impl::
+        // resolveImportedVar's "compiled alongside this one" branch) binds
+        // the SAME llvm::GlobalVariable into ITS OWN symbol table by
+        // calling defVar again, under whatever local/qualified name the
+        // importer spells it, which reaches this same choke point a
+        // second time for one storage location. This project builds one
+        // llvm::Module (and so one DICompileUnit) for a whole program, not
+        // one per Pascal module, so there is no "declaration in the
+        // importing CU, definition in the owning one" split to give a
+        // second DW_TAG_variable a legitimate reason to exist (the Clang
+        // precedent for an extern declared in one TU and used in
+        // another): a second DIGlobalVariableExpression here is just a
+        // spurious duplicate, under the IMPORTER's own alias rather than
+        // the variable's real declared name, and (confirmed with
+        // llvm-dwarfdump on a two-module program) a bogus line -- the
+        // typeNode passed for a re-import is null (see
+        // resolveImportedVar), so `line` above is always 0, not the
+        // variable's real declaring line, regardless of which import
+        // reaches here first.  GlobalVariable::getDebugInfo (not a bare
+        // hasMetadata/MD_dbg check, so a global that has SOME unrelated
+        // metadata but no debug info yet still gets its first, correct
+        // declaration) is the guard: skip whenever this GV already has
+        // one, no matter which name/typeNode is in hand this time.
+        llvm::SmallVector<llvm::DIGlobalVariableExpression*, 1> existing;
+        GV->getDebugInfo(existing);
+        if (existing.empty()) {
+            auto* GVE = DBuilder->createGlobalVariableExpression(
+                DebugCU, name, /*LinkageName=*/"", DebugFile, line, DT,
+                /*IsLocalToUnit=*/false);
+            GV->addDebugInfo(GVE);
+        }
     } else if (CurScope && B.GetInsertBlock()) {
         auto* DV = DBuilder->createAutoVariable(CurScope, name, DebugFile, line, DT);
         llvm::Value* storage = debugIndirectPtr ? debugIndirectPtr : ptr;
@@ -194,6 +528,31 @@ void CGDebugInfo::declareLocal(const std::string& name, const TypeNode* typeNode
             llvm::DILocation::get(Ctx, line, 0, CurScope),
             B.GetInsertBlock());
     }
+}
+
+void CGDebugInfo::declareProcParam(const std::string& name, const ProcedureTypeNode* PT,
+                                    llvm::Value* ptr) {
+    if (!DBuilder || !PT || !PT->ResolvedType || !CurScope || !B.GetInsertBlock()) return;
+    llvm::DISubroutineType* SubTy = buildSubroutineDIType(*PT->ResolvedType);
+    auto* CodeTy  = DBuilder->createPointerType(SubTy, 64);
+    // The frame's own pointee varies per call site (whatever static link the
+    // procedure passed happens to need) and nothing here knows its shape --
+    // an untyped pointer, the same honest answer a C `void*` frame would
+    // get, exactly like a null pointee elsewhere in this file.
+    auto* FrameTy = DBuilder->createPointerType(nullptr, 64);
+    std::vector<llvm::Metadata*> Elems{
+        DBuilder->createMemberType(DebugFile, "code", DebugFile, 0, 64, 64, 0,
+                                    llvm::DINode::FlagZero, CodeTy),
+        DBuilder->createMemberType(DebugFile, "frame", DebugFile, 0, 64, 64, 64,
+                                    llvm::DINode::FlagZero, FrameTy),
+    };
+    auto* PairTy = DBuilder->createStructType(
+        DebugFile, "procparam", DebugFile, 0, 128, 64, llvm::DINode::FlagZero,
+        nullptr, DBuilder->getOrCreateArray(Elems));
+    const unsigned line = SrcMgr ? SrcMgr->getPresumedLoc(PT->Loc).Line : 0;
+    auto* DV = DBuilder->createAutoVariable(CurScope, name, DebugFile, line, PairTy);
+    DBuilder->insertDeclare(ptr, DV, DBuilder->createExpression(),
+                             llvm::DILocation::get(Ctx, line, 0, CurScope), B.GetInsertBlock());
 }
 
 llvm::DILocalScope* CGDebugInfo::enterShadowScope(SourceLocation Loc) {

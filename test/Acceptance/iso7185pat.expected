@@ -17,7 +17,7 @@ Integer default output field
 Real default output field
          1111111111222222222233333333334
 1234567890123456789012345678901234567890
- 1.20000000000000e+000
+ 1.2000000000000000e+000
 Note that the exponent character 'e' or 'E' is implementation
 defined as well as the number of exponent digits
 Boolean default output field

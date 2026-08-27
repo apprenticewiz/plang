@@ -11,5 +11,9 @@ module M interface;
   var Count: integer;
   function Scale(x: real; k: integer): real;
 end.
+module M;
+  function Scale(x: real; k: integer): real;
+  begin Scale := x * k end;
+end.
 program p;
 begin end.

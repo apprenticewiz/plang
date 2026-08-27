@@ -10,5 +10,9 @@ module M interface;
   function f: integer;
   function g: integer;
 end.
+module M;
+  function f: integer; begin f := 0 end;
+  function g: integer; begin g := 0 end;
+end.
 program p;
 begin end.

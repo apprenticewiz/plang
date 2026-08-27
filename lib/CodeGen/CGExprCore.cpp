@@ -38,7 +38,8 @@ llvm::Value* CGExprCore::emitExpr(const ExprNode& e) {
         if (ExprIsVarStr(e)) {
             int64_t cap  = (int64_t)n->Value.size();
             auto*   tmp  = CreateEntryAlloca(Types.strStructType(cap), "str.lit");
-            Strings.emitStrFromCStr(tmp, i64c(cap), Strings.internStrPtr(n->Value));
+            Strings.emitStrFromBytes(tmp, i64c(cap), Strings.internStrPtr(n->Value),
+                                     i64c(cap));
             return tmp;
         }
         return Strings.internStrPtr(n->Value);

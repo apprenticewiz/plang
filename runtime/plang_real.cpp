@@ -45,15 +45,15 @@ std::size_t plangFormatReal(char* Buf, double V, int64_t TotalWidth) {
     while (*Exp == '0' && *(Exp + 1) != '\0') ++Exp;  // %e pads to two; restrip
     std::size_t ExpLen = std::strlen(Exp);
 
-    // §6.9.3.4.1: the sign character is '-' only when the value is negative and
-    // has not rounded away to zero, so a small negative written to few decimal
-    // places comes out as a positive zero rather than as -0.
-    bool AllZero = true;
-    for (std::size_t I = 0; I < MantLen; ++I)
-        if (Digits[I] >= '1' && Digits[I] <= '9') { AllZero = false; break; }
-
+    // §6.9.3.4.1: the sign character is '-' whenever the value itself was
+    // negative, including -0.0.  %e always normalizes a nonzero value to a
+    // leading digit of 1-9, so an all-zero mantissa here only ever means V was
+    // exactly zero (positive or negative) -- not a negative value that
+    // "rounded away".  FPC keeps the sign on a negative zero in every real
+    // format (fixed-point and exponential alike), so match that here rather
+    // than special-casing it away.
     std::size_t P = 0;
-    Buf[P++] = (Negative && !AllZero) ? '-' : ' ';
+    Buf[P++] = Negative ? '-' : ' ';
     std::memcpy(Buf + P, Digits, MantLen);
     P += MantLen;
     Buf[P++] = 'e';
