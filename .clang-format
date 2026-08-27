@@ -42,12 +42,17 @@ AllowShortIfStatementsOnASingleLine: Never
 AllowShortLoopsOnASingleLine:       false
 
 # Trailing commas / comments
-SpaceBeforeTrailingComments: 2
-AlignTrailingComments:       true
+SpacesBeforeTrailingComments: 2
+AlignTrailingComments:        true
 
 # Alignment
 AlignConsecutiveAssignments:  false
 AlignConsecutiveDeclarations: false
 
 # C++
-Standard: c++23
+# "c++23" is not a recognized enum value for the Standard key (clang-format's
+# LanguageStandard enum tops out at explicit c++20; there is no c++23
+# literal). Use Latest so formatting tracks the newest standard the
+# installed clang-format understands, which also avoids re-breaking this
+# file the next time the project's language standard bumps.
+Standard: Latest
