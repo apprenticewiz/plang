@@ -248,7 +248,16 @@ DIAG(err_set_base_too_wide, Error,
 DIAG(err_set_lit_too_wide, Error,
      "set constructor spans %0..%1, which exceeds the %2-element limit on sets")
 DIAG(err_file_component_is_file, Error, "file component type must not itself be a file type")
-DIAG(err_file_field_has_file, Error, "file component type must not contain a file field (field '%0' is a file type)")
+// Issue #167: this used to only look one record level deep -- a field
+// directly on the component record -- so a file nested inside an array, or
+// inside a record nested inside another record (etc.), was silently
+// accepted.  typeContainsFile already walks arrays, records, conformant
+// arrays and schema bodies recursively for the assignment/parameter/
+// result-type checks below; this reuses it here too, so this one
+// diagnostic now also covers the direct-field case that the old,
+// since-removed err_file_field_has_file used to report on its own.
+DIAG(err_file_component_has_file, Error,
+     "'%0' contains a file type inside a record or array, and cannot be a file's component type")
 // Issue #241: get/read/put/position all derive the file's component stride
 // from this type's byte size, and disagree about what a zero-size component
 // means -- fread and an fseek(0) are no-ops, so read never moves the file

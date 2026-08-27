@@ -451,15 +451,17 @@ std::shared_ptr<Type> Sema::resolveTypeImpl(const TypeNode& Node) {
             else if (const auto Sz = byteSizeOf(*Elem); Sz && *Sz == 0)
                 error(N->Loc, diag::err_file_component_zero_size,
                       {Elem->Name});
-            else {
-                // Check for records that contain a file field
-                for (const auto& F : Elem->RecordFields) {
-                    if (F.Ty && F.Ty->Kind == TypeKind::File) {
-                        error(N->Loc, diag::err_file_field_has_file, {F.Name});
-                        break;
-                    }
-                }
-            }
+            // Issue #167: a file need not be the component's own immediate
+            // field to violate §6.4.3.5 -- it is just as much "contained"
+            // when it sits inside an array, or inside a record (or schema
+            // body) nested arbitrarily deep inside this one.  typeContainsFile
+            // already does that full walk for the assignment, value-parameter
+            // and function-result checks, so reuse it here instead of the
+            // one-record-level-deep field loop that used to run in its place
+            // (which caught `record f: text end` but missed an array of
+            // files, or a record nested inside another record).
+            else if (typeContainsFile(*Elem))
+                error(N->Loc, diag::err_file_component_has_file, {Elem->Name});
         }
         return Ctx_.getFile(std::move(Elem), std::move(Index));
     }

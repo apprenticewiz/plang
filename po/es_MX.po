@@ -124,11 +124,6 @@ msgid "file component type must not itself be a file type"
 msgstr "el tipo componente de un archivo no debe ser a su vez un tipo archivo"
 
 #, fuzzy
-msgctxt "diag/err_file_field_has_file"
-msgid "file component type must not contain a file field (field '%0' is a file type)"
-msgstr "el tipo componente de un archivo no debe contener un campo de archivo (el campo «%0» es de tipo archivo)"
-
-#, fuzzy
 msgctxt "diag/err_array_lower_bound_not_const"
 msgid "lower bound of array index type is not a constant expression; for a run-time length use a schema type, 'type t(n: integer) = array[1..n]'"
 msgstr "el límite inferior del tipo de índice de el arreglo no es una expresión constante; para una longitud determinada en ejecución use un tipo esquema, «type t(n: integer) = array[1..n]»"

@@ -1275,10 +1275,18 @@ bool Sema::typeContainsFile(const Type& T) {
             if (F.Ty && typeContainsFile(*F.Ty)) return true;
         return false;
     // An array of files holds files as surely as a record of them does, and
-    // was the way round the rule.
+    // was the way round the rule.  A conformant array (EP §6.7.3.7) is the
+    // same rule with its element type carried in the same field.
     case TypeKind::Array:
     case TypeKind::Set:
+    case TypeKind::ConformantArray:
         return T.ElemType && typeContainsFile(*T.ElemType);
+    // EP §6.4.7: a schema's body is itself a record or array assembled from
+    // these same building blocks (see SchemaBody), so a file anywhere in it
+    // is exactly as forbidden as one in an ordinary field or element.
+    case TypeKind::SchemaInstance:
+    case TypeKind::Schema:
+        return T.SchemaBody && typeContainsFile(*T.SchemaBody);
     default:               return false;
     }
 }
