@@ -1289,7 +1289,8 @@ bool Codegen::Impl::hasInitialState(const TypeNode* tn, int depth) const {
 }
 
 void Codegen::Impl::emitInitialState(llvm::Value* ptr, llvm::Type* ty,
-                                     const TypeNode* tn, int depth) {
+                                     const TypeNode* tn, int depth,
+                                     const Type* semaRec) {
     if (!ptr || !tn || depth > 16) return;
 
     const TypeNode* carrier = nullptr;
@@ -1308,12 +1309,26 @@ void Codegen::Impl::emitInitialState(llvm::Value* ptr, llvm::Type* ty,
         if (!body) return;
         if (stn->ResolvedBody && stn->ResolvedBody->SchemaBody) {
             SchemaBindingScope bind(*cgTypes_, *stn->ResolvedBody->SchemaBody);
-            emitInitialState(ptr, ty, body, depth + 1);
+            // #197: stn->ResolvedBody is THIS denoter's own cached
+            // resolution, good here because it was just re-established by
+            // the SchemaBindingScope above -- carry it down as semaRec so
+            // the record branch below can hand it to layoutOf instead of
+            // laying the body out from its declaration node alone.
+            emitInitialState(ptr, ty, body, depth + 1,
+                              stn->ResolvedBody->SchemaBody.get());
         }
         return;
     }
     if (auto* rtn = llvm::dyn_cast_or_null<RecordTypeNode>(shape)) {
-        const auto& L  = layoutOf(*rtn);
+        // #197: semaRec (this instance's own Sema record, when the recursion
+        // has one) makes layoutOf prefer Sema's per-field types over each
+        // field's own denoter.  Without it, a field that is itself a schema
+        // instantiation -- `x: inner(n)` -- is sized from whichever
+        // instantiation of `inner` Sema resolved last across the WHOLE
+        // program, not this one, shifting every GEP into the fields that
+        // follow it (issue #197; see CGTypes.cpp's R4 comment on layoutOf
+        // for the sibling bug this matches).
+        const auto& L  = layoutOf(*rtn, semaRec);
         auto*       st = L.Ty;
         for (const auto& fd : rtn->Fields) {
             if (!hasInitialState(fd.Type.get(), depth + 1)) continue;

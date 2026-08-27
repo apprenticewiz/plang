@@ -189,7 +189,14 @@ llvm::Value* CGStructuredValue::emitStructuredValue(const StructuredValueExpr& e
 
         // The layout, rather than a map built here from the fixed fields: it
         // covers the tag and the variants too, which were silently dropped.
-        const auto& L      = Types.layoutOf(*rtn);
+        // #197: e.ResolvedType is THIS constructor's own resolved type, not
+        // a shared declaration node re-read for every instantiation, so it
+        // is exactly the semaRec layoutOf wants -- passing it makes a field
+        // that is itself a schema instantiation size from this record's own
+        // instance instead of from whichever instantiation was resolved
+        // last elsewhere in the program (see CGTypes.cpp's R4 comment on
+        // layoutOf).
+        const auto& L      = Types.layoutOf(*rtn, e.ResolvedType.get());
         auto*       st     = L.Ty;
         auto*       alloca = CreateEntryAlloca(st, "rec.ctor");
         B.CreateStore(llvm::Constant::getNullValue(st), alloca);

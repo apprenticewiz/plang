@@ -31,6 +31,7 @@
 #include "llvm/Support/Process.h"
 #include "llvm/Support/Program.h"
 #include "llvm/Support/VersionTuple.h"
+#include "llvm/Support/raw_ostream.h"
 #include "llvm/TargetParser/Host.h"
 #include "llvm/TargetParser/Triple.h"
 
@@ -249,6 +250,22 @@ static std::string findRuntimeLib(const std::string &ExePath) {
 }
 
 // ---------------------------------------------------------------------------
+// Version-numbered directory sorting (shared by the GCC and Darwin toolchain
+// probes below, both of which pick the newest of several installed versions)
+// ---------------------------------------------------------------------------
+
+bool plang::versionDirLess(std::string_view A, std::string_view B) {
+    llvm::VersionTuple VA, VB;
+    // tryParse() returns true on FAILURE (llvm::VersionTuple convention).
+    const bool AOk = !VA.tryParse(A);
+    const bool BOk = !VB.tryParse(B);
+    if (AOk && BOk) return VA < VB;
+    if (AOk) return false; // A is a real version, B is not: A sorts after B.
+    if (BOk) return true;  // B is a real version, A is not: A sorts before B.
+    return A < B;          // Neither parses: fall back to a stable order.
+}
+
+// ---------------------------------------------------------------------------
 // GCC installation detection (for ld.lld CRT/library paths)
 // ---------------------------------------------------------------------------
 
@@ -257,6 +274,9 @@ struct GCCInstall {
     std::string LibDir; ///< system lib dir containing Scrt1.o
 };
 
+/// Direct children of \p Parent, sorted ascending by versionDirLess so that
+/// callers who want the newest installed version can walk the result
+/// back-to-front (see detectGCC and builtinsUnder below).
 static std::vector<std::string> subdirs(const std::string &Parent) {
     std::vector<std::string> Out;
     std::error_code EC;
@@ -266,7 +286,7 @@ static std::vector<std::string> subdirs(const std::string &Parent) {
         if (!Name.empty() && Name[0] != '.')
             Out.push_back(std::string(Name));
     }
-    std::sort(Out.begin(), Out.end());
+    std::sort(Out.begin(), Out.end(), versionDirLess);
     return Out;
 }
 
@@ -541,9 +561,20 @@ int Driver::runTool(const std::string &Prog,
                     const std::vector<std::string> &Args,
                     bool Verbose, bool DryRun) {
     if (Verbose || DryRun) {
-        std::cerr << Prog;
-        for (const auto &A : Args) std::cerr << ' ' << A;
-        std::cerr << '\n';
+        // Quoted the same way clang's own -### output is (llvm::sys::printArg,
+        // which always wraps its argument in quotes and backslash-escapes any
+        // embedded '"' or '\\') -- issue #286.  The plain space-joined line
+        // this replaces could not tell a two-word argument from two
+        // arguments once printed, so it could be neither read correctly nor
+        // pasted back into a shell.
+        std::string Line;
+        llvm::raw_string_ostream LineOS(Line);
+        llvm::sys::printArg(LineOS, Prog, /*Quote=*/true);
+        for (const auto &A : Args) {
+            LineOS << ' ';
+            llvm::sys::printArg(LineOS, A, /*Quote=*/true);
+        }
+        std::cerr << Line << '\n';
     }
     if (DryRun) return 0;
 
@@ -631,9 +662,32 @@ Options Driver::parseArgs(int Argc, char *Argv[]) {
             Opts.mode = OutputMode::DumpTokens;
         } else if (Arg == "-dump-parse-tree") {
             Opts.mode = OutputMode::DumpParseTree;
+        } else if (Arg.size() > 2 && Arg[0] == '-' && Arg[1] == 'o') {
+            // Joined form (issue #244): "-ojoined.o".  Options.def has always
+            // declared -o JoinedOrSeparate, but this hardcoded fast path used
+            // to implement only the separate half of that, so a joined -o
+            // fell through to the generic Options.def-driven fallback further
+            // down, which (since -o is a "Both" option) forwarded the whole,
+            // still-prefixed string to the front end as an opaque argument
+            // rather than recognizing it as -o's own value -- and the front
+            // end's own parser had the identical gap, so it rejected the
+            // forwarded string too.  Nothing glued on can be empty (that is
+            // the separate form, handled below), so there is no empty-value
+            // case to reject here.
+            Opts.outputFile = Arg.substr(2);
         } else if (Arg == "-o") {
             if (I + 1 >= Argc) { diag(diag::err_arg_requires_value, {"-o"}); continue; }
-            Opts.outputFile = Argv[++I];
+            // Issue #286: an explicitly empty value ("-o ''", as a shell
+            // passes one through from an empty or unset variable) used to be
+            // accepted -- Opts.outputFile uses "" as its own sentinel for "no
+            // -o was given at all" (see its doc comment in Driver.h), so an
+            // empty -o was indistinguishable from no -o by the time anything
+            // downstream looked at it, and silently fell back to the default
+            // output name instead of reporting the mistake.  This is the only
+            // point that can still tell the two cases apart.
+            const std::string Val = Argv[++I];
+            if (Val.empty()) { diag(diag::err_empty_output_filename); continue; }
+            Opts.outputFile = Val;
 
         } else if (Arg == "-O0") { Opts.optLevel = 0;
         } else if (Arg == "-O1") { Opts.optLevel = 1;
@@ -699,8 +753,28 @@ Options Driver::parseArgs(int Argc, char *Argv[]) {
             Opts.modulePaths.push_back(Argv[++I]);
         } else if (Arg.size() > 2 && Arg[0] == '-' && Arg[1] == 'L') {
             Opts.linkerArgs.push_back(Arg);
+        } else if (Arg == "-L") {
+            // Separate form (issue #245): "-L dir".  Options.def used to
+            // declare -L Joined-only, matching the gap here -- a standalone
+            // "-L" matched no case in this chain (the generic Options.def
+            // fallback below does not apply either: -L is Driver-only, so it
+            // is never forwarded to the front end, the only thing that
+            // fallback does) and fell all the way to the unrecognized-
+            // argument catch-all, leaving its value to be picked up next as
+            // if it were an ordinary input file.  Reassembled into the same
+            // joined spelling linkerArgs already holds the glued form in,
+            // rather than as two separate argv entries, since nothing else
+            // in this file has needed the two-entries shape ld.lld also
+            // accepts.
+            if (I + 1 >= Argc) { diag(diag::err_arg_requires_value, {"-L"}); continue; }
+            Opts.linkerArgs.push_back("-L" + std::string(Argv[++I]));
         } else if (Arg.size() > 2 && Arg[0] == '-' && Arg[1] == 'l') {
             Opts.linkerArgs.push_back(Arg);
+        } else if (Arg == "-l") {
+            // Separate form (issue #245): "-l lib" -- see the -L arm just
+            // above, which has the same shape for the same reason.
+            if (I + 1 >= Argc) { diag(diag::err_arg_requires_value, {"-l"}); continue; }
+            Opts.linkerArgs.push_back("-l" + std::string(Argv[++I]));
 
         } else if (const opts::Option *O = opts::lookup(Arg);
                    O && opts::goesToFrontend(*O)) {
