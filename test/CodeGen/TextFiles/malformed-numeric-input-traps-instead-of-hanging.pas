@@ -1,6 +1,6 @@
 (*
 RUN: %plang %s -o %t
-RUN: not timeout 5 %run %t > %t.out 2> %t.err
+RUN: not %run %t > %t.out 2> %t.err
 RUN: FileCheck --check-prefix=ERR %s < %t.err
 RUN: FileCheck --check-prefix=OUT --allow-empty %s < %t.out
 *)
@@ -17,9 +17,12 @@ OUT-NOT: should not reach here
    leave read(f, i) consuming nothing and reporting nothing (fscanf's own
    match-failure return was never checked).  Since the file position never
    moved, eof(f) never became true either, so
-   `while not eof(f) do read(f, i)` spun forever.  This must now trap
-   cleanly and quickly -- well inside the timeout above, which exists only
-   as a guard against a regression back to the hang. *)
+   `while not eof(f) do read(f, i)` spun forever.  The fix removes the hang
+   at its source (a clean trap on the first malformed token), so this test
+   needs no timeout wrapper -- same precedent as issue #241's and #247's own
+   hang-class regression tests.  `timeout` itself isn't portably available
+   (absent by default on macOS CI runners); relying on the fix's own
+   immediacy avoids that dependency entirely. *)
 program p;
 var f: text; i: integer;
 begin
