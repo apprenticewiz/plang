@@ -11,13 +11,16 @@ separate compilation involved at all.  A var of the same borrowed type
 across as-is; a routine's heading was re-resolved by name and so is the one
 this file targets.
 
-RUN: %plang -std=iso10206 %s -o %t
+RUN: split-file %s %t.dir
+RUN: %plang -std=iso10206 %t.dir/test.pas -o %t
 RUN: %run %t | FileCheck --strict-whitespace --match-full-lines %s
 *)
 
 (*
 CHECK:42
 *)
+
+//--- test.pas
 
 module Colors interface;
 export Colors = (Meters);
