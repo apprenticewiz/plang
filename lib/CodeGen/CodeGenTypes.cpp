@@ -155,8 +155,8 @@ void Codegen::Impl::init(const std::string& progName) {
             return it->second[astArgIdx].schemaDiscCount;
         });
     // Call-argument marshalling + the EP string-store/address operations.
-    // EmitExpr/EmitLValue/CreateEntryAlloca/CoerceToType are narrow
-    // closures into methods not yet extracted (CodeGenExprs.cpp/
+    // EmitExpr/EmitLValue/CreateEntryAlloca/CreateDynAlloca/CoerceToType are
+    // narrow closures into methods not yet extracted (CodeGenExprs.cpp/
     // CodeGenTypes.cpp); the three string-shape predicates stay on Impl
     // (stateless, used far outside this unit too), same treatment
     // SchemaAccess already gives these same three.
@@ -166,6 +166,7 @@ void Codegen::Impl::init(const std::string& progName) {
         [this](const ExprNode& e){ return emitExpr(e); },
         [this](const ExprNode& e){ return emitLValue(e); },
         [this](llvm::Type* t, const std::string& n){ return createEntryAlloca(t, n); },
+        [this](llvm::Value* bytes, const std::string& n){ return createDynAlloca(bytes, n); },
         [this](llvm::Value* v, llvm::Type* t){ return coerceToType(v, t); },
         [](const ExprNode& e){ return exprIsCharStr(e); },
         [](const ExprNode& e){ return exprIsVarStr(e); },
@@ -180,6 +181,7 @@ void Codegen::Impl::init(const std::string& progName) {
     // CodeGenTypes.cpp).
     closureAbi_ = std::make_unique<ClosureAndCallABI>(ctx, *mod, builder,
         *schemaAccess_, *schemaLayout_, *cgTypes_, *symTab_, *linkage_, *dbgInfo_,
+        *setOps_,
         i32Ty, i64Ty, ptrTy,
         [this](const ExprNode& e){ return emitLValue(e); },
         [this](const ExprNode& e, llvm::Type* t, bool byRef){
@@ -561,12 +563,18 @@ llvm::Value* Codegen::Impl::createDynStrAlloca(llvm::Value* capV,
     // builds, just measured rather than declared.
     auto* bytes = alignUpV(builder.CreateAdd(llvm::ConstantInt::get(i64Ty, 8),
                                              capV, "str.tmp.size"), 8);
-    dynAllocaUsed_ = true;
-    auto* mem = builder.CreateAlloca(i8Ty, bytes, name);
-    mem->setAlignment(llvm::Align(8));
+    auto* mem = createDynAlloca(bytes, name);
     // A fresh temporary has no characters in it yet, and every runtime entry
     // point reads the length before it writes one.
     builder.CreateStore(llvm::ConstantInt::get(i64Ty, 0), mem);
+    return mem;
+}
+
+llvm::Value* Codegen::Impl::createDynAlloca(llvm::Value* bytes,
+                                            const std::string& name) {
+    dynAllocaUsed_ = true;
+    auto* mem = builder.CreateAlloca(i8Ty, bytes, name);
+    mem->setAlignment(llvm::Align(8));
     return mem;
 }
 

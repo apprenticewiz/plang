@@ -78,6 +78,23 @@ llvm::Value* StringCallMarshalling::emitStrAddr(const ExprNode& e) {
 }
 
 llvm::Value* StringCallMarshalling::emitCStrArg(const ExprNode& e) {
+    // A char value converts too, and needs its own case: EmitExpr returns it
+    // as a bare i8, not a pointer, so it is not among the "everything else"
+    // the comment below is about.  EP §6.1.7 makes a single-character string
+    // literal -- the 'x' in `update(f, 'x')` -- type char rather than
+    // string(1), which is exactly the shape reset/rewrite/extend/update's
+    // optional file-name argument takes when the name is one character long.
+    // Before this, that i8 reached plang_update (etc.) unconverted, against
+    // a `const char *` parameter LLVM's verifier rejects a scalar for.
+    // Issue #296.
+    if (e.ResolvedType && e.ResolvedType->Kind == TypeKind::Char) {
+        auto* i8Ty = llvm::Type::getInt8Ty(Ctx);
+        auto* buf  = CreateEntryAlloca(llvm::ArrayType::get(i8Ty, 2), "str.cstr.ch");
+        B.CreateStore(EmitExpr(e), buf);
+        auto* nulAt = B.CreateInBoundsGEP(i8Ty, buf, i64c(1), "str.cstr.ch.nul");
+        B.CreateStore(llvm::ConstantInt::get(i8Ty, 0), nulAt);
+        return buf;
+    }
     // Only a string(n) value needs converting -- everything else EmitExpr
     // returns for a string-shaped argument (a plain string literal outside
     // Extended Pascal, an already-null-terminated `String`) is already a
@@ -87,18 +104,31 @@ llvm::Value* StringCallMarshalling::emitCStrArg(const ExprNode& e) {
     if (!addr) codegenICE("a string value with no address");
     auto* len  = Strings.strLoadLen(addr);
     auto* data = Strings.strDataPtr(addr);
+    auto* i8Ty = llvm::Type::getInt8Ty(Ctx);
+    llvm::Value* buf;
     // ExprStrCap is exprStrCapStatic: a discriminant-fixed capacity is not a
     // compile-time constant (that's the whole point of a discriminant), so it
-    // widens to PlangMaxStringCapacity rather than under-sizing the buffer
-    // against a runtime length that can exceed the probe capacity on the
-    // static type.  With a real constant capacity this is exact, so the
-    // buffer -- unlike the runtime length that fills it -- can be a reused
-    // entry-block alloca the same way every other string temporary in this
-    // file is.
-    auto* i8Ty = llvm::Type::getInt8Ty(Ctx);
-    auto* buf  = CreateEntryAlloca(
-        llvm::ArrayType::get(i8Ty, static_cast<uint64_t>(ExprStrCap(e)) + 1),
-        "str.cstr");
+    // widens to PlangMaxStringCapacity there.  string(300) is legal, and its
+    // 300 was new()'s runtime discriminant, never a compile-time probe --
+    // sizing the buffer from that widened guess let `len` below, the actual
+    // runtime length the memcpy copies, run past it: a 300-character value
+    // memcpy'd into a 256-byte stack buffer, 45 bytes past the end of the
+    // allocation.  Sized from `len` itself instead -- the very value the
+    // memcpy and the NUL store already use below -- the buffer is exactly as
+    // large as what fills it, by construction, no matter what the static
+    // type could or couldn't tell us about the capacity behind it.
+    if (e.ResolvedType->ExtentVaries) {
+        auto* bytes = B.CreateAdd(len, i64c(1), "str.cstr.size");
+        buf = CreateDynAlloca(bytes, "str.cstr");
+    } else {
+        // With a real constant capacity this is exact, so the buffer --
+        // unlike the runtime length that fills it -- can be a reused
+        // entry-block alloca the same way every other string temporary in
+        // this file is.
+        buf = CreateEntryAlloca(
+            llvm::ArrayType::get(i8Ty, static_cast<uint64_t>(ExprStrCap(e)) + 1),
+            "str.cstr");
+    }
     B.CreateMemCpy(buf, llvm::MaybeAlign(), data, llvm::MaybeAlign(), len);
     auto* nulAt = B.CreateInBoundsGEP(i8Ty, buf, len, "str.cstr.nul");
     B.CreateStore(llvm::ConstantInt::get(i8Ty, 0), nulAt);

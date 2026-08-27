@@ -508,7 +508,8 @@ void Sema::processModuleBody(const ModuleNode& Mod) {
         if (Mod.InitStmt)  checkStmt(Mod.InitStmt.get());
         if (Mod.FinalStmt) checkStmt(Mod.FinalStmt.get());
         harvestModuleExports(Mod);
-    }, /*IsGlobalScope=*/true, /*IsInterfaceBlock=*/Mod.IsInterface);
+    }, /*IsGlobalScope=*/true, /*IsModuleBlock=*/true,
+       /*IsInterfaceBlock=*/Mod.IsInterface);
 
     InModuleImplementation_ = SavedInImpl;
     CurrentUnit_ = SavedUnit;
@@ -833,6 +834,7 @@ void Sema::scanLabelNesting(const StmtNode* S,
 void Sema::checkBlock(const BlockNode& Block,
                       llvm::function_ref<void()> BeforePop,
                       bool IsGlobalScope,
+                      bool IsModuleBlock,
                       bool IsInterfaceBlock) {
     Symtab.pushScope();
 
@@ -859,6 +861,7 @@ void Sema::checkBlock(const BlockNode& Block,
         S.Kind    = SymbolKind::Label;
         S.Name    = Lbl;
         S.DeclLoc = Block.Loc;
+        S.LabelInModuleBlock = IsModuleBlock;
         if (!Symtab.define(S))
             error(T, diag::err_duplicate_label, {Lbl});
     }
@@ -926,6 +929,14 @@ void Sema::checkBlock(const BlockNode& Block,
     // (We can't use the TyErr singleton because singletons have no identifying name.)
     // EP §6.4.7: Schema definitions are registered immediately as Schema symbols
     // (no forward-pointer stub needed since schema bodies are not resolved eagerly).
+    //
+    // Each stub's address is also the key TypeContext::getPointer interns
+    // `^<stub>` under, until Phase 3c's rebindPointer re-files it -- see that
+    // function's comment for why the stub must stay alive at least that
+    // long.  It then stays alive well past that, for free: resolveType
+    // (SemaType.cpp) stamps every TypeNode's resolved type onto the node
+    // itself, and a stub is exactly what a not-yet-declared name resolves to,
+    // so the AST holds a shared_ptr to it for the rest of the compilation.
     for (const auto& Td : Block.Types) {
         if (!Td.SchemaParams.empty()) {
             // Schema definition — register directly as Schema kind.
@@ -1027,6 +1038,7 @@ void Sema::checkBlock(const BlockNode& Block,
     // such dangling pointers.  This handles both:
     //   PNode = ^Node;  Node = record … end   (top-level forward reference)
     //   Node  = record … next: ^Node end       (self-referential type)
+    //   PList = array[1..N] of ^Node           (element-type forward reference)
     // EP §6.4.7: Schema symbols are skipped (their bodies are resolved lazily).
     std::function<void(std::shared_ptr<Type>&)> fixForwardPtrs =
         [&](std::shared_ptr<Type>& T) {
@@ -1046,6 +1058,11 @@ void Sema::checkBlock(const BlockNode& Block,
             if (T->Kind == TypeKind::Record)
                 for (auto& F : T->RecordFields)
                     fixForwardPtrs(F.Ty);
+            // Array and File share the ElemType field (Set does too, but a
+            // set's base type is required to be ordinal, so a pointer can
+            // never legally sit there and there is no stub to patch).
+            if (T->Kind == TypeKind::Array || T->Kind == TypeKind::File)
+                fixForwardPtrs(T->ElemType);
         };
     for (const auto& Td : Block.Types) {
         Symbol* Sym = Symtab.lookupCurrent(Td.Name);
@@ -1070,13 +1087,21 @@ void Sema::checkBlock(const BlockNode& Block,
         // confusing ld.lld error pointing at some unrelated runtime function
         // rather than at this declaration.  Caught here instead, well under
         // that ceiling: see err_global_var_too_large's comment for why 1 GiB.
-        if (IsGlobalScope && !T->isError()) {
-            constexpr uint64_t GlobalVarByteLimit = 1ull << 30; // 1 GiB
-            if (auto Sz = byteSizeOf(*T); Sz && *Sz > GlobalVarByteLimit) {
+        //
+        // A local (procedure/function-body) variable hits no relocation, but
+        // gets no pass on size either (#223): it is a stack `alloca`, and one
+        // this large hangs the LLVM backend lowering it long before it would
+        // ever fit a real stack. Same threshold, same reasoning -- only the
+        // diagnostic differs, so it names the variable's actual scope.
+        if (!T->isError()) {
+            constexpr uint64_t VarByteLimit = 1ull << 30; // 1 GiB
+            if (auto Sz = byteSizeOf(*T); Sz && *Sz > VarByteLimit) {
+                const DiagID Id = IsGlobalScope ? diag::err_global_var_too_large
+                                                 : diag::err_local_var_too_large;
                 for (const auto& Nm : Vg.Names)
-                    error(Vg.Type->Loc, diag::err_global_var_too_large,
+                    error(Vg.Type->Loc, Id,
                           {Nm, std::to_string(*Sz),
-                           std::to_string(GlobalVarByteLimit)});
+                           std::to_string(VarByteLimit)});
             }
         }
 

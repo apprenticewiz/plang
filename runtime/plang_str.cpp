@@ -196,7 +196,19 @@ void plang_str_substr_assign(void* dst, int64_t /*cap_dst*/,
                               int64_t i, int64_t n,
                               const void* src, int64_t /*cap_src*/) {
     const int64_t ld = strLen(dst);
-    if (n <= 0 || i < 1 || i + n - 1 > ld) plang_err_substr(i, n, ld);
+    // i+n-1>ld, done directly, can signed-overflow the same way
+    // plang_str_substr's own past-the-end check used to (see the comment
+    // there, and issue #11): n arrives as high-low+1, computed by CGAssign's
+    // plain wrapping add/sub, so it can come out huge -- or, by wrapping,
+    // even small and "plausible" -- while i (low) is independently huge too;
+    // either way the addition below can overflow and wrap around to a value
+    // that passes the check, sending an out-of-range i on to the memcpy
+    // below. n<=0 and i<1 are already rejected by the two disjuncts before
+    // this one, so by the time it runs i>=1 and n>=1: checking i>ld first
+    // (cheap, and itself overflow-free) short-circuits before ld-i is ever
+    // computed, and once i<=ld is established, ld-i can't go negative or
+    // overflow either, since ld is a real string length, never huge.
+    if (n <= 0 || i < 1 || i > ld || n > ld - i + 1) plang_err_substr(i, n, ld);
     const int64_t ls = strLen(src);
     if (ls != n) plang_err_substr_assign(ls, n);
     std::memcpy(strData(dst) + (i - 1), strData(src), static_cast<size_t>(n));
