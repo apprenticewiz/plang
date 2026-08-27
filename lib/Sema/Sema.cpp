@@ -925,6 +925,14 @@ void Sema::checkBlock(const BlockNode& Block,
     // (We can't use the TyErr singleton because singletons have no identifying name.)
     // EP §6.4.7: Schema definitions are registered immediately as Schema symbols
     // (no forward-pointer stub needed since schema bodies are not resolved eagerly).
+    //
+    // Each stub's address is also the key TypeContext::getPointer interns
+    // `^<stub>` under, until Phase 3c's rebindPointer re-files it -- see that
+    // function's comment for why the stub must stay alive at least that
+    // long.  It then stays alive well past that, for free: resolveType
+    // (SemaType.cpp) stamps every TypeNode's resolved type onto the node
+    // itself, and a stub is exactly what a not-yet-declared name resolves to,
+    // so the AST holds a shared_ptr to it for the rest of the compilation.
     for (const auto& Td : Block.Types) {
         if (!Td.SchemaParams.empty()) {
             // Schema definition — register directly as Schema kind.
