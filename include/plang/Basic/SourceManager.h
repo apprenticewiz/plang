@@ -10,6 +10,23 @@
 
 namespace plang {
 
+/// Whether \p C is a UTF-8 continuation byte (10xxxxxx): one that is not the
+/// first byte of its character and so does not start a display cell of its
+/// own.  A diagnostic's column needs to skip these to land under the right
+/// glyph instead of counting raw bytes -- three bytes for one accented
+/// letter is still one cell on the screen, and #285 was exactly that: a
+/// caret landing cells to the right of its token whenever multi-byte UTF-8
+/// text preceded it on the line.  This is a byte-classification, not a
+/// decoder -- it does not validate the UTF-8 it walks, so malformed input
+/// degrades to counting lead bytes rather than rejecting anything, matching
+/// how the rest of the scanner treats source text it does not otherwise
+/// police.  Shared between SourceManager (which turns a byte offset into a
+/// column number) and DiagnosticPrinter (which draws the caret under that
+/// same column), so the two can never disagree about which bytes count.
+[[nodiscard]] inline bool isUtf8ContinuationByte(char C) {
+    return (static_cast<unsigned char>(C) & 0xC0) == 0x80;
+}
+
 /// Owns the text of every source buffer and answers questions about positions
 /// in it.
 ///
