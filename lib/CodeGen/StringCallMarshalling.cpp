@@ -138,22 +138,28 @@ void StringCallMarshalling::emitCharStrStore(llvm::Value* dst, int64_t n,
     if (ExprIsVarStr(src)) {
         auto* from = emitStrAddr(src);
         if (!from) codegenICE("a string value with no address");
-        // §6.4.3.2 requires the lengths to match, and Sema settles that when it
-        // knows the capacity.  It cannot when a discriminant fixes it, so it
-        // lets the assignment through -- and copying n bytes out of a string
-        // holding fewer read past the end of the allocation and dropped heap
-        // bytes into the array.  Checked here instead, against the length the
-        // string actually has.
-        if (src.ResolvedType->ExtentVaries) {
-            auto* len = Strings.strLoadLen(from);
-            auto* bad = B.CreateICmpNE(len, i64c(n), "charstr.len.bad");
-            RangeGuards.emitGuard(bad, "charstrlen", [&] {
-                B.CreateCall(
-                    RtFns.getExternFnN("plang_err_str_length",
-                                       llvm::Type::getVoidTy(Ctx), {I64Ty, I64Ty}),
-                    {len, i64c(n)});
-            });
-        }
+        // §6.4.3.2 requires the lengths to match, and Sema settles that when
+        // it knows the capacity -- but a capacity that matches n is not the
+        // same thing as a LENGTH that does.  A string(n)'s length is a
+        // mutable run-time field independent of its capacity: `s := 'hi'` on
+        // a string(5) leaves it at length 2 despite room for 5, and copying n
+        // bytes out of it regardless read whatever stale bytes happened to
+        // follow in the buffer.  This used to run only when a discriminant
+        // left the capacity itself unknown to Sema (ExtentVaries); that is
+        // only the case Sema could not even ATTEMPT its compile-time check
+        // for, not the only case where a matching capacity can still have a
+        // shorter run-time length, so a fixed-capacity string(5) reassigned
+        // to something shorter went unchecked and leaked the earlier value's
+        // trailing bytes.  Checked here instead, against the length the
+        // string actually has, unconditionally.
+        auto* len = Strings.strLoadLen(from);
+        auto* bad = B.CreateICmpNE(len, i64c(n), "charstr.len.bad");
+        RangeGuards.emitGuard(bad, "charstrlen", [&] {
+            B.CreateCall(
+                RtFns.getExternFnN("plang_err_str_length",
+                                   llvm::Type::getVoidTy(Ctx), {I64Ty, I64Ty}),
+                {len, i64c(n)});
+        });
         B.CreateMemCpy(dst, llvm::MaybeAlign(), Strings.strDataPtr(from),
                        llvm::MaybeAlign(),
                        llvm::ConstantInt::get(I64Ty, n));
