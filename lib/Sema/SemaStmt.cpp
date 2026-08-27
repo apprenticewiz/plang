@@ -367,16 +367,35 @@ void Sema::checkFor(const ForStmt& S) {
         // Driving a loop is a use: the control variable is named here, not in
         // an expression the identifier check would see.
         Sym->Referenced = true;
-        if (!Sym->Ty->isOrdinal())
-            error(S.Loc, diag::err_for_var_not_ordinal, {S.Var, Sym->Ty->Name});
 
-        // ISO §6.8.3.9: the control variable must be local to the block
-        // containing the for-statement.  A with-statement and a `for ... in`
-        // open a scope that is not a block, so asking only the innermost one
-        // rejected `with r do for i := 1 to 3 do ...` about an `i` that is
-        // declared exactly where the standard requires.
-        if (!Symtab.lookupInEnclosingBlock(S.Var))
-            error(S.Loc, diag::err_for_var_not_local, {S.Var});
+        // ISO §6.8.3.9: the control variable must be an entire variable. A
+        // bare identifier can just as well resolve to a procedure, a builtin,
+        // a constant, a type name, or a schema -- Ty is null for Proc/
+        // Builtin/Schema (registerBuiltins and friends never set it), so
+        // isOrdinal() below would null-deref, and for Const/TypeAlias/
+        // EnumValue it is set but describes the wrong thing (the constant's
+        // or alias's type, not any storage this loop could drive), which let
+        // a const or type-alias control variable sail through Sema only to
+        // hit "no storage" in codegen. VarParam is a variable too (isLValue
+        // treats it the same as Var); it is excluded from a for-statement
+        // only by not being LOCAL to this block, which the check below
+        // already catches.
+        const bool IsVar = Sym->Kind == SymbolKind::Var
+                         || Sym->Kind == SymbolKind::VarParam;
+        if (!IsVar) {
+            error(S.Loc, diag::err_for_var_not_variable, {S.Var});
+        } else {
+            if (!Sym->Ty->isOrdinal())
+                error(S.Loc, diag::err_for_var_not_ordinal, {S.Var, Sym->Ty->Name});
+
+            // ISO §6.8.3.9: the control variable must be local to the block
+            // containing the for-statement.  A with-statement and a `for ... in`
+            // open a scope that is not a block, so asking only the innermost one
+            // rejected `with r do for i := 1 to 3 do ...` about an `i` that is
+            // declared exactly where the standard requires.
+            if (!Symtab.lookupInEnclosingBlock(S.Var))
+                error(S.Loc, diag::err_for_var_not_local, {S.Var});
+        }
     }
     auto From  = checkExpr(*S.From);
     auto Limit = checkExpr(*S.Limit);
@@ -596,6 +615,20 @@ void Sema::checkCallStmt(const CallStmt& S) {
             return;
         }
 
+        // checkCallExpr (SemaExpr.cpp) asks this before dispatching on the
+        // builtin's spelling; this arm did not, so a call that is not one of
+        // the special cases below -- reset, close, dispose, ... -- reached
+        // codegen with whatever argument count was written.  `reset(f, 1, 2)`
+        // let its extra argument through to a runtime call already typed for
+        // two, which the IR verifier rejected as a compiler crash rather than
+        // a diagnostic; `reset()` reached emitUserProcCall and failed to link
+        // against an external symbol nothing defines.  Builtins.def's arity is
+        // the same source checkBuiltinArity already reads for expressions.
+        if (!checkBuiltinArity(Sym->BuiltinKind, Lo, S.Loc, S.Args.size())) {
+            for (const auto& Arg : S.Args) (void)checkExpr(*Arg);
+            return;
+        }
+
         // §6.9.4: page, like readln and writeln, is about lines, and only a
         // text file has any.  The other two are checked where their arguments
         // are already being walked, since checking an expression twice reports
@@ -810,6 +843,14 @@ void Sema::checkCallStmt(const CallStmt& S) {
         // formal discriminant and each must be ordinal.
         if (Lo == "new" && !S.Args.empty()) {
             auto PtrTy = checkExpr(*S.Args[0]);
+            // Every check below -- schema discriminants, variant/schema extra
+            // arguments -- is keyed off Pointee, which only a genuine Pointer
+            // arg0 computes; anything else left it null and every one of
+            // those checks silently no-opped rather than rejecting the call,
+            // so `new(i)` for a non-pointer i sailed through Sema and reached
+            // CodeGen with no pointee to size an allocation from.
+            if (!PtrTy->isError() && PtrTy->Kind != TypeKind::Pointer)
+                error(S.Args[0]->Loc, diag::err_new_arg_not_pointer, {PtrTy->Name});
             const Type* Pointee = PtrTy->Kind == TypeKind::Pointer
                                       ? PtrTy->PointeeType.get() : nullptr;
             const bool ToSchema = Pointee && Pointee->Kind == TypeKind::Schema;
@@ -868,7 +909,9 @@ void Sema::checkCallStmt(const CallStmt& S) {
             return;
         }
 
-        // Generic: evaluate arguments for side-effects / type errors, skip arity.
+        // Generic: arity was already checked against Builtins.def above.
+        // Evaluate arguments for side-effects / type errors and leave the
+        // rest -- which argument means what -- to codegen.
         for (const auto& Arg : S.Args) (void)checkExpr(*Arg);
         return;
     }
@@ -1008,6 +1051,16 @@ void Sema::checkGoto(const GotoStmt& S) {
     // block's statement part: landing anywhere else would resume in the middle
     // of a structured statement whose activation was just thrown away.
     if (!CurrentBlockLabels.contains(S.Label)) {
+        // EP §6.11.2: unlike a program's block or an enclosing procedure's,
+        // a module's 'to begin do'/'to end do' does not stay on the call
+        // stack for as long as the module's procedures stay callable -- see
+        // Symbol::LabelInModuleBlock.  Checked ahead of LabelNested: a label
+        // at the outermost level of a module's statement part is exactly as
+        // unreachable this way as one that is not.
+        if (Sym->LabelInModuleBlock) {
+            error(S.Loc, diag::err_goto_module_block, {S.Label});
+            return;
+        }
         if (Sym->LabelNested) {
             error(S.Loc, diag::err_goto_outer_block, {S.Label});
             return;

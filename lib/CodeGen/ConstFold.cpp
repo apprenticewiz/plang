@@ -57,8 +57,11 @@ std::optional<int64_t> tryEvalConstInt(
         return std::nullopt;
     }
     if (auto* n = llvm::dyn_cast<UnaryExpr>(&e)) {
+        // Issue #202: -minint overflows (its magnitude, 2^63, is one past
+        // maxint); checkedNeg (Arith.h) declines rather than compute the
+        // wrapped result, the same as Sema's own fold (SemaType.cpp).
         if (n->Op == TokenKind::Minus)
-            if (auto v = tryEvalConstInt(*n->Operand, known)) return -*v;
+            if (auto v = tryEvalConstInt(*n->Operand, known)) return checkedNeg(*v);
         if (n->Op == TokenKind::Plus)
             return tryEvalConstInt(*n->Operand, known);
         return std::nullopt;
@@ -68,12 +71,21 @@ std::optional<int64_t> tryEvalConstInt(
         const auto r = tryEvalConstInt(*n->Right, known);
         if (!l || !r) return std::nullopt;
         switch (n->Op) {
-        case TokenKind::Plus:  return *l + *r;
-        case TokenKind::Minus: return *l - *r;
-        case TokenKind::Times: return *l * *r;
-        case TokenKind::Div:   return *r ? std::optional{*l / *r} : std::nullopt;
-        case TokenKind::Mod:   return *r ? std::optional{isoMod(*l, *r)}
-                                         : std::nullopt;
+        // Issue #202: checked the same way Sema's own fold is -- nullopt on
+        // overflow rather than a wrapped value handed back as the constant.
+        case TokenKind::Plus:  return checkedAdd(*l, *r);
+        case TokenKind::Minus: return checkedSub(*l, *r);
+        case TokenKind::Times: return checkedMul(*l, *r);
+        // Issue #201: divOverflows is minint div/mod -1, the one nonzero
+        // divisor with no representable result -- it SIGFPE-traps this
+        // hardware's `idiv` the same way a zero divisor already does, so it
+        // needs the same guard as the zero check right here.
+        case TokenKind::Div:
+            return (*r && !divOverflows(*l, *r))
+                 ? std::optional{*l / *r} : std::nullopt;
+        case TokenKind::Mod:
+            return (*r && !divOverflows(*l, *r))
+                 ? std::optional{isoMod(*l, *r)} : std::nullopt;
         default:               return std::nullopt;
         }
     }
@@ -114,9 +126,15 @@ llvm::Constant* evalConst(
     if (auto* n = dyn_cast<UnaryExpr>(&e)) {
         auto* vc = evalConst(*n->Operand, known, ctx, i64Ty, dblTy);
         if (!vc || n->Op != TokenKind::Minus) return nullptr;
-        if (auto* vi = dyn_cast<llvm::ConstantInt>(vc))
-            return llvm::ConstantInt::get(i64Ty,
-                static_cast<uint64_t>(-vi->getSExtValue()), true);
+        if (auto* vi = dyn_cast<llvm::ConstantInt>(vc)) {
+            // Issue #202: -minint overflows; decline (null, the same answer
+            // as every other expression this cannot fold) instead of
+            // computing the wrapped result.
+            auto neg = checkedNeg(vi->getSExtValue());
+            return neg ? llvm::ConstantInt::get(
+                             i64Ty, static_cast<uint64_t>(*neg), true)
+                       : nullptr;
+        }
         if (auto* vf = dyn_cast<llvm::ConstantFP>(vc))
             return llvm::ConstantFP::get(dblTy,
                 -vf->getValueAPF().convertToDouble());
@@ -133,12 +151,23 @@ llvm::Constant* evalConst(
         auto* ri = dyn_cast<llvm::ConstantInt>(rc);
         if (li && ri) {
             int64_t l = li->getSExtValue(), r = ri->getSExtValue();
+            // Issue #202/#201: checked the same way tryEvalConstInt and
+            // Sema's own fold are -- null (decline) on overflow rather than
+            // a wrapped value baked into the IR as the constant, or, for
+            // minint div/mod -1, a SIGFPE computing it right here.
+            auto asConst = [&](std::optional<int64_t> v) -> llvm::Constant* {
+                return v ? llvm::ConstantInt::get(i64Ty, *v, true) : nullptr;
+            };
             switch (n->Op) {
-            case TokenKind::Plus:  return llvm::ConstantInt::get(i64Ty, l + r, true);
-            case TokenKind::Minus: return llvm::ConstantInt::get(i64Ty, l - r, true);
-            case TokenKind::Times: return llvm::ConstantInt::get(i64Ty, l * r, true);
-            case TokenKind::Div:   return r ? llvm::ConstantInt::get(i64Ty, l / r, true) : nullptr;
-            case TokenKind::Mod:   return r ? llvm::ConstantInt::get(i64Ty, isoMod(l, r), true) : nullptr;
+            case TokenKind::Plus:  return asConst(checkedAdd(l, r));
+            case TokenKind::Minus: return asConst(checkedSub(l, r));
+            case TokenKind::Times: return asConst(checkedMul(l, r));
+            case TokenKind::Div:
+                return (r && !divOverflows(l, r))
+                     ? llvm::ConstantInt::get(i64Ty, l / r, true) : nullptr;
+            case TokenKind::Mod:
+                return (r && !divOverflows(l, r))
+                     ? llvm::ConstantInt::get(i64Ty, isoMod(l, r), true) : nullptr;
             default:               return nullptr;
             }
         }

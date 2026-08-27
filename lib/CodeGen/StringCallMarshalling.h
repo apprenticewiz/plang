@@ -70,9 +70,10 @@ public:
     /// EP §6.7.5.2's optional reset/rewrite/extend/update file name is the
     /// one user today.  A string(n) value has no terminator of its own (only
     /// a length field in front of its bytes), so it is copied into one here;
-    /// anything else (a plain string literal outside Extended Pascal, or an
-    /// already-null-terminated `String`) already IS a `char *` and is
-    /// returned unchanged.
+    /// a char value (a one-character file name, e.g. `update(f, 'x')`) is
+    /// widened into a one-byte-plus-NUL buffer the same way; anything else (a
+    /// plain string literal outside Extended Pascal, or an already-null-
+    /// terminated `String`) already IS a `char *` and is returned unchanged.
     llvm::Value* emitCStrArg(const plang::ExprNode& e);
     /// Wraps a §6.4.3.2 char-array value as a temporary `string(n)` struct.
     llvm::Value* emitCharStrAsStr(const plang::ExprNode& e);
