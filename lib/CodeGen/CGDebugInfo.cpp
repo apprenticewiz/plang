@@ -1,8 +1,11 @@
 #include "CGDebugInfo.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <iostream>
+#include <random>
 
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/BinaryFormat/Dwarf.h"
@@ -53,6 +56,30 @@ std::pair<std::string, std::string> splitDebugFilePath(std::string_view Name) {
     }
     return {P.filename().string(), P.parent_path().string()};
 }
+
+/// Zero-padded 16-hex-digit rendering of a 64-bit token -- used both for
+/// SchemaBuildId_ (embedded in DW_AT_producer and the sidecar's "buildId")
+/// and for a schema's structural fingerprint (the sidecar's per-variant
+/// "fp"), so both sides of issue #140/#141's fix speak the same format.
+std::string toHex16(uint64_t v) {
+    char buf[17];
+    std::snprintf(buf, sizeof(buf), "%016llx", static_cast<unsigned long long>(v));
+    return std::string(buf);
+}
+
+/// FNV-1a, 64-bit -- a small, dependency-free, stable-across-runs hash;
+/// nothing here needs cryptographic strength, only that two structurally
+/// different inputs are exceedingly unlikely to collide and that plang and
+/// plang_schema_printers.py (an independent Python implementation) compute
+/// the identical value from the identical canonical string.
+uint64_t fnv1a64(std::string_view s) {
+    uint64_t h = 14695981039346656037ull;
+    for (unsigned char c : s) {
+        h ^= c;
+        h *= 1099511628211ull;
+    }
+    return h;
+}
 } // namespace
 
 CGDebugInfo::CGDebugInfo(llvm::Module& Mod, llvm::LLVMContext& Ctx, llvm::IRBuilder<>& B,
@@ -65,15 +92,49 @@ CGDebugInfo::CGDebugInfo(llvm::Module& Mod, llvm::LLVMContext& Ctx, llvm::IRBuil
     if (SrcMgr)
         std::tie(Filename, Directory) = splitDebugFilePath(SrcMgr->getBufferName(MainFileID));
     DebugFile = DBuilder->createFile(Filename, Directory);
+
+    // Issue #141: a random 64-bit token, minted fresh every single time a
+    // CGDebugInfo is constructed (i.e. once per compile that has -g on),
+    // regardless of whether this particular compile ever ends up writing a
+    // sidecar. Embedded in DW_AT_producer below (readable back from the
+    // live binary's own DWARF, independent of any file on disk) and again
+    // in the sidecar's own "buildId" field by writeSchemaDebugScript --
+    // plang_schema_printers.py compares the two before trusting the
+    // sidecar, so an older binary loading a newer/different sidecar (or
+    // vice versa) is a detectable mismatch instead of silently wrong data.
+    std::random_device rd;
+    SchemaBuildId_ = (static_cast<uint64_t>(rd()) << 32) | static_cast<uint64_t>(rd());
+
     DebugCU = DBuilder->createCompileUnit(
         llvm::DISourceLanguageName(llvm::dwarf::DW_LANG_Pascal83),
-        DebugFile, "plang " PLANG_VERSION_STRING,
+        DebugFile, "plang " PLANG_VERSION_STRING " schemabuildid:" + toHex16(SchemaBuildId_),
         /*isOptimized=*/Opts.OptLevel > 0, /*Flags=*/"", /*RV=*/0);
     // DWARF cannot be read back without a producer that states which
     // version of the metadata schema it wrote; DIBuilder's own nodes
     // say nothing about this on their own.
     Mod.addModuleFlag(llvm::Module::Warning, "Debug Info Version",
                        llvm::DEBUG_METADATA_VERSION);
+
+    // Issue #141, defense in depth beyond the buildId check above: truncate
+    // any pre-existing sidecar from an EARLIER compile of this same source
+    // right now, rather than only ever overwriting it at the very end in
+    // writeSchemaDebugScript. Narrows the window in which a stale sidecar
+    // on disk can be read by a gdb session against some OTHER, not-yet-
+    // relinked binary while this compile is still running (or if it never
+    // reaches finalize() at all, e.g. it crashes or the schema pass never
+    // runs because Debug got no schema types this time) -- the file is
+    // simply gone rather than confidently describing a different program.
+    if (auto path = schemaSidecarPath(); !path.empty()) {
+        std::error_code ec;
+        std::filesystem::remove(path, ec);
+    }
+}
+
+std::filesystem::path CGDebugInfo::schemaSidecarPath() const {
+    if (!SrcMgr) return {};
+    std::filesystem::path SourcePath(SrcMgr->getBufferName(MainFileID));
+    SourcePath += ".plang-schemas.json";
+    return SourcePath;
 }
 
 // -g.  Every TypeKind that reaches codegen gets a real DIType now (Record/
@@ -530,14 +591,43 @@ void CGDebugInfo::jsonEncodeExtentForm(const ExtentForm& F, std::string& Out) {
     }
 }
 
+std::optional<uint64_t> CGDebugInfo::computeSchemaFingerprint(const RecordTypeNode& rt,
+                                                                size_t numDiscs) {
+    if (!Types) return std::nullopt;
+    if (rt.Variant) return std::nullopt;
+    const auto& DL = Mod.getDataLayout();
+    // Canonical string: discriminant count, then every body field's own
+    // (name, kind, byte size) in DWARF declaration order -- deliberately
+    // the SAME quantities buildRecordDIType feeds a member's own DIType
+    // (DL.getTypeSizeInBits(fp.Ty)/8 is exactly the byte size that becomes
+    // that member's DW_AT_byte_size), so plang_schema_printers.py can
+    // reproduce this identical hash purely from a live gdb.Type's own
+    // member list -- no need to also read the sidecar just to find out
+    // which sidecar entry to trust.
+    std::string canon = "D" + std::to_string(numDiscs) + ";";
+    for (const auto& fd : rt.Fields) {
+        auto* at = llvm::dyn_cast<ArrayTypeNode>(fd.Type.get());
+        if (at && (!at->ExtentLow || !at->ExtentHigh)) return std::nullopt;
+        if (!at && (fd.Type->ExtentLow || fd.Type->ExtentHigh)) return std::nullopt;
+        llvm::Type* FieldLLTy = Types->llvmTypeOfNode(*fd.Type);
+        if (!FieldLLTy) return std::nullopt;
+        const uint64_t sizeBytes = DL.getTypeSizeInBits(FieldLLTy) / 8;
+        const char* kind = at ? "array" : "scalar";
+        for (const auto& name : fd.Names) {
+            canon += name;
+            canon += ':';
+            canon += kind;
+            canon += ':';
+            canon += std::to_string(sizeBytes);
+            canon += ';';
+        }
+    }
+    return fnv1a64(canon);
+}
+
 void CGDebugInfo::recordSchemaLayoutForScript(const Type& T, const RecordTypeNode& rt,
                                                uint64_t hdrBytes) {
     if (!Types) return;
-    // Recorded once per NAME (see schemaScriptEntries_'s own comment) --
-    // schemas sharing a declared name always share a body, so re-recording
-    // the same name from a different probe instantiation would just
-    // duplicate identical work.
-    if (schemaScriptEntries_.count(T.Name)) return;
     // Nothing here handles a variant part or an array whose bound isn't a
     // closed form (shouldn't happen for a field reached through a schema
     // body -- see TypeNode's own ExtentLow/ExtentHigh comment -- but this
@@ -546,9 +636,34 @@ void CGDebugInfo::recordSchemaLayoutForScript(const Type& T, const RecordTypeNod
     // ordinary DWARF-derived value) is exactly as good as not having run
     // this pass at all.
     if (rt.Variant) return;
+
+    // Issue #140: keyed on (T.Name, structural fingerprint), not on the
+    // bare name alone -- two schemas that share a name AND a fingerprint
+    // (the common case: the same schema type recorded from several probe
+    // instantiation sites) collapse into one entry, exactly as the old
+    // name-only key did; two that share a name but NOT a fingerprint (a
+    // genuine collision -- two distinct schema types that happen to be
+    // spelled the same) get a second, distinct entry instead of the first
+    // silently winning forever.
+    const std::optional<uint64_t> fpOpt = computeSchemaFingerprint(rt, T.SchemaDiscs.size());
+    if (!fpOpt) return;
+    const uint64_t fp = *fpOpt;
+
+    auto& variants = schemaScriptEntries_[T.Name];
+    for (const auto& variant : variants)
+        if (variant.first == fp) return; // already recorded -- harmless merge
+    if (!variants.empty() && warnedSchemaNames_.insert(T.Name).second) {
+        std::cerr << "plang: warning: schema type '" << T.Name
+                   << "' is declared more than once with incompatible field "
+                      "layouts (same name, different body) -- the -g debug "
+                      "sidecar now records each layout under its own "
+                      "structural fingerprint so the gdb pretty-printer can "
+                      "tell them apart, but this ambiguity is still worth "
+                      "fixing in the source.\n";
+    }
     const auto& DL = Mod.getDataLayout();
 
-    std::string J = "{";
+    std::string J = "{\"fp\":\"" + toHex16(fp) + "\",";
     J += "\"discs\":[";
     for (size_t i = 0; i < T.SchemaDiscs.size(); ++i) {
         if (i) J += ",";
@@ -595,21 +710,36 @@ void CGDebugInfo::recordSchemaLayoutForScript(const Type& T, const RecordTypeNod
         J += fieldJson;
     }
     J += "]}";
-    schemaScriptEntries_[T.Name] = J;
+    variants.emplace_back(fp, std::move(J));
 }
 
 void CGDebugInfo::writeSchemaDebugScript() {
     if (schemaScriptEntries_.empty() || !SrcMgr) return;
-    std::filesystem::path SourcePath(SrcMgr->getBufferName(MainFileID));
-    std::filesystem::path SidecarPath = SourcePath;
-    SidecarPath += ".plang-schemas.json";
+    const std::filesystem::path SidecarPath = schemaSidecarPath();
+    if (SidecarPath.empty()) return;
 
-    std::string J = "{\"schemas\":{";
+    // Issue #140: each name now maps to a JSON ARRAY of variant bodies (one
+    // per distinct structural fingerprint seen under that name), not a
+    // single object -- see schemaScriptEntries_'s own comment. The common,
+    // non-colliding case is a one-element array; plang_schema_printers.py
+    // only needs to disambiguate at all once it sees more than one.
+    //
+    // Issue #141: "buildId" ties this specific sidecar to this specific
+    // compile -- see SchemaBuildId_'s own comment for how the printer uses
+    // it (compared against the matching token embedded in DW_AT_producer).
+    std::string J = "{\"buildId\":\"" + toHex16(SchemaBuildId_) + "\",\"schemas\":{";
     bool first = true;
-    for (const auto& [name, body] : schemaScriptEntries_) {
+    for (const auto& [name, variants] : schemaScriptEntries_) {
         if (!first) J += ",";
         first = false;
-        J += "\"" + name + "\":" + body;
+        J += "\"" + name + "\":[";
+        bool firstVariant = true;
+        for (const auto& [fp, body] : variants) {
+            if (!firstVariant) J += ",";
+            firstVariant = false;
+            J += body;
+        }
+        J += "]";
     }
     J += "}}";
 
