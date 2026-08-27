@@ -584,13 +584,19 @@ void Sema::processImports(const std::vector<ImportClause>& Imports) {
             };
 
             // Search in ModuleSearchPaths first, then the current directory.
+            // The filename uses Key (already lowercased), matching how
+            // writePMIFiles names the file it publishes -- Pascal module
+            // names are case-insensitive, so the file has to be found
+            // whichever case the import clause spells it in, even on a
+            // case-sensitive filesystem. The module's true identity still
+            // travels inside the file and is checked below (WrongModule).
             bool Found = false;
             for (const auto& Dir : Opts.ModuleSearchPaths)
-                if (tryCandidate(Dir + "/" + Clause.ModuleName + ".pmi")) {
+                if (tryCandidate(Dir + "/" + Key + ".pmi")) {
                     Found = true;
                     break;
                 }
-            if (!Found) Found = tryCandidate("./" + Clause.ModuleName + ".pmi");
+            if (!Found) Found = tryCandidate("./" + Key + ".pmi");
 
             if (!Found) {
                 switch (LastFailure.St) {
@@ -693,9 +699,17 @@ Sema::PMILoadResult Sema::loadPMI(const std::string& Key, const std::string& Pat
 
     // A .pmi holds the interface of one module, written as an EP module
     // heading.  The parser reads a file of modules followed by a program, so
-    // an empty program is appended to make one.
+    // an empty program is appended to make one.  The wrapper's own name has
+    // to be a valid EP identifier -- "__pmi__" used to be used here, but its
+    // leading, trailing, AND doubled underscore each trip ISO 10206 §6.1.3's
+    // own placement rule (see Scanner::scanIdentifierOrKeyword), so every
+    // load used to carry at least one guaranteed, unrelated error that had
+    // nothing to do with whatever the real .pmi content said.  "pmiwrapper"
+    // has no underscore at all, so it trips neither that rule nor the
+    // EP-extension-underscore warning, and the diagnostic stream below can
+    // now be trusted to reflect only the content that was actually read.
     std::string Wrapped = SS.str();
-    Wrapped += "\nprogram __pmi__;\nbegin end.\n";
+    Wrapped += "\nprogram pmiwrapper;\nbegin end.\n";
 
     // Parse the wrapped content using an in-memory scanner.  PMIDiags and
     // PMISrcMgr are both local to this call -- a Diagnostic's own SourceLoc
@@ -711,17 +725,20 @@ Sema::PMILoadResult Sema::loadPMI(const std::string& Key, const std::string& Pat
     Scanner PSc(PMISrcMgr, "<" + Path + ">", Wrapped, PMIDiags, PMIOpts);
     Parser  PP(std::move(PSc), PMIDiags, PMIOpts);
     auto Prog = PP.parse();
-    // !Prog, not PMIDiags.hasErrors(): confirmed empirically, not just by
-    // reasoning about the two conditions in the abstract.  The synthetic
-    // "program __pmi__;" wrapper above trips this compiler's own
-    // leading/trailing-underscore identifier rule -- a real, pre-existing
-    // scanner defect in the wrapper name, unrelated to whatever a real .pmi
-    // actually says -- and the parser's error recovery still returns a
-    // valid Prog despite it, so hasErrors() is true on every load, including
-    // ones that have always worked. Using hasErrors() as the gate broke
-    // importing a real, freshly-compiler-generated .pmi outright; !Prog
-    // matches the original, working behavior.
-    if (!Prog) {
+    // Both !Prog and PMIDiags.hasErrors() matter now that the wrapper itself
+    // is clean.  Parser::parse() already returns null once its own
+    // ErrorCount is nonzero, but ErrorCount only counts errors the Parser
+    // itself raised through Parser::emitError -- a Scanner-level error (an
+    // invalid character, an unterminated string, a misplaced underscore
+    // inside the .pmi's OWN content) reports straight to PMIDiags via
+    // Scanner::emitError without ever touching the Parser's counter, so
+    // Parser::parse() can still hand back a non-null (if partial) tree.
+    // Checking only !Prog, as this code used to before the wrapper was
+    // fixed, would silently accept such a file: a hand-edited or
+    // wrongly-generated .pmi that a Scanner error flags as malformed must
+    // not be trusted just because parsing recovered enough to produce a
+    // tree.
+    if (!Prog || PMIDiags.hasErrors()) {
         std::string Detail;
         for (const auto& D : PMIDiags.diagnostics())
             if (D.Severity == DiagSeverity::Error) { Detail = D.Message; break; }
@@ -1189,6 +1206,11 @@ void Sema::checkBlock(const BlockNode& Block,
                 error(Vg.Type->Loc, diag::err_value_init_type_mismatch,
                       {InitT->Name, T->Name});
             checkStringCapacity(*T, *Vg.InitExpr);
+            // isAssignCompatible above accepts any integer literal for a
+            // subrange destination, same gap checkInitialState had for a
+            // type-denoter's own 'value' clause (#254): `var x: 1..10 value
+            // 500;` compiled clean and x started life outside its subrange.
+            warnIfConstantOutOfRange(*T, *Vg.InitExpr);
             adoptSetType(*Vg.InitExpr, T);
         }
     }

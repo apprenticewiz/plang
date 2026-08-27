@@ -41,9 +41,11 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <limits>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -211,12 +213,29 @@ CatalogReport MessageCatalog::loadText(std::string_view Text, bool Merge) {
 
     // The header entry has no msgctxt; its metadata is read here and it is not
     // stored.  Everything else needs a msgctxt to be found by.
+    bool SawHeader = false; // the genuine header, once its entry has been read
     auto flush = [&]() -> bool {
         struct Reset { Pending& P; Field& F;
                        ~Reset() { P.reset(); F = Field::None; } } _{P, Cur};
 
         if (!P.HasCtxt) {
             if (!P.HasStr) return true;             // nothing at all: fine
+
+            // gettext's header is the entry with an empty msgid, and only the
+            // first one is it.  msgctxt is optional in gettext and most
+            // real-world entries never carry one, so without the Id check
+            // here, an ordinary "msgid / msgstr" pair -- ctxt-less, like the
+            // header, but a message like any other -- would be misread as
+            // the header the moment its msgstr happened to contain a line
+            // starting "Content-Type:" or "X-Plang-Catalog-ABI:", and could
+            // refuse the whole catalog over a charset that was never
+            // actually declared.
+            if (!P.Id.empty() || SawHeader) {
+                ++R.Unknown; // msgctxt-less and not the header: no key to load it under
+                return true;
+            }
+            SawHeader = true;
+
             // The header.  Only two fields can refuse the file.
             std::string_view H = P.Str;
             const auto find = [&](std::string_view Key) -> std::string_view {
@@ -250,10 +269,25 @@ CatalogReport MessageCatalog::loadText(std::string_view Text, bool Merge) {
                 }
             }
             if (std::string_view Abi = find("X-Plang-Catalog-ABI:"); !Abi.empty()) {
-                unsigned V = 0;
-                for (char Ch : Abi)
-                    if (Ch >= '0' && Ch <= '9') V = V * 10 + unsigned(Ch - '0');
-                    else break;
+                // A saturating parse.  CatalogAbi is a small constant, so all
+                // that matters past it is "bigger" -- but an accumulator that
+                // wraps on overflow can come back around to something small
+                // and *equal*, which is how 2**32 + 1 previously wrapped to 1
+                // and a catalog claiming an ABI four billion newer than this
+                // reader was silently accepted.  Clamping instead of wrapping
+                // keeps an oversized or adversarial number reading as "newer
+                // than this plang" -- refused -- rather than as anything a
+                // real ABI could be.
+                std::uint64_t V = 0;
+                for (char Ch : Abi) {
+                    if (Ch < '0' || Ch > '9') break;
+                    const auto Digit = static_cast<std::uint64_t>(Ch - '0');
+                    if (V > (std::numeric_limits<std::uint64_t>::max() - Digit) / 10) {
+                        V = std::numeric_limits<std::uint64_t>::max();
+                        break;
+                    }
+                    V = V * 10 + Digit;
+                }
                 if (V > CatalogAbi) {
                     R.FatalReason = "catalog needs a newer plang (ABI " +
                                     std::to_string(V) + ")";

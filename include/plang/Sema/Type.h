@@ -97,14 +97,21 @@ struct Type {
     ///
     /// Meaningful for Integer, Subrange, Enum and Boolean, and for Real it is
     /// the float width.  Every other kind leaves it at the default and nothing
-    /// reads it.
+    /// reads it -- except Pointer, Nil and String (issue #243's follow-up),
+    /// where it is the TARGET's pointer width, not a per-value bit count: a
+    /// pointer has no bits of its own to be wide or narrow, but Sema::
+    /// byteSizeOf/byteAlignOf still need an answer for `^T`, and it varies
+    /// with --target the same way an Integer's width varies with -std=.
     ///
     /// ISO 7185 and Extended Pascal have one integer type and stamp 64 on all
     /// of it, so `getIntNTy(ctx, Width)` is the i64 those dialects already
     /// emitted.  Turbo has Byte, ShortInt, Word, Integer, LongInt and Comp at
     /// four different widths, and the width has to travel with the type: it is
     /// what SizeOf answers, what a variable typecast's legality rule compares,
-    /// and what a `file of T` image is made of.
+    /// and what a `file of T` image is made of.  TypeContext stamps the
+    /// pointer-kind default (64, i.e. 8 bytes -- every machine plang ran on
+    /// before --target existed) the same way it stamps Integer's: once, at
+    /// construction, from what the driver/front end resolved --target to.
     unsigned Width{64};
     bool     IsSigned{true};
 

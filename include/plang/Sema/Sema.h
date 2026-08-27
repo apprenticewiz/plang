@@ -147,8 +147,10 @@ private:
 
     /// Canonical type store — owns built-in singletons and interns structural
     /// types.  Built from Opts, which is why Opts is declared above it: what an
-    /// unqualified `integer` is depends on the dialect.
-    TypeContext Ctx_{Opts.defaultIntWidth()};
+    /// unqualified `integer` is depends on the dialect, and what a pointer is
+    /// (Type::Width, for Pointer/Nil/String -- see TypeContext's constructor)
+    /// depends on --target.
+    TypeContext Ctx_{Opts.defaultIntWidth(), Opts.PointerWidthBits};
 
     // Convenience aliases that forward to TypeContext singletons.
     // Kept for backward compat with existing Sema implementation code.
@@ -621,6 +623,15 @@ private:
     [[nodiscard]] std::optional<std::pair<int64_t, int64_t>>
     foldBounds(const ExprNode& Low, const ExprNode& High,
                const Type& Base, DiagID LowID, DiagID HighID);
+
+    // ISO §6.4.2.2/§6.4.3.2: reports err_bound_types_differ (against High's
+    // location) and returns false when LoTy and HiTy are both ordinal but
+    // not of the same ordinal type.  True (nothing to report here) when
+    // either side is already an error, or is not ordinal at all -- that half
+    // of the question belongs to the caller, which already has its own
+    // not-ordinal diagnostic in scope.
+    [[nodiscard]] bool boundsShareOrdinalType(const Type& LoTy, const ExprNode& High,
+                                              const Type& HiTy);
 
     // ---- statement checking ----
     void checkStmt      (const StmtNode*   Stmt);

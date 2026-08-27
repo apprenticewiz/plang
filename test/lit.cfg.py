@@ -139,6 +139,19 @@ if shutil.which("gdb") is not None:
 if os.name != "nt":
     config.available_features.add("posix")
 
+# dev-full: /dev/full is a Linux (and some other Unix) character device that
+# accepts any open but fails every write with ENOSPC -- the only portable way
+# to make a write fail *after* a successful open, which is exactly the gap
+# issue #246 found (a failed OPEN was already diagnosed; a failed WRITE was
+# not). Not present on macOS, so this is probed directly rather than assumed
+# from the platform name, the same way fpc-binary/gdb-binary above are.
+try:
+    import stat
+    if stat.S_ISCHR(os.stat("/dev/full").st_mode):
+        config.available_features.add("dev-full")
+except OSError:
+    pass
+
 # asan-build: issue #146's CodeGen expression-depth guard (CGExprCore.h)
 # uses a much lower MaxExprDepth under a sanitizer build, where its real
 # per-frame stack cost is far higher than on a normal build, than on one

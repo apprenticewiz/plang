@@ -14,6 +14,7 @@
 #include "plang_real.h"
 
 #include <cctype>
+#include <cerrno>
 #include <cinttypes>
 #include <cstdarg>
 #include <cstdint>
@@ -31,20 +32,51 @@ std::size_t PlangInPos = 0;
 
 namespace {
 
-/// writestr's destination.  Null while output is going to stdout.  Grown on
-/// demand and kept between statements so the common case does not re-allocate.
-char*       CapBuf = nullptr;
-std::size_t CapLen = 0;
-std::size_t CapCap = 0;
-bool        Capturing = false;
+/// One level of writestr's destination buffer.  Grown on demand and kept
+/// between calls at the same nesting depth so the common (non-nested) case
+/// does not re-allocate.
+struct CapFrame {
+    char*       Buf = nullptr;
+    std::size_t Len = 0;
+    std::size_t Cap = 0;
+};
 
-void capReserve(std::size_t Need) {
-    if (Need <= CapCap) return;
-    std::size_t NewCap = CapCap ? CapCap : 256;
+/// Stack of capture frames, one per writestr currently in progress.  A
+/// writestr's write-parameters are ordinary expressions, so one of them may
+/// call a function that itself calls writestr (e.g. `writestr(s, 'x', f())`
+/// where f writes into a string of its own) -- capture state has to nest
+/// rather than share a single buffer, or the inner call clobbers the outer
+/// call's in-progress text, and the inner call's `Capturing = false` sends
+/// the rest of the outer call's output to stdout instead of into its buffer.
+/// Index CapDepth-1 is the innermost (currently-writing) frame; CapDepth ==
+/// 0 means output goes to stdout.
+CapFrame*   CapStack    = nullptr;
+std::size_t CapStackCap = 0;   // allocated slots in CapStack
+std::size_t CapDepth    = 0;   // active frames
+
+/// Grows CapStack, if needed, to hold at least \p Need frames.
+void capStackReserve(std::size_t Need) {
+    if (Need <= CapStackCap) return;
+    std::size_t NewCap = CapStackCap ? CapStackCap : 4;
     while (NewCap < Need) NewCap *= 2;
-    if (char* P = static_cast<char*>(std::realloc(CapBuf, NewCap))) {
-        CapBuf = P;
-        CapCap = NewCap;
+    auto* P = static_cast<CapFrame*>(std::realloc(CapStack, NewCap * sizeof(CapFrame)));
+    if (!P) return;   // allocation failed; caller sees CapStackCap unchanged
+    for (std::size_t I = CapStackCap; I < NewCap; ++I) {
+        P[I].Buf = nullptr;
+        P[I].Len = 0;
+        P[I].Cap = 0;
+    }
+    CapStack    = P;
+    CapStackCap = NewCap;
+}
+
+void capReserve(CapFrame& F, std::size_t Need) {
+    if (Need <= F.Cap) return;
+    std::size_t NewCap = F.Cap ? F.Cap : 256;
+    while (NewCap < Need) NewCap *= 2;
+    if (char* P = static_cast<char*>(std::realloc(F.Buf, NewCap))) {
+        F.Buf = P;
+        F.Cap = NewCap;
     }
 }
 
@@ -52,11 +84,12 @@ void capReserve(std::size_t Need) {
 
 void plangOutN(const char* Data, std::size_t N) {
     if (N == 0) return;
-    if (!Capturing) { std::fwrite(Data, 1, N, stdout); return; }
-    capReserve(CapLen + N);
-    if (CapLen + N > CapCap) return;   // allocation failed; drop the excess
-    std::memcpy(CapBuf + CapLen, Data, N);
-    CapLen += N;
+    if (CapDepth == 0) { std::fwrite(Data, 1, N, stdout); return; }
+    CapFrame& F = CapStack[CapDepth - 1];
+    capReserve(F, F.Len + N);
+    if (F.Len + N > F.Cap) return;   // allocation failed; drop the excess
+    std::memcpy(F.Buf + F.Len, Data, N);
+    F.Len += N;
 }
 
 void plangOutStr(const char* S) {
@@ -95,20 +128,47 @@ int skipBlanks() {
     return C;
 }
 
-/// Collects the longest prefix that can form a number into \p Tok, which must
-/// hold TokMax characters.  Digits only when \p Real is false; otherwise also
-/// a fractional part and an exponent.
-constexpr std::size_t TokMax = 64;
+/// scanNumber's token buffer.  Issue #237: this used to be a fixed 64
+/// characters, silently truncating any longer literal -- most visibly, a
+/// long real's exponent digits fell off the end along with everything else
+/// past the limit, so "1" followed by 71 more digits read back as 1e+62
+/// instead of 1e71.  Grown on demand like writestr's CapBuf just above, and
+/// kept between calls for the same reason: the common case allocates once.
+char*       TokBuf = nullptr;
+std::size_t TokCap = 0;
 
-void scanNumber(char* Tok, bool Real) {
+void tokReserve(std::size_t Need) {
+    if (Need <= TokCap) return;
+    std::size_t NewCap = TokCap ? TokCap : 64;
+    while (NewCap < Need) NewCap *= 2;
+    if (char* P = static_cast<char*>(std::realloc(TokBuf, NewCap))) {
+        TokBuf = P;
+        TokCap = NewCap;
+    }
+}
+
+/// Collects the longest prefix that can form a number into TokBuf, growing
+/// it rather than truncating (issue #237).  Digits only when \p Real is
+/// false; otherwise also a fractional part and an exponent.
+///
+/// \p SawAny reports whether a non-blank character was available at all
+/// before end-of-file -- how the caller tells a malformed token (issue
+/// #236: something was there and it didn't parse) apart from a legitimate
+/// read past the end of the input (issue #284: nothing was left to read).
+void scanNumber(bool Real, bool &SawAny) {
     std::size_t N = 0;
-    auto put = [&](int C) { if (N + 1 < TokMax) Tok[N++] = static_cast<char>(C); };
+    auto put = [&](int C) {
+        tokReserve(N + 2);
+        if (N + 1 < TokCap) TokBuf[N++] = static_cast<char>(C);
+    };
     auto digits = [&](int& C) {
         while (C != EOF && std::isdigit(static_cast<unsigned char>(C)))
             { put(C); C = plangInCh(); }
     };
 
+    tokReserve(1);
     int C = skipBlanks();
+    SawAny = (C != EOF);
     if (C == '+' || C == '-') { put(C); C = plangInCh(); }
     digits(C);
     if (Real) {
@@ -121,7 +181,7 @@ void scanNumber(char* Tok, bool Real) {
         }
     }
     plangInUnget(C);
-    Tok[N] = '\0';
+    if (TokBuf) TokBuf[N] = '\0';
 }
 
 void consumeLine() {
@@ -140,6 +200,8 @@ void plang_write_f64_f(double V, int64_t W, int64_t D);
 
 /// Defined with the other runtime error reporters in plang_sys.cpp.
 [[noreturn]] void plang_err_field_width(int64_t W);
+[[noreturn]] void plang_err_read_format(const char *Op);
+[[noreturn]] void plang_err_read_int_range(const char *Op, const char *Tok);
 
 // ISO §6.10.3.1 calls a negative TotalWidth or FracDigits "an error" (§3.2's
 // weaker class, which a processor may leave undetected) rather than saying
@@ -210,14 +272,28 @@ void plang_writeln_cplx_w(double Re, double Im, int64_t W, int64_t D)
 // ---- read ----
 
 void plang_read_i64 (int64_t *P) {
-    char Tok[TokMax];
-    scanNumber(Tok, /*Real=*/false);
-    if (Tok[0]) *P = std::strtoll(Tok, nullptr, 10);
+    bool SawAny = false;
+    scanNumber(/*Real=*/false, SawAny);
+    if (!SawAny) { *P = 0; return; }             // issue #284: past EOF is a defined, consistent zero
+    char* End = TokBuf;
+    errno = 0;
+    const long long V = TokBuf ? std::strtoll(TokBuf, &End, 10) : 0;
+    if (!TokBuf || End == TokBuf) plang_err_read_format("read");        // issue #236
+    if (errno == ERANGE) plang_err_read_int_range("read", TokBuf);      // issue #240
+    *P = static_cast<int64_t>(V);
 }
 void plang_read_f64 (double  *P) {
-    char Tok[TokMax];
-    scanNumber(Tok, /*Real=*/true);
-    if (Tok[0]) *P = std::strtod(Tok, nullptr);
+    bool SawAny = false;
+    scanNumber(/*Real=*/true, SawAny);
+    if (!SawAny) { *P = 0.0; return; }            // issue #284
+    char* End = TokBuf;
+    const double V = TokBuf ? std::strtod(TokBuf, &End) : 0.0;
+    if (!TokBuf || End == TokBuf) plang_err_read_format("read");        // issue #236
+    // A real that overflows to +/-HUGE_VAL is left alone, matching the
+    // runtime's existing policy for real arithmetic generally (an IEEE
+    // infinity or NaN, not a trap) -- issue #240 is scoped to integers,
+    // whose type has no infinity to fall back on.
+    *P = V;
 }
 void plang_read_char(int8_t  *P) {
     const int C = plangInCh();
@@ -287,7 +363,15 @@ static void plangOutPadded(const char* S, int64_t W) {
     if (W == 0) return;
     const size_t Len = S ? std::strlen(S) : 0;
     if (W < 0) { if (Len) plangOutN(S, Len); return; }
-    const auto Width = static_cast<size_t>(W);
+    // W > 0 here: the numeric/char writers above hand W to printf's `%*d`/
+    // `%*c`, so checkedWidth's INT32_MAX trap guards their width argument
+    // from silently truncating (issue #15). This writer paces its own
+    // padding loop by hand instead of going through printf, so without the
+    // same call an oversized W (write(s:maxint)) just pads one character at
+    // a time until it gets there -- no truncation to guard against, but an
+    // unbounded amount of CPU and output for a value nothing could ever
+    // read (issue #247).
+    const auto Width = static_cast<size_t>(checkedWidth(W));
     for (size_t I = Len; I < Width; ++I) plangOutCh(' ');
     if (Len) plangOutN(S, Len < Width ? Len : Width);
 }
@@ -318,22 +402,32 @@ void plang_writeln_str_w (const char *S, int64_t W) { plang_write_str_w(S, W); p
 // writestr and readstr inherit the full set of formats and parsing rules.
 
 void plang_writestr_begin() {
-    CapLen    = 0;
-    Capturing = true;
+    capStackReserve(CapDepth + 1);
+    if (CapDepth >= CapStackCap) return;   // allocation failed; degrade to a no-op frame
+    CapStack[CapDepth].Len = 0;
+    ++CapDepth;
 }
 
 /// Ends capture, storing the formatted text into the string(N) at \p S.
 /// Characters beyond \p Cap are dropped, matching truncating assignment.
+/// Pops this writestr's frame off CapStack so an enclosing writestr (if any)
+/// resumes capturing into its own buffer instead of falling through to stdout.
 void plang_writestr_end(void *S, int64_t Cap) {
-    Capturing = false;
+    std::size_t Len = 0;
+    const char* Buf = nullptr;
+    if (CapDepth > 0) {
+        CapFrame& F = CapStack[--CapDepth];
+        Len = F.Len;
+        Buf = F.Buf;
+    }
     if (!S) return;
-    auto Len = static_cast<int64_t>(CapLen);
-    if (Len > Cap) Len = Cap;
+    auto L = static_cast<int64_t>(Len);
+    if (L > Cap) L = Cap;
     // string(N) is { i64 length, [N x i8] data }; see strStructType in codegen.
     auto* Base = static_cast<char*>(S);
-    *reinterpret_cast<int64_t*>(Base) = Len;
-    if (Len > 0)
-        std::memcpy(Base + sizeof(int64_t), CapBuf, static_cast<std::size_t>(Len));
+    *reinterpret_cast<int64_t*>(Base) = L;
+    if (L > 0)
+        std::memcpy(Base + sizeof(int64_t), Buf, static_cast<std::size_t>(L));
 }
 
 /// The fixed-string-type sibling: EP §6.7.5.5 defines writestr(s, ...) as
@@ -342,13 +436,19 @@ void plang_writestr_end(void *S, int64_t Cap) {
 /// whatever is short of capacity N is padded with spaces rather than left
 /// out of a length count.
 void plang_writestr_end_fixed(void *Buf, int64_t N) {
-    Capturing = false;
+    std::size_t Len = 0;
+    const char* Src = nullptr;
+    if (CapDepth > 0) {
+        CapFrame& F = CapStack[--CapDepth];
+        Len = F.Len;
+        Src = F.Buf;
+    }
     if (!Buf) return;
-    auto Len = static_cast<int64_t>(CapLen);
-    if (Len > N) Len = N;
+    auto L = static_cast<int64_t>(Len);
+    if (L > N) L = N;
     auto* Data = static_cast<char*>(Buf);
-    if (Len > 0) std::memcpy(Data, CapBuf, static_cast<std::size_t>(Len));
-    for (int64_t I = Len; I < N; ++I) Data[I] = ' ';
+    if (L > 0) std::memcpy(Data, Src, static_cast<std::size_t>(L));
+    for (int64_t I = L; I < N; ++I) Data[I] = ' ';
 }
 
 void plang_readstr_begin(const void *S, int64_t Len) {

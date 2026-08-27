@@ -106,6 +106,30 @@ Sema::foldBounds(const ExprNode& Low, const ExprNode& High,
     return std::pair{*Lo, *Hi};
 }
 
+/// ISO §6.4.2.2: a subrange-type's two bounds shall be constants of the same
+/// ordinal type, which becomes the subrange's host type; ISO §6.4.3.2 makes
+/// an index type written as a range the same rule.  The callers used to pick
+/// a host type from "whichever bound is ordinal" -- Low if it qualified,
+/// else High, else a silent fallback to integer -- and never asked whether
+/// the OTHER bound agreed, so `1..b` (integer, enum) and `'a'..100` (char,
+/// integer) were each accepted as if the second bound's type were the
+/// first's (issue #251).
+///
+/// Silent (true) when either side is already Error, so one bad bound is not
+/// reported twice, and when either side is not ordinal at all: that is a
+/// different mistake than a mismatched PAIR of ordinal types, and is left
+/// for the caller's own not-ordinal diagnostic (or, failing that, for
+/// foldBounds/constBound to find nothing to fold).
+bool Sema::boundsShareOrdinalType(const Type& LoTy, const ExprNode& High,
+                                  const Type& HiTy) {
+    if (LoTy.isError() || HiTy.isError())     return true;
+    if (!LoTy.isOrdinal() || !HiTy.isOrdinal()) return true;
+    if (isAssignCompatible(LoTy, HiTy) || isAssignCompatible(HiTy, LoTy))
+        return true;
+    error(High.Loc, diag::err_bound_types_differ, {LoTy.Name, HiTy.Name});
+    return false;
+}
+
 std::shared_ptr<Type> Sema::resolveType(const TypeNode& Node) {
     auto T = resolveTypeImpl(Node);
     // Record the result on the node so codegen can lower type denoters whose
@@ -169,6 +193,13 @@ void Sema::checkInitialState(const TypeNode& Node, const Type& T) {
         error(Node.InitialState->Loc, diag::err_value_init_type_mismatch,
               {VT->Name, T.Name});
     checkStringCapacity(T, *Node.InitialState);
+    // isAssignCompatible above only checks that a value of T's ORDINAL kind
+    // was written -- any integer literal satisfies a subrange -- so `1..5
+    // value 99` compiled clean and every variable of the type started life
+    // holding 99, already outside its own subrange.  The same constant is
+    // checked against T's actual bounds the way an assigned one is
+    // (checkAssignStmt's warnIfConstantOutOfRange call).
+    warnIfConstantOutOfRange(T, *Node.InitialState);
     adoptSetType(*Node.InitialState, Node.ResolvedType);
     // Folded HERE, in the scope the 'value' clause was actually written in --
     // constBound/constRealBound write the result onto InitialState's own
@@ -359,6 +390,7 @@ std::shared_ptr<Type> Sema::resolveTypeImpl(const TypeNode& Node) {
         // Determine the ordinal base type of the index from the declared bounds.
         auto Lo = checkExpr(*N->Low);
         auto Hi = checkExpr(*N->High);
+        if (!boundsShareOrdinalType(*Lo, *N->High, *Hi)) return TyErr;
         auto BaseOrd = (Lo->isOrdinal() ? Lo : (Hi->isOrdinal() ? Hi : TyInt));
         // As for a string capacity above: whether THESE bounds read a
         // discriminant, not whether anything in the enclosing body did.
@@ -392,6 +424,7 @@ std::shared_ptr<Type> Sema::resolveTypeImpl(const TypeNode& Node) {
     if (auto* N = llvm::dyn_cast<SubrangeTypeNode>(&Node)) {
         auto Lo = checkExpr(*N->Low);
         auto Hi = checkExpr(*N->High);
+        if (!boundsShareOrdinalType(*Lo, *N->High, *Hi)) return TyErr;
         auto Base = (Lo->isOrdinal() ? Lo : (Hi->isOrdinal() ? Hi : TyInt));
         const bool SavedUsed = SchemaBindingUsed_;
         SchemaBindingUsed_   = false;
@@ -1555,9 +1588,14 @@ uint64_t Sema::byteAlignOf(const Type& T) {
     case TypeKind::Real:        return 8;
     case TypeKind::Complex:     return 8;
     case TypeKind::Set:         return intAlign(PlangMaxSetElements);
+    // The target's pointer width (issue #243's follow-up): Type::Width is
+    // repurposed for these three kinds -- see its comment -- and stamped by
+    // TypeContext from --target=, defaulting to 8 bytes where it was not
+    // given.  Alignment equals size for a bare pointer on every ABI plang
+    // targets.
     case TypeKind::String:
     case TypeKind::Pointer:
-    case TypeKind::Nil:         return 8;
+    case TypeKind::Nil:         return T.Width / 8;
     case TypeKind::VarString:   return 8;   // the length field leads it
     case TypeKind::File:        return 8;   // a pointer leads PascalFile
     case TypeKind::Array:       return T.ElemType ? byteAlignOf(*T.ElemType) : 1;
@@ -1587,9 +1625,10 @@ std::optional<uint64_t> Sema::byteSizeOf(const Type& T, FieldOffsets* Offsets) {
     case TypeKind::Real:        return 8;
     case TypeKind::Complex:     return 16;  // { double, double }
     case TypeKind::Set:         return intBytes(PlangMaxSetElements);
+    // The target's pointer width; see the identical case in byteAlignOf.
     case TypeKind::String:
     case TypeKind::Pointer:
-    case TypeKind::Nil:         return 8;
+    case TypeKind::Nil:         return T.Width / 8;
     // EP §6.4.3.3: { i64 length, [capacity x i8] }.
     case TypeKind::VarString:
         return roundUp(8 + static_cast<uint64_t>(T.StrCapacity > 0 ? T.StrCapacity
