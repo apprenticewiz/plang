@@ -649,10 +649,21 @@ void CGDebugInfo::recordSchemaLayoutForScript(const Type& T, const RecordTypeNod
     if (!fpOpt) return;
     const uint64_t fp = *fpOpt;
 
-    auto& variants = schemaScriptEntries_[T.Name];
-    for (const auto& variant : variants)
-        if (variant.first == fp) return; // already recorded -- harmless merge
-    if (!variants.empty() && warnedSchemaNames_.insert(T.Name).second) {
+    // Looked up without inserting: any of this function's several bail-out
+    // returns below (a nested-schema field, a variant part reached late,
+    // an unlowerable field type, ...) must NOT leave a stray empty
+    // "name":[] entry behind for a schema that's never actually recorded --
+    // plang_schema_printers.py's own SIDECAR-NOT-style tests treat the
+    // bare presence of a name as "this schema WAS recorded", so an empty
+    // placeholder is as wrong as a real-but-incorrect one. Only the final,
+    // successful emplace_back below touches schemaScriptEntries_ itself.
+    auto existingIt = schemaScriptEntries_.find(T.Name);
+    const bool hadPriorVariants =
+        existingIt != schemaScriptEntries_.end() && !existingIt->second.empty();
+    if (existingIt != schemaScriptEntries_.end())
+        for (const auto& variant : existingIt->second)
+            if (variant.first == fp) return; // already recorded -- harmless merge
+    if (hadPriorVariants && warnedSchemaNames_.insert(T.Name).second) {
         std::cerr << "plang: warning: schema type '" << T.Name
                    << "' is declared more than once with incompatible field "
                       "layouts (same name, different body) -- the -g debug "
@@ -724,7 +735,7 @@ void CGDebugInfo::recordSchemaLayoutForScript(const Type& T, const RecordTypeNod
         J += fieldJson;
     }
     J += "]}";
-    variants.emplace_back(fp, std::move(J));
+    schemaScriptEntries_[T.Name].emplace_back(fp, std::move(J));
 }
 
 void CGDebugInfo::writeSchemaDebugScript() {
