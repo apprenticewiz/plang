@@ -376,6 +376,18 @@ private:
     llvm::DIType* fieldOrFallbackDIType(const plang::Type* SemaTy, llvm::Type* LLTy,
                                          const std::string& DisplayName);
 
+    /// The module's real pointer width, in bits -- what every createPointerType
+    /// call below must report as a DWARF pointer member's DW_AT_byte_size,
+    /// rather than the 64 every one of them hardcoded until issue #243's
+    /// follow-up (a data layout that is genuinely non-host's own only became
+    /// reachable once --target started working at all).  Mod's data layout is
+    /// already target-correct -- Codegen::Impl::init sets it from the same
+    /// --target this debug info is being built for -- so this asks it rather
+    /// than re-deriving the width a second, independent way.
+    [[nodiscard]] unsigned ptrBits() const {
+        return Mod.getDataLayout().getPointerSizeInBits();
+    }
+
     llvm::Module& Mod;
     llvm::LLVMContext& Ctx;
     llvm::IRBuilder<>& B;

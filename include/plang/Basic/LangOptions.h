@@ -61,6 +61,30 @@ struct LangOptions {
     /// lookup that keys off it (see Codegen::Impl::init), the same way any
     /// other target LLVM was not built with does.
     std::string TargetTriple;
+    /// The pointer width TargetTriple implies, in bits: 32 or 64.  Defaults to
+    /// 64, matching every machine plang ran on before --target existed and
+    /// TargetTriple was still empty.
+    ///
+    /// A plain integer rather than something Sema could ask llvm::Triple
+    /// itself: this header, and Sema/TypeContext below it, are built with no
+    /// LLVM dependency at all (see CodeGen.h's own comment on why CodeGen is
+    /// hidden behind a pimpl), so the one llvm::Triple query this needs is
+    /// made once, upstream in frontendPC1Main where TargetTriple is parsed,
+    /// and only the answer crosses into this LLVM-free half of the compiler.
+    ///
+    /// TypeContext stamps this onto every Pointer/Nil/String Type it mints
+    /// (Type::Width, repurposed for those three kinds -- see its comment),
+    /// the same way it already stamps Integer's dialect-dependent width: once,
+    /// at construction, so that Sema::byteSizeOf/byteAlignOf need no target
+    /// awareness of their own and CodeGen's checkSizeAgreement/
+    /// checkFieldOffsetAgreement oracle (CGTypes.cpp) — which independently
+    /// asks the module's real DataLayout for a `ptr`'s size — has something
+    /// that actually agrees with it for a target whose pointers are not 8
+    /// bytes wide (issue #243's follow-up: before this field existed, Sema
+    /// hardcoded 8 regardless of --target, which CodeGen's now-real
+    /// cross-target data layout correctly disagreed with, and reported as an
+    /// internal error rather than silently miscompiling).
+    unsigned PointerWidthBits = 64;
 
     // ---- Positional switch state ------------------------------------------
 

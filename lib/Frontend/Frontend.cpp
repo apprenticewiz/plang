@@ -854,6 +854,20 @@ int frontendPC1Main(int Argc, char *Argv[]) {
     Opts.OptLevel          = OptLevel;
     Opts.Debug             = Debug;
     Opts.TargetTriple      = std::move(Target);
+    // The one llvm::Triple query LangOptions::PointerWidthBits needs (see its
+    // comment): made here, where Frontend.cpp already depends on LLVM for
+    // printVersion's own Triple use below, so that Sema/TypeContext can stay
+    // free of the dependency and just read the plain integer this leaves in
+    // Opts.  isArch32Bit() rather than a hand-rolled architecture-name list:
+    // it is the same fact CodeGen's real DataLayout is about to derive from
+    // this identical triple string, by construction rather than by two
+    // implementations happening to agree, and it is what
+    // CGTypes::checkSizeAgreement/checkFieldOffsetAgreement's cross-check
+    // (issue #243's follow-up) needs Sema's answer to actually match.
+    if (!Opts.TargetTriple.empty()) {
+        const llvm::Triple T(llvm::Triple::normalize(Opts.TargetTriple));
+        Opts.PointerWidthBits = T.isArch32Bit() ? 32 : 64;
+    }
     Opts.ModuleSearchPaths = std::move(ModuleSearchPaths);
 
     DiagnosticOptions DiagOpts;

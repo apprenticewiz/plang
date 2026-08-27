@@ -147,8 +147,10 @@ private:
 
     /// Canonical type store — owns built-in singletons and interns structural
     /// types.  Built from Opts, which is why Opts is declared above it: what an
-    /// unqualified `integer` is depends on the dialect.
-    TypeContext Ctx_{Opts.defaultIntWidth()};
+    /// unqualified `integer` is depends on the dialect, and what a pointer is
+    /// (Type::Width, for Pointer/Nil/String -- see TypeContext's constructor)
+    /// depends on --target.
+    TypeContext Ctx_{Opts.defaultIntWidth(), Opts.PointerWidthBits};
 
     // Convenience aliases that forward to TypeContext singletons.
     // Kept for backward compat with existing Sema implementation code.
