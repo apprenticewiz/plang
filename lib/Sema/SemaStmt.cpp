@@ -810,6 +810,14 @@ void Sema::checkCallStmt(const CallStmt& S) {
         // formal discriminant and each must be ordinal.
         if (Lo == "new" && !S.Args.empty()) {
             auto PtrTy = checkExpr(*S.Args[0]);
+            // Every check below -- schema discriminants, variant/schema extra
+            // arguments -- is keyed off Pointee, which only a genuine Pointer
+            // arg0 computes; anything else left it null and every one of
+            // those checks silently no-opped rather than rejecting the call,
+            // so `new(i)` for a non-pointer i sailed through Sema and reached
+            // CodeGen with no pointee to size an allocation from.
+            if (!PtrTy->isError() && PtrTy->Kind != TypeKind::Pointer)
+                error(S.Args[0]->Loc, diag::err_new_arg_not_pointer, {PtrTy->Name});
             const Type* Pointee = PtrTy->Kind == TypeKind::Pointer
                                       ? PtrTy->PointeeType.get() : nullptr;
             const bool ToSchema = Pointee && Pointee->Kind == TypeKind::Schema;

@@ -311,6 +311,15 @@ DIAG(err_schema_body_not_representable, Error,
      "array body recomputes its extent from them at run time, and any other "
      "body needs their values to lay itself out and to range-check; Extended "
      "Pascal allows this, so write them out, as in '%0(...)'")
+// ISO 7185 §6.6.5.3: new's first parameter is a pointer variable -- the
+// procedure creates a fresh variable and makes the pointer refer to it.
+// Only the Pointer-Kind case computed a Pointee; every other kind left it
+// null and fell through every check below untouched, so `new(i)` for a
+// plain `integer` i reached CodeGen with nothing to size an allocation from
+// and hit a codegenICE -- an implementation crash where the standard calls
+// for the program to be rejected here.
+DIAG(err_new_arg_not_pointer, Error,
+     "'new' expects a pointer as its first argument, got '%0'")
 // TRANSLATORS: "discriminant(s)" is an English plural dodge.
 DIAG(err_schema_new_needs_discs, Error,
      "'new' for a pointer to schema '%0' needs %1 discriminant(s), got %2")
