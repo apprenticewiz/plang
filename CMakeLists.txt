@@ -59,6 +59,18 @@ cmake_minimum_required(VERSION 3.16)
 #   4. move the changelog's [Unreleased] section under the new version
 #   5. tag from that branch once ready; `main` is untouched throughout
 #
+# All five steps are manual, and step 5's tag name has no structural link to
+# steps 2 and 4's own edits -- nothing previously caught a tag cut against a
+# stale VERSION (or a changelog heading never moved out of [Unreleased]),
+# so a compiler reporting one version and a shared library carrying another
+# could ship undetected (issue #185). tools/check_release_version.py is the
+# gate for that: run it by hand with the intended tag right after step 4 and
+# before step 5 (`check_release_version.py --tag vX.Y.Z`), and CI's
+# `release-metadata-check` job runs it again automatically once the tag is
+# actually pushed, plus a build-job step that also checks a real built
+# `plang -dumpversion` and the installed libplang-frontend.so.X.Y.Z agree --
+# any disagreement fails that tag's CI outright rather than shipping quietly.
+#
 file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/VERSION" PLANG_BASE_VERSION LIMIT_COUNT 1)
 string(STRIP "${PLANG_BASE_VERSION}" PLANG_BASE_VERSION)
 
