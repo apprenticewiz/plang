@@ -73,12 +73,19 @@ public:
     std::optional<std::pair<llvm::Value*, llvm::Value*>>
     rtIndexBounds(const plang::ArrayTypeNode& at);
     llvm::Value* rtFieldOffset(const plang::RecordTypeNode& rt, const std::string& field);
+    /// Every field's offset, from one walk -- see the definition for why a
+    /// caller wanting more than one field's offset should call this instead
+    /// of rtFieldOffset in a loop.
+    std::vector<std::pair<std::string, llvm::Value*>>
+    rtAllFieldOffsets(const plang::RecordTypeNode& rt);
     llvm::Value* rtWalkFields(const std::vector<plang::FieldDecl>& fields,
                               llvm::Value* off, bool packed,
-                              const std::string* stopAt, bool* found);
+                              const std::string* stopAt, bool* found,
+                              std::vector<std::pair<std::string, llvm::Value*>>* collect = nullptr);
     llvm::Value* rtWalkVariant(const plang::VariantPart& vp, llvm::Value* off,
                                bool packed, const std::string* stopAt,
-                               bool* found, bool nested = false);
+                               bool* found, bool nested = false,
+                               std::vector<std::pair<std::string, llvm::Value*>>* collect = nullptr);
     uint64_t     rtVariantRunAlign(const plang::VariantPart& vp);
     uint64_t     rtVariantAlign(const plang::VariantPart& vp);
     llvm::Value* alignUpV(llvm::Value* v, uint64_t align);

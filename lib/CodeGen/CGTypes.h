@@ -29,6 +29,8 @@
 #include "SchemaLayoutEngine.h"
 #include "SetOps.h"
 
+#include "plang/Sema/Type.h"
+
 namespace llvm {
 class Module;
 class Value;
@@ -41,7 +43,6 @@ struct RecordTypeNode;
 struct TypeNode;
 struct VariantCase;
 struct VariantPart;
-struct Type;
 struct LangOptions;
 }
 
@@ -165,4 +166,16 @@ private:
     std::map<int64_t, llvm::StructType*> strStructTypes_;
     llvm::StructType* fileStructTy_{nullptr};
     llvm::StructType* timestampTy_{nullptr};
+    /// Name (lowercased) -> field, memoized per Sema record.  semaFieldType
+    /// used to re-scan the whole RecordFields list for every call, and it is
+    /// called once per field name while laying a record out -- an O(n) scan
+    /// times n fields made the whole pass O(n^2).  This index turns each
+    /// lookup after the first into O(1), without changing which field (or
+    /// none) is found: it is filled by the same linear walk semaFieldType
+    /// used to do inline, just done once and cached instead of once per call.
+    std::unordered_map<const plang::Type*,
+                        std::unordered_map<std::string, const plang::Type::Field*>>
+        semaFieldIndex_;
+    const std::unordered_map<std::string, const plang::Type::Field*>&
+        semaFieldIndexFor(const plang::Type* semaRec);
 };
