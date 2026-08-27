@@ -63,3 +63,8 @@ local/
 .claude/
 build-asan/
 -
+
+# Module interface files, generated as a side effect of compiling a module
+# declaration -- should only ever appear in a build/test tmp dir via split-file,
+# never in the checked-in source tree (a recurring mistake this guards against).
+*.pmi
