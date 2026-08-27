@@ -408,7 +408,7 @@ std::shared_ptr<Type> Sema::checkBinary(const BinaryExpr& E) {
     }
 
     switch (E.Op) {
-        case TokenKind::Plus:
+        case TokenKind::Plus: {
             // EP §6.8.3.6: string concatenation.  ISO 10206 §6.4.3.3.1's note
             // is explicit that a STRING-TYPE -- the category covering the
             // fixed-string-type (ISO §6.4.3.2's packed array[1..n] of char)
@@ -419,21 +419,32 @@ std::shared_ptr<Type> Sema::checkBinary(const BinaryExpr& E) {
             // "canonical-string-type" operand column by that coercion rule.
             // isVarStringLike/Kind==String were missing isCharStringType, the
             // same sibling gap length/substr/trim/index had.
-            if (isVarStringLike(Lt.get()) || isVarStringLike(Rt.get())
-                || Lt->Kind == TypeKind::String  || Rt->Kind == TypeKind::String
-                || (!Lt->isError() && isCharStringType(*Lt))
-                || (!Rt->isError() && isCharStringType(*Rt))
-                || (Lt->Kind == TypeKind::Char && (isVarStringLike(Rt.get())
-                                                 || Rt->Kind == TypeKind::String
-                                                 || (!Rt->isError() && isCharStringType(*Rt))))
-                || (Rt->Kind == TypeKind::Char && (isVarStringLike(Lt.get())
-                                                 || Lt->Kind == TypeKind::String
-                                                 || (!Lt->isError() && isCharStringType(*Lt))))
+            //
+            // isStringConcatOperand below classifies each operand on its own
+            // terms (VarString-like, canonical String, or a fixed
+            // char-string-type); the concatenation is only accepted once
+            // BOTH operands independently qualify (a lone Char pairs with
+            // any of those, or with another Char under CharConcatenation).
+            // Accepting the pair off of only ONE operand's kind -- as a
+            // stray `isVarStringLike(Lt) || isVarStringLike(Rt)` would -- let
+            // a genuinely mismatched pair (e.g. 'hello' + aRecord) reach
+            // CodeGen, which has no lowering for that and crashes instead of
+            // Sema cleanly rejecting it.
+            auto isStringConcatOperand = [](const std::shared_ptr<Type>& T) {
+                return isVarStringLike(T.get()) || T->Kind == TypeKind::String
+                    || (!T->isError() && isCharStringType(*T));
+            };
+            bool LOk = isStringConcatOperand(Lt);
+            bool ROk = isStringConcatOperand(Rt);
+            bool LChar = Lt->Kind == TypeKind::Char;
+            bool RChar = Rt->Kind == TypeKind::Char;
+            if ((LOk && ROk)
+                || (LOk && RChar)
+                || (LChar && ROk)
                 // EP §6.8.3.2: a char is a string-compatible operand of '+', so
                 // two of them concatenate rather than failing as non-numeric.
                 || (Opts.has(LangOptions::Feature::CharConcatenation)
-                        && Lt->Kind == TypeKind::Char
-                        && Rt->Kind == TypeKind::Char)) {
+                        && LChar && RChar)) {
                 auto cap = [](const std::shared_ptr<Type>& T) -> int64_t {
                     // A capacity fixed by a discriminant is the probe's here,
                     // so it is treated the way an unbounded string is: the
@@ -449,6 +460,7 @@ std::shared_ptr<Type> Sema::checkBinary(const BinaryExpr& E) {
                 };
                 return Type::makeVarString(cap(Lt) + cap(Rt));
             }
+        }
             [[fallthrough]];
         case TokenKind::Minus:
         case TokenKind::Times:
