@@ -248,6 +248,15 @@ static void printType(const TypeNode& node, std::ostream& os) {
         os << "(?type)";
         break;
     }
+    // EP §6.6: the 'value' clause belongs to the denoter itself (see
+    // TypeNode::InitialState's own comment) and every kind of denoter can
+    // carry one, so it is checked once here rather than duplicated into
+    // every case above -- matching the ' value ' spelling
+    // Frontend.cpp's typeNodeToString already uses for the same field.
+    if (node.InitialState) {
+        os << " value ";
+        printExpr(*node.InitialState, os);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -332,6 +341,11 @@ static void printExpr(const ExprNode& node, std::ostream& os) {
     }
     case NodeKind::SetLiteralExpr: {
         const auto* n = llvm::cast<SetLiteralExpr>(&node);
+        // EP §6.8.7.4: the type-name prefix is what tells checkSetLit this is
+        // a TYPED constructor -- whose elements must match that type's base
+        // type -- rather than the untyped [] literal, so leaving it out here
+        // made the two indistinguishable in the dump.
+        if (!n->TypeName.empty()) os << n->TypeName;
         os << "[";
         Sep sp;
         for (const auto& elem : n->Elements) {
@@ -601,6 +615,13 @@ static void printBlock(const BlockNode& node, std::ostream& os, int depth) {
         for (const auto& name : vg.Names) os << sp << name;
         os << ") ";
         printType(*vg.Type, os);
+        // EP §6.4.1: the declaration's own 'value' initializer, distinct
+        // from (and printed after) any 'value' clause on Type itself --
+        // see VarGroup::InitExpr's own comment.
+        if (vg.InitExpr) {
+            os << " value ";
+            printExpr(*vg.InitExpr, os);
+        }
         os << ")\n";
     }
 
@@ -618,6 +639,13 @@ static void printProc(const ProcDecl& node, std::ostream& os, int depth) {
        << "(" << (node.IsFunction ? "function" : "procedure")
        << " " << node.Name << " ";
     printParams(node.Params, os);
+    // EP §6.7.2: the optional named-result-variable-specification is written
+    // '= identifier' right after the parameter list and before the result
+    // type (ParseDecl.cpp's parseProcDecl), so it is printed in that same
+    // position -- see ProcDecl::ResultName's own comment.
+    if (!node.ResultName.empty()) {
+        os << " = " << node.ResultName;
+    }
     if (node.IsFunction && node.ReturnType) {
         os << " ";
         printType(*node.ReturnType, os);
@@ -638,6 +666,10 @@ static void printProc(const ProcDecl& node, std::ostream& os, int depth) {
 static void printModule(const ModuleNode& mod, std::ostream& os, int depth) {
     os << ind(depth) << "(module " << mod.Name;
     if (mod.IsInterface) os << " interface";
+    // EP §6.11.1: the 'implementation' module-identification -- mutually
+    // exclusive with IsInterface (ParseModule.cpp's if/else-if), so there is
+    // no ordering question between the two.
+    if (mod.IsImplementation) os << " implementation";
     if (!mod.Exports.empty()) {
         os << " (export";
         for (const auto& e : mod.Exports) {
