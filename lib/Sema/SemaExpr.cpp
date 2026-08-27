@@ -1330,6 +1330,12 @@ void Sema::checkProcedureActual(const Type& Formal, const std::string& ParamName
     // write, read and friends are variadic or polymorphic and have no single
     // heading to be congruous with.
     if (S->Kind == SymbolKind::Builtin) {
+        // If the name is a required identifier that the active dialect
+        // doesn't have at all, that is the more useful diagnostic to give —
+        // the same one the direct-call path (checkCallExpr) already gives —
+        // rather than telling the user it "cannot be passed as a parameter",
+        // which reads as though the name exists here but the wrong way.
+        if (!checkEPOnly(*S, Arg.Loc)) return;
         error(Arg.Loc, diag::err_proc_param_is_required, {Id->Name});
         return;
     }
