@@ -36,7 +36,17 @@ configure_file(
     @ONLY
 )
 
-set(LIT_ARGS -sv)
+# --skip-test-time-recording: every category shares one test_exec_root
+# (build/test, set once in lit.cfg.py) rather than a directory of its own, so
+# running the lit-* CTest targets in parallel (ctest -j) means every one of
+# them reads and writes the same .lit_test_times.txt with no coordination --
+# a genuine, reproducible race (confirmed via lit's own TestTimes.py: no
+# locking, and a plain `open(path, "w")` that truncates before writing back
+# out). The feature this file records for -- reordering a *future* run to
+# try historically-slow tests first -- has no value in CI anyway, since the
+# build tree is fresh every run; skipping the write side removes the race
+# entirely rather than just narrowing its window.
+set(LIT_ARGS -sv --skip-test-time-recording)
 
 # One CTest entry and one `ninja check-lit-<category>` target per top-level
 # lit directory (LLVM-idiomatic granularity, not one per test file -- see
