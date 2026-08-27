@@ -268,10 +268,22 @@ void CGAssign::emitAssign(const AssignStmt& s) {
     // Implicit integer-to-real widening.
     if (dstTy->isDoubleTy() && rhs->getType()->isIntegerTy())
         rhs = B.CreateSIToFP(rhs, DblTy, "widen");
-    // Integer narrowing (e.g. i64 → i8 for char assignment).
+    // Integer width mismatch, either direction: i64 -> i8 (e.g. an integer
+    // expression stored into a char variable) narrows, but i8/i1 -> i64 (a
+    // char or boolean value stored into a subrange slot -- every subrange is
+    // i64 regardless of its host type; see llvmTypeOfSemaTypeImpl) needs to
+    // widen just as much.  This used to only trunc, so a narrower rhs was
+    // stored with a store narrower than the destination slot, leaving
+    // whatever was already in the slot's upper bytes untouched -- silently
+    // for a freshly zero-initialized variable, wrong for a variant-record
+    // field whose shared storage was last written through a wider
+    // alternative (issue #229). Zero-extension is the correct widening: the
+    // narrow ordinals plang has (char, boolean) are all non-negative, the
+    // same reasoning coerceToType's identical int/int branch uses for every
+    // other value-consuming path (call arguments, constructors, ...).
     if (dstTy->isIntegerTy() && rhs->getType()->isIntegerTy()
-            && rhs->getType()->getIntegerBitWidth() > dstTy->getIntegerBitWidth())
-        rhs = B.CreateTrunc(rhs, dstTy, "narrow");
+            && rhs->getType() != dstTy)
+        rhs = B.CreateZExtOrTrunc(rhs, dstTy, "conv");
 
     auto* st = B.CreateStore(rhs, addr);
     // A field of a packed record is at a byte offset that need not satisfy its
