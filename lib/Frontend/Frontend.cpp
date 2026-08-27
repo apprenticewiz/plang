@@ -675,6 +675,23 @@ static void writePMIFiles(const ProgramNode& Program,
     }
 }
 
+/// Diagnoses and reports whether Os is in a fail state after its writer has
+/// already been flushed (Name empty means Os is std::cout; otherwise it is
+/// the -o path that was opened into Os).
+///
+/// A write can fail after the open already succeeded -- a full disk, or
+/// /dev/full in a repro -- and std::ostream only ever surfaces that through
+/// its own failbit, which a small write does not set until the underlying
+/// buffer is actually flushed.  Callers must flush/close Os before calling
+/// this, or a failure that has not reached the OS yet reads as success.
+static bool reportIfWriteFailed(std::ostream& Os, const std::string& Name) {
+    if (Os) return false;
+    std::cerr << "plang -pc1: error writing "
+              << (Name.empty() ? "to standard output" : "output file '" + Name + "'")
+              << "\n";
+    return true;
+}
+
 } // namespace
 
 int frontendPC1Main(int Argc, char *Argv[]) {
@@ -873,7 +890,8 @@ int frontendPC1Main(int Argc, char *Argv[]) {
     auto withOutput = [&](auto action) -> int {
         if (OutputFile.empty()) {
             action(std::cout);
-            return 0;
+            std::cout.flush();
+            return reportIfWriteFailed(std::cout, "") ? 1 : 0;
         }
         std::ofstream F(OutputFile);
         if (!F) {
@@ -881,7 +899,8 @@ int frontendPC1Main(int Argc, char *Argv[]) {
             return 1;
         }
         action(F);
-        return 0;
+        F.close();
+        return reportIfWriteFailed(F, OutputFile) ? 1 : 0;
     };
 
     Scanner Sc(SrcMgr, InputFile, Diags, Opts);
@@ -929,15 +948,22 @@ int frontendPC1Main(int Argc, char *Argv[]) {
     Cg.setImportOwners(Sem.importOwners());
     Cg.setLoadedInterfaces(Sem.loadedInterfaces());
     if (Opts.Debug) Cg.setSourceManager(SrcMgr, MainFileID);
-    if (OutputFile.empty())
-        return Cg.emit(*Program, std::cout) ? 0 : 1;
+    if (OutputFile.empty()) {
+        const bool EmitOk = Cg.emit(*Program, std::cout);
+        std::cout.flush();
+        if (EmitOk && reportIfWriteFailed(std::cout, "")) return 1;
+        return EmitOk ? 0 : 1;
+    }
 
     std::ofstream F(OutputFile);
     if (!F) {
         std::cerr << "plang -pc1: cannot open output file '" << OutputFile << "'\n";
         return 1;
     }
-    return Cg.emit(*Program, F) ? 0 : 1;
+    const bool EmitOk = Cg.emit(*Program, F);
+    F.close();
+    if (EmitOk && reportIfWriteFailed(F, OutputFile)) return 1;
+    return EmitOk ? 0 : 1;
 }
 
 } // namespace plang
