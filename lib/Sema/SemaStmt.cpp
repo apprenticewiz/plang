@@ -837,9 +837,39 @@ void Sema::checkCallStmt(const CallStmt& S) {
             if (!ArrTy->isError() && !ArrOk)
                 error(ArrArg.Loc, diag::err_pack_operand_not_array_unpacked,
                       {Lo, ArrTy->Name});
-            if (!PkdTy->isError() && PkdTy->Kind != TypeKind::Array)
+            const bool PkdOk = PkdTy->Kind == TypeKind::Array;
+            if (!PkdTy->isError() && !PkdOk)
                 error(PkdArg.Loc, diag::err_pack_operand_not_array_packed,
                       {Lo, PkdTy->Name});
+
+            // ISO §6.6.5.4: pack/unpack is the one place an array crosses
+            // between packed and unpacked, and the direction is fixed -- `a`
+            // unpacked, `z` packed.  Neither Packed flag was looked at, so a
+            // packed `a` or an unpacked `z` was accepted and copied exactly
+            // as if the direction had been the one actually declared.
+            if (ArrOk && ArrTy->Packed)
+                error(ArrArg.Loc, diag::err_pack_operand_not_unpacked,
+                      {Lo, ArrTy->Name});
+            if (PkdOk && !PkdTy->Packed)
+                error(PkdArg.Loc, diag::err_pack_operand_not_packed,
+                      {Lo, PkdTy->Name});
+
+            // ISO §6.6.5.4: the component types of a and z shall be
+            // identical.  CGPackUnpack lowers the whole transfer as a single
+            // memcpy sized and aligned from `a`'s element type alone, so a
+            // mismatch here is not a value that fails to convert -- it is
+            // bytes moved under the wrong element's size, e.g. an
+            // `array of integer` packed into a `packed array of char`
+            // copying 4 bytes per character instead of 1.  isAssignCompatible
+            // permits integer -> real widening that a raw copy cannot
+            // perform, so it is the wrong tool here; isIdenticalType is what
+            // congruousConformant uses for the same "no conversion happens"
+            // reason.
+            if (ArrOk && PkdOk && ArrTy->ElemType && PkdTy->ElemType
+                && !isIdenticalType(ArrTy->ElemType, PkdTy->ElemType))
+                error(ArrArg.Loc, diag::err_pack_element_type_mismatch,
+                      {Lo, ArrTy->ElemType->Name, PkdTy->ElemType->Name});
+
             // The index type of a conformant array is the ordinal its bounds
             // were declared with, which is as much a type as a written range.
             if (ArrOk && ArrTy->IndexType && !IdxTy->isError()

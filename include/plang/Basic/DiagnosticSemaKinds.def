@@ -202,6 +202,21 @@ DIAG(err_pack_operand_not_array_unpacked, Error,
      "%0 expects an array as its unpacked argument, got '%1'")
 DIAG(err_pack_operand_not_array_packed, Error,
      "%0 expects an array as its packed argument, got '%1'")
+// ISO 7185 §6.6.5.4: the unpacked operand's type shall not be packed, and
+// the packed operand's shall be -- that direction is the entire meaning of
+// "pack" and "unpack".  Two diagnostics for the same reason as the pair
+// above: %0 is 'pack' or 'unpack' and stays a call, not a description.
+DIAG(err_pack_operand_not_unpacked, Error,
+     "%0's unpacked argument must not be packed, got '%1'")
+DIAG(err_pack_operand_not_packed, Error,
+     "%0's packed argument must be packed, got '%1'")
+// ISO 7185 §6.6.5.4: a and z shall have identical component types.  CodeGen
+// lowers the transfer as one memcpy sized from the unpacked side's element
+// type alone, so this has to be identity and not mere assignment
+// compatibility -- an integer->real widening is a value conversion a raw
+// copy cannot perform, and would silently move the wrong bytes.
+DIAG(err_pack_element_type_mismatch, Error,
+     "%0: unpacked array has component type '%1', packed array has component type '%2'")
 DIAG(err_with_non_record, Error, "'with' expects a record variable, got '%0'")
 // ISO §6.8.3.10 / EP §6.8.3.10: a with-statement's record-variable is a
 // variable-access, not any record-valued expression -- a function call's
