@@ -288,6 +288,30 @@ bool Sema::check(const ProgramNode& Prog) {
             List.insert(List.end(), Mod->Exports.begin(), Mod->Exports.end());
         }
 
+    // EP §6.11.1: an interface part promises a body somewhere.  Both parts
+    // are ordinarily written in the same file (module-declaration lets them
+    // come in either order, but not one alone) -- unlike an *implementation*
+    // with no interface part in this file, which is the legitimate
+    // "module-identification" form a module compiled apart from its own
+    // interface, or a self-contained module with an implicit interface,
+    // legitimately uses.  Left unchecked, an interface with no matching
+    // implementation anywhere in this file compiled clean with no
+    // diagnostic and no useful output (no .pmi under -c, since nothing was
+    // ever `processModuleBody`'d to emit one; a confusing undefined
+    // `__plang_init_*` at link time otherwise) -- catching the real mistake
+    // only far downstream of where it was actually made.
+    for (const auto* Mod : Prog.Modules)
+        if (Mod->IsInterface) {
+            const bool HasImpl = std::any_of(
+                Prog.Modules.begin(), Prog.Modules.end(),
+                [&](const ModuleNode* M) {
+                    return !M->IsInterface && eqCI(M->Name, Mod->Name);
+                });
+            if (!HasImpl)
+                error(Mod->Loc, diag::err_module_interface_without_implementation,
+                      {Mod->Name});
+        }
+
     // EP §6.11: process module definitions before the program block.
     // Module interfaces register export stubs; bodies register full symbols.
     for (auto* Mod : Prog.Modules) {

@@ -359,6 +359,14 @@ DIAG(err_export_range_not_constants, Error,
 // where it is imported.
 DIAG(err_protected_import_assigned, Error,
      "'%0' is exported protected and cannot be assigned to here")
+// EP §6.11.1: a module interface part promises a body; this file never
+// supplies one (module Foo interface; ... end. with no matching
+// module Foo; ... end. anywhere in it).  Left unchecked this compiled
+// silently -- no .pmi under -c, or an undefined __plang_init_<name> at link
+// time from whatever later imported it -- so the mistake surfaced far from
+// where it was made.
+DIAG(err_module_interface_without_implementation, Error,
+     "module '%0' has an interface part but no matching implementation part")
 
 // --------------------------------------------------------------------------
 // Warnings

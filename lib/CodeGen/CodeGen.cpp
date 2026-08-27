@@ -76,6 +76,37 @@ bool Codegen::emit(const ProgramNode& prog, std::ostream& os) {
     // keeps them apart on the Pascal side to match: the program reaches an
     // imported name through its import clauses, not by finding whatever
     // happened to be emitted last.
+    // EP §6.11: a type or constant an imported interface declares must be
+    // visible before ANY module body is emitted, not just the program's own
+    // block below.  When the whole program is one compilation, an imported
+    // module is also one of prog.Modules and registers its own constants
+    // (emitGlobals, in the loop just below) before a later module's body can
+    // reference them.  Under genuine separate compilation, though, an
+    // imported module contributes nothing to prog.Modules at all -- only a
+    // loadedInterfaces_ entry read back from its .pmi -- so if this
+    // registration ran only after the modules loop (where it used to live,
+    // alongside the declare-only loop for imported procedures), a module
+    // compiled here that referenced an imported constant or enum literal in
+    // its OWN body found nothing in `consts` yet, fell through to the
+    // imported-variable path, and emitted an external reference
+    // (`pasg_a$Green`) to a symbol no one -- A included, since enum literals
+    // and folded constants are inlined values, not globals -- ever defines,
+    // breaking the link.  Registering here, before any body is emitted,
+    // fixes that without disturbing the single-invocation case: a module's
+    // own later (re)declaration of the same name still wins, since
+    // registerInterfaceTypes only fills a name `consts` does not already
+    // have, and emitGlobals's own constant loop overwrites unconditionally.
+    for (const auto* Iface : PImpl->loadedInterfaces_)
+        if (Iface->Body)
+            PImpl->registerInterfaceTypes(*Iface->Body, toLower(Iface->Name));
+    for (const auto* Iface : PImpl->loadedInterfaces_) {
+        if (!Iface->Body) continue;
+        PImpl->namePrefix = PlangProcPrefix + toLower(Iface->Name) + PlangScopeSep;
+        for (const auto& Proc : Iface->Body->Procs)
+            PImpl->emitFunctionDef(*Proc, /*declareOnly=*/true);
+    }
+    PImpl->namePrefix = PlangProcPrefix;
+
     std::vector<std::string> InitModules;
     for (auto* Mod : prog.Modules) {
         if (Mod->IsInterface) continue;
@@ -122,29 +153,6 @@ bool Codegen::emit(const ProgramNode& prog, std::ostream& os) {
             [&](const std::string& N) { return eqCI(N, Clause.ModuleName); });
         if (!Local) InitModules.push_back(Clause.ModuleName);
     }
-
-    // EP §6.11: a type an imported interface declares is one this unit lays
-    // out and, where the interface says so, initialises — and the declaration
-    // it does that from is the one read back from the .pmi.  The program's own
-    // declarations come after, so a name it declares itself stays its own.
-    for (const auto* Iface : PImpl->loadedInterfaces_)
-        if (Iface->Body)
-            PImpl->registerInterfaceTypes(*Iface->Body, toLower(Iface->Name));
-
-    // A routine of an imported module is called with whatever hidden arguments
-    // its parameters ask for — the bounds of a conformant array, the
-    // discriminants of a schema, the frame of a procedural parameter.  Those
-    // are read off the heading, so the headings the interface files carry are
-    // declared here; a call site that found no declaration would invent one
-    // from the shape of the argument list and pass an array where the module
-    // reads a pointer and a bound.
-    for (const auto* Iface : PImpl->loadedInterfaces_) {
-        if (!Iface->Body) continue;
-        PImpl->namePrefix = PlangProcPrefix + toLower(Iface->Name) + PlangScopeSep;
-        for (const auto& Proc : Iface->Body->Procs)
-            PImpl->emitFunctionDef(*Proc, /*declareOnly=*/true);
-    }
-    PImpl->namePrefix = PlangProcPrefix;
 
     PImpl->emitFileParams(prog.FileParams);
     PImpl->emitGlobals(*prog.Block);
