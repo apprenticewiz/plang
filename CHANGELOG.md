@@ -8,6 +8,148 @@ version numbers follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 
 ## [Unreleased]
 
+A sixth adversarial review round, and by far the largest: three external models,
+independent of this project's own review process, each did a full pass and filed
+what they found as GitHub issues rather than reporting back directly. 119 confirmed
+bugs (roughly 6x the size of any prior round), triaged into six waves by severity and
+subsystem and fixed with the same discipline as rounds 1-5 -- a fail-before/pass-after
+regression test per fix, a real `gdb` session (not just IR-text checks) for anything
+touching debug-info emission, and a full rebuild plus the complete test suite before
+every merge. That last discipline caught real bugs no individual PR's own CI could
+have: merging two independently-correct fixes together produced a genuine null-pointer
+segfault (a `for`-loop bound check that stopped gating on symbol kind once a sibling
+fix changed the surrounding code), a stale test assertion (a codegen-level test
+expecting the exact ICE text a newly-merged Sema-level check now intercepts earlier,
+with a better diagnostic), and a `.pmi` filename casing mismatch (one fix's test
+predated a sibling fix's later, deliberate switch to lowercased filenames). All three
+were caught by this project's own full-suite reverification before merging, not by
+any agent's or any PR's own CI, and are fixed as part of the commits below rather than
+filed as separate issues. `--target`'s fix (#243) also surfaced a real, previously
+latent bug purely by making cross-compilation possible for the first time: Sema's
+`byteSizeOf` hardcoded the host's 8-byte pointer width unconditionally, invisible
+until a non-host target made CodeGen's real `DataLayout` genuinely disagree -- fixed
+in the same PR, verified with a live `gdb` session on the ordinary native case to
+confirm zero regression to the common path.
+
+### Fixed
+
+- **Compiler crashes, ICEs, and undefined behavior**, now clean diagnostics or correct
+  codegen instead: `new()` on a non-pointer type (#206); a for-loop control variable
+  that isn't a variable (#205); a builtin procedure called where a value is expected
+  (#222) or with the wrong arity in statement position (#207); `ord`/`chr`/`odd` of a
+  non-ordinal argument, which used to crash Sema's own CodeGen instead of erroring
+  (#212); `chr()` not range-checking its argument at all (#166); singleton subranges
+  (`lo == hi`) never getting a range check (#195); a variant tag field name that
+  duplicates a fixed field (#208); a file type nested inside an array or record
+  component (#167); a zero-size record rejected as a file's component type (#241); a
+  parameter's array index type not routed through the same checker as everywhere else
+  (#258); patching forward-declared pointers inside array/file element types (#209); a
+  non-local `goto` from a module procedure to a module-block label (#211); a stack-
+  overflow-shaped crash from unbounded recursion in EP structured-value constructors
+  (#203) and in the constant folders, which also gained checked arithmetic instead of
+  silently wrapping on overflow (#201, #202, #204); checked arithmetic for array
+  extent/size computation, closing the same wraparound-causes-heap-corruption bug
+  pattern for local variables too, not just globals (#214, #215, #223); a nondecimal
+  literal's base overflowing past the 2..36 range check (#213); `sqr(x)` on an
+  out-of-range integer silently wrapping instead of trapping (#219); extent-form `mod`
+  using raw `srem` instead of ISO's sign convention (#228); every `<cctype>` call in
+  the scanner now casts to `unsigned char` first, closing real UB on a negative
+  `char`/non-ASCII byte (#221); for-loop bound-type checking and threat-scan gaps,
+  including a real segfault this round's own merge introduced and caught before it
+  reached `main` (#259, #265, #291); threading the Sema record into the two remaining
+  `layoutOf` callers that were missing it (#197).
+- **Runtime memory-safety and undefined behavior**: `emitCStrArg`'s C-string buffer
+  was sized from a static probe instead of the actual runtime length (#216); a source
+  file's size was `stat`-ed after reading instead of before (#218); `fseek`'s return
+  value went unchecked in `SeekRead`/`SeekWrite`/`SeekUpdate` (#233); `rebindPointer`
+  left a stale placeholder cache entry behind (#288); `substr_assign`'s past-the-end
+  check could overflow the same way `substr`'s already-fixed one did (#220); `for ...
+  in` could rebind a mismatched control variable's storage (#217); three more
+  varying-string operations walked their access path twice, the same double-evaluation
+  bug pattern fixed once already (#196); `read()` checked its own arguments twice
+  (#272).
+- **Sema correctness -- silent wrong-acceptance and missing diagnostics**, the largest
+  single group this round: `isAssignCompatible`'s blind spots that accepted when they
+  should have rejected (#171, #172); `with`-statement now requires an lvalue and
+  refuses restricted (schema-body) records (#264, #290); `schemaInstMatch` compared
+  spelling instead of declaration identity (#255, #268); `halt` resolved by name
+  instead of by symbol identity, and a dereferenced pointer was wrongly marked written
+  (#270, #271); incomplete forward-declared procedures went unaudited, and a type-error
+  placeholder could fake a stub (#266, #269); var-strings were checked against their
+  declared capacity instead of their actual runtime length (#231, #232); parameters,
+  locals, and program-parameters were cross-checked for collisions in only one region
+  (#289, #292); variant-tag and case-constant validation gaps (#253, #257, #260, #293);
+  value clauses and discriminant range-checking in `new()` on a schema (#194, #230);
+  conformant-array bound/index type checking (#262, #263, #267, #294); a fixed schema
+  instance's discriminant read narrowed to its declared type (#210); a set window's
+  rebase/width machinery had three separate gaps (#225, #226, #227); `read`/`readln`
+  targets were never checked for assignability (#224); `string(n)` capacities were
+  routed through a probe/255 fallback instead of the real declared capacity (#193,
+  #198); packed-record alignment was ignored for `with`-bound and indexed fields
+  (#192); a file's buffer variable didn't get the alignment codegen already promised it
+  elsewhere (#199); a narrower right-hand side wasn't widened to its destination slot
+  in `emitAssign` (#229); a value clause's constant wasn't range-checked against its
+  type's bounds (#254); `write`'s field-width and decimals expressions went
+  type-unchecked (#256); a subrange or array-index bound pair could mix two unrelated
+  ordinal types (#251); `pack`/`unpack` didn't validate their operand element types or
+  packedness (#252); required-function arguments were validated only for a handful of
+  special-cased names (#261).
+- **Runtime and library behavior**: `arg(0+0i)` returned 0 silently instead of
+  trapping the undefined phase angle (#249); `binding(f).bound` went false merely
+  because `f` had been closed, not because it had actually been unbound (#248); a
+  nested `writestr` corrupted the enclosing capture through shared global state
+  (#235); `halt()` skipped module finalisers instead of running them (#242); `reset`/
+  `rewrite` with no explicit name failed to reuse the last one that was given, and
+  `reset` of a directory wasn't rejected (#239, #287); a char-typed `reset`/`rewrite`/
+  `extend`/`update` file name wasn't marshalled the way every other string-shaped
+  argument is (#296); bare CR line endings weren't
+  indexed as their own line, and diagnostic columns counted bytes instead of display
+  cells (#285); the string/boolean field-width writers had no shared overflow guard
+  (#247); a sticky `ferror` misattributed a later, successful operation to an earlier
+  failure (#238); numeric text-input parsing had four separate gaps, including
+  spinning forever on malformed input instead of trapping cleanly (#236, #237, #240,
+  #284); a named text file's final partial line was never terminated on close (#234);
+  the message-catalog ABI check wrapped at 2^32, and a `msgctxt`-less entry past the
+  first was misread as the header (#280); `.pmi` files are now canonicalized
+  (lowercased, so module lookup is properly case-insensitive), published atomically,
+  and parsed more defensively (#168, #173, #175); `-dump-ast` no longer writes `.pmi`
+  files as a side effect of a read-only inspection mode (#274); three diagnostics were
+  declared but never actually emitted anywhere, now removed with a lint to catch the
+  next one (#295); the compiler's own output-write failures (a full disk, `/dev/full`)
+  now report a nonzero exit instead of silent success (#246); `AstPrinter` dropped
+  set-constructor type names, value clauses, `ResultName`, and a module's
+  interface/implementation kind (#273); GCC/Clang toolchain version directories were
+  sorted lexicographically instead of numerically, so `9` could beat `10` (#250);
+  filenames and locale tags are now control-character-escaped before reaching a
+  terminal or a log, closing a terminal-escape/log-injection hole (#281).
+- **Driver, CLI, and the `-pc1` front end**: `--target` never actually reached the
+  frontend, so a cross-compiled build silently kept the host's triple and data layout
+  (#243, plus a latent Sema pointer-width bug this uncovered, see above); `Driver::run`
+  called `exit()` directly for `--version`/`--help`/etc. instead of returning control
+  to an in-process caller the way its own header promises, and `-c` silently ignored
+  linker-only inputs instead of warning (#174, #277); `-o`'s joined form
+  (`-ofile.ll`), `-L`/`-l`'s separate form, and an empty `-o` were all handled
+  inconsistently, and the `-###`/`-v` command echo wasn't shell-quoted (#244, #245,
+  #286); the front end's own CLI diagnostics bypassed `-w`/`-Werror`/`-Wno-<name>` by
+  printing straight to `stderr`, and `-pc1` had no directory guard of its own (#275,
+  #276); only a subset of the project's public headers were actually installed,
+  breaking anything that transitively included one that wasn't (#169); multi-file
+  output/temp-file management had three gaps: collision-prone output filenames,
+  temp files leaking on a signal, and stray `.o` litter in the working directory
+  (#170, #278, #279); release tags are now checked against `VERSION` and the shared
+  library's own embedded metadata before a release ships (#185).
+- **Documentation, CI, and build tooling**: `.clang-format` had two keys clang-format
+  22 rejects outright, breaking the formatter for every contributor (#187);
+  `PLANG_SANITIZE` was a `BOOL` `option()` instead of a validated `STRING`, so a typo'd
+  sanitizer name configured silently and only failed deep in build output (#186);
+  `docs/technical_info.md`'s test counts and `test/README.md`'s FPC differential-
+  testing description had both drifted well out of sync with what actually exists
+  (#188); `docs/conformance.md`'s `succ`/`pred` entry predated a since-added range
+  check, and its integer-overflow entry didn't mention that EP's `pow` operator and
+  `minint div -1` both trap unconditionally (#282, #283); CI never actually failed
+  when `lit` or `FileCheck` were unavailable -- a missing tool silently registered zero
+  test suites while `ctest` still reported 100% success (#184).
+
 ## [0.3.4] - 2026-08-27
 
 A fifth adversarial review round, prompted directly by unease about 0.3.3's own new `-g`
