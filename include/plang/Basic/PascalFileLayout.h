@@ -49,8 +49,13 @@ struct PascalFile {
     int64_t    CompSize = 0;
     int        Buf      = PlangFileUninit;
     int8_t     Binding  = PlangBindNone;
-    /// Whether the stream may be read, so that filling f^ by peeking is only
-    /// attempted where peeking can work.
+    /// The file's current direction: 0 = write-only (rewrite, seekwrite),
+    /// 1 = read-only (reset, seekread), 2 = both (extend/update/seekupdate).
+    /// Existing boolean reads of this field (peeking, eof) only ask whether
+    /// it is nonzero, which 2 still satisfies; plang_file.cpp's
+    /// trapOnWrongDirection is what tells 1 and 2 apart, for an internal
+    /// (tmpfile()-backed) file where the C stream itself cannot enforce a
+    /// direction (see issue #152).
     int8_t     Readable = 0;
     /// Whether Comp holds the component at the current position.  Cleared
     /// wherever the position moves, so the next access reads it afresh.

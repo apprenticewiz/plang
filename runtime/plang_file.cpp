@@ -125,6 +125,29 @@ static void trapOnScanError(PascalFile *F, int MatchCount, const char *Op) {
     if (MatchCount == EOF && !std::feof(F->Fp)) plang_err_file_wrong_mode(Op);
 }
 
+/// Issue #152: extends the #124 mode trap to an internal (unbound) file.
+/// Such a file is backed by tmpfile(), which glibc always opens "w+b" --
+/// genuinely bidirectional at the C level -- regardless of which way the
+/// Pascal file is currently facing, so a wrong-direction stdio call there
+/// succeeds outright: ferror/feof never fires, and trapOnStreamError /
+/// trapOnScanError have nothing to see.  F->Readable is the only place the
+/// intended direction is recorded for such a file (set by reset/rewrite and
+/// their seek* counterparts, same as for a named file), so this checks it
+/// directly and traps through the same plang_err_file_wrong_mode a named
+/// file's ferror/feof check reaches.
+///
+/// Only PlangBindTemp is checked: a named or standard stream is already
+/// protected by its own C-level open mode (fopen "r"/"w"), so adding this
+/// check there would be redundant at best.  Readable's third value, 2, is
+/// set by extend/update/seekupdate for a file genuinely opened both ways
+/// (named files use "r+b" there too) and is deliberately exempt: those modes
+/// allow interleaved reads and writes by design, not by omission.
+static void trapOnWrongDirection(PascalFile *F, const char *Op, int8_t WantWrite) {
+    if (F->Binding != PlangBindTemp || F->Readable == 2) return;
+    if ((WantWrite && F->Readable == 1) || (!WantWrite && F->Readable == 0))
+        plang_err_file_wrong_mode(Op);
+}
+
 // ---- open / close ----
 
 static void closeStream(PascalFile *F) {
@@ -325,6 +348,7 @@ void plang_get_file(PascalFile *F, int64_t ElemSize) {
 void plang_put_file(PascalFile *F, int64_t ElemSize) {
     abortIfClosed(F, "put");
     if (!F->Comp) return;
+    trapOnWrongDirection(F, "put", 1);
     if (ElemSize < 1) ElemSize = 1;
     std::fwrite(F->Comp, static_cast<std::size_t>(ElemSize), 1, F->Fp);
     trapOnStreamError(F, "put");
@@ -341,12 +365,14 @@ void plang_readln_file(PascalFile *F) {
 
 void plang_writeln_file(PascalFile *F) {
     abortIfClosed(F, "writeln");
+    trapOnWrongDirection(F, "writeln", 1);
     std::fputc('\n', F->Fp);
     trapOnStreamError(F, "writeln");
 }
 
 void plang_page_file(PascalFile *F) {
     abortIfClosed(F, "page");
+    trapOnWrongDirection(F, "page", 1);
     std::fputc('\f', F->Fp);
     trapOnStreamError(F, "page");
 }
@@ -355,6 +381,7 @@ void plang_page_file(PascalFile *F) {
 
 void plang_read_file_i64(PascalFile *F, int64_t *P) {
     abortIfClosed(F, "read");
+    trapOnWrongDirection(F, "read", 0);
     trapOnScanError(F, std::fscanf(F->Fp, "%" SCNd64, P), "read");
     prime(F);
     unloadComponent(F);
@@ -362,6 +389,7 @@ void plang_read_file_i64(PascalFile *F, int64_t *P) {
 
 void plang_read_file_f64(PascalFile *F, double *P) {
     abortIfClosed(F, "read");
+    trapOnWrongDirection(F, "read", 0);
     trapOnScanError(F, std::fscanf(F->Fp, "%lf", P), "read");
     prime(F);
     unloadComponent(F);
@@ -369,6 +397,7 @@ void plang_read_file_f64(PascalFile *F, double *P) {
 
 void plang_read_file_char(PascalFile *F, int8_t *P) {
     abortIfClosed(F, "read");
+    trapOnWrongDirection(F, "read", 0);
     ensurePrimed(F);
     if (F->Buf == EOF) { *P = 0; return; }
     // §6.9.1 reads a char as `v := f^; get(f)`, and §6.4.3.5 gives f^ the value
@@ -389,6 +418,7 @@ void plang_str_read_file(PascalFile *F, void *S, int64_t Cap) {
     auto*   Base = static_cast<char*>(S);
     char*   Data = Base + sizeof(int64_t);
     int64_t Len  = 0;
+    trapOnWrongDirection(F, "read", 0);
     ensurePrimed(F);
     while (F->Buf != EOF && F->Buf != '\n') {
         const int C = advance(F);
@@ -405,6 +435,7 @@ void plang_str_read_fixed_file(PascalFile *F, void *Buf, int64_t N) {
     abortIfClosed(F, "read");
     auto*   Data = static_cast<char*>(Buf);
     int64_t Len  = 0;
+    trapOnWrongDirection(F, "read", 0);
     ensurePrimed(F);
     while (F->Buf != EOF && F->Buf != '\n') {
         const int C = advance(F);
@@ -421,6 +452,7 @@ void plang_str_write_file(PascalFile *F, const void *S, int64_t /*Cap*/) {
     const auto* Base = static_cast<const char*>(S);
     const int64_t Len = *reinterpret_cast<const int64_t*>(Base);
     if (Len > 0) {
+        trapOnWrongDirection(F, "write", 1);
         std::fwrite(Base + sizeof(int64_t), 1, static_cast<size_t>(Len), F->Fp);
         trapOnStreamError(F, "write");
     }
@@ -435,6 +467,7 @@ void plang_str_write_file_w(PascalFile *F, const void *S, int64_t /*Cap*/,
                             int64_t W) {
     abortIfClosed(F, "write");
     if (W == 0) return;
+    trapOnWrongDirection(F, "write", 1);
     const auto* Base = static_cast<const char*>(S);
     int64_t Len = *reinterpret_cast<const int64_t*>(Base);
     if (Len < 0) Len = 0;
@@ -458,11 +491,11 @@ void plang_str_write_file_w(PascalFile *F, const void *S, int64_t /*Cap*/,
 void plang_write_file_f64_e(PascalFile *F, double V, int64_t W);
 void plang_write_file_f64_f(PascalFile *F, double V, int64_t W, int64_t D);
 
-void plang_write_file_i64 (PascalFile *F, int64_t     V) { abortIfClosed(F,"write"); std::fprintf(F->Fp, "%" PRId64, V); trapOnStreamError(F, "write"); }
+void plang_write_file_i64 (PascalFile *F, int64_t     V) { abortIfClosed(F,"write"); trapOnWrongDirection(F, "write", 1); std::fprintf(F->Fp, "%" PRId64, V); trapOnStreamError(F, "write"); }
 void plang_write_file_f64 (PascalFile *F, double      V) { plang_write_file_f64_e(F, V, PlangRealWidth); }
-void plang_write_file_bool(PascalFile *F, int8_t      V) { abortIfClosed(F,"write"); std::fputs(V ? "true" : "false", F->Fp); trapOnStreamError(F, "write"); }
-void plang_write_file_char(PascalFile *F, int8_t      V) { abortIfClosed(F,"write"); std::fputc(static_cast<unsigned char>(V), F->Fp); trapOnStreamError(F, "write"); }
-void plang_write_file_str (PascalFile *F, const char *S) { abortIfClosed(F,"write"); std::fputs(S ? S : "", F->Fp); trapOnStreamError(F, "write"); }
+void plang_write_file_bool(PascalFile *F, int8_t      V) { abortIfClosed(F,"write"); trapOnWrongDirection(F, "write", 1); std::fputs(V ? "true" : "false", F->Fp); trapOnStreamError(F, "write"); }
+void plang_write_file_char(PascalFile *F, int8_t      V) { abortIfClosed(F,"write"); trapOnWrongDirection(F, "write", 1); std::fputc(static_cast<unsigned char>(V), F->Fp); trapOnStreamError(F, "write"); }
+void plang_write_file_str (PascalFile *F, const char *S) { abortIfClosed(F,"write"); trapOnWrongDirection(F, "write", 1); std::fputs(S ? S : "", F->Fp); trapOnStreamError(F, "write"); }
 
 // ---- typed write with a field width (ISO §6.9.3.1) ----
 //
@@ -493,11 +526,13 @@ static int checkedWidth(int64_t W) {
 
 void plang_write_file_i64_w (PascalFile *F, int64_t V, int64_t W) {
     abortIfClosed(F,"write");
+    trapOnWrongDirection(F, "write", 1);
     std::fprintf(F->Fp, "%*" PRId64, checkedWidth(W), V);
     trapOnStreamError(F, "write");
 }
 void plang_write_file_f64_e (PascalFile *F, double V, int64_t W) {
     abortIfClosed(F, "write");
+    trapOnWrongDirection(F, "write", 1);
     char Buf[PlangRealMaxChars];
     const std::size_t N = plangFormatReal(Buf, V, W);
     std::fwrite(Buf, 1, N, F->Fp);
@@ -509,6 +544,7 @@ void plang_write_file_f64_e (PascalFile *F, double V, int64_t W) {
 void plang_write_file_f64_f (PascalFile *F, double V, int64_t W, int64_t D) {
     abortIfClosed(F,"write");
     if (D < 0) { plang_write_file_f64_e(F, V, W); return; }
+    trapOnWrongDirection(F, "write", 1);
     std::fprintf(F->Fp, "%*.*f", checkedWidth(W), checkedWidth(D), V);
     trapOnStreamError(F, "write");
 }
@@ -518,6 +554,7 @@ void plang_write_file_f64_f (PascalFile *F, double V, int64_t W, int64_t D) {
 // included.  A negative W is written in full, as if no width had been given.
 static void writePadded(PascalFile *F, const char *S, int64_t W) {
     if (W == 0) return;
+    trapOnWrongDirection(F, "write", 1);
     const std::size_t Len = S ? std::strlen(S) : 0;
     if (W < 0) {
         if (Len) std::fwrite(S, 1, Len, F->Fp);
@@ -534,6 +571,7 @@ void plang_write_file_bool_w(PascalFile *F, int8_t V, int64_t W)
 void plang_write_file_char_w(PascalFile *F, int8_t V, int64_t W) {
     abortIfClosed(F,"write");
     if (W == 0) return;
+    trapOnWrongDirection(F, "write", 1);
     if (W < 0) {
         std::fputc(static_cast<unsigned char>(V), F->Fp);
         trapOnStreamError(F, "write");
@@ -550,6 +588,7 @@ void plang_write_file_str_w (PascalFile *F, const char *S, int64_t W)
 // real writer rather than being formatted alongside the parentheses.
 void plang_write_file_cplx (PascalFile *F, double Re, double Im) {
     abortIfClosed(F, "write");
+    trapOnWrongDirection(F, "write", 1);
     std::fputc('(', F->Fp);
     trapOnStreamError(F, "write");
     plang_write_file_f64(F, Re);
@@ -562,6 +601,7 @@ void plang_write_file_cplx (PascalFile *F, double Re, double Im) {
 void plang_write_file_cplx_w(PascalFile *F, double Re, double Im,
                              int64_t W, int64_t D) {
     abortIfClosed(F,"write");
+    trapOnWrongDirection(F, "write", 1);
     // plang_write_file_f64_f already picks between "%*.*f" and the
     // exponential fallback on D's sign, which used to be duplicated here.
     std::fputc('(', F->Fp);
@@ -583,6 +623,7 @@ void plang_read_binary(PascalFile *F, void *Buf, int64_t ElemSize) {
     // write-only) must not leave Buf holding whatever the caller's memory
     // held before the call.
     if (ElemSize > 0) std::memset(Buf, 0, static_cast<std::size_t>(ElemSize));
+    trapOnWrongDirection(F, "read", 0);
     std::fread(Buf, static_cast<std::size_t>(ElemSize), 1, F->Fp);
     trapOnStreamError(F, "read");
     // eof reads the window, which the fread just invalidated.
@@ -592,6 +633,7 @@ void plang_read_binary(PascalFile *F, void *Buf, int64_t ElemSize) {
 
 void plang_write_binary(PascalFile *F, const void *Buf, int64_t ElemSize) {
     abortIfClosed(F, "write");
+    trapOnWrongDirection(F, "write", 1);
     std::fwrite(Buf, static_cast<std::size_t>(ElemSize), 1, F->Fp);
     trapOnStreamError(F, "write");
     unloadComponent(F);
@@ -624,7 +666,10 @@ void plang_extend(PascalFile *F, const char *Name) {
         std::fseek(F->Fp, 0, SEEK_END);
     }
     F->Buf      = PlangFileUninit;
-    F->Readable = 1;
+    // 2, not 1: extend opens both directions (named files get "r+b" above,
+    // same as update), and trapOnWrongDirection treats 2 as the one value
+    // that is exempt from its internal-file direction check.
+    F->Readable = 2;
     unloadComponent(F);
 }
 
@@ -653,7 +698,7 @@ void plang_update(PascalFile *F, const char *Name) {
         std::rewind(F->Fp);
     }
     F->Buf      = PlangFileUninit;
-    F->Readable = 1;
+    F->Readable = 2; // both directions -- see the same note in plang_extend
     unloadComponent(F);
 }
 
@@ -685,7 +730,7 @@ void plang_seekupdate(PascalFile *F, int64_t N, int64_t ElemSize, int64_t IndexL
     abortIfClosed(F, "SeekUpdate");
     std::fseek(F->Fp, (N - IndexLow) * ElemSize, SEEK_SET);
     F->Buf      = PlangFileUninit;
-    F->Readable = 1;
+    F->Readable = 2; // both directions -- see the note in plang_extend
     unloadComponent(F);
 }
 
