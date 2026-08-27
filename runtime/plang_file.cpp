@@ -36,6 +36,8 @@
 #include <cstdlib>
 #include <cstring>
 
+#include <sys/stat.h>
+
 namespace plang {
 
 // PascalFile, PlangBinding and PlangFileUninit are declared in
@@ -51,6 +53,13 @@ extern "C" {
 /// Defined with the binding table further down; reset and rewrite need it to
 /// honor a name established by an earlier bind (EP §6.7.5.6).
 static const char* findBinding(PascalFile *F);
+
+/// Defined with the binding table further down; reset and rewrite call this
+/// too now (issue #239): a name given directly to either -- not just one
+/// given through bind -- is retained the same way, so a later call with no
+/// name reopens that same external entity instead of diverting to fresh,
+/// unnamed internal storage.
+static void setBinding(PascalFile *F, const char *Name);
 
 /// Defined with the other runtime error reporters in plang_sys.cpp.
 [[noreturn]] void plang_err_bind_already_bound(void);
@@ -184,9 +193,13 @@ static void closeFinalLine(PascalFile *F) {
 
 void plang_reset(PascalFile *F, const char *Name, int8_t IsText) {
     if (IsText) closeFinalLine(F);
+    // Issue #239: it is Name as the caller actually passed it -- not
+    // whatever the bind() fallback below may replace it with -- that gets
+    // retained further down, so which case this is has to be captured now.
+    const bool HasExplicitName = Name && Name[0] != '\0';
     // EP §6.7.5.6: a file bound to an external entity opens that entity even
     // when reset is called without an explicit name.
-    if (!Name || Name[0] == '\0') Name = findBinding(F);
+    if (!HasExplicitName) Name = findBinding(F);
     if (!Name || Name[0] == '\0') {
         if (F->Binding == PlangBindStd) {
             // stdin is not rewindable; just re-prime the lookahead window.
@@ -208,6 +221,28 @@ void plang_reset(PascalFile *F, const char *Name, int8_t IsText) {
             std::snprintf(Msg, sizeof(Msg), "cannot open '%s' for reading", Name);
             plang_err_cannot_open(Msg);
         }
+        // Issue #287: opening a directory read-only succeeds at the C level
+        // on POSIX -- the open() syscall underneath allows O_RDONLY on one,
+        // even though no byte of it can ever be read back -- so left
+        // unchecked, eof(f) would come up true immediately and every read
+        // would silently see what looks like an ordinary, unremarkable
+        // end-of-file instead of the real problem. Checked once, here,
+        // rather than in each of this file's several different read paths.
+        // rewrite/extend/update need no equivalent check: opening a
+        // directory for writing (or read+write) already fails at fopen
+        // itself, reaching the plang_err_cannot_open call just above instead.
+        struct stat St;
+        if (fstat(fileno(F->Fp), &St) == 0 && S_ISDIR(St.st_mode)) {
+            std::fclose(F->Fp);
+            F->Fp = nullptr;
+            char Msg[512];
+            std::snprintf(Msg, sizeof(Msg), "'%s' is a directory, not a file", Name);
+            plang_err_cannot_open(Msg);
+        }
+        // Issue #239: retain an explicit name the same way bind() does, so a
+        // later reset/rewrite with no name reopens this same external entity
+        // instead of silently diverting to fresh, unnamed internal storage.
+        if (HasExplicitName) setBinding(F, Name);
     }
     F->Readable = 1;
     unloadComponent(F);
@@ -215,7 +250,11 @@ void plang_reset(PascalFile *F, const char *Name, int8_t IsText) {
 }
 
 void plang_rewrite(PascalFile *F, const char *Name, int8_t /*IsText*/) {
-    if (!Name || Name[0] == '\0') Name = findBinding(F);
+    // Issue #239: see the identical note in plang_reset -- Name is about to
+    // be overwritten by the bind() fallback on the next line, so whether it
+    // was the caller's own explicit argument has to be captured first.
+    const bool HasExplicitName = Name && Name[0] != '\0';
+    if (!HasExplicitName) Name = findBinding(F);
     if ((!Name || Name[0] == '\0') && F->Binding == PlangBindStd) {
         F->Buf      = PlangFileUninit; // rewrite(output) keeps writing to stdout
         F->Readable = 0;
@@ -233,6 +272,10 @@ void plang_rewrite(PascalFile *F, const char *Name, int8_t /*IsText*/) {
             std::snprintf(Msg, sizeof(Msg), "cannot open '%s' for writing", Name);
             plang_err_cannot_open(Msg);
         }
+        // Issue #239: retain an explicit name the same way bind() does, so a
+        // later reset/rewrite with no name reopens this same external entity
+        // instead of silently diverting to fresh, unnamed internal storage.
+        if (HasExplicitName) setBinding(F, Name);
     }
     F->Buf      = PlangFileUninit;
     F->Readable = 0;
