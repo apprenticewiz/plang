@@ -8,6 +8,8 @@ version numbers follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 
 ## [Unreleased]
 
+## [0.3.3] - 2026-08-27
+
 A fourth adversarial review round, prompted by "really shake bugs out" before starting the
 Turbo Pascal extensions -- 14 lenses, including a dedicated adversarial re-review of round 3's
 own brand-new `-g` debug-info code, file I/O edge cases, driver/CLI flag combinations, module
