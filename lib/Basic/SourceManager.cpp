@@ -3,6 +3,7 @@
 #include "plang/Basic/SourceManager.h"
 
 #include <algorithm>
+#include <filesystem>
 #include <fstream>
 #include <limits>
 #include <sstream>
@@ -56,6 +57,23 @@ std::optional<FileID> SourceManager::addBuffer(std::string Name, std::string Tex
 }
 
 std::optional<FileID> SourceManager::addFile(const std::string& Path) {
+    // Stat before opening anything: wouldOverflow's whole job is to keep a
+    // pathological input from being read into memory at all, and a file big
+    // enough to trip it (issue #218) is exactly the file that must never
+    // reach the read below.  Checking Ss.str().size() only after `Ss <<
+    // File.rdbuf()` had already read the whole thing -- what this once did --
+    // means the multi-gigabyte allocation the check exists to prevent has
+    // already happened by the time it runs; under this project's
+    // -fno-exceptions build that allocation failing is std::terminate, not a
+    // diagnostic. A stat failure (file missing, unreadable, race with a
+    // deletion) is left for the ifstream open below to report the usual way,
+    // since Ec alone cannot tell "doesn't exist" apart from "exists but its
+    // size is unknown for some other reason" and both are already handled
+    // there.
+    std::error_code Ec;
+    const std::uintmax_t Size = std::filesystem::file_size(Path, Ec);
+    if (!Ec && wouldOverflow(static_cast<size_t>(Size))) return std::nullopt;
+
     std::ifstream File(Path);
     if (!File) return std::nullopt;
     std::ostringstream Ss;
