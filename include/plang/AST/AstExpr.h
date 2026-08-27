@@ -60,6 +60,17 @@ struct IdentExpr : ExprNode {
     /// twice.  Anything more than "was it declared" should be recorded as a
     /// value too, or the symbol table given stable storage first.
     mutable bool UserDeclared{false};
+
+    /// Narrower than UserDeclared: true only when the nearer declaration
+    /// found is specifically a procedure/function (SymbolKind::Proc), not
+    /// any user declaration at all. UserDeclared alone is too broad a signal
+    /// for "this name should be resolved as a call, not read as a constant"
+    /// -- an ordinary enum literal or named constant is also UserDeclared,
+    /// and treating those as "shadowed" broke their normal constant-table
+    /// resolution (issue #129's own fix regressed this before it shipped;
+    /// caught by an independent full-suite verification pass, not the
+    /// fixing agent's own testing).
+    mutable bool UserDeclaredCallable{false};
 };
 
 struct IndexExpr : ExprNode {

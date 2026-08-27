@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <filesystem>
+#include <fstream>
 
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/BinaryFormat/Dwarf.h"
@@ -17,6 +18,7 @@
 #include "plang/Sema/Type.h"
 
 #include "CGTypes.h"
+#include "SchemaTypeRegistry.h"
 
 using namespace plang;
 
@@ -56,7 +58,7 @@ std::pair<std::string, std::string> splitDebugFilePath(std::string_view Name) {
 CGDebugInfo::CGDebugInfo(llvm::Module& Mod, llvm::LLVMContext& Ctx, llvm::IRBuilder<>& B,
                           const LangOptions& Opts, const SourceManager* SrcMgr,
                           FileID MainFileID, const std::string& ProgName)
-    : Mod(Mod), Ctx(Ctx), B(B), Opts(Opts), SrcMgr(SrcMgr) {
+    : Mod(Mod), Ctx(Ctx), B(B), Opts(Opts), SrcMgr(SrcMgr), MainFileID(MainFileID) {
     if (!Opts.Debug) return;
     DBuilder = std::make_unique<llvm::DIBuilder>(Mod);
     std::string Filename = ProgName, Directory;
@@ -172,23 +174,21 @@ llvm::DIType* CGDebugInfo::debugTypeOfSemaType(const Type& T) {
             break;
         case TypeKind::Schema:
         case TypeKind::SchemaInstance:
-            // EP §6.4.7.  SchemaBody is the body resolved against either
-            // the real discriminants (a SchemaInstance whose extent is
-            // fixed: this recursion lands on an ordinary, fully accurate
-            // Record/Array DIType) or a PROBE binding (T.ExtentVaries, or
-            // an undiscriminated Schema with no fixed layout at all --
-            // CodeGenSchema lays the real, per-instance storage out at run
-            // time and nothing here can predict its size).  Recursing into
-            // the probe body regardless is a deliberate, documented
-            // partial fix: it is only accurate for the fixed portion of the
-            // type and can UNDER- or OVER-state a varying field's real
-            // extent, but it is a real DIType with real field names rather
-            // than nothing, which is what every schema-typed variable had
-            // before this.  Full runtime-varying DWARF (a location
-            // expression that reads the object's own stored discriminants)
-            // is real design work left undone -- see this change's commit
-            // message.
-            DT = T.SchemaBody ? debugTypeOfSemaType(*T.SchemaBody) : nullptr;
+            // EP §6.4.7.  SchemaBody is the body resolved against either the
+            // real discriminants (a SchemaInstance whose extent is fixed:
+            // codegen stores it as a plain value with no header -- see
+            // CGTypes::llvmTypeOfSemaTypeImpl's own SchemaInstance case --
+            // so recursing straight into the body's DIType is exact) or a
+            // PROBE binding (T.ExtentVaries: an undiscriminated Schema, or
+            // one whose discriminant only arrives at run time).  The latter
+            // is where SchemaLayoutEngine::schemaHeaderBytes and
+            // SchemaAccess::emitNewSchema/schemaRefOf put a leading
+            // discriminant-word header in front of the body at run time --
+            // buildSchemaDIType accounts for it; see its own comment for why
+            // recursing into the probe body as if it had none (the previous
+            // behavior, issue #122) put every FIXED field, not just the
+            // varying one's own extent, at the wrong DWARF offset.
+            DT = buildSchemaDIType(T);
             break;
         default:
             break;
@@ -408,6 +408,213 @@ llvm::DIType* CGDebugInfo::buildRecordDIType(const Type& T) {
     DBuilder->replaceTemporary(llvm::TempDIType(Fwd), Full);
     debugTypes_[&T] = Full;
     return Full;
+}
+
+llvm::DIType* CGDebugInfo::buildSchemaDIType(const Type& T) {
+    if (!T.SchemaBody) return nullptr;
+    llvm::DIType* BodyDT = debugTypeOfSemaType(*T.SchemaBody);
+    if (!BodyDT || !Types) return BodyDT;
+
+    // A fixed-extent instance (T.ExtentVaries false) is stored as a plain
+    // value with no header at all -- see CGTypes::llvmTypeOfSemaTypeImpl's
+    // own SchemaInstance case, which just lowers SchemaBody directly -- so
+    // BodyDT is already exact and there is nothing to wrap.
+    if (!T.ExtentVaries) return BodyDT;
+
+    llvm::Type* BodyLLTy = Types->llvmTypeOfSemaType(*T.SchemaBody);
+    if (!BodyLLTy) return BodyDT;
+
+    // Matches SchemaLayoutEngine::schemaHeaderBytes exactly: one 8-byte
+    // word per discriminant, aligned up to the body's own alignment (never
+    // below 8).  The body's ABI alignment does not depend on how many
+    // elements a varying array field really has (only its element type
+    // does), so computing it off the PROBE body here agrees with the real,
+    // per-instance header every run-time object actually carries.
+    const auto& DL = Mod.getDataLayout();
+    const uint64_t bodyAlign = std::max<uint64_t>(8, DL.getABITypeAlign(BodyLLTy).value());
+    const uint64_t rawHdr    = T.SchemaDiscs.size() * 8;
+    const uint64_t hdrBytes  = (rawHdr + bodyAlign - 1) / bodyAlign * bodyAlign;
+
+    auto* Fwd = DBuilder->createReplaceableCompositeType(
+        llvm::dwarf::DW_TAG_structure_type, T.Name, DebugFile, DebugFile, 0);
+    debugTypes_[&T] = Fwd;
+
+    // One named member per discriminant, in the header -- readable by name
+    // (`print q^.n`) exactly like an ordinary field, since that is what the
+    // header really holds -- followed by the body itself as one unnamed
+    // member just past the header.  DW_TAG_member with no DW_AT_name is the
+    // ordinary DWARF "anonymous struct/union member" shape (the same one a
+    // C `struct { struct { int x; }; }` anonymous nested struct gets):
+    // gdb/lldb read straight through it, so `q^.a`/`q^.k` still resolve to
+    // the body's own fields without one more `.` in the way -- only the
+    // OFFSET they are read at changed, not the access spelling.
+    std::vector<llvm::Metadata*> Elements;
+    auto* DiscDT = DBuilder->createBasicType("integer", 64, llvm::dwarf::DW_ATE_signed);
+    for (size_t i = 0; i < T.SchemaDiscs.size(); ++i) {
+        Elements.push_back(DBuilder->createMemberType(
+            Fwd, T.SchemaDiscs[i].Name, DebugFile, 0, 64, 64,
+            i * 64, llvm::DINode::FlagZero, DiscDT));
+    }
+    // BodyDT's own field offsets are still the PROBE's (issue #122's other
+    // half, left as-is here): a varying-extent field's real size can only
+    // be known from the discriminant this object carries at run time, which
+    // a DIType -- one static description shared by every instance of T, not
+    // rebuilt per allocation -- has no way to read.  Wrapping the header
+    // around it fixes the header itself and every field AT OR BEFORE the
+    // varying one exactly (nothing past this point in the body depends on
+    // any discriminant); a FIXED field written AFTER a varying one in the
+    // same record still inherits the varying field's own probe-approximated
+    // extent for its own offset, same as the varying field's own extent
+    // already did before this fix. issue #130: this cannot be closed with a
+    // genuine per-object DWARF location expression the way this comment
+    // used to say -- LLVM's DWARF emitter has no implementation of a
+    // computed member ADDRESS at all (confirmed directly from
+    // DwarfUnit.cpp's constructMemberDIE: an expression-typed offset always
+    // becomes DW_AT_data_bit_offset, a bitfield-only attribute; confirmed
+    // empirically too, gdb 17.2 crashes trying to print a member built that
+    // way). recordSchemaLayoutForScript below is the real fix for this gap
+    // instead -- a sidecar a gdb pretty-printer reads separately, computing
+    // the correct value from live memory, bypassing DWARF's limitation
+    // entirely rather than fighting it.
+    Elements.push_back(DBuilder->createMemberType(
+        Fwd, "", DebugFile, 0, DL.getTypeSizeInBits(BodyLLTy),
+        DL.getABITypeAlign(BodyLLTy).value() * 8, hdrBytes * 8,
+        llvm::DINode::FlagZero, BodyDT));
+
+    const uint64_t sizeBits = hdrBytes * 8 + DL.getTypeSizeInBits(BodyLLTy);
+    auto* Full = DBuilder->createStructType(
+        DebugFile, T.Name, DebugFile, 0, sizeBits, bodyAlign * 8,
+        llvm::DINode::FlagZero, nullptr, DBuilder->getOrCreateArray(Elements));
+    DBuilder->replaceTemporary(llvm::TempDIType(Fwd), Full);
+    debugTypes_[&T] = Full;
+
+    if (const TypeNode* bodyNode = SchemaTypes ? SchemaTypes->schemaBodyNodeOf(T) : nullptr) {
+        if (const auto* rt = llvm::dyn_cast<RecordTypeNode>(bodyNode))
+            recordSchemaLayoutForScript(T, *rt, hdrBytes);
+    }
+    return Full;
+}
+
+void CGDebugInfo::jsonEncodeExtentForm(const ExtentForm& F, std::string& Out) {
+    // A flat JSON array, op name first: ["const",1], ["disc",0],
+    // ["add",<left>,<right>], ["neg",<arg>] -- plang_schema_printers.py's
+    // eval_form walks this directly, no separate schema needed on that side
+    // beyond "first element is the op name".
+    switch (F.Kind) {
+        case ExtentForm::Op::Const: Out += "[\"const\"," + std::to_string(F.Value) + "]"; return;
+        case ExtentForm::Op::Disc:  Out += "[\"disc\","  + std::to_string(F.Value) + "]"; return;
+        case ExtentForm::Op::Neg:
+            Out += "[\"neg\",";
+            if (!F.Args.empty()) jsonEncodeExtentForm(F.Args[0], Out); else Out += "[\"const\",0]";
+            Out += "]";
+            return;
+        default: {
+            const char* op = F.Kind == ExtentForm::Op::Add ? "add"
+                            : F.Kind == ExtentForm::Op::Sub ? "sub"
+                            : F.Kind == ExtentForm::Op::Mul ? "mul"
+                            : F.Kind == ExtentForm::Op::Div ? "div"
+                            : F.Kind == ExtentForm::Op::Mod ? "mod"
+                            : F.Kind == ExtentForm::Op::Pow ? "pow"
+                            : "const";
+            Out += std::string("[\"") + op + "\",";
+            if (F.Args.size() == 2) {
+                jsonEncodeExtentForm(F.Args[0], Out);
+                Out += ",";
+                jsonEncodeExtentForm(F.Args[1], Out);
+            } else {
+                Out += "[\"const\",0],[\"const\",0]";
+            }
+            Out += "]";
+            return;
+        }
+    }
+}
+
+void CGDebugInfo::recordSchemaLayoutForScript(const Type& T, const RecordTypeNode& rt,
+                                               uint64_t hdrBytes) {
+    if (!Types) return;
+    // Recorded once per NAME (see schemaScriptEntries_'s own comment) --
+    // schemas sharing a declared name always share a body, so re-recording
+    // the same name from a different probe instantiation would just
+    // duplicate identical work.
+    if (schemaScriptEntries_.count(T.Name)) return;
+    // Nothing here handles a variant part or an array whose bound isn't a
+    // closed form (shouldn't happen for a field reached through a schema
+    // body -- see TypeNode's own ExtentLow/ExtentHigh comment -- but this
+    // stays defensive rather than emitting a partial, misleading entry):
+    // skip recording, plang_schema_printers.py's own fallback (print the
+    // ordinary DWARF-derived value) is exactly as good as not having run
+    // this pass at all.
+    if (rt.Variant) return;
+    const auto& DL = Mod.getDataLayout();
+
+    std::string J = "{";
+    J += "\"discs\":[";
+    for (size_t i = 0; i < T.SchemaDiscs.size(); ++i) {
+        if (i) J += ",";
+        J += "\"" + T.SchemaDiscs[i].Name + "\"";
+    }
+    J += "],\"hdrBytes\":" + std::to_string(hdrBytes) + ",\"fields\":[";
+
+    bool firstField = true;
+    for (const auto& fd : rt.Fields) {
+        auto* at = llvm::dyn_cast<ArrayTypeNode>(fd.Type.get());
+        if (at && (!at->ExtentLow || !at->ExtentHigh)) return; // see comment above
+        if (!at && (fd.Type->ExtentLow || fd.Type->ExtentHigh)) return; // varying non-array field, out of scope
+
+        llvm::Type* FieldLLTy = Types->llvmTypeOfNode(*fd.Type);
+        if (!FieldLLTy) return;
+        const uint64_t align = DL.getABITypeAlign(FieldLLTy).value();
+
+        std::string fieldJson = "{\"names\":[";
+        for (size_t i = 0; i < fd.Names.size(); ++i) {
+            if (i) fieldJson += ",";
+            fieldJson += "\"" + fd.Names[i] + "\"";
+        }
+        fieldJson += "],";
+        if (at) {
+            llvm::Type* ElemLLTy = Types->llvmTypeOfNode(*at->Element);
+            if (!ElemLLTy) return;
+            const uint64_t elemSize  = DL.getTypeAllocSize(ElemLLTy);
+            const uint64_t elemAlign = DL.getABITypeAlign(ElemLLTy).value();
+            fieldJson += "\"kind\":\"array\",\"elemSizeBytes\":" + std::to_string(elemSize)
+                       + ",\"elemAlignBytes\":" + std::to_string(elemAlign)
+                       + ",\"alignBytes\":" + std::to_string(align) + ",\"low\":";
+            jsonEncodeExtentForm(*at->ExtentLow, fieldJson);
+            fieldJson += ",\"high\":";
+            jsonEncodeExtentForm(*at->ExtentHigh, fieldJson);
+            fieldJson += "}";
+        } else {
+            const uint64_t sizeBytes = DL.getTypeAllocSize(FieldLLTy);
+            fieldJson += "\"kind\":\"scalar\",\"sizeBytes\":" + std::to_string(sizeBytes)
+                       + ",\"alignBytes\":" + std::to_string(align) + "}";
+        }
+
+        if (!firstField) J += ",";
+        firstField = false;
+        J += fieldJson;
+    }
+    J += "]}";
+    schemaScriptEntries_[T.Name] = J;
+}
+
+void CGDebugInfo::writeSchemaDebugScript() {
+    if (schemaScriptEntries_.empty() || !SrcMgr) return;
+    std::filesystem::path SourcePath(SrcMgr->getBufferName(MainFileID));
+    std::filesystem::path SidecarPath = SourcePath;
+    SidecarPath += ".plang-schemas.json";
+
+    std::string J = "{\"schemas\":{";
+    bool first = true;
+    for (const auto& [name, body] : schemaScriptEntries_) {
+        if (!first) J += ",";
+        first = false;
+        J += "\"" + name + "\":" + body;
+    }
+    J += "}}";
+
+    std::ofstream Out(SidecarPath);
+    if (Out) Out << J;
 }
 
 llvm::DISubprogram* CGDebugInfo::emitFunctionStart(llvm::Function* Fn, llvm::DIScope* Scope,

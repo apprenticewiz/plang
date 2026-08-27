@@ -1626,9 +1626,23 @@ std::string Codegen::Impl::emitModuleInitFn(const ModuleNode& modNode) {
     // overflowing the stack.  Sema rejects those, but this function is also
     // reachable from objects it never saw.
     builder.CreateStore(llvm::ConstantInt::get(i8Ty, 1), done);
-    for (const auto& clause : modNode.Imports)
-        if (!isBuiltinModule(clause.ModuleName))
-            builder.CreateCall(moduleInitFn(clause.ModuleName), {});
+    // A module written with a separate interface/implementation is two AST
+    // nodes for one Pascal-level declaration, and 'import' may be written on
+    // either half (most naturally the interface's, since that is where a
+    // name a signature mentions has to already be visible).  modNode is the
+    // implementation half here, so moduleIfaceImports_ -- the matching
+    // interface's own import clauses, set by the caller while this module's
+    // scope is current -- has to be walked too, or an import written only on
+    // the interface would silently never be brought up when this module is
+    // its own separate translation unit (issue #126).  Calling
+    // moduleInitFn() twice for a name listed on both halves is harmless: the
+    // guard above makes every init function idempotent.
+    std::vector<const std::vector<ImportClause>*> importLists{&modNode.Imports};
+    if (moduleIfaceImports_) importLists.push_back(moduleIfaceImports_);
+    for (const auto* clauses : importLists)
+        for (const auto& clause : *clauses)
+            if (!isBuiltinModule(clause.ModuleName))
+                builder.CreateCall(moduleInitFn(clause.ModuleName), {});
 
     // The module's own globals come up here, after the modules it imports and
     // before its `to begin do`, which may well read them.

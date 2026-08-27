@@ -99,6 +99,29 @@ private:
     SymbolTable              Symtab;
     DiagnosticsEngine&       Diags; // shared with Scanner and Parser
 
+    // Live activations of checkExpr.  Every recursive re-entry into expression
+    // checking -- a binary/unary operand, a call argument, an index/field/
+    // deref base -- funnels through checkExpr, so bounding activations there
+    // (see ExprDepthScope and MaxExprDepth in SemaExpr.cpp) bounds the whole
+    // AST-walking recursion against a flat operator chain built specifically
+    // to be deep, e.g. `1+1+1+...+1` with tens of thousands of terms.  Unlike
+    // deeply NESTED parenthesized input, which the parser's own ExprDepth
+    // guard (Parser.h) already catches, precedence-climbing parses a flat
+    // chain iteratively, so its AST can be arbitrarily deep with no parser-
+    // level ceiling on it -- Sema is the first place that walks it
+    // recursively, and without a ceiling here that walk used to exhaust the
+    // real C++ stack instead of failing with a diagnostic. Same shape as
+    // Parser::ExprDepth; see its comment for the rationale.
+    unsigned                 ExprDepth{};
+    bool                     ExprDepthLimitHit{};
+    struct ExprDepthScope {
+        unsigned& N;
+        bool&     LimitHit;
+        explicit ExprDepthScope(unsigned& Counter, bool& LimitHitFlag)
+            : N(Counter), LimitHit(LimitHitFlag) { ++N; }
+        ~ExprDepthScope() { if (--N == 0) LimitHit = false; }
+    };
+
     /// Canonical type store — owns built-in singletons and interns structural
     /// types.  Built from Opts, which is why Opts is declared above it: what an
     /// unqualified `integer` is depends on the dialect.

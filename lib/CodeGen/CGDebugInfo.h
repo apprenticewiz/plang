@@ -30,11 +30,14 @@
 
 namespace plang {
 struct TypeNode;
+struct RecordTypeNode;
 struct Type;
 struct ProcedureTypeNode;
+struct ExtentForm;
 }
 
 class CGTypes;
+class SchemaTypeRegistry;
 
 class CGDebugInfo {
 public:
@@ -51,6 +54,14 @@ public:
     /// than recomputing it, so there is exactly one place that knows a
     /// field's offset, not two that can drift apart.
     void setCGTypes(CGTypes& T) { Types = &T; }
+    /// Already exists by the time dbgInfo_ is constructed in
+    /// Codegen::Impl::init() (schemaTypes_ is built just before it), so
+    /// this is called right after construction rather than deferred like
+    /// setCGTypes is. recordSchemaLayoutForScript uses this to reach a
+    /// schema type's own RecordTypeNode -- the FieldDecls, and each array
+    /// field's TypeNode::ExtentLow/ExtentHigh -- which the resolved Type
+    /// alone does not carry.
+    void setSchemaTypes(SchemaTypeRegistry& S) { SchemaTypes = &S; }
 
     /// False when LangOptions::Debug was unset -- every other method is a
     /// safe no-op (returns null / does nothing) when this is false, exactly
@@ -220,10 +231,51 @@ public:
 
     /// -g: construct whatever deferred debug-info nodes DIBuilder collected
     /// (e.g. forward-declared types) before the module is inspected by
-    /// anything else.  A no-op when Debug is unset.
-    void finalize() { if (DBuilder) DBuilder->finalize(); }
+    /// anything else.  A no-op when Debug is unset.  Also writes the schema
+    /// debug-script sidecar (see writeSchemaDebugScript) -- this is the one
+    /// place every compile with Debug set reaches exactly once, late enough
+    /// that every schema type debugTypeOfSemaType ever built has already
+    /// called recordSchemaLayoutForScript.
+    void finalize() {
+        if (!DBuilder) return;
+        DBuilder->finalize();
+        writeSchemaDebugScript();
+    }
 
 private:
+    /// Issue #130's real fix: LLVM's DWARF emitter has no implementation of
+    /// a computed MEMBER ADDRESS (confirmed directly from
+    /// llvm/lib/CodeGen/AsmPrinter/DwarfUnit.cpp's constructMemberDIE --
+    /// an expression-typed member offset always becomes DW_AT_data_bit_offset,
+    /// a bitfield-only attribute, with no parallel path to
+    /// DW_AT_data_member_location; confirmed empirically too, gdb 17.2
+    /// crashes trying to print a member built that way). A field declared
+    /// after a varying-extent one therefore cannot get a correct static
+    /// DWARF offset at all -- so this sidesteps DWARF for exactly those
+    /// fields instead: alongside the (unchanged, still probe-approximate)
+    /// DIType, record each ExtentVaries schema's REAL layout as data (field
+    /// order, sizes, alignments, and each array field's bound as a
+    /// JSON-serialized ExtentForm) into a sidecar file a gdb Python
+    /// pretty-printer (share/plang/gdb/plang_schema_printers.py) loads
+    /// separately, walking it against the object's LIVE memory at print
+    /// time -- the exact computation tryFlattenSchemaBody attempted to push
+    /// into DWARF itself, run in Python instead, where it can actually
+    /// compute a real address rather than being limited to what
+    /// DW_AT_data_bit_offset's bitfield semantics allow.
+    void recordSchemaLayoutForScript(const plang::Type& T, const plang::RecordTypeNode& rt,
+                                      uint64_t hdrBytes);
+    /// Serializes every schema recordSchemaLayoutForScript has collected to
+    /// <source file>.plang-schemas.json, once, here in finalize() --
+    /// silently does nothing if none were recorded (Debug set but no
+    /// ExtentVaries schema ever reached codegen) or SrcMgr is null (the
+    /// -pc1 internal frontend always sets it when Debug is on; see
+    /// Codegen::setSourceManager's own call site).
+    void writeSchemaDebugScript();
+    /// True if F is expressible in the sidecar's tiny JSON-array encoding
+    /// (append the encoded form to Out); Const/Disc/Add/Sub/Mul/Div/Mod/Neg/
+    /// Pow all are, unlike DWARF -- Python's ** operator gives this format a
+    /// real advantage over the DW_OP attempt for Pow specifically.
+    static void jsonEncodeExtentForm(const plang::ExtentForm& F, std::string& Out);
     /// Record, Array, Set, Complex, String and VarString DIType construction
     /// (see debugTypeOfSemaType.cpp -- each has its own builder below) reads
     /// field offsets/sizes/element types out of here rather than
@@ -242,6 +294,15 @@ private:
     /// of any one instance -- see the concerns note where this is called.
     llvm::DIType* buildStringDIType(int64_t cap);
     llvm::DISubroutineType* buildSubroutineDIType(const plang::Type& T);
+    /// Schema/SchemaInstance whose extent a discriminant fixes only at run
+    /// time (Type::ExtentVaries): SchemaLayoutEngine::schemaHeaderBytes /
+    /// SchemaAccess::emitNewSchema store a leading discriminant header in
+    /// front of the body at run time, so this wraps the body's own DIType
+    /// in a synthetic outer struct that accounts for it -- see the
+    /// definition for why recursing into the body directly (as the
+    /// fixed-extent case still does) put every field, not just the varying
+    /// one, at the wrong DWARF offset.
+    llvm::DIType* buildSchemaDIType(const plang::Type& T);
     /// A record field's own DIType via debugTypeOfSemaType(*SemaTy) where
     /// that resolves to something (the ordinary case); otherwise -- no
     /// matching Sema::Type::Field found, or that field's own type has no
@@ -258,11 +319,21 @@ private:
     llvm::IRBuilder<>& B;
     const plang::LangOptions& Opts;
     const plang::SourceManager* SrcMgr;
+    /// Kept only for writeSchemaDebugScript's own SrcMgr->getBufferName
+    /// call -- every other use of the main file already goes through
+    /// SrcMgr->getPresumedLoc(Loc) with a real per-node SourceLocation, not
+    /// this file identity, so this one extra field is scoped to that one
+    /// caller rather than threaded anywhere else.
+    plang::FileID MainFileID;
     /// Null until setCGTypes runs (always before any real codegen; see its
     /// own comment). Composite DIType builders bail to null, exactly like
     /// the pre-existing default: break, if asked to run before then --
     /// defensive only, every real caller goes through Codegen::Impl::init().
     CGTypes* Types{nullptr};
+    /// Null until setSchemaTypes runs. recordSchemaLayoutForScript bails
+    /// (silently skips the sidecar entry) if this is null, same defensive-
+    /// only shape as Types above.
+    SchemaTypeRegistry* SchemaTypes{nullptr};
 
     std::unique_ptr<llvm::DIBuilder> DBuilder;
     llvm::DICompileUnit* DebugCU{nullptr};
@@ -279,4 +350,13 @@ private:
     /// DILocation::get and createAutoVariable/createLexicalBlock's Scope
     /// parameter both already accept.
     llvm::DILocalScope* CurScope{nullptr};
+    /// One fully-formed JSON object body per ExtentVaries schema type, keyed
+    /// by T.Name, appended by recordSchemaLayoutForScript and assembled into
+    /// the final sidecar by writeSchemaDebugScript. A map (not a vector),
+    /// keyed on the same T.Name debugTypes_ already uses to identify a
+    /// schema's DWARF struct -- schemas with the same declared name are the
+    /// same schema (a Type* can differ per-instantiation-site probe, but the
+    /// name and body never do), so recording only needs to happen once per
+    /// name, not once per Type* debugTypeOfSemaType happens to see.
+    std::map<std::string, std::string> schemaScriptEntries_;
 };

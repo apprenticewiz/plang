@@ -100,7 +100,33 @@ void Sema::warnIfComparisonIsSettled(const BinaryExpr& E, const Type& Lt,
 // Expression checking
 // ---------------------------------------------------------------------------
 
+// Ceiling on live checkExpr activations (Sema::ExprDepth).  1000 levels of
+// recursion through checkExpr -> checkBinary/checkUnary/... -> checkExpr is
+// well under the crash threshold observed empirically on this build's
+// default 8MB stack (a flat chain starts crashing a few thousand terms in),
+// while no legitimate Pascal expression -- handwritten or reasonably
+// generated -- nests anywhere close to this deep. Unlike deeply NESTED
+// parenthesized input, which Parser::ExprDepth (see ParseExpr.cpp) already
+// bounds, a flat operator chain like `1+1+1+...+1` is parsed ITERATIVELY by
+// precedence climbing, so its AST can be arbitrarily deep with no parser-side
+// ceiling on it; checkExpr's own recursive walk of that AST is the first
+// place this needs a guard.
+static constexpr unsigned MaxExprDepth = 1000;
+
 std::shared_ptr<Type> Sema::checkExpr(const ExprNode& E) {
+    // See MaxExprDepth above. Checked before the RAII bump: a caller already
+    // sitting at the ceiling must return without recursing again, not recurse
+    // once more and only then stop.
+    if (ExprDepth >= MaxExprDepth) {
+        if (!ExprDepthLimitHit) {
+            ExprDepthLimitHit = true;
+            error(E.Loc, diag::err_expr_too_deeply_nested);
+        }
+        E.ResolvedType = TyErr;
+        return TyErr;
+    }
+    ExprDepthScope DepthGuard(ExprDepth, ExprDepthLimitHit);
+
     std::shared_ptr<Type> T;
 
     if (llvm::dyn_cast<IntLitExpr>(&E))
@@ -173,8 +199,11 @@ std::shared_ptr<Type> Sema::checkIdent(const IdentExpr& E) {
     // as a Builtin symbol -- so a plain lookup finds `eof` in every program
     // ever written.  What matters here is a declaration nearer than that one.
     if (const Symbol* S = Symtab.lookup(E.Name);
-            S && S->Kind != SymbolKind::Builtin)
+            S && S->Kind != SymbolKind::Builtin) {
         E.UserDeclared = true;
+        if (S->Kind == SymbolKind::Proc)
+            E.UserDeclaredCallable = true;
+    }
 
     // Inside a function body, the function's own name (or named result variable,
     // EP §6.7.2) is the result pseudo-variable.
@@ -300,10 +329,16 @@ std::shared_ptr<Type> Sema::checkIndex(const IndexExpr& E) {
         error(E.Loc, diag::err_subscript_non_array, {ArrTy->Name});
         return TyErr;
     }
-    if (!IdxTy->isError() && !IdxTy->isOrdinal())
+    const bool IdxNotOrdinal = !IdxTy->isError() && !IdxTy->isOrdinal();
+    if (IdxNotOrdinal)
         error(E.Loc, diag::err_index_not_ordinal, {IdxTy->Name});
-    // ISO §6.5.3.2: index expression must be assignment-compatible with the declared index type.
-    if (!IdxTy->isError() && ArrTy->IndexType && !ArrTy->IndexType->isError()
+    // ISO §6.5.3.2: index expression must be assignment-compatible with the
+    // declared index type.  Skipped once err_index_not_ordinal has already
+    // fired for this same index expression -- a non-ordinal index is never
+    // assignment-compatible with an ordinal index type either, so the second
+    // check would only restate the same root cause as a separate diagnostic.
+    if (!IdxNotOrdinal && !IdxTy->isError() && ArrTy->IndexType
+        && !ArrTy->IndexType->isError()
         && !isAssignCompatible(*ArrTy->IndexType, *IdxTy))
         error(E.Loc, diag::err_index_type_mismatch,
               {IdxTy->Name, ArrTy->IndexType->Name});

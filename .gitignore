@@ -68,3 +68,8 @@ build-asan/
 # declaration -- should only ever appear in a build/test tmp dir via split-file,
 # never in the checked-in source tree (a recurring mistake this guards against).
 *.pmi
+
+# Schema-layout sidecar for the gdb pretty-printer (issue #130), written next
+# to the source file a -g compile with a runtime-varying schema type used --
+# same class of side-effect-of-compiling artifact as *.pmi above.
+*.plang-schemas.json

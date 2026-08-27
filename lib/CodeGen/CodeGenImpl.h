@@ -278,6 +278,18 @@ struct Codegen::Impl {
     /// The heading of the module being emitted, whose declarations are its
     /// block's; null while emitting anything else.
     const BlockNode* moduleIfaceBlock_{nullptr};
+    /// The same heading's own import clauses (EP §6.11.3).  A module written
+    /// with a separate interface/implementation is one Pascal-level
+    /// declaration split into two AST nodes, and 'import' may be written on
+    /// either half -- most naturally the interface's, since that is where an
+    /// imported name a signature mentions has to already be visible.  Under
+    /// genuine separate compilation the implementation's own ModuleNode is
+    /// all emitModuleInitFn otherwise sees, so an import written only on the
+    /// interface would silently vanish from the init function's own list of
+    /// imports to bring up first, leaving the imported module never
+    /// initialised.  Null while emitting anything else, same lifetime as
+    /// moduleIfaceBlock_ above.
+    const std::vector<ImportClause>* moduleIfaceImports_{nullptr};
 
     /// What is known about \p name as an import of the unit being emitted, or
     /// null if this unit does not import it.

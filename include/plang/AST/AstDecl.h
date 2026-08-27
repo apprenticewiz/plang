@@ -34,6 +34,10 @@ struct TypeDef {
 
 struct VarGroup {
     std::vector<std::string>  Names;
+    /// Where each name in Names was written, index-aligned with Names.  Used
+    /// so diagnostics about one name in a multi-name group ("a, b: integer")
+    /// point at that name's own token rather than at the shared type.
+    std::vector<SourceLocation> NameLocs;
     std::unique_ptr<TypeNode> Type;
     /// EP §6.4.1: optional 'value expr' initializer; null if absent.
     std::unique_ptr<ExprNode> InitExpr;

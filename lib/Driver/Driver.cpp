@@ -793,7 +793,10 @@ static int linkELF(Driver &D, const Options &Opts, const std::string &ObjFile,
     Args.push_back("-L/lib");
     Args.push_back("-L/usr/lib");
     Args.push_back("-L/usr/lib/" + Arch + "-linux-gnu");
-    Args.push_back(ObjFile);
+    // ObjFile is empty in linker-only mode (no .pas input, just .o/.a files
+    // forwarded straight to the linker via Opts.linkerArgs below); an empty
+    // argument would otherwise be handed to ld.lld as a bogus input file.
+    if (!ObjFile.empty()) Args.push_back(ObjFile);
     if (!RuntimeLib.empty()) Args.push_back(RuntimeLib);
     Args.push_back("-lm");
     Args.push_back("-lgcc"); Args.push_back("--as-needed");
@@ -846,7 +849,8 @@ static int linkDarwin(Driver &D, const Options &Opts, const std::string &ObjFile
         Args.push_back(TC.SDKVersion.empty() ? MinOS : TC.SDKVersion);
     }
     Args.push_back("-o"); Args.push_back(OutFile);
-    Args.push_back(ObjFile);
+    // See the matching comment in linkELF: empty in linker-only mode.
+    if (!ObjFile.empty()) Args.push_back(ObjFile);
     if (!RuntimeLib.empty()) Args.push_back(RuntimeLib);
     for (const auto &A : Opts.linkerArgs) Args.push_back(A);
     Args.push_back("-lSystem");
@@ -871,6 +875,15 @@ int Driver::compile(const Options &Opts, bool IsExtraFile) {
         ? defaultOutput(Opts.inputFile, Opts.mode)
         : Opts.outputFile;
 
+    // Linker-only mode: no .pas input, only .o/.a files (parseArgs routed
+    // them into Opts.linkerArgs).  There is no source to run the front end
+    // or assembler on -- go straight to the link step, matching the standard
+    // "compile with -c, link separately" workflow every C toolchain supports.
+    if (Opts.inputFile.empty()) {
+        return link(*this, Opts, /*ObjFile=*/"", OutFile,
+                    findRuntimeLib(ExePath_), Opts.verbose, Opts.dryRun);
+    }
+
     const std::string Self = findSelf();
     const std::string OOpt = "-O" + std::to_string(Opts.optLevel);
     const bool V  = Opts.verbose;
@@ -879,6 +892,10 @@ int Driver::compile(const Options &Opts, bool IsExtraFile) {
     // Check the input file before spawning the front end.
     if (!llvm::sys::fs::exists(Opts.inputFile)) {
         diag(diag::err_file_not_found, {Opts.inputFile});
+        return 1;
+    }
+    if (llvm::sys::fs::is_directory(Opts.inputFile)) {
+        diag(diag::err_is_a_directory, {Opts.inputFile});
         return 1;
     }
 
@@ -904,6 +921,10 @@ int Driver::compile(const Options &Opts, bool IsExtraFile) {
     for (const auto &ExtraFile : Opts.extraInputFiles) {
         if (!llvm::sys::fs::exists(ExtraFile)) {
             diag(diag::err_file_not_found, {ExtraFile});
+            return 1;
+        }
+        if (llvm::sys::fs::is_directory(ExtraFile)) {
+            diag(diag::err_is_a_directory, {ExtraFile});
             return 1;
         }
         Options ExtraOpts = Opts;
@@ -1051,7 +1072,10 @@ int Driver::run(int Argc, char *Argv[]) {
     // one of them; parsing carries on so that they all are.
     if (Diags_.hasErrors()) return 1;
 
-    if (Opts.inputFile.empty()) {
+    // Truly nothing to do only when there is no .pas input *and* no
+    // linker-only input (.o/.a) either; a linker-only invocation (e.g.
+    // "plang hello.o -o hello_bin") skips straight to the link step below.
+    if (Opts.inputFile.empty() && Opts.linkerArgs.empty()) {
         diag(diag::err_no_input_files);
         return 1;
     }

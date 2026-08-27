@@ -13,15 +13,35 @@ cmake_minimum_required(VERSION 3.16)
 # one in project(VERSION ...), and a shared library named
 # libplang-frontend.so.0.3.1-pre is not something anyone wants either. What a
 # human actually reads (PLANG_VERSION_STRING, below) is never hand-maintained
-# at all: it is git-describe's own answer to "how far is the working tree
-# from the last release tag," computed fresh at every configure. Sitting
-# exactly on a release tag with a clean tree gives the bare number back
-# ("0.3.0"); N commits past it gives "0.3.0+N.g<hash>" (SemVer build
-# metadata, which per the spec's own §10 carries no precedence meaning --
-# exactly right here, since this string is diagnostic, not a promise about
-# what the next real release will be numbered); a dirty tree appends
-# ".dirty". No git, or no matching tag (a source tarball export, say), falls
-# back to VERSION's bare number with no suffix.
+# at all in the common case: it is git-describe's own answer to "how far is
+# the working tree from the last release tag," computed fresh at every
+# configure. Sitting exactly on a release tag with a clean tree gives the
+# bare number back ("0.3.2"); a dirty tree there appends ".dirty".
+#
+# Off a release tag (an ordinary dev build), the version string is the base
+# VERSION plus the real commit hash -- "99.99.99+gce3d15c" -- NOT the nearest
+# tag's own number plus a commit count. That was tried first and rejected:
+# release branches (release/0.3.x) carry their own v0.3.1/v0.3.2/... tags
+# that are never merged back into `main` (see the 5-step process below,
+# "main is untouched throughout"), so `git describe` run on `main` walks
+# straight past an already-shipped tag to a much older, unrelated one --
+# `main` well past v0.3.2 described itself as "v0.3.0-38-gce3d15c", which
+# reads exactly like a real, orderable version and is actively misleading
+# once a later release has shipped. Reporting the real hash instead of a
+# fabricated distance-from-a-maybe-stale-tag number is the whole fix; no
+# tag lookup is trustworthy enough here to build a "+N" count from.
+#
+# VERSION's own bare content on `main` is, for the identical reason, a
+# deliberate, non-committal sentinel -- "99.99.99" -- not the last real
+# release number: it is what actually drives project(VERSION ...) and the
+# shared library's SONAME unconditionally, regardless of whether git is even
+# available, so a plain `main` build's library has never silently claimed to
+# BE a shipped release; and it is what a source tarball export (no git, or
+# no reachable tag) falls back to instead of a stale, real-looking number
+# with nothing to say otherwise. Mirrors Redis's own long-standing
+# "999.999.999" convention, surveyed and initially passed over in favor of
+# "just let it sit at the last release," then revisited once that staleness
+# was seen as actively misleading rather than merely imprecise.
 #
 # Recomputed at configure time only, not on every incremental build --
 # `cmake`'s own version string has the identical property (its git-hash
@@ -29,12 +49,9 @@ cmake_minimum_required(VERSION 3.16)
 # this only means a local incremental build's --version can lag one commit
 # behind until the next `cmake -S . -B build`.
 #
-# The direct consequence, and the reason this replaced a hand-bumped "-pre"
-# suffix: VERSION does not need to change the moment a release ships, or get
-# guessed at in advance. It just sits at the last real release for as long as
-# `main` is between releases, however long that takes or whatever the next
-# one turns out to be numbered -- nothing here commits to that early. It only
-# changes when a release is actually being prepared:
+# VERSION only ever holds a real number on a release branch, set at the
+# point a release is actually being prepared, immediately reverting to
+# 99.99.99 on `main` (which is never itself touched by a release cut):
 #
 #   1. cut the release branch (or reuse an existing one, for a patch release)
 #   2. on that branch, set VERSION to the exact target number
@@ -58,22 +75,67 @@ if(GIT_EXECUTABLE AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.git")
         ERROR_QUIET
         RESULT_VARIABLE PLANG_GIT_DESCRIBE_RESULT
     )
-    # Matches e.g. "v0.3.0" (exactly on the tag), "v0.3.0-12-gabc1234" (12
-    # commits past it), either optionally followed by "-dirty". A tarball
-    # export or a shallow clone with no reachable tag makes describe fail
-    # (nonzero exit, or no match) -- PLANG_VERSION_STRING keeps its plain
-    # VERSION-file fallback from above in that case.
+    # Matches e.g. "v0.3.2" (exactly on the tag), "v0.3.0-38-gce3d15c" (38
+    # commits past it), either optionally followed by "-dirty".
     if(PLANG_GIT_DESCRIBE_RESULT EQUAL 0 AND PLANG_GIT_DESCRIBE MATCHES
        "^v?([0-9]+\\.[0-9]+\\.[0-9]+)(-([0-9]+)-g([0-9a-f]+))?(-dirty)?$")
-        set(PLANG_VERSION_STRING "${CMAKE_MATCH_1}")
         if(CMAKE_MATCH_3)
-            set(PLANG_VERSION_STRING "${PLANG_VERSION_STRING}+${CMAKE_MATCH_3}.g${CMAKE_MATCH_4}")
+            # Not sitting exactly on a release tag -- a dev build. The
+            # NEAREST tag `git describe` found is not necessarily meaningful
+            # here: release branches carry their own v0.3.1/v0.3.2/... tags
+            # that are never merged back into `main` (see the release
+            # procedure below), so `main`'s own history can walk straight
+            # past a real, already-shipped tag to a much older one. Showing
+            # that stale tag's number plus a commit count relative to it
+            # ("0.3.0+38.gce3d15c" when 0.3.2 has already shipped) looks
+            # like a real, orderable version and is actively misleading.
+            # Use this build's own base VERSION (the "99.99.99" sentinel on
+            # `main`, or a release branch's real target number mid-cycle)
+            # together with the actual commit hash instead -- a dev build
+            # never claims to sit at a specific distance from a tag that
+            # may not even be its most recent real ancestor release.
+            set(PLANG_VERSION_STRING "${PLANG_BASE_VERSION}+g${CMAKE_MATCH_4}")
+        else()
+            set(PLANG_VERSION_STRING "${CMAKE_MATCH_1}")
         endif()
         if(CMAKE_MATCH_5)
             set(PLANG_VERSION_STRING "${PLANG_VERSION_STRING}.dirty")
         endif()
+    else()
+        # No reachable "v[0-9]*" tag at all (a shallow clone, or a history
+        # that predates tagging) -- still surface the real commit hash
+        # rather than silently falling back to a bare, hash-less VERSION.
+        execute_process(
+            COMMAND ${GIT_EXECUTABLE} rev-parse --short HEAD
+            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+            OUTPUT_VARIABLE PLANG_GIT_HASH
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            ERROR_QUIET
+            RESULT_VARIABLE PLANG_GIT_HASH_RESULT
+        )
+        if(PLANG_GIT_HASH_RESULT EQUAL 0 AND PLANG_GIT_HASH)
+            set(PLANG_VERSION_STRING "${PLANG_BASE_VERSION}+g${PLANG_GIT_HASH}")
+            # --untracked-files=no keeps this consistent with the primary
+            # path above: `git describe --dirty` only ever reacts to
+            # modifications to tracked files, never to untracked files sitting
+            # in the tree (issue #127 -- a bare `git status --porcelain` here
+            # disagreed with that and marked a tree ".dirty" for an untracked
+            # file alone, which `git describe` never would have).
+            execute_process(
+                COMMAND ${GIT_EXECUTABLE} status --porcelain --untracked-files=no
+                WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+                OUTPUT_VARIABLE PLANG_GIT_DIRTY_CHECK
+                OUTPUT_STRIP_TRAILING_WHITESPACE
+                ERROR_QUIET
+            )
+            if(PLANG_GIT_DIRTY_CHECK)
+                set(PLANG_VERSION_STRING "${PLANG_VERSION_STRING}.dirty")
+            endif()
+        endif()
     endif()
 endif()
+# No git, or git present but genuinely no commit to name (an empty repo) --
+# PLANG_VERSION_STRING keeps its plain VERSION-file fallback from above.
 
 # The date in the man page header, which by convention is when the page last
 # changed rather than when it was built — a build date would make two builds of
@@ -244,6 +306,16 @@ install(FILES ${CMAKE_BINARY_DIR}/docs/plang.1
 install(DIRECTORY ${PLANG_LOCALE_BUILD_DIR}/
     DESTINATION ${CMAKE_INSTALL_DATADIR}/plang/locale
     FILES_MATCHING PATTERN "*.po"
+)
+# gdb pretty-printer for issue #130 (a schema field after a varying-extent
+# one has no correct static DWARF offset LLVM's own emitter can express --
+# see share/plang/gdb/plang_schema_printers.py's own header comment for the
+# full account). Not auto-loaded -- `(gdb) source
+# <prefix>/share/plang/gdb/plang_schema_printers.py`, or add that line to
+# ~/.gdbinit.
+install(DIRECTORY share/plang/gdb/
+    DESTINATION ${CMAKE_INSTALL_DATADIR}/plang/gdb
+    FILES_MATCHING PATTERN "*.py"
 )
 
 # ---- Tests ----

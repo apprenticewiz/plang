@@ -11,6 +11,12 @@
 // message for one condition is the point of a shared catalog.
 
 DIAG(err_no_input_files, Error, "no input files")
+// A path that exists but names a directory, not a file -- passed where an
+// input file is expected.  Without this check the front end went on to try
+// reading it as source, which succeeds at open() but reads back empty,
+// producing a cascade of unrelated "expected X, got end of file" parser
+// errors instead of one diagnostic naming the real problem.
+DIAG(err_is_a_directory, Error, "is a directory, not a file: '%0'")
 DIAG(err_arg_requires_value, Error, "%0 requires an argument")
 DIAG(err_unknown_dialect, Error,
      "unknown Pascal dialect '%0'; valid dialects: %1")

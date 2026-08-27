@@ -231,9 +231,15 @@ void Parser::parseVarSection(BlockNode& Block) {
 // EP §6.4.1: 'value' introduces an initial-state specifier.
 VarGroup Parser::parseVarGroup() {
     VarGroup G;
-    G.Names.push_back(expect(TokenKind::Identifier).Lexeme);
+    {
+        Token T = expect(TokenKind::Identifier);
+        G.Names.push_back(T.Lexeme);
+        G.NameLocs.push_back(T.Loc);
+    }
     while (match(TokenKind::Comma)) {
-        G.Names.push_back(expect(TokenKind::Identifier).Lexeme);
+        Token T = expect(TokenKind::Identifier);
+        G.Names.push_back(T.Lexeme);
+        G.NameLocs.push_back(T.Loc);
     }
     for (const auto& N : G.Names) VarNames_.insert(toLower(N));
     expect(TokenKind::Colon);
@@ -345,9 +351,15 @@ ParamGroup Parser::parseParamGroup() {
         G.IsProtected = true; advance();
     }
     G.IsVar = match(TokenKind::Var);
-    G.Names.push_back(expect(TokenKind::Identifier).Lexeme);
+    {
+        Token T = expect(TokenKind::Identifier);
+        G.Names.push_back(T.Lexeme);
+        G.NameLocs.push_back(T.Loc);
+    }
     while (match(TokenKind::Comma)) {
-        G.Names.push_back(expect(TokenKind::Identifier).Lexeme);
+        Token T = expect(TokenKind::Identifier);
+        G.Names.push_back(T.Lexeme);
+        G.NameLocs.push_back(T.Loc);
     }
     for (const auto& N : G.Names) VarNames_.insert(toLower(N));
     expect(TokenKind::Colon);
@@ -381,7 +393,11 @@ ParamGroup Parser::parseProcedureParamGroup() {
     PT->IsFunction = IsFunction;
 
     ParamGroup G;
-    G.Names.push_back(expect(TokenKind::Identifier).Lexeme);
+    {
+        Token T = expect(TokenKind::Identifier);
+        G.Names.push_back(T.Lexeme);
+        G.NameLocs.push_back(T.Loc);
+    }
     PT->Params = parseParamList();
 
     if (IsFunction) {

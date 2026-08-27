@@ -102,6 +102,14 @@ config.substitutions.insert(0,
     ("%hold_stdin_open",
      "bash " + os.path.join(config.plang_source_dir, "test", "tools", "run-with-stdin-held-open.sh")))
 
+# Issue #130's gdb pretty-printer -- referenced straight from the source
+# tree (share/plang/gdb/), not the installed copy, same as every other
+# %substitution here points at the just-built binary rather than anything
+# `make install` may or may not have run yet.
+config.substitutions.insert(0,
+    ("%plang_schema_printers",
+     os.path.join(config.plang_source_dir, "share", "plang", "gdb", "plang_schema_printers.py")))
+
 # ---- available_features ------------------------------------------------
 #
 # fpc-binary, not bare "fpc": include/plang/Basic/Dialects.def already
@@ -117,6 +125,14 @@ if shutil.which("fpc") is not None:
     try:
         subprocess.run(["fpc", "-iV"], capture_output=True, timeout=5, check=True)
         config.available_features.add("fpc-binary")
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
+        pass
+
+if shutil.which("gdb") is not None:
+    import subprocess
+    try:
+        subprocess.run(["gdb", "--version"], capture_output=True, timeout=5, check=True)
+        config.available_features.add("gdb-binary")
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
         pass
 
