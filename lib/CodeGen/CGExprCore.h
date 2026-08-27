@@ -74,6 +74,53 @@ public:
     llvm::Value* spillToTemporary(const plang::ExprNode& e);
 
 private:
+    // Live activations of emitExpr.  Every recursive re-entry into expression
+    // emission -- a binary/unary operand, a call argument, an index/field/
+    // deref base -- funnels through emitExpr (directly, or indirectly via the
+    // EmitExpr callback threaded into CGBinaryOps and friends), so bounding
+    // activations here bounds the whole recursive descent.
+    //
+    // Sema::checkExpr (see ExprDepthScope/MaxExprDepth in SemaExpr.cpp) already
+    // rejects any expression nesting >= 1000 checkExpr activations deep before
+    // it ever reaches codegen, so a Sema-accepted expression is nested well
+    // under 1000 levels deep by construction. In an ordinary Release/Debug
+    // build that is no problem: CodeGen's per-frame stack usage keeps its own
+    // practical crash threshold safely above 1000, so MaxExprDepth below is
+    // set comfortably higher still -- purely defense-in-depth against a
+    // genuine internal inconsistency (Sema and CodeGen disagreeing about what
+    // "too deep" means), not expected to fire on any real, Sema-accepted
+    // program.
+    //
+    // Under this project's own ASan+UBSan CI build, though, ASan's much
+    // larger per-frame stack usage (redzones, shadow-memory bookkeeping, no
+    // tail-call folding) drops CodeGen's *real* crash threshold well BELOW
+    // Sema's 1000-term cap -- empirically, on this codebase, a flat
+    // `1+1+...+1` chain of as few as ~380 terms crashes CodeGen with a raw
+    // SIGSEGV / ASan stack-overflow report under
+    // `-DPLANG_SANITIZE=address,undefined` (issue #146), even though Sema
+    // accepted it with no diagnostic and the same input compiles fine on a
+    // non-sanitized build. A guard above 1000 cannot catch that: the real
+    // stack overflow happens first. So under a sanitizer build specifically,
+    // MaxExprDepth is instead set well BELOW the measured ~380-term crash
+    // floor (with a margin for expression kinds heavier than a plain
+    // integer '+' chain), trading "reject a small, unrealistic sliver of
+    // deeply-nested-but-legal expressions" for "never let CodeGen's own
+    // recursion raw-SIGSEGV" -- turning the crash into the same clean,
+    // diagnosable failure (codegenICE, CodegenICE.h) every other invariant
+    // violation in codegen produces.
+#if defined(__SANITIZE_ADDRESS__) \
+    || (defined(__has_feature) && __has_feature(address_sanitizer))
+    static constexpr unsigned MaxExprDepth = 200;
+#else
+    static constexpr unsigned MaxExprDepth = 4000;
+#endif
+    unsigned                  ExprDepth_{};
+    struct ExprDepthScope {
+        unsigned& N;
+        explicit ExprDepthScope(unsigned& Counter) : N(Counter) { ++N; }
+        ~ExprDepthScope() { --N; }
+    };
+
     llvm::LLVMContext& Ctx;
     llvm::Module& Mod;
     llvm::IRBuilder<>& B;

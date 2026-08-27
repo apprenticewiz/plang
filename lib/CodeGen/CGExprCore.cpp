@@ -16,6 +16,15 @@
 using namespace plang;
 
 llvm::Value* CGExprCore::emitExpr(const ExprNode& e) {
+    // See MaxExprDepth in CGExprCore.h. Checked before the RAII bump: a caller
+    // already sitting at the ceiling must abort without recursing again.
+    if (ExprDepth_ >= MaxExprDepth)
+        codegenICE("expression nesting exceeds CodeGen's depth ceiling; "
+                    "this is a hard recursion limit of this build's "
+                    "expression emitter, not a diagnostic on the input "
+                    "program");
+    ExprDepthScope DepthGuard(ExprDepth_);
+
     if (auto* n = llvm::dyn_cast<IntLitExpr>(&e))
         return llvm::ConstantInt::get(I64Ty, static_cast<uint64_t>(n->Value), true);
 
