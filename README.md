@@ -133,23 +133,7 @@ plang -O2 program.pas -o program
 
 # Debugging
 plang -g program.pas -o program
-gdb program
-
-# A record/pointer variable of a schema type (EP §6.4.7) whose extent is
-# only fixed at run time prints correctly under this ordinary `gdb`
-# workflow for its discriminant and any field at or before the first
-# varying-extent one; a field declared AFTER one does not (a real DWARF
-# limitation, not a plang bug -- see issue #130). If your program uses such
-# a schema and you want every field to print correctly, source the
-# companion gdb pretty-printer once per session:
-gdb -ex "source /path/to/plang/share/plang/gdb/plang_schema_printers.py" program
-# IMPORTANT (issue #145): that pretty-printer only ever corrects WHOLE-value
-# printing, e.g. `print q^`. A direct field-path access, e.g. `print
-# q^.field`, bypasses it entirely and can still show a wrong value for a
-# field declared after a varying one -- gdb resolves that expression itself,
-# off the DWARF member offset, before the pretty-printer ever runs. This is
-# a limitation of gdb's pretty-printer API, not something more plang code
-# can fix; always print the whole value (`print q^`) for a correct view.
+gdb program[^1][^2]
 
 # Dialect selection (iso7185 is the default; turbo, delphi and fpc are planned)
 plang -std=iso10206 program.pas -o program   # Extended Pascal
@@ -166,6 +150,23 @@ plang -w program.pas
 # Give up after a set number of errors rather than cascading
 plang -ferror-limit=5 program.pas
 ```
+
+[^1]: A record/pointer variable of a schema type (EP §6.4.7) whose extent is
+only fixed at run time prints correctly under this ordinary `gdb`
+workflow for its discriminant and any field at or before the first
+varying-extent one; a field declared AFTER one does not (a real DWARF
+limitation, not a plang bug -- see issue #130). If your program uses such
+a schema and you want every field to print correctly, source the
+companion gdb pretty-printer once per session:
+`gdb -ex "source /path/to/plang/share/plang/gdb/plang_schema_printers.py" program`
+
+[^2]: IMPORTANT (issue #145): that pretty-printer only ever corrects WHOLE-value
+printing, e.g. `print q^`. A direct field-path access, e.g. `print
+q^.field`, bypasses it entirely and can still show a wrong value for a
+field declared after a varying one -- gdb resolves that expression itself,
+off the DWARF member offset, before the pretty-printer ever runs. This is
+a limitation of gdb's pretty-printer API, not something more plang code
+can fix; always print the whole value (`print q^`) for a correct view.
 
 ## License
 
