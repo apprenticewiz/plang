@@ -1189,6 +1189,11 @@ void Sema::checkBlock(const BlockNode& Block,
                 error(Vg.Type->Loc, diag::err_value_init_type_mismatch,
                       {InitT->Name, T->Name});
             checkStringCapacity(*T, *Vg.InitExpr);
+            // isAssignCompatible above accepts any integer literal for a
+            // subrange destination, same gap checkInitialState had for a
+            // type-denoter's own 'value' clause (#254): `var x: 1..10 value
+            // 500;` compiled clean and x started life outside its subrange.
+            warnIfConstantOutOfRange(*T, *Vg.InitExpr);
             adoptSetType(*Vg.InitExpr, T);
         }
     }
