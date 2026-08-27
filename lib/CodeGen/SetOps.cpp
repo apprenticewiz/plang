@@ -61,9 +61,22 @@ llvm::Value* SetOps::alignSet(llvm::Value* v, int64_t from, int64_t to) {
     // -5..10` and `set of 0..10` are compatible and their windows are five bits
     // apart.  Without this the bits were carried across unmoved and every
     // member came out shifted — {1, 3} read back as {-4, -2}.
-    auto* st  = setTy();
-    auto* amt = llvm::ConstantInt::get(
-        st, static_cast<uint64_t>(from > to ? from - to : to - from));
+    auto* st = setTy();
+    const uint64_t diff = static_cast<uint64_t>(from > to ? from - to : to - from);
+    // Each type's own span is held under PlangMaxSetElements by
+    // checkSetBaseRange, but the two windows are anchored independently, so
+    // their ORIGINS can still land PlangMaxSetElements or more apart -- `set
+    // of -300..-250` and `set of 0..10` are each individually fine and 300
+    // bits apart.  A shift that size is not just wrong, it is poison: LLVM
+    // gives `shl`/`lshr` undefined results once the shift amount reaches the
+    // operand's own bit width, and at -O2 that poison was observed to reach
+    // a branch condition and take the optimizer's UB license to delete the
+    // rest of the function. No ordinal representable in the `from` window can
+    // land inside the `to` window once they are this far apart, so the only
+    // value every one of its bits could correctly rebase to is empty.
+    if (diff >= static_cast<uint64_t>(PlangMaxSetElements))
+        return llvm::ConstantInt::get(st, 0);
+    auto* amt = llvm::ConstantInt::get(st, diff);
     auto* x = toSetWidth(v);
     return from > to ? B.CreateShl (x, amt, "set.align")
                      : B.CreateLShr(x, amt, "set.align");

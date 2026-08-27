@@ -323,11 +323,31 @@ ClosureAndCallABI::emitProcParamCall(const VarEntry& ve,
             else if (discs)     Schema.pushSchemaArgs(args, a, discs);
             else if (inner)     pushProcParamArgs(args, a, *inner);
             else if (pg.IsVar)  args.push_back(EmitLValue(a));
-            else                args.push_back(EmitCallArg(a,
-                                    args.size() < fnTy->getNumParams()
-                                        ? fnTy->getParamType(args.size())
-                                        : nullptr,
-                                    /*byRef=*/false));
+            else {
+                // The two direct call paths (CGProcCall.cpp, CGFuncCall.cpp)
+                // look the callee's own declared set base up by mangled name
+                // through ParamSetBaseOf/paramMeta_ and route a plain-value
+                // set argument through Sets.alignSetArg with it, so the
+                // argument lands in the callee's own window rather than
+                // arriving with its bits carried across unmoved.  This path
+                // has no mangled callee to look paramMeta_ up by -- the
+                // formal is *this* ProcedureTypeNode's own pg.Type, already
+                // in hand -- but it is exactly the same declared type
+                // paramMeta_ would have been recorded from (CodeGenProcs.cpp),
+                // so deriving the base from it directly is equivalent, not a
+                // separate rule to keep in sync.
+                std::optional<int64_t> destSetBase;
+                if (pg.Type->ResolvedType
+                    && pg.Type->ResolvedType->Kind == TypeKind::Set)
+                    destSetBase = setOffsetOf(*pg.Type->ResolvedType);
+                args.push_back(Sets.alignSetArg(
+                    EmitCallArg(a,
+                        args.size() < fnTy->getNumParams()
+                            ? fnTy->getParamType(args.size())
+                            : nullptr,
+                        /*byRef=*/false),
+                    a, destSetBase));
+            }
         }
     }
 
