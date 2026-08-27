@@ -8,6 +8,119 @@ version numbers follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-08-27
+
+A follow-up adversarial review of 0.3.0, focused on the ground the previous pass hadn't
+covered: the new `-g` support, a fresh skeptical re-check of the CodeGen decomposition
+itself, and areas with no prior scrutiny at all -- sets, complex numbers, file I/O, non-local
+`goto`, procedural parameters, and a systematic sweep for missing range checks. Nineteen bugs,
+several of them real memory-safety issues. Every fix carries a regression test verified to
+fail against the code it fixes.
+
+### Fixed
+
+- **`-g` combined with any of `-O1`/`-O2`/`-O3` crashed `llc` outright, on ordinary code.**
+  Three or more levels of nested procedures, where a non-innermost level's own local or
+  parameter reuses the name of a variable captured from further out (an extremely common
+  pattern -- reusing `i`, `x`, `count` at multiple nesting depths), produced a DWARF scope
+  shape LLVM's own source languages never generate: a subprogram parented directly under a
+  lexical block that is itself inside another subprogram. `llc`'s DWARF backend segfaulted
+  building the abstract subprogram context for it, and `-O0` never reached the same code path,
+  so this shipped invisibly until it hit code slightly more nested than what the original
+  shadowing fix (0.3.0) had tested.
+
+- **Conformant array parameter accesses had no range check at all.** Every other way of
+  indexing an array in plang -- a plain array, one behind a pointer, a schema array -- is
+  range-checked; the one path handling EP §6.6.6.2 conformant array parameters was not,
+  so an out-of-bounds index silently read or wrote past the actual allocation, even with
+  range checks on by default. Found independently by two separate review passes.
+
+- **A non-local `goto` out of a procedure with its own by-value conformant-array parameter
+  leaked that parameter's heap copy permanently.** The copy's disposal only ran on the
+  normal-return path; the `setjmp`/`longjmp`-based non-local unwind skipped it entirely.
+  Confirmed with a real AddressSanitizer/LeakSanitizer before-and-after.
+
+- **`minint div -1` — the one integer division that overflows even with a nonzero divisor —
+  crashed with an uncontrolled SIGFPE**, or gave a silently wrong answer depending on
+  optimization level. Now traps cleanly, matching this runtime's existing convention for
+  other undefined arithmetic.
+
+- **Unbounded recursion in type, statement, and nested-procedure-declaration parsing
+  stack-overflowed the compiler.** A depth guard already existed for deeply nested
+  parenthesized expressions (0.3.0); it covered only that one construct. Deeply nested array/
+  record/pointer/set/file types, deeply nested compound statements, and procedures declared
+  inside procedures declared inside procedures all crashed the same way. All three now report
+  a clean "too deeply nested" diagnostic instead.
+
+- **An overflowing `-ferror-limit=` value crashed the compiler** with an unhandled
+  `std::out_of_range` instead of a diagnostic naming the bad flag value.
+
+- **An untyped set literal spanning more than 256 elements silently dropped elements with no
+  diagnostic**, when every element was non-negative. `x in [0, 300]` read `false` for 300 --
+  silently wrong, not merely unchecked -- because the width check added for a *negative*-lower-
+  bound literal was never reached for a purely non-negative one. `card([0, 300])` and similar
+  now report the same "exceeds the 256-element limit" error a negative-bound literal already
+  got.
+
+- **Complex division used the naive `(ac+bd)/(c²+d²)` formula**, silently producing a wrong
+  (finite, non-NaN) result whenever the divisor's magnitude squared over- or underflowed
+  double range, even though the true quotient was perfectly representable. Replaced with
+  Smith's algorithm (the same approach glibc's own complex-division routine uses), which
+  never squares the larger-magnitude component outright.
+
+- **`reset`/`rewrite`/`extend`/`update` passed a `VarString` struct pointer directly as the
+  runtime's filename argument**, instead of its actual character data, whenever the filename
+  expression was a var-string under Extended Pascal -- silently corrupting or colliding file
+  names between calls with different filenames.
+
+- **`round()`/`trunc()` of a real outside the representable `int64` range silently returned a
+  garbage sentinel value instead of trapping.** `round(1e30)` returned a specific wrong
+  integer with no indication anything had gone wrong; now reports a clean domain error.
+
+- **`-Wl,<args>` and `-Xlinker <arg>` were parsed but never actually forwarded to the linker
+  invocation** -- accepted on the command line, silently doing nothing.
+
+- **`write(real:W:D)` with a very large runtime-computed `W` produced gigabytes of garbage
+  output, or silently dropped the write**, instead of the field-width diagnostic every other
+  width form (integer, char, boolean -- 0.3.0) already raises. The real-with-width path had
+  been missed when that guard was added.
+
+- **Complex `**` skipped the domain-error guard the real `**` path already has** for a zero
+  base with a non-positive-real-part exponent (EP §6.8.3.2), silently producing `Inf`/`NaN`
+  instead of the runtime diagnostic the mathematically identical real case already gives.
+
+- **`sqrt()` of a negative real silently returned `NaN`** instead of trapping, unlike this
+  codebase's own established convention for `abs`/`pow`/`ipow` domain errors. `ln()` of a
+  non-positive real had the identical gap and is fixed alongside it.
+
+- **A module interface's `.pmi` dropped the `import` clauses its own declarations depend
+  on**, and separately, **a qualified imported name (`M.name`) could never be used to denote a
+  type at all** -- only in expression or statement position. Together these meant ISO 10206
+  §6.11.6's own Example 3 (an interface heading using a type imported, qualified, from
+  another module) could not be compiled, split across files or not. A third, related gap in
+  implementation-module import scoping was found and fixed making that example actually pass
+  end to end.
+
+- **Value parameters of a subrange type were never range-checked against the formal's
+  declared subrange** at the call site, unlike an ordinary out-of-range assignment to a
+  subrange-typed variable, which already is.
+
+- **Set constructor elements were never checked against the set's declared base-type
+  range** before being admitted into the runtime bitmask -- a constant out-of-range element
+  is now a compile-time diagnostic, and a runtime-computed one a dynamic range check, matching
+  how every other kind of out-of-range value in a set constructor is already handled.
+
+### Fixed (build and test infrastructure)
+
+- **Every `lit`-based test suite shared one `test_exec_root`**, so running them in parallel
+  (as CI always does) meant they all raced on writing lit's own `.lit_test_times.txt` cache
+  file with no locking -- and once one run corrupted it, every subsequent lit invocation
+  failed immediately, before running a single test, until the file was deleted. The cache
+  has no value in CI (the build tree is fresh every run); disabled outright.
+- **One module-interface test leaked `.pmi` files into the checked-in source tree**, the same
+  class of mistake already fixed twice before in this project's history. Fixed, and `*.pmi`
+  is now gitignored outright as a backstop.
+
 ## [0.3.0] - 2026-08-26
 
 A foundation release rather than a features release, aside from one
