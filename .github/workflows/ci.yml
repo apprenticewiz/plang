@@ -425,7 +425,7 @@ jobs:
       - name: Test schema/variant/pointer/string subset under guardheap (lit)
         run: |
           cd build/test
-          lit -sv --filter='Schema|VariantRecord|VariantPart|ConformantArray|Shadowing|Storage|String|Substr|Pointer' CodeGen EP Module Driver
+          lit -sv --skip-test-time-recording --filter='Schema|VariantRecord|VariantPart|ConformantArray|Shadowing|Storage|String|Substr|Pointer' CodeGen EP Module Driver
         env:
           PLANG_TEST_RUN_WRAPPER: "bash ${{ github.workspace }}/test/tools/run-under-guardheap.sh"
 
