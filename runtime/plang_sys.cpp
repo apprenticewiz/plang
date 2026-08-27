@@ -308,6 +308,17 @@ void plang_err_mod_divisor(int64_t D) {
     std::exit(PlangRuntimeErrorStatus);
 }
 
+/// EP §6.7.6.2: arg(z) is z's phase angle, atan2(im, re) -- undefined at the
+/// origin, where every angle is equally valid.  Like plang_err_ipow_zero_zero,
+/// this fires for exactly one fixed input, so it takes no argument.
+[[noreturn]] void plang_err_arg_domain(void) {
+    std::fflush(stdout);
+    std::fprintf(stderr,
+                 "plang runtime: arg(0,0) is undefined (the origin has no "
+                 "phase angle)\n");
+    std::exit(PlangRuntimeErrorStatus);
+}
+
 /// ISO §6.5.4: the identifying value of a pointer variable being dereferenced
 /// shall not be nil.
 [[noreturn]] void plang_err_nil_deref(void) {
