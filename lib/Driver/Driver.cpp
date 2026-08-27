@@ -24,12 +24,14 @@
 #include <unistd.h>
 #include <vector>
 
+#include "llvm/ADT/ScopeExit.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/JSON.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/Path.h"
 #include "llvm/Support/Process.h"
 #include "llvm/Support/Program.h"
+#include "llvm/Support/Signals.h"
 #include "llvm/Support/VersionTuple.h"
 #include "llvm/TargetParser/Host.h"
 #include "llvm/TargetParser/Triple.h"
@@ -67,6 +69,22 @@ static bool isRegFile(const llvm::Twine &Path) {
 
 static bool isDir(const llvm::Twine &Path) {
     return llvm::sys::fs::is_directory(Path);
+}
+
+/// Deletes a temp file this process created for its own internal use (an
+/// intermediate .ll/.o/probe-output file, never a user-requested -o target)
+/// and un-registers it from RemoveFileOnSignal.
+///
+/// Every such temp file is registered with RemoveFileOnSignal right after
+/// creation (issue #278: a driver killed by SIGINT/SIGTERM mid-compile used
+/// to leave it behind -- there was no signal handling at all, only these
+/// same explicit removes on the normal-return paths, which a signal does
+/// not take).  Un-registering here, rather than leaving the registration
+/// until process exit, keeps a signal arriving later in the same run (e.g.
+/// while linking) from trying to remove a path already gone.
+static void removeOwnTemp(llvm::StringRef Path) {
+    llvm::sys::DontRemoveFileOnSignal(Path);
+    llvm::sys::fs::remove(Path);
 }
 
 /// Resolves \p Path to a canonical, absolute form for same-file comparison
@@ -126,6 +144,7 @@ static std::string captureOutput(const std::string &Prog,
     if (llvm::sys::fs::createTemporaryFile("plang-probe", "txt", Fd, OutPath))
         return "";
     close(Fd);
+    llvm::sys::RemoveFileOnSignal(OutPath);
 
     llvm::SmallVector<llvm::StringRef, 8> Argv;
     Argv.push_back(*ResolvedOrErr);
@@ -142,7 +161,7 @@ static std::string captureOutput(const std::string &Prog,
         if (auto Buf = llvm::MemoryBuffer::getFile(OutPath))
             Out = (*Buf)->getBuffer().rtrim().str();
     }
-    llvm::sys::fs::remove(OutPath);
+    removeOwnTemp(OutPath);
     return Out;
 }
 
@@ -957,6 +976,21 @@ int Driver::compile(const Options &Opts, bool IsExtraFile) {
     // module search path, so PMI files written alongside any of them,
     // including siblings, are automatically found.
     std::vector<std::string> ExtraObjs;
+    // The subset of ExtraObjs that are ours to delete once the link step
+    // below (the only thing that reads them) is done with them: an extra
+    // file's object is always just an intermediate, never a user-requested
+    // artifact, so leaving it in the cwd is litter (issue #279) exactly like
+    // the main file's own OwnObj temp is guarded against further down --
+    // this is the same fix, just for N files instead of one.  Populated
+    // at creation, not after a successful compile, so a *failed* extra
+    // compile's already-created temp is cleaned up too; deleted through a
+    // scope_exit rather than only after a successful link so that an early
+    // return above the link step (a dump mode, or the main file's own
+    // front end failing) does not skip the cleanup either.
+    std::vector<std::string> ExtraObjTemps;
+    llvm::scope_exit CleanupExtraObjTemps([&] {
+        for (const auto &F : ExtraObjTemps) removeOwnTemp(F);
+    });
     for (const auto &ExtraFile : Opts.extraInputFiles) {
         if (!llvm::sys::fs::exists(ExtraFile)) {
             diag(diag::err_file_not_found, {ExtraFile});
@@ -969,10 +1003,42 @@ int Driver::compile(const Options &Opts, bool IsExtraFile) {
         Options ExtraOpts = Opts;
         ExtraOpts.inputFile       = ExtraFile;
         ExtraOpts.mode            = OutputMode::Object;
-        // flattenedStem, not stem: two extra files that share a basename in
-        // different directories (issue #20) must not default to the same
-        // "foo.o" in the cwd, silently clobbering one with the other's.
-        ExtraOpts.outputFile      = flattenedStem(ExtraFile) + ".o";
+
+        if (Opts.saveTemps) {
+            // A visible intermediate the user asked to keep: flattenedStem,
+            // not stem, so two extra files sharing a basename in different
+            // directories (issue #20) do not both default to the same
+            // "foo.o" in the cwd.  flattenedStem's '/'->'_' folding is
+            // itself not injective, though -- "unitA/b_c.pas" and
+            // "unitA_b/c.pas" both flatten to "unitA_b_c" -- so a second
+            // file landing on a name an earlier one already claimed
+            // (checked against ExtraObjs, which holds every prior extra
+            // file's own final name) gets a numeric suffix instead of
+            // silently overwriting the first file's object (issue #170).
+            const std::string Base = flattenedStem(ExtraFile);
+            std::string Name = Base + ".o";
+            for (int N = 2; std::find(ExtraObjs.begin(), ExtraObjs.end(), Name) != ExtraObjs.end(); ++N)
+                Name = Base + "~" + std::to_string(N) + ".o";
+            ExtraOpts.outputFile = Name;
+        } else {
+            // Just an intermediate needed for the final link, not a
+            // human-facing artifact: a real, OS-named unique temp file,
+            // exactly like the main file's own OwnObj below.  This sidesteps
+            // the flattenedStem collision above entirely -- the name comes
+            // from the OS, not from folding the input path -- and keeps it
+            // out of the cwd (issue #279).
+            llvm::SmallString<128> TmpPath;
+            int Fd;
+            if (auto EC = llvm::sys::fs::createTemporaryFile("plang", "o", Fd, TmpPath)) {
+                diag(diag::err_cannot_create_temp_file, {EC.message()});
+                return 1;
+            }
+            close(Fd);
+            llvm::sys::RemoveFileOnSignal(TmpPath);
+            ExtraOpts.outputFile = std::string(TmpPath);
+            ExtraObjTemps.push_back(ExtraOpts.outputFile);
+        }
+
         ExtraOpts.extraInputFiles.clear(); // avoid recursion
         // Add every extra file's directory, not just this one's, so that this
         // file may import a module a sibling extra file defines (issue #21).
@@ -1003,13 +1069,25 @@ int Driver::compile(const Options &Opts, bool IsExtraFile) {
     bool OwnIr = false;
 
     if (Opts.saveTemps) {
-        // flattenedStem for an extra file, for the same reason as its .o
-        // above: two extra files sharing a basename in different directories
-        // would otherwise both save to the same "foo.ll", the second
-        // silently overwriting the first's kept-for-inspection IR.  The main
-        // file's own naming is untouched -- stem(), as always -- since it has
-        // no sibling to collide with.
-        IrFile = (IsExtraFile ? flattenedStem(Opts.inputFile) : stem(Opts.inputFile)) + ".ll";
+        if (IsExtraFile) {
+            // Derived from Opts.outputFile -- the .o name the calling loop
+            // above already assigned this same extra file, disambiguated
+            // against every sibling extra file it had already planned a
+            // name for (issue #170) -- rather than recomputing
+            // flattenedStem(Opts.inputFile) independently here. Two extra
+            // files whose flattenedStem collides (e.g. "unitA/b_c.pas" and
+            // "unitA_b/c.pas", both "unitA_b_c") would otherwise still
+            // collide on their *.ll* even after that .o fix: this function
+            // has no visibility into its siblings to detect the collision
+            // itself, only the base name the caller already resolved it to.
+            std::string Base = Opts.outputFile;
+            if (llvm::StringRef(Base).ends_with(".o")) Base.resize(Base.size() - 2);
+            IrFile = Base + ".ll";
+        } else {
+            // The main file's own naming is untouched -- stem(), as always
+            // -- since it has no sibling to collide with.
+            IrFile = stem(Opts.inputFile) + ".ll";
+        }
     } else {
         llvm::SmallString<128> TmpPath;
         int Fd;
@@ -1018,6 +1096,7 @@ int Driver::compile(const Options &Opts, bool IsExtraFile) {
             return 1;
         }
         close(Fd);
+        llvm::sys::RemoveFileOnSignal(TmpPath);
         IrFile = std::string(TmpPath);
         OwnIr  = true;
     }
@@ -1035,7 +1114,7 @@ int Driver::compile(const Options &Opts, bool IsExtraFile) {
     }
     int Rc = runTool(Self, makeFEArgs(MainOpts, IrFile), V, DR);
     if (Rc != 0) {
-        if (OwnIr) llvm::sys::fs::remove(IrFile);
+        if (OwnIr) removeOwnTemp(IrFile);
         return Rc;
     }
 
@@ -1052,7 +1131,7 @@ int Driver::compile(const Options &Opts, bool IsExtraFile) {
         LLCArgs.push_back("-o"); LLCArgs.push_back(OutFile);
         LLCArgs.push_back(IrFile);
         Rc = runTool("llc", LLCArgs, V, DR);
-        if (OwnIr) llvm::sys::fs::remove(IrFile);
+        if (OwnIr) removeOwnTemp(IrFile);
         return Rc;
     }
 
@@ -1069,10 +1148,11 @@ int Driver::compile(const Options &Opts, bool IsExtraFile) {
         int Fd;
         if (auto EC = llvm::sys::fs::createTemporaryFile("plang", "o", Fd, TmpPath)) {
             diag(diag::err_cannot_create_temp_file, {EC.message()});
-            if (OwnIr) llvm::sys::fs::remove(IrFile);
+            if (OwnIr) removeOwnTemp(IrFile);
             return 1;
         }
         close(Fd);
+        llvm::sys::RemoveFileOnSignal(TmpPath);
         ObjFile = std::string(TmpPath);
         OwnObj  = true;
     }
@@ -1086,8 +1166,8 @@ int Driver::compile(const Options &Opts, bool IsExtraFile) {
         LLCArgs.push_back(IrFile);
         Rc = runTool("llc", LLCArgs, V, DR);
     }
-    if (OwnIr) llvm::sys::fs::remove(IrFile);
-    if (Rc != 0) { if (OwnObj) llvm::sys::fs::remove(ObjFile); return Rc; }
+    if (OwnIr) removeOwnTemp(IrFile);
+    if (Rc != 0) { if (OwnObj) removeOwnTemp(ObjFile); return Rc; }
 
     if (Opts.mode == OutputMode::Object) return 0;
 
@@ -1095,7 +1175,7 @@ int Driver::compile(const Options &Opts, bool IsExtraFile) {
     Options LinkOpts = Opts;
     for (const auto &EO : ExtraObjs) LinkOpts.linkerArgs.push_back(EO);
     Rc = link(*this, LinkOpts, ObjFile, OutFile, findRuntimeLib(ExePath_), V, DR);
-    if (OwnObj) llvm::sys::fs::remove(ObjFile);
+    if (OwnObj) removeOwnTemp(ObjFile);
     return Rc;
 }
 
