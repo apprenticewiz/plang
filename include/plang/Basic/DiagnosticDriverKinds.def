@@ -26,6 +26,14 @@ DIAG(err_is_a_directory, Error, "is a directory, not a file: '%0'")
 DIAG(err_input_output_same, Error,
      "input file '%0' is the same as output file")
 DIAG(err_arg_requires_value, Error, "%0 requires an argument")
+// -o given an explicitly empty value (issue #286), e.g. "plang -o "$X" foo.pas"
+// where $X is unset -- a shell passes that through as a real, if empty,
+// argument.  Opts.outputFile also uses "" as its own sentinel for "-o was
+// not given at all" (see its doc comment in Driver.h), so without this check
+// an empty -o was indistinguishable downstream from no -o, and silently fell
+// back to the default output name.  Wording matches gcc's own refusal of the
+// same command line.
+DIAG(err_empty_output_filename, Error, "output filename may not be empty")
 DIAG(err_unknown_dialect, Error,
      "unknown Pascal dialect '%0'; valid dialects: %1")
 DIAG(err_dialect_not_implemented, Error,
