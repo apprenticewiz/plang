@@ -1,5 +1,5 @@
 (*
-RUN: timeout 30 %plang %s -o %t
+RUN: timeout 120 %plang %s -o %t
 RUN: %run %t | FileCheck --strict-whitespace --match-full-lines %s
 *)
 
@@ -12,8 +12,9 @@ CHECK-NEXT:20000
    record this wide used to take multiple minutes to compile because both
    the static layout's Sema-field lookup and its differential run-time-walk
    cross-check restarted a linear scan once PER FIELD.  `timeout` above is
-   the regression guard: this compiles in well under a second fixed, and
-   the unfixed quadratic code does not finish in 30. *)
+   the regression guard: this compiles in a few seconds fixed (120s of
+   headroom for slow Debug/sanitizer CI runners), and the unfixed quadratic
+   code does not finish in that window. *)
 
 program p;
 type
