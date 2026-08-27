@@ -183,6 +183,13 @@ DIAG(err_read_type_mismatch, Error, "type mismatch in read: file element type is
 DIAG(err_read_param_type, Error,
      "'%0' cannot be read into; a read-parameter is an integer, real or char "
      "variable")
+// ISO §6.9.1 / §6.9.2: read(v) and readln(v) are defined as v := f^, so a
+// read target must be a variable-access exactly as an assignment's
+// left-hand side is (err_lhs_not_lvalue).  Nothing enforced that, so
+// `read(5)` or `read(someFunc())` reached codegen with no storage to read
+// into and either aborted the compiler outright or silently read into a
+// throwaway temporary that nothing could ever see.
+DIAG(err_read_not_variable, Error, "read/readln target must be a variable, got '%0'")
 // EP §6.7.6.7: EQ/LT/GT/NE/LE/GE's arguments "shall each be of char-type or
 // the canonical-string-type" — the same requirement §6.8.3.6 gives '+'.
 DIAG(err_string_fn_arg_type, Error,
