@@ -203,6 +203,10 @@ DIAG(err_pack_operand_not_array_unpacked, Error,
 DIAG(err_pack_operand_not_array_packed, Error,
      "%0 expects an array as its packed argument, got '%1'")
 DIAG(err_with_non_record, Error, "'with' expects a record variable, got '%0'")
+// ISO §6.8.3.10 / EP §6.8.3.10: a with-statement's record-variable is a
+// variable-access, not any record-valued expression -- a function call's
+// result has no storage for a with-bound field write to land in.
+DIAG(err_with_not_variable, Error, "'with' requires a variable, not an expression of type '%0'")
 DIAG(err_goto_undefined, Error, "undefined label '%0'")
 // ISO 7185 §6.8.1: A goto may not leave the immediately enclosing block
 // or transfer control into a structured statement.
