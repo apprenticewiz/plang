@@ -1110,6 +1110,21 @@ std::optional<Type::ExtentForm> Sema::buildExtentForm(
         const ExprNode& E, const std::vector<std::string>& Discs) const {
     using EF = Type::ExtentForm;
 
+    // Issue #204: this recurses into itself below for every '+'/'-'/'*'/...
+    // node the same way checkExpr recurses into itself, so a schema array
+    // body written as a flat chain -- `array[1..1+1+...+1]` -- walks just as
+    // deep here as it would in checkExpr, with nothing bounding it.  Sharing
+    // checkExpr's own counter and ceiling (ExprDepth/MaxExprDepth, Sema.h)
+    // means this and checkExpr count against the same budget instead of each
+    // getting its own, and needs no diagnostic of its own: whatever reached
+    // this expression already ran it through checkExpr first (array-bound
+    // resolution does, and this is only ever reached from there), so
+    // checkExpr's own "nested too deeply" has already fired by the time this
+    // could ever hit the ceiling.  Declining quietly here is what stops the
+    // second, unguarded walk from being the one that exhausts the stack.
+    if (ExprDepth >= MaxExprDepth) return std::nullopt;
+    ExprDepthScope DepthGuard(ExprDepth, ExprDepthLimitHit);
+
     // A discriminant becomes its INDEX.  Checked before folding, because the
     // body is resolved with the discriminants bound to a probe value and
     // folding would quietly turn `n` into 1.
@@ -1157,6 +1172,19 @@ std::optional<Type::ExtentForm> Sema::buildExtentForm(
 }
 
 std::optional<int64_t> Sema::constBound(const ExprNode& E) const {
+    // Issue #204: constBound and constBoundImpl call each other below (an
+    // operand of a BinaryExpr/UnaryExpr/call argument re-enters here) the
+    // same way checkExpr recurses into itself, over the same flat-chain
+    // shape a bound can be written in, e.g. `array[1..1+1+...+1]`.  Sharing
+    // checkExpr's own counter and ceiling (Sema.h) rather than giving this
+    // an independent one means the two count against a single budget; see
+    // buildExtentForm just above for why declining quietly, with no
+    // diagnostic of its own, is enough -- every caller of constBound on an
+    // expression this deep has already run it through checkExpr first,
+    // which is where "nested too deeply" is reported.
+    if (ExprDepth >= MaxExprDepth) return std::nullopt;
+    ExprDepthScope DepthGuard(ExprDepth, ExprDepthLimitHit);
+
     // Whether THIS fold read a schema discriminant, not whether anything
     // earlier did.
     const bool SavedUsed = SchemaBindingUsed_;
@@ -1198,8 +1226,11 @@ std::optional<int64_t> Sema::constBoundImpl(const ExprNode& E) const {
         }
     }
     if (auto* N = llvm::dyn_cast<UnaryExpr>(&E)) {
+        // Issue #202: -minint overflows (its magnitude, 2^63, is one past
+        // maxint); checkedNeg (Arith.h) declines the fold instead of
+        // computing the UB, wrapped result.
         if (N->Op == TokenKind::Minus)
-            if (auto Inner = constBound(*N->Operand)) return -*Inner;
+            if (auto Inner = constBound(*N->Operand)) return checkedNeg(*Inner);
         if (N->Op == TokenKind::Plus)
             return constBound(*N->Operand);
     }
@@ -1210,16 +1241,32 @@ std::optional<int64_t> Sema::constBoundImpl(const ExprNode& E) const {
         const auto R = constBound(*N->Right);
         if (L && R) {
             switch (N->Op) {
-            case TokenKind::Plus:  return *L + *R;
-            case TokenKind::Minus: return *L - *R;
-            case TokenKind::Times: return *L * *R;
+            // Issue #202: +, -, * are checked -- nullopt (decline the fold)
+            // on signed overflow, rather than the UB plain `+`/`-`/`*` would
+            // be here: in a release build, the wrapped value folded in as
+            // though it were the constant the source actually named (and
+            // from there into whatever array bound, case label or
+            // initializer read this constant).
+            case TokenKind::Plus:  return checkedAdd(*L, *R);
+            case TokenKind::Minus: return checkedSub(*L, *R);
+            case TokenKind::Times: return checkedMul(*L, *R);
+            // Issue #201: divOverflows (Arith.h) is minint div/mod -1, the
+            // one pair with a nonzero divisor and still no representable
+            // result -- signed-overflow UB that SIGFPE-traps this hardware's
+            // `idiv` the same way a zero divisor already does, which is why
+            // it needs the same guard as the zero check right below it.
             // Division by zero in a constant bound is diagnosed where the
-            // expression is checked; folding it here would trap.
-            case TokenKind::Div:   if (*R) return *L / *R; break;
-            case TokenKind::Mod:   if (*R) return isoMod(*L, *R); break;
+            // expression is checked; folding either case here would trap.
+            case TokenKind::Div:
+                if (*R && !divOverflows(*L, *R)) return *L / *R;
+                break;
+            case TokenKind::Mod:
+                if (*R && !divOverflows(*L, *R)) return isoMod(*L, *R);
+                break;
             // EP §6.8.3.2: an integer base keeps an integer result, so this is
             // a bound.  A negative exponent is not, and is left to the check on
-            // the expression itself to report.
+            // the expression itself to report.  isoPow itself now declines on
+            // overflow (Arith.h), the same as checkedMul just above.
             case TokenKind::Pow:   if (*R >= 0) return isoPow(*L, *R); break;
             default: break;
             }
@@ -1236,11 +1283,15 @@ std::optional<int64_t> Sema::constBoundImpl(const ExprNode& E) const {
     // fails to fold, same as it did before this call existed.
     if (auto* N = llvm::dyn_cast<CallExpr>(&E)) {
         switch (N->ResolvedBuiltin) {
+        // Issue #202: abs(minint) has no representable result -- the same
+        // overflow as unary minus above, and checkedNeg for the same reason.
+        // sqr is `*V * *V`, checked the same way Times is above.
         case BuiltinID::Abs:
-            if (auto V = constBound(*N->Args[0])) return *V < 0 ? -*V : *V;
+            if (auto V = constBound(*N->Args[0]))
+                return *V < 0 ? checkedNeg(*V) : V;
             break;
         case BuiltinID::Sqr:
-            if (auto V = constBound(*N->Args[0])) return *V * *V;
+            if (auto V = constBound(*N->Args[0])) return checkedMul(*V, *V);
             break;
         // ord and chr both represent their value as its plain ordinal here,
         // the same as the single-character StringLitExpr case above.
@@ -1257,8 +1308,12 @@ std::optional<int64_t> Sema::constBoundImpl(const ExprNode& E) const {
             const auto V = constBound(*N->Args[0]);
             const auto K = N->Args.size() > 1 ? constBound(*N->Args[1])
                                                : std::optional<int64_t>(1);
+            // Issue #202: the same unchecked overflow as +/- above --
+            // succ(maxint) and pred(minint) are maxint+1 and minint-1 by
+            // another name.
             if (V && K)
-                return N->ResolvedBuiltin == BuiltinID::Succ ? *V + *K : *V - *K;
+                return N->ResolvedBuiltin == BuiltinID::Succ
+                     ? checkedAdd(*V, *K) : checkedSub(*V, *K);
             break;
         }
         default: break;

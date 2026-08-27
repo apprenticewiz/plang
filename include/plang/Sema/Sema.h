@@ -102,7 +102,7 @@ private:
     // Live activations of checkExpr.  Every recursive re-entry into expression
     // checking -- a binary/unary operand, a call argument, an index/field/
     // deref base -- funnels through checkExpr, so bounding activations there
-    // (see ExprDepthScope and MaxExprDepth in SemaExpr.cpp) bounds the whole
+    // (see ExprDepthScope and MaxExprDepth below) bounds the whole
     // AST-walking recursion against a flat operator chain built specifically
     // to be deep, e.g. `1+1+1+...+1` with tens of thousands of terms.  Unlike
     // deeply NESTED parenthesized input, which the parser's own ExprDepth
@@ -112,8 +112,31 @@ private:
     // recursively, and without a ceiling here that walk used to exhaust the
     // real C++ stack instead of failing with a diagnostic. Same shape as
     // Parser::ExprDepth; see its comment for the rationale.
-    unsigned                 ExprDepth{};
-    bool                     ExprDepthLimitHit{};
+    //
+    // constBound and buildExtentForm (SemaType.cpp) recurse over the same
+    // kind of AST -- a bound written as a flat chain, e.g. an array's
+    // `array[1..1+1+...+1]` -- by a different route (constBound/
+    // constBoundImpl call each other; buildExtentForm calls itself) that
+    // checkExpr's own guard does not cover: checkExpr is run on a bound
+    // first and stops safely at MaxExprDepth, but foldBounds then walks the
+    // SAME chain again through constBound with nothing stopping it.  Sharing
+    // this counter and ceiling, rather than each giving itself an
+    // independent one, is what "share the same depth budget as checkExpr"
+    // (issue #204) means: whichever of the two is active, recursing through
+    // either one now counts against the one ceiling.  const because
+    // constBound/constBoundImpl/buildExtentForm are; SchemaBindingUsed_
+    // below is the existing precedent for a mutable scratch counter in an
+    // otherwise-const fold.
+    mutable unsigned          ExprDepth{};
+    mutable bool              ExprDepthLimitHit{};
+    // 1000 levels of recursion through checkExpr -> checkBinary/checkUnary/
+    // ... -> checkExpr, or through constBound -> constBoundImpl ->
+    // constBound -> ..., is well under the crash threshold observed
+    // empirically on this build's default 8MB stack (a flat chain starts
+    // crashing a few thousand terms in), while no legitimate Pascal
+    // expression -- handwritten or reasonably generated -- nests anywhere
+    // close to this deep.
+    static constexpr unsigned MaxExprDepth = 1000;
     struct ExprDepthScope {
         unsigned& N;
         bool&     LimitHit;
