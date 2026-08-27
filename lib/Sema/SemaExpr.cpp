@@ -820,6 +820,26 @@ std::shared_ptr<Type> Sema::checkCallExpr(const CallExpr& E) {
             }
             return ArgTy;
         }
+        // ISO §6.6.6.4 (ord, chr) / §6.6.6.5 (odd): all three transfer between
+        // an ordinal value and its ordinal position -- ord(x) is x's position,
+        // chr(x) is the value at position x, odd(x) reads position x's low
+        // bit -- so, like succ/pred just above, the argument has to be
+        // ordinal. Unlike succ/pred none of the three were special-cased
+        // here, so they fell through to the generic "check each argument,
+        // trust the declared return type" path below with nothing stopping a
+        // non-ordinal argument. CodeGen has nothing valid to lower one to
+        // either: ord's case zext's its operand unconditionally, so
+        // ord(1.5) reached the LLVM verifier as `zext double ... to i64`
+        // and aborted the compiler instead of Sema reporting it (issue #212).
+        if ((Lo == "ord" || Lo == "chr" || Lo == "odd") && !E.Args.empty()) {
+            auto ArgTy = checkExpr(*E.Args[0]);
+            if (ArgTy->isError()) return TyErr;
+            if (!ArgTy->isOrdinal()) {
+                error(E.Loc, diag::err_ordinal_argument, {Lo, ArgTy->Name});
+                return TyErr;
+            }
+            return Sym->ReturnType ? Sym->ReturnType : TyErr;
+        }
         // EP §6.7.6.7: substr/trim return the same string capacity as their
         // input.  ISO §6.4.3.2's other string shape -- a packed array[1..n] of
         // char -- is string-like too (isCharStringType), and was missing here:
