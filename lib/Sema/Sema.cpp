@@ -1026,6 +1026,7 @@ void Sema::checkBlock(const BlockNode& Block,
     // such dangling pointers.  This handles both:
     //   PNode = ^Node;  Node = record … end   (top-level forward reference)
     //   Node  = record … next: ^Node end       (self-referential type)
+    //   PList = array[1..N] of ^Node           (element-type forward reference)
     // EP §6.4.7: Schema symbols are skipped (their bodies are resolved lazily).
     std::function<void(std::shared_ptr<Type>&)> fixForwardPtrs =
         [&](std::shared_ptr<Type>& T) {
@@ -1045,6 +1046,11 @@ void Sema::checkBlock(const BlockNode& Block,
             if (T->Kind == TypeKind::Record)
                 for (auto& F : T->RecordFields)
                     fixForwardPtrs(F.Ty);
+            // Array and File share the ElemType field (Set does too, but a
+            // set's base type is required to be ordinal, so a pointer can
+            // never legally sit there and there is no stub to patch).
+            if (T->Kind == TypeKind::Array || T->Kind == TypeKind::File)
+                fixForwardPtrs(T->ElemType);
         };
     for (const auto& Td : Block.Types) {
         Symbol* Sym = Symtab.lookupCurrent(Td.Name);
