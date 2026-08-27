@@ -43,6 +43,15 @@ struct Options {
     std::vector<std::string> extraInputFiles; ///< additional .pas files for multi-file builds
 };
 
+/// Orders two GCC/Clang install-directory names (e.g. "9", "12.2.0") the way
+/// their version numbers actually compare, not lexicographically: "9" sorts
+/// before "10", and "9.5.0" sorts before "10.1.0" — plain string comparison
+/// gets both backwards, since '1' < '9'.  A name that does not parse as a
+/// version (the regex [0-9]+(\.[0-9]+){0,3}) sorts before every name that
+/// does, so a stray non-version directory is never mistaken for the newest
+/// toolchain by a caller that sorts ascending and takes the last entry.
+bool versionDirLess(std::string_view A, std::string_view B);
+
 /// Compiler driver.  Parses arguments and orchestrates the compilation
 /// pipeline: plang -pc1 (Pascal front end), llc (code generation), and the
 /// platform linker — ld.lld on ELF targets, the system ld on macOS.
