@@ -667,7 +667,8 @@ struct Codegen::Impl {
     /// body for why a bare SSA value needs this and an alloca doesn't.
     void defVar(const std::string& name, llvm::Value* ptr, llvm::Type* type,
                 const TypeNode* typeNode = nullptr,
-                llvm::Value* debugIndirectPtr = nullptr);
+                llvm::Value* debugIndirectPtr = nullptr,
+                bool suppressDebugDecl = false);
     const VarEntry* findVar(const std::string& name) const;
 
     /// Whether \p name is bound by a scope opened INSIDE the current function
