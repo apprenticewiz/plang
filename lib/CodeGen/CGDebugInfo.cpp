@@ -2,6 +2,7 @@
 
 #include <filesystem>
 
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/BinaryFormat/Dwarf.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/GlobalVariable.h"
@@ -146,6 +147,21 @@ llvm::DISubprogram* CGDebugInfo::emitFunctionStart(llvm::Function* Fn, llvm::DIS
     return SP;
 }
 
+llvm::DISubprogram* CGDebugInfo::emitThunkStart(llvm::Function* Fn, llvm::DIScope* Scope,
+                                                 const std::string& Name) {
+    if (!DBuilder) return nullptr;
+    auto* SubTy = DBuilder->createSubroutineType(
+        DBuilder->getOrCreateTypeArray({}));
+    auto* SP = DBuilder->createFunction(
+        Scope, Name, Fn->getName(), DebugFile, /*LineNo=*/0, SubTy, /*ScopeLine=*/0,
+        llvm::DINode::FlagArtificial,
+        llvm::DISubprogram::SPFlagDefinition
+            | (Opts.OptLevel > 0 ? llvm::DISubprogram::SPFlagOptimized
+                                  : llvm::DISubprogram::SPFlagZero));
+    Fn->setSubprogram(SP);
+    return SP;
+}
+
 void CGDebugInfo::declareLocal(const std::string& name, const TypeNode* typeNode,
                                 llvm::Value* ptr, llvm::Value* debugIndirectPtr) {
     // -g: the single choke point every named Pascal variable, parameter,
@@ -179,10 +195,38 @@ void CGDebugInfo::declareLocal(const std::string& name, const TypeNode* typeNode
     if (!DT) return;
     const unsigned line = SrcMgr ? SrcMgr->getPresumedLoc(typeNode->Loc).Line : 0;
     if (auto* GV = llvm::dyn_cast<llvm::GlobalVariable>(ptr)) {
-        auto* GVE = DBuilder->createGlobalVariableExpression(
-            DebugCU, name, /*LinkageName=*/"", DebugFile, line, DT,
-            /*IsLocalToUnit=*/false);
-        GV->addDebugInfo(GVE);
+        // A module's own global is declared exactly once, through its own
+        // defVar -- but an EP module importing it (Codegen::Impl::
+        // resolveImportedVar's "compiled alongside this one" branch) binds
+        // the SAME llvm::GlobalVariable into ITS OWN symbol table by
+        // calling defVar again, under whatever local/qualified name the
+        // importer spells it, which reaches this same choke point a
+        // second time for one storage location. This project builds one
+        // llvm::Module (and so one DICompileUnit) for a whole program, not
+        // one per Pascal module, so there is no "declaration in the
+        // importing CU, definition in the owning one" split to give a
+        // second DW_TAG_variable a legitimate reason to exist (the Clang
+        // precedent for an extern declared in one TU and used in
+        // another): a second DIGlobalVariableExpression here is just a
+        // spurious duplicate, under the IMPORTER's own alias rather than
+        // the variable's real declared name, and (confirmed with
+        // llvm-dwarfdump on a two-module program) a bogus line -- the
+        // typeNode passed for a re-import is null (see
+        // resolveImportedVar), so `line` above is always 0, not the
+        // variable's real declaring line, regardless of which import
+        // reaches here first.  GlobalVariable::getDebugInfo (not a bare
+        // hasMetadata/MD_dbg check, so a global that has SOME unrelated
+        // metadata but no debug info yet still gets its first, correct
+        // declaration) is the guard: skip whenever this GV already has
+        // one, no matter which name/typeNode is in hand this time.
+        llvm::SmallVector<llvm::DIGlobalVariableExpression*, 1> existing;
+        GV->getDebugInfo(existing);
+        if (existing.empty()) {
+            auto* GVE = DBuilder->createGlobalVariableExpression(
+                DebugCU, name, /*LinkageName=*/"", DebugFile, line, DT,
+                /*IsLocalToUnit=*/false);
+            GV->addDebugInfo(GVE);
+        }
     } else if (CurScope && B.GetInsertBlock()) {
         auto* DV = DBuilder->createAutoVariable(CurScope, name, DebugFile, line, DT);
         llvm::Value* storage = debugIndirectPtr ? debugIndirectPtr : ptr;

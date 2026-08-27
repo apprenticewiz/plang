@@ -95,6 +95,26 @@ public:
                                            const std::string& Name,
                                            plang::SourceLocation Loc);
 
+    /// Builds a minimal DISubprogram for a compiler-synthesized shim (e.g.
+    /// the uniform-signature procedural-parameter thunk in
+    /// ClosureAndCallABI::procParamThunk) that has no Pascal-level source
+    /// identity of its own to attribute lines to.  Marked
+    /// DIFlagArtificial -- the standard DWARF way to say
+    /// "this frame exists but isn't user code" -- rather than left with no
+    /// DISubprogram at all: an unattributed thunk gets no line-table
+    /// entries whatsoever, so a debugger's "step into" a call made through
+    /// a procedural parameter silently jumps clean over the thunk AND the
+    /// real target (confirmed with gdb: `step` on the call site runs the
+    /// whole call to completion instead of entering anything), rather than
+    /// stopping in either the thunk or, transparently through it, the real
+    /// target.  Attaches Fn->setSubprogram like emitFunctionStart, but
+    /// deliberately does NOT touch the IRBuilder's current debug location
+    /// -- procParamThunk sets each instruction's location itself (all of
+    /// them line 0, this SP's own scope), since a thunk has no notion of
+    /// "current statement" to advance through.
+    llvm::DISubprogram* emitThunkStart(llvm::Function* Fn, llvm::DIScope* Scope,
+                                        const std::string& Name);
+
     /// R3: makes \p NewScope the current scope for as long as the guard
     /// lives, restoring the previous one on destruction -- replaces the
     /// four hand-written save/restore pairs around emitFunctionDef/
