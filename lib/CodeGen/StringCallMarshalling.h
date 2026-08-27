@@ -39,6 +39,7 @@ public:
         std::function<llvm::Value*(const plang::ExprNode&)> EmitExpr,
         std::function<llvm::Value*(const plang::ExprNode&)> EmitLValue,
         std::function<llvm::AllocaInst*(llvm::Type*, const std::string&)> CreateEntryAlloca,
+        std::function<llvm::Value*(llvm::Value*, const std::string&)> CreateDynAlloca,
         std::function<llvm::Value*(llvm::Value*, llvm::Type*)> CoerceToType,
         std::function<bool(const plang::ExprNode&)> ExprIsCharStr,
         std::function<bool(const plang::ExprNode&)> ExprIsVarStr,
@@ -48,6 +49,7 @@ public:
           RtFns(RtFns), Types(Types), Schema(Schema), I64Ty(I64Ty), PtrTy(PtrTy),
           EmitExpr(std::move(EmitExpr)), EmitLValue(std::move(EmitLValue)),
           CreateEntryAlloca(std::move(CreateEntryAlloca)),
+          CreateDynAlloca(std::move(CreateDynAlloca)),
           CoerceToType(std::move(CoerceToType)),
           ExprIsCharStr(std::move(ExprIsCharStr)),
           ExprIsVarStr(std::move(ExprIsVarStr)),
@@ -98,6 +100,7 @@ private:
     std::function<llvm::Value*(const plang::ExprNode&)> EmitExpr;
     std::function<llvm::Value*(const plang::ExprNode&)> EmitLValue;
     std::function<llvm::AllocaInst*(llvm::Type*, const std::string&)> CreateEntryAlloca;
+    std::function<llvm::Value*(llvm::Value*, const std::string&)> CreateDynAlloca;
     std::function<llvm::Value*(llvm::Value*, llvm::Type*)> CoerceToType;
     /// Stateless string-shape predicates -- static Impl methods used far
     /// outside this unit too, so they stay put; reached via closure rather

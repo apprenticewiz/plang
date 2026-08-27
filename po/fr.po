@@ -798,11 +798,6 @@ msgid "file component type must not itself be a file type"
 msgstr "le type composant d'un fichier ne doit pas être lui-même un type fichier"
 
 #, fuzzy
-msgctxt "diag/err_file_field_has_file"
-msgid "file component type must not contain a file field (field '%0' is a file type)"
-msgstr "le type composant d'un fichier ne doit pas contenir de champ fichier (le champ « %0 » est d'un type fichier)"
-
-#, fuzzy
 msgctxt "diag/err_string_cap_not_int"
 msgid "string capacity must be an integer constant expression"
 msgstr "la capacité d'une chaîne doit être une expression constante entière"

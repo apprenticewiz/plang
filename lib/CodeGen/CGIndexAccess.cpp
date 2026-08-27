@@ -344,5 +344,10 @@ llvm::Value* CGIndexAccess::emitIndexLoad(const IndexExpr& e) {
         if (!T->isError())
             elemTy = Types.llvmTypeOfSemaType(*T);
     }
-    return B.CreateLoad(elemTy, ptr, "elem");
+    auto* ld = B.CreateLoad(elemTy, ptr, "elem");
+    // Issue #192: a[i] into an array field of a packed record sits at a byte
+    // offset elemTy's ABI alignment does not fix; see packedAccessAlign
+    // (CGFieldAccess.cpp), which this recurses into via e.Array.
+    if (auto A = PackedAccessAlign(e)) ld->setAlignment(*A);
+    return ld;
 }

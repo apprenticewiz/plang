@@ -184,7 +184,17 @@ llvm::Value* CGFuncCall::emitCallExpr(const CallExpr& e) {
         return B.CreateZExt(v, I64Ty, "ord");
     }
     if (lo == "chr") {
-        return B.CreateTrunc(ToI64(EmitExpr(*e.Args[0])), I8Ty, "chr");
+        // ISO §6.6.6.4: chr(x) yields the value whose ordinal number is x,
+        // and "it shall be an error if this value does not exist" -- checked
+        // nowhere, so this went straight to CreateTrunc and chr(256) wrapped
+        // silently into chr(0) (and chr(-1) into chr(255)) instead of being
+        // reported.  Same convention as succ/pred below: guard the wide
+        // value before it is narrowed.  Char's range is the fixed 0..255
+        // ordinalRange gives it, not a lookup on the argument's type -- the
+        // argument is whatever ordinal expression was passed, not a char.
+        auto* v = ToI64(EmitExpr(*e.Args[0]));
+        RangeGuards.emitRangeCheck(v, 0, 255, /*isIndex=*/false, e.Loc);
+        return B.CreateTrunc(v, I8Ty, "chr");
     }
     if (lo == "odd") {
         auto* v   = ToI64(EmitExpr(*e.Args[0]));

@@ -409,3 +409,26 @@ std::unique_ptr<ExprNode> Parser::parseFactor() {
         }
     }
 }
+
+// case-constant → ('+' | '-')? factor.  See the declaration in Parser.h: a
+// case-statement's label and a variant-part's are both ISO Sec6.3's signed
+// `constant`, and parseFactor alone has no sign production, so a bare
+// parseFactor() call for either rejected `-1` outright.  Structurally the
+// same as parseSubrangeBound's own unconditional sign-handling branch
+// (ParseType.cpp), kept separate because that one function is also the
+// EP-relaxed-bounds entry point (guarded on SubrangeBoundExprs) and a
+// case-constant is never that -- it is always exactly a signed factor,
+// under every dialect.
+std::unique_ptr<ExprNode> Parser::parseCaseConstant() {
+    const Token Loc = Current;
+    if (check(TokenKind::Plus)) { advance(); return parseFactor(); }
+    if (check(TokenKind::Minus)) {
+        advance();
+        auto Node     = std::make_unique<UnaryExpr>();
+        Node->Loc     = Loc;
+        Node->Op      = TokenKind::Minus;
+        Node->Operand = parseFactor();
+        return Node;
+    }
+    return parseFactor();
+}

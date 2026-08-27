@@ -376,6 +376,17 @@ private:
     // postfix: '[' expression ']' | '.' identifier | '^'
     std::unique_ptr<ExprNode>     parseFactor();
 
+    // case-constant → ('+' | '-')? factor.  ISO Sec6.3: constant = [ sign ]
+    // ( unsigned-number | constant-identifier ) | character-string.  Used
+    // for a case-statement's labels (Sec6.8.3.5) and a variant-part's
+    // (Sec6.4.3.3), both of which are this same production; parseFactor
+    // alone has no sign of its own (only parseSimpleExpr, one level up,
+    // does), so a bare parseFactor() call left '-1: ...' unparseable in
+    // both places. Mirrors parseSubrangeBound's unconditional sign-handling
+    // branch, not gated by any dialect option: a signed case-constant is
+    // Standard Pascal, not an extension.
+    std::unique_ptr<ExprNode>     parseCaseConstant();
+
     // Applies zero or more postfix operators to Expr: subscript ([]), field
     // access (.), or pointer dereference (^).
     std::unique_ptr<ExprNode>     parsePostfix(std::unique_ptr<ExprNode> Expr);

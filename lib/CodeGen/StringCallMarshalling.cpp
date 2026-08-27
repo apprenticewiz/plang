@@ -104,18 +104,31 @@ llvm::Value* StringCallMarshalling::emitCStrArg(const ExprNode& e) {
     if (!addr) codegenICE("a string value with no address");
     auto* len  = Strings.strLoadLen(addr);
     auto* data = Strings.strDataPtr(addr);
+    auto* i8Ty = llvm::Type::getInt8Ty(Ctx);
+    llvm::Value* buf;
     // ExprStrCap is exprStrCapStatic: a discriminant-fixed capacity is not a
     // compile-time constant (that's the whole point of a discriminant), so it
-    // widens to PlangMaxStringCapacity rather than under-sizing the buffer
-    // against a runtime length that can exceed the probe capacity on the
-    // static type.  With a real constant capacity this is exact, so the
-    // buffer -- unlike the runtime length that fills it -- can be a reused
-    // entry-block alloca the same way every other string temporary in this
-    // file is.
-    auto* i8Ty = llvm::Type::getInt8Ty(Ctx);
-    auto* buf  = CreateEntryAlloca(
-        llvm::ArrayType::get(i8Ty, static_cast<uint64_t>(ExprStrCap(e)) + 1),
-        "str.cstr");
+    // widens to PlangMaxStringCapacity there.  string(300) is legal, and its
+    // 300 was new()'s runtime discriminant, never a compile-time probe --
+    // sizing the buffer from that widened guess let `len` below, the actual
+    // runtime length the memcpy copies, run past it: a 300-character value
+    // memcpy'd into a 256-byte stack buffer, 45 bytes past the end of the
+    // allocation.  Sized from `len` itself instead -- the very value the
+    // memcpy and the NUL store already use below -- the buffer is exactly as
+    // large as what fills it, by construction, no matter what the static
+    // type could or couldn't tell us about the capacity behind it.
+    if (e.ResolvedType->ExtentVaries) {
+        auto* bytes = B.CreateAdd(len, i64c(1), "str.cstr.size");
+        buf = CreateDynAlloca(bytes, "str.cstr");
+    } else {
+        // With a real constant capacity this is exact, so the buffer --
+        // unlike the runtime length that fills it -- can be a reused
+        // entry-block alloca the same way every other string temporary in
+        // this file is.
+        buf = CreateEntryAlloca(
+            llvm::ArrayType::get(i8Ty, static_cast<uint64_t>(ExprStrCap(e)) + 1),
+            "str.cstr");
+    }
     B.CreateMemCpy(buf, llvm::MaybeAlign(), data, llvm::MaybeAlign(), len);
     auto* nulAt = B.CreateInBoundsGEP(i8Ty, buf, len, "str.cstr.nul");
     B.CreateStore(llvm::ConstantInt::get(i8Ty, 0), nulAt);
@@ -155,22 +168,28 @@ void StringCallMarshalling::emitCharStrStore(llvm::Value* dst, int64_t n,
     if (ExprIsVarStr(src)) {
         auto* from = emitStrAddr(src);
         if (!from) codegenICE("a string value with no address");
-        // §6.4.3.2 requires the lengths to match, and Sema settles that when it
-        // knows the capacity.  It cannot when a discriminant fixes it, so it
-        // lets the assignment through -- and copying n bytes out of a string
-        // holding fewer read past the end of the allocation and dropped heap
-        // bytes into the array.  Checked here instead, against the length the
-        // string actually has.
-        if (src.ResolvedType->ExtentVaries) {
-            auto* len = Strings.strLoadLen(from);
-            auto* bad = B.CreateICmpNE(len, i64c(n), "charstr.len.bad");
-            RangeGuards.emitGuard(bad, "charstrlen", [&] {
-                B.CreateCall(
-                    RtFns.getExternFnN("plang_err_str_length",
-                                       llvm::Type::getVoidTy(Ctx), {I64Ty, I64Ty}),
-                    {len, i64c(n)});
-            });
-        }
+        // §6.4.3.2 requires the lengths to match, and Sema settles that when
+        // it knows the capacity -- but a capacity that matches n is not the
+        // same thing as a LENGTH that does.  A string(n)'s length is a
+        // mutable run-time field independent of its capacity: `s := 'hi'` on
+        // a string(5) leaves it at length 2 despite room for 5, and copying n
+        // bytes out of it regardless read whatever stale bytes happened to
+        // follow in the buffer.  This used to run only when a discriminant
+        // left the capacity itself unknown to Sema (ExtentVaries); that is
+        // only the case Sema could not even ATTEMPT its compile-time check
+        // for, not the only case where a matching capacity can still have a
+        // shorter run-time length, so a fixed-capacity string(5) reassigned
+        // to something shorter went unchecked and leaked the earlier value's
+        // trailing bytes.  Checked here instead, against the length the
+        // string actually has, unconditionally.
+        auto* len = Strings.strLoadLen(from);
+        auto* bad = B.CreateICmpNE(len, i64c(n), "charstr.len.bad");
+        RangeGuards.emitGuard(bad, "charstrlen", [&] {
+            B.CreateCall(
+                RtFns.getExternFnN("plang_err_str_length",
+                                   llvm::Type::getVoidTy(Ctx), {I64Ty, I64Ty}),
+                {len, i64c(n)});
+        });
         B.CreateMemCpy(dst, llvm::MaybeAlign(), Strings.strDataPtr(from),
                        llvm::MaybeAlign(),
                        llvm::ConstantInt::get(I64Ty, n));

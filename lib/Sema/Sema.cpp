@@ -276,13 +276,21 @@ bool Sema::check(const ProgramNode& Prog) {
     Symtab.pushScope(); // global scope
     registerBuiltins();
 
-    // Register program file-parameters as text file variables (ISO §6.10)
+    // Register program file-parameters as text file variables (ISO §6.10).
+    // This lets 'input' and 'output' -- the two the language understands
+    // without any declaration at all -- and every other name in the list
+    // resolve to something for the rest of this function, whether or not the
+    // program block goes on to give it a real declaration of its own; see the
+    // BeforePop hook below for the check that it did.  A name repeated in the
+    // list collides right here, in this same scope, so report the failure
+    // Symtab.define already detects instead of discarding it as before.
     for (const auto& Name : Prog.FileParams) {
         Symbol S;
         S.Kind = SymbolKind::Var;
         S.Name = Name;
         S.Ty   = Ctx_.getText();
-        (void)Symtab.define(std::move(S));
+        if (!Symtab.define(std::move(S)))
+            error(Prog.Loc, diag::err_duplicate_param, {Name});
     }
 
     // EP §6.11.2: an interface settles what its implementation module exports,
@@ -331,7 +339,29 @@ bool Sema::check(const ProgramNode& Prog) {
     if (!Prog.Imports.empty())
         processImports(Prog.Imports);
 
-    checkBlock(*Prog.Block, /*BeforePop=*/{}, /*IsGlobalScope=*/true);
+    // ISO §6.10: every program-parameter but 'input' and 'output' must be
+    // given a defining declaration in the program block itself -- the heading
+    // only says which of the block's own declarations are external files (or,
+    // under Extended Pascal, other bindable entities); it is not itself one.
+    // Checked from checkBlock's BeforePop hook, while the block's own scope
+    // -- where such a declaration would live -- is still the current one; by
+    // the time checkBlock returns below, that scope has already been popped.
+    // lookupCurrent (this scope only) is deliberate: the implicit text-file
+    // Var the loop above defined for every name lives in the OUTER scope
+    // pushed at the top of this function, so it never stands in for a
+    // declaration the block itself never wrote -- it exists only so the rest
+    // of the program can still refer to the name, not to satisfy this check.
+    std::set<std::string> CheckedProgramParams;
+    checkBlock(*Prog.Block, /*BeforePop=*/[&] {
+        for (const auto& Name : Prog.FileParams) {
+            const std::string Lower = toLower(Name);
+            if (Lower == "input" || Lower == "output") continue;
+            if (!CheckedProgramParams.insert(Lower).second)
+                continue; // one diagnostic per distinct name, not per repeat
+            if (!Symtab.lookupCurrent(Name))
+                error(Prog.Loc, diag::err_program_param_not_declared, {Name});
+        }
+    }, /*IsGlobalScope=*/true);
     Symtab.popScope();
     return !hasErrors();
 }
@@ -508,7 +538,8 @@ void Sema::processModuleBody(const ModuleNode& Mod) {
         if (Mod.InitStmt)  checkStmt(Mod.InitStmt.get());
         if (Mod.FinalStmt) checkStmt(Mod.FinalStmt.get());
         harvestModuleExports(Mod);
-    }, /*IsGlobalScope=*/true, /*IsModuleBlock=*/true);
+    }, /*IsGlobalScope=*/true, /*IsModuleBlock=*/true,
+       /*IsInterfaceBlock=*/Mod.IsInterface);
 
     InModuleImplementation_ = SavedInImpl;
     CurrentUnit_ = SavedUnit;
@@ -833,8 +864,34 @@ void Sema::scanLabelNesting(const StmtNode* S,
 void Sema::checkBlock(const BlockNode& Block,
                       llvm::function_ref<void()> BeforePop,
                       bool IsGlobalScope,
-                      bool IsModuleBlock) {
+                      bool IsModuleBlock,
+                      bool IsInterfaceBlock) {
     Symtab.pushScope();
+
+    // ISO §6.2.2: a procedure or function's formal-parameter-list and its
+    // block are one region, so a name this block is about to declare must not
+    // repeat one of CurrentProc's parameters -- see EnclosingParamNames_'s
+    // comment for why Symtab.define's own per-scope duplicate check cannot
+    // see that collision by itself.  Checked once, up front, against the raw
+    // declarations rather than at each phase's own Symtab.define call below,
+    // so every kind of declaration this block can introduce is covered by
+    // one check instead of by several that could drift out of sync with each
+    // other.  Empty (so this is skipped outright) for a program or module
+    // block, which has no enclosing parameter scope to collide with.
+    if (!EnclosingParamNames_.empty()) {
+        auto checkNotParam = [&](const std::string& Name, SourceLocation Loc) {
+            if (EnclosingParamNames_.count(toLower(Name)))
+                error(Loc, diag::err_duplicate_declaration, {Name});
+        };
+        for (const auto& Cd : Block.Consts) checkNotParam(Cd.Name, Cd.Value->Loc);
+        for (const auto& Td : Block.Types)  checkNotParam(Td.Name, Td.Type->Loc);
+        for (const auto& Vg : Block.Vars)
+            for (size_t Idx = 0; Idx < Vg.Names.size(); ++Idx)
+                checkNotParam(Vg.Names[Idx],
+                              Idx < Vg.NameLocs.size() ? Vg.NameLocs[Idx]
+                                                        : Vg.Type->Loc);
+        for (const auto& Proc : Block.Procs) checkNotParam(Proc->Name, Proc->Loc);
+    }
 
     // A block nested in this one checks its own body before this one does, and
     // must not be left holding this block's answers.  Restored at the bottom.
@@ -1227,6 +1284,29 @@ void Sema::checkBlock(const BlockNode& Block,
             warning(T, diag::warn_label_unreachable, {Sym.Name});
     });
 
+    // Phase 7.6 — Forward-declaration completion audit (ISO §6.6.1).
+    //
+    // The forward directive promises a defining occurrence of the same
+    // procedure- or function-identifier "later in the same block".  Phase 5a
+    // clears IsForward the moment a matching heading is found, but nothing
+    // audited the remainder: a forward declaration with no matching
+    // definition anywhere in the block compiled clean and failed only at
+    // link time, against the mangled name (e.g. "undefined symbol
+    // pas_never_defined") rather than being caught here against the source
+    // identifier (#266).
+    //
+    // Skipped for a module interface's own block: EP §6.11.2 records every
+    // heading there as IsForward regardless of the 'forward' keyword, since
+    // the heading alone is the whole declaration and its body is given in a
+    // separate implementation block -- a different scope this audit, being
+    // per-scope, never sees.
+    if (!IsInterfaceBlock) {
+        Symtab.forEachInCurrentScope([&](Symbol& Sym) {
+            if (Sym.Kind != SymbolKind::Proc || !Sym.IsForward) return;
+            error(Sym.DeclLoc, diag::err_forward_never_defined, {Sym.Name});
+        });
+    }
+
     CurrentBlockLabels = std::move(SavedBlockLabels);
     Symtab.popScope();
 }
@@ -1442,8 +1522,9 @@ void Sema::checkProcBody(const ProcDecl& Proc) {
                 error(Pg.Type->Loc, diag::err_duplicate_param, {Nm});
 
             // EP §6.7.3.7: for conformant array params, register each lo/hi bound
-            // variable as an integer Var in the function scope.  Walk nested
-            // ConformantArray types to register all dimensions.
+            // variable as a Var, typed with the dimension's declared ordinal
+            // type (index-type-specification), in the function scope.  Walk
+            // nested ConformantArray types to register all dimensions.
             if (T && T->Kind == TypeKind::ConformantArray) {
                 auto* Ct = T.get();
                 while (Ct && Ct->Kind == TypeKind::ConformantArray) {
@@ -1453,8 +1534,18 @@ void Sema::checkProcBody(const ProcDecl& Proc) {
                             Symbol Bs;
                             Bs.Kind    = SymbolKind::Var;
                             Bs.Name    = BoundName;
-                            Bs.Ty      = TyInt;
+                            // EP §6.7.3.7: "applied occurrences ... shall
+                            // denote the smallest [largest] value specified
+                            // by the corresponding index-type" -- the type
+                            // written in the schema, not always integer.
+                            Bs.Ty      = Cb.OrdType ? Cb.OrdType : TyInt;
                             Bs.DeclLoc = Pg.Type->Loc;
+                            // EP §6.7.3.7.1 NOTE 2: "The object denoted by a
+                            // bound-identifier is neither constant nor a
+                            // variable" -- it may be used but never assigned.
+                            // Reuse the protected-parameter enforcement path
+                            // (checkNotProtected) rather than a parallel one.
+                            Bs.IsConformantBound = true;
                             if (!Symtab.define(Bs))
                                 error(Pg.Type->Loc, diag::err_duplicate_param, {BoundName});
                         };
@@ -1494,7 +1585,23 @@ void Sema::checkProcBody(const ProcDecl& Proc) {
         CurrentRetType = nullptr;
     }
 
+    // ISO §6.2.2: the parameters just defined above and Proc.Body's own
+    // declarations are one region.  checkBlock (about to run) pushes its own
+    // scope for the latter, so it cannot see this scope's names through
+    // Symtab.define alone -- snapshot them here and let checkBlock
+    // cross-check its declarations against the snapshot instead.  Saved and
+    // restored around the call so a nested procedure's own checkProcBody
+    // invocation (reached from inside checkBlock, via Phase 5b) sees only
+    // ITS OWN parameters while its body is checked, not this one's.
+    auto SavedEnclosingParamNames = std::move(EnclosingParamNames_);
+    EnclosingParamNames_.clear();
+    Symtab.forEachInCurrentScope([&](Symbol& S) {
+        EnclosingParamNames_.insert(toLower(S.Name));
+    });
+
     if (Proc.Body) checkBlock(*Proc.Body);
+
+    EnclosingParamNames_ = std::move(SavedEnclosingParamNames);
 
     // ISO §6.7.3: a function must assign to its result variable at least once.
     // The assignment that does so may be written in a function nested inside

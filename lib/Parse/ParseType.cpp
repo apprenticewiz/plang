@@ -289,6 +289,28 @@ std::unique_ptr<ExprNode> Parser::parseSubrangeBound() {
     return parseFactor();
 }
 
+// Denoters that cannot begin an expression, so a construct starting with one
+// of them can never be a subrange's low bound — only an ordinal type named in
+// place.  Shared by parseArrayIndexType and parseConformantOrRegular's
+// regular-array fallback (the latter cannot call the former once it has
+// already speculatively consumed an identifier) so the two do not drift.
+static bool startsOrdinalTypeOnly(TokenKind K) {
+    switch (K) {
+    case TokenKind::LeftParen:  // enumeration written in place
+    case TokenKind::Boolean:
+    case TokenKind::Char:
+    case TokenKind::Integer:
+    // real and string are not ordinal types and cannot index anything, but
+    // routing them through parseTypeExpr is what gets them the diagnostic
+    // that says so rather than one about an expression that would not parse.
+    case TokenKind::Real:
+    case TokenKind::String:
+        return true;
+    default:
+        return false;
+    }
+}
+
 // An index is an ordinal type denoter (ISO §6.4.3.2): a range in nearly every
 // array ever written, but equally a type name, `boolean`, or an enumeration
 // spelled out in place.  This is not parseTypeExpr because the bounds of an
@@ -298,20 +320,7 @@ std::unique_ptr<TypeNode> Parser::parseArrayIndexType() {
     const Token Loc = Current;
 
     // Denoters that cannot begin an expression, so no range can be meant.
-    switch (Current.Kind) {
-    case TokenKind::LeftParen:  // enumeration written in place
-    case TokenKind::Boolean:
-    case TokenKind::Char:
-    case TokenKind::Integer:
-    // real and string are not ordinal types and cannot index anything, but
-    // going through parseTypeExpr is what gets them the diagnostic that says
-    // so rather than one about an expression that would not parse.
-    case TokenKind::Real:
-    case TokenKind::String:
-        return parseTypeExpr();
-    default:
-        break;
-    }
+    if (startsOrdinalTypeOnly(Current.Kind)) return parseTypeExpr();
 
     // Otherwise parse an expression and let what follows decide: `..` makes it
     // the lower bound of a range, and anything else means the index was named
@@ -561,34 +570,43 @@ std::unique_ptr<TypeNode> Parser::parseConformantOrRegular(bool Packed) {
             return node;
         }
 
-        // No '..' after lo identifier — regular array with lo being an IdentExpr.
-        // Parse lo..hi normally but lo was already consumed.
-        // This path is unusual (e.g. array [SomeType] is invalid anyway).
-        // Just build a SubrangeTypeNode as low expression.
-        auto loExpr  = std::make_unique<IdentExpr>();
-        loExpr->Loc  = loTok;
-        loExpr->Name = loName;
-
-        // We expect '..' here; if it's not here emit error.
-        expect(TokenKind::DotDot); // will emit error if not present
-        auto node    = std::make_unique<ArrayTypeNode>();
-        node->Loc    = Loc;
-        node->Packed = Packed;
-        node->Low    = std::move(loExpr);
-        node->High   = parseExpression();
+        // No '..' after lo identifier: not a range at all, but a single
+        // ordinal type named by that identifier — `array[Color]` — the same
+        // shape parseArrayIndexType builds for a named index type (below).
+        // This used to be forced through expect(DotDot) on the theory that
+        // `array[SomeType]` "is invalid anyway", which rejected every
+        // user-defined enum or subrange type used as a parameter's array
+        // index (issue #258).
+        auto idxNode  = std::make_unique<NamedTypeNode>();
+        idxNode->Loc  = loTok;
+        idxNode->Name = loName;
+        auto node     = std::make_unique<ArrayTypeNode>();
+        node->Loc     = Loc;
+        node->Packed  = Packed;
+        node->Index   = std::move(idxNode);
         expect(TokenKind::RightBracket);
         expect(TokenKind::Of);
         node->Element = parseTypeExpr();
         return node;
     }
 
-    // lo is not an identifier — parse as regular array.
+    // lo is not an identifier.  A handful of tokens can never begin an
+    // expression — 'boolean', 'char', a built-in type name, or an
+    // enumeration spelled out in place with '(' — so unconditionally calling
+    // parseExpression() here misreported them as a broken expression instead
+    // of the ordinal-type index they are (issue #258). parseArrayIndexType
+    // already draws exactly this line; route through it instead of
+    // re-deciding it less completely.
     auto node    = std::make_unique<ArrayTypeNode>();
     node->Loc    = Loc;
     node->Packed = Packed;
-    node->Low    = parseExpression();
-    expect(TokenKind::DotDot);
-    node->High   = parseExpression();
+    if (startsOrdinalTypeOnly(Current.Kind)) {
+        node->Index = parseArrayIndexType();
+    } else {
+        node->Low  = parseExpression();
+        expect(TokenKind::DotDot);
+        node->High = parseExpression();
+    }
     expect(TokenKind::RightBracket);
     expect(TokenKind::Of);
     node->Element = parseTypeExpr();
@@ -683,10 +701,10 @@ std::unique_ptr<VariantPart> Parser::parseVariantPart() {
     // Parse variant cases until 'end' (which belongs to the enclosing record).
     while (!check(TokenKind::End) && !check(TokenKind::Eof)) {
         VariantCase Vc;
-        // Case label list
-        Vc.Labels.push_back(parseFactor());
+        // Case label list.  ISO §6.4.3.3 / §6.3: a case-constant may carry a sign.
+        Vc.Labels.push_back(parseCaseConstant());
         while (match(TokenKind::Comma)) {
-            Vc.Labels.push_back(parseFactor());
+            Vc.Labels.push_back(parseCaseConstant());
         }
         expect(TokenKind::Colon);
         expect(TokenKind::LeftParen);

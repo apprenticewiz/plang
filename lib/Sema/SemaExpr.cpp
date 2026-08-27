@@ -318,8 +318,18 @@ std::shared_ptr<Type> Sema::checkIndex(const IndexExpr& E) {
     }
     // EP §6.7.3.7: conformant arrays are indexed like regular arrays.
     if (ArrTy->Kind == TypeKind::ConformantArray) {
-        if (!IdxTy->isError() && !IdxTy->isOrdinal())
+        const bool IdxNotOrdinal = !IdxTy->isError() && !IdxTy->isOrdinal();
+        if (IdxNotOrdinal)
             error(E.Loc, diag::err_index_not_ordinal, {IdxTy->Name});
+        // ISO §6.5.3.2: same assignment-compatibility check the plain-Array
+        // branch below makes against IndexType, but against the ordinal type
+        // named in this dimension's index-type-specification -- a conformant
+        // array leaves the BOUNDS unknown until the call, not the index type.
+        const std::shared_ptr<Type> IdxSpecTy = !ArrTy->ConformantBounds.empty()
+            ? ArrTy->ConformantBounds[0].OrdType : nullptr;
+        if (!IdxNotOrdinal && !IdxTy->isError() && IdxSpecTy
+            && !IdxSpecTy->isError() && !isAssignCompatible(*IdxSpecTy, *IdxTy))
+            error(E.Loc, diag::err_index_type_mismatch, {IdxTy->Name, IdxSpecTy->Name});
         return ArrTy->ElemType ? ArrTy->ElemType : TyErr;
     }
     if (ArrTy->Kind != TypeKind::Array) {
@@ -1275,10 +1285,18 @@ bool Sema::typeContainsFile(const Type& T) {
             if (F.Ty && typeContainsFile(*F.Ty)) return true;
         return false;
     // An array of files holds files as surely as a record of them does, and
-    // was the way round the rule.
+    // was the way round the rule.  A conformant array (EP §6.7.3.7) is the
+    // same rule with its element type carried in the same field.
     case TypeKind::Array:
     case TypeKind::Set:
+    case TypeKind::ConformantArray:
         return T.ElemType && typeContainsFile(*T.ElemType);
+    // EP §6.4.7: a schema's body is itself a record or array assembled from
+    // these same building blocks (see SchemaBody), so a file anywhere in it
+    // is exactly as forbidden as one in an ordinary field or element.
+    case TypeKind::SchemaInstance:
+    case TypeKind::Schema:
+        return T.SchemaBody && typeContainsFile(*T.SchemaBody);
     default:               return false;
     }
 }
@@ -1286,11 +1304,31 @@ bool Sema::typeContainsFile(const Type& T) {
 namespace {
 
 // EP §6.4.7: Returns true if two SchemaInstance types represent the same
-// instantiation (same schema name and identical discriminant values).
+// instantiation of the same schema DECLARATION.
+//
+// A schema is identified by its declaration, not by its spelling -- see
+// isAssignCompatible's SchemaInstance arm (c03cd04) for the story: two
+// `vec(3)` from unconnected declarations are two different types even though
+// they print alike and share every discriminant value.  That fix taught
+// assignment compatibility the rule but left this function, which backs
+// var-parameter identity (ISO §6.6.3.3) and forward-declaration congruity
+// (ISO §6.6.3.6), still comparing spellings -- so a `var` formal happily
+// aliased an unrelated same-named schema instance across a scope boundary.
+//
+// Unlike isAssignCompatible there is no falling back to comparing bodies
+// when both declarations are known and differ: identity, not mere structural
+// resemblance, is what a var parameter and a re-declared heading require.
 bool schemaInstMatch(const Type& A, const Type& B) {
     if (A.Kind != TypeKind::SchemaInstance || B.Kind != TypeKind::SchemaInstance)
         return false;
-    if (A.SchemaName != B.SchemaName) return false;
+    // Where a declaration is unknown on either side -- separate compilation
+    // gives the same schema a different node in each unit -- the name and
+    // discriminants are all that is left to compare.
+    if (A.SchemaBodyNode && B.SchemaBodyNode && A.SchemaBodyNode != B.SchemaBodyNode)
+        return false;
+    // Pascal identifiers are case-insensitive; see e.g. sameParamType's
+    // undiscriminated-Schema arm and isLValue's discriminant check below.
+    if (!eqCI(A.SchemaName, B.SchemaName)) return false;
     if (A.SchemaDiscs.size() != B.SchemaDiscs.size()) return false;
     for (size_t I = 0; I < A.SchemaDiscs.size(); ++I)
         if (A.SchemaDiscs[I].Value != B.SchemaDiscs[I].Value) return false;
@@ -1436,6 +1474,20 @@ void Sema::checkProcedureActual(const Type& Formal, const std::string& ParamName
     }
 }
 
+/// The ordinal index type of \p T's outermost dimension, for an actual that
+/// may conform to a conformant-array schema: a plain Array's IndexType, or
+/// (when relaying an already-conformant parameter to another one) a
+/// ConformantArray's own first bound's declared type.  Null for anything
+/// else, or when that dimension's type never resolved.  Shared by
+/// isConformable and its caller's diagnostic, so the two cannot disagree on
+/// what "the actual's index type" means.
+static std::shared_ptr<Type> outerIndexTypeOf(const Type& T) {
+    if (T.Kind == TypeKind::Array) return T.IndexType;
+    if (T.Kind == TypeKind::ConformantArray && !T.ConformantBounds.empty())
+        return T.ConformantBounds[0].OrdType;
+    return nullptr;
+}
+
 void Sema::checkCallArgs(const Symbol& Sym, SourceLocation CallLoc,
                          std::span<const std::unique_ptr<ExprNode>> Args) {
     if (Args.size() != Sym.Params.size()) {
@@ -1499,10 +1551,30 @@ void Sema::checkCallArgs(const Symbol& Sym, SourceLocation CallLoc,
                     Actual = Underlying;
             }
             if (!isConformable(*Param.Ty, *Actual)) {
+                // ISO §6.7.3.8: report whichever of a)/d)/the element type
+                // actually failed, in the same order isConformable checks
+                // them -- otherwise a packedness or index-type mismatch was
+                // reported as an element-type mismatch with the SAME type
+                // named on both sides ("expected 'integer', got 'integer'"),
+                // which only isConformable's old element-only check could
+                // never produce and this one now can.
+                const std::shared_ptr<Type> FormalOrdTy =
+                    !Param.Ty->ConformantBounds.empty()
+                        ? Param.Ty->ConformantBounds[0].OrdType : nullptr;
+                const std::shared_ptr<Type> ActualIdxTy = outerIndexTypeOf(*Actual);
                 if (Actual->Kind != TypeKind::Array
                         && Actual->Kind != TypeKind::ConformantArray) {
                     error(ArgNode.Loc, diag::err_conformant_actual_not_array,
                           {Param.Name, At->Name});
+                } else if (Param.Ty->Packed != Actual->Packed) {
+                    error(ArgNode.Loc, diag::err_conformant_packed_mismatch,
+                          {Param.Name, Param.Ty->Packed ? "packed" : "unpacked",
+                           Actual->Packed ? "packed" : "unpacked"});
+                } else if (FormalOrdTy && !FormalOrdTy->isError()
+                               && ActualIdxTy && !ActualIdxTy->isError()
+                               && !isAssignCompatible(*FormalOrdTy, *ActualIdxTy)) {
+                    error(ArgNode.Loc, diag::err_conformant_index_type_mismatch,
+                          {Param.Name, FormalOrdTy->Name, ActualIdxTy->Name});
                 } else {
                     error(ArgNode.Loc, diag::err_conformant_elem_mismatch,
                           {Param.Name,
@@ -1630,6 +1702,26 @@ bool Sema::isConformable(const Type& Formal, const Type& Actual) const {
     if (Actual.Kind != TypeKind::Array
             && Actual.Kind != TypeKind::ConformantArray)
         return false;
+    // ISO §6.7.3.8 d): a packed conformant-array-form requires a packed
+    // actual, and an unpacked one requires an unpacked actual -- checked at
+    // every nesting level this function recurses into, same as a) below.
+    if (Formal.Packed != Actual.Packed) return false;
+    // ISO §6.7.3.8 a): the index-type of the actual has to be *compatible*
+    // with the ordinal-type-name of this dimension's index-type-specification
+    // -- e.g. a `char` schema does not conform to an `integer`-indexed actual
+    // even when the element types agree.  isAssignCompatible, asked with the
+    // schema's ordinal type as Dst, is this codebase's stand-in for §6.4.5
+    // "compatible types" between two ordinal types (same type, or subranges
+    // sharing a host type) -- the plain-Array index check above relies on the
+    // same equivalence.
+    if (!Formal.ConformantBounds.empty()) {
+        const auto& FormalOrdTy = Formal.ConformantBounds[0].OrdType;
+        auto ActualIdxTy = outerIndexTypeOf(Actual);
+        if (FormalOrdTy && !FormalOrdTy->isError()
+                && ActualIdxTy && !ActualIdxTy->isError()
+                && !isAssignCompatible(*FormalOrdTy, *ActualIdxTy))
+            return false;
+    }
     if (!Formal.ElemType || !Actual.ElemType) return true;
     // ISO §6.6.3.8: the element type of the actual conforms in its turn when
     // the formal's is another schema, which is how a parameter of more than
@@ -1683,7 +1775,12 @@ bool Sema::isAssignCompatible(const Type& Dst, const Type& Src,
         // which accepts an identical shape and rejects a different one.
         const bool SameDecl = !Dst.SchemaBodyNode || !Src.SchemaBodyNode
                            || Dst.SchemaBodyNode == Src.SchemaBodyNode;
-        if (Dst.SchemaName == Src.SchemaName && SameDecl
+        // Pascal identifiers are case-insensitive (eqCI, as the Schema arm
+        // just below already uses); a bare `==` here was academic while
+        // SameDecl gated it, but it stopped mattering only by accident of the
+        // body-comparison fallback below silently correcting a mismatch,
+        // rather than the comparison being right.
+        if (eqCI(Dst.SchemaName, Src.SchemaName) && SameDecl
                 && Dst.SchemaDiscs.size() == Src.SchemaDiscs.size()) {
             bool same = true;
             for (size_t I = 0; I < Dst.SchemaDiscs.size(); ++I)
@@ -1802,7 +1899,18 @@ bool Sema::isAssignCompatible(const Type& Dst, const Type& Src,
                             && Dst.RecordDecl == Src.RecordDecl)
                         return true;
                 }
-                if (Depth > 16) return true;   // give up rather than misjudge
+                // The cap exists so a record reachable from itself only
+                // through a chain of distinct anonymous record types (no
+                // RecordDecl to short-circuit on) cannot recurse without end;
+                // it is not license to call two types compatible once the
+                // structure below it goes unexamined.  Two records that were
+                // never shown equal are not equal, so this refuses rather
+                // than misjudges -- the same conservative default the
+                // restricted-type check above makes when it cannot say yes.
+                // A false negative here is a diagnostic to rename or
+                // restructure a type; a false positive is a value of one
+                // layout copied over another's.
+                if (Depth > 16) return false;
                 // ISO §6.4.3.1: `packed` is part of what the type IS, and two
                 // records that differ in it have different layouts.  Ignoring
                 // it let a padded record be stored into a packed one --
@@ -1826,11 +1934,29 @@ bool Sema::isAssignCompatible(const Type& Dst, const Type& Src,
                 if (!Dst.ElemType || !Src.ElemType) return Dst.Name == Src.Name;
                 return isAssignCompatible(*Dst.ElemType, *Src.ElemType);
 
-            // Pointer: compatible when pointee types are compatible.
+            // Pointer: ISO §6.4.4 requires the two pointer-types' domain
+            // types to be the SAME type, not merely assignment-compatible
+            // with one another -- there is no covariance or contravariance
+            // through a pointer.  Recursing into isAssignCompatible on the
+            // pointees let a subrange's own compatibility with its base type
+            // leak through a pointer: `^integer` and `^(1..10)` were
+            // accepted either way round, though a range check the subrange
+            // requires never runs on a value read back through the integer
+            // pointer.
+            //
+            // Pointer types are interned by pointee identity (see
+            // TypeContext::getPointer) and Enum/Record types carry their own
+            // declaration as their identity (ISO §6.4.2.3, §6.4.3.3), so two
+            // pointers to the same domain type are already the same Type
+            // object and were caught by the `&Dst == &Src` shortcut above.
+            // Reaching here with Dst.Kind == Src.Kind == Pointer means the
+            // domain types are genuinely different, so isIdenticalType --
+            // the same canonical-identity test ISO §6.6.3.3 uses for a var
+            // parameter -- is what settles it, not the general assignability
+            // relation.
             case TypeKind::Pointer:
                 if (!Dst.PointeeType || !Src.PointeeType) return false;
-                return isAssignCompatible(*Dst.PointeeType, *Src.PointeeType,
-                                          /*ExactBounds=*/true);
+                return isIdenticalType(Dst.PointeeType, Src.PointeeType);
 
             default:
                 return Dst.Name == Src.Name;

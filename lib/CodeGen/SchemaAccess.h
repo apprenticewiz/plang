@@ -109,7 +109,11 @@ public:
     llvm::Type* schemaStorageType(const SchemaRef& ref);
     llvm::Value* schemaBodySize(const plang::Type& schema,
                                 const std::vector<llvm::Value*>& discs);
-    void emitNewSchema(const plang::ExprNode& ptrArg, const plang::Type& schema,
+    /// Allocates and writes the header; returns the new object's run-time
+    /// view (body address + discriminants) so a caller can apply the body's
+    /// `value` clauses (EP §6.6) without re-evaluating discArgs a second
+    /// time.
+    SchemaRef emitNewSchema(const plang::ExprNode& ptrArg, const plang::Type& schema,
                        std::span<const std::unique_ptr<plang::ExprNode>> discArgs);
     llvm::Value* exprStrCapV(const plang::ExprNode& e);
     /// R5: the address AND the capacity of a string from ONE walk of its
@@ -161,6 +165,22 @@ private:
     /// outside this unit) a free-standing header as a side effect of this
     /// extraction.
     std::function<unsigned(const std::string&, size_t)> SchemaArgDiscCountOf;
+
+    /// R6: substr/trim's result is typed as its ARGUMENT's Type object (see
+    /// the CallExpr branch of exprStrCapV), so strAddrAndCap on a substr/trim
+    /// call is a second question about that same argument on top of the one
+    /// call-evaluation already answers while marshalling it -- and asking it
+    /// by walking the argument fresh repeated whatever side effect an index
+    /// in its path has: `substr(q^.a[next].s, 1, 2)` called `next` once for
+    /// the call's own argument and once more for the result's capacity.
+    /// strAddrAndCap primes these across that one call-evaluation, so the
+    /// lookup its own argument marshalling makes of the very same node (by
+    /// pointer identity -- a node is only ever this call's own argument)
+    /// answers from here instead of walking again.  Set only for the
+    /// duration of that one nested call and cleared unconditionally after,
+    /// whether or not it was read.
+    const plang::ExprNode* pendingArgExpr_{nullptr};
+    std::pair<llvm::Value*, llvm::Value*> pendingArgVal_{};
 
     llvm::Constant* i64c(int64_t v) const;
 };
