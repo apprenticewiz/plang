@@ -8,6 +8,54 @@ version numbers follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 
 ## [Unreleased]
 
+A third adversarial review round, prompted by the goal of making plang "bulletproof" before
+starting the Turbo Pascal (0.4.0) extensions -- 14 lenses, deliberately targeting ground the
+first two rounds left thin: deep `-g` interaction with every other feature, an `-O1`/`-O2`/`-O3`
+sweep, fresh second opinions on the runtime and CodeGen decomposition, string/ordinal edges,
+cross-module boundaries, feature combinations, diagnostic quality, and resource/scale stress
+testing. Eighteen bugs, every fix carrying a regression test verified to fail against the code
+it fixes.
+
+### Fixed
+
+- **Composite-typed locals and parameters were completely invisible under `-g`.** Every type
+  except the seven scalar/pointer kinds -- record, array, set, complex, string/`VarString`,
+  procedure/function, schema/schema-instance -- silently got no DWARF variable at all, despite
+  `-g` shipping as a complete feature in 0.3.0. Real `DIType` construction added for every kind,
+  verified with real `gdb` sessions per kind, not just IR-text checks.
+- A procedural-parameter thunk had zero DWARF info, so stepping through a call made via a
+  procedural parameter silently ran to completion instead of entering the thunk or the real
+  target.
+- An EP module's imported global got a spurious duplicate `DW_TAG_variable` in the importing
+  compilation unit.
+- Integer `**`/`pow` silently wrapped on overflow instead of trapping, the same class already
+  fixed for `div`, missed for `pow`.
+- `write`'s `FracDigits` (`:D`) argument had the same missing-range-check gap already fixed for
+  `TotalWidth` (`:W`).
+- A string literal with an embedded NUL byte silently truncated.
+- EP's free declaration order broke for a `const` referencing an enum value declared in a
+  later type section.
+- Constants exported from one module and used in a genuinely-separately-compiled third module
+  produced an undefined external symbol at link time.
+- A module with only an interface part and no implementation part compiled clean with broken
+  output instead of a Sema error.
+- An unqualified import shadowing a builtin/required identifier was silently dropped, keeping
+  the builtin instead.
+- Fixed-discriminant schema-instance parameter types were never congruous with themselves,
+  rejecting legitimately identical forward declarations.
+- String concatenation `+` accepted one string-like operand without checking the other,
+  crashing CodeGen instead of diagnosing a real type mismatch.
+- Passing a dialect-gated-off required identifier as a procedural-parameter actual gave a
+  misleading diagnostic about the wrong cause.
+- Record type layout was O(n²) in field count, taking multiple minutes to compile at tens of
+  thousands of fields.
+- A global array large enough to overflow a 32-bit PC-relative relocation produced a confusing
+  internal `ld.lld` error instead of a clean diagnostic.
+- Case-statement range-label duplicate checking enumerated every value in a range with no
+  bound, hanging the compiler on one large range.
+- Negative zero's sign was inconsistently suppressed across real-formatting modes; the default
+  real-write precision could round-trip `DBL_MAX` to `+Infinity`.
+
 ## [0.3.1] - 2026-08-27
 
 A follow-up adversarial review of 0.3.0, focused on the ground the previous pass hadn't
