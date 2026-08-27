@@ -18,7 +18,7 @@ REQUIRES: gdb-binary
 
 (*
 RUN: %plang -g -std=iso10206 %s -o %t
-RUN: python3 -c "import json; p='%s.plang-schemas.json'; d=json.load(open(p)); d['schemas']['Rec']['fields'][1]['kind']='bogus'; json.dump(d, open(p, 'w'))"
+RUN: python3 -c "import json; p='%s.plang-schemas.json'; d=json.load(open(p)); d['schemas']['Rec'][0]['fields'][1]['kind']='bogus'; json.dump(d, open(p, 'w'))"
 RUN: gdb -q -batch -ex "source %plang_schema_printers" -ex "break %s:35" -ex run -ex "print q^" %t 2>&1 | FileCheck %s
 *)
 

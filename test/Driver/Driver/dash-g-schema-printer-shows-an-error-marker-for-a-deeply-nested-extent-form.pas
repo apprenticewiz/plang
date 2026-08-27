@@ -17,7 +17,7 @@ REQUIRES: gdb-binary
 
 (*
 RUN: %plang -g -std=iso10206 %s -o %t
-RUN: python3 -c "import json, sys; from functools import reduce; sys.setrecursionlimit(6000); p='%s.plang-schemas.json'; d=json.load(open(p)); d['schemas']['Rec']['fields'][0]['high']=reduce(lambda a,_:['add',a,['const',0]],range(1500),['const',1]); json.dump(d, open(p, 'w'))"
+RUN: python3 -c "import json, sys; from functools import reduce; sys.setrecursionlimit(6000); p='%s.plang-schemas.json'; d=json.load(open(p)); d['schemas']['Rec'][0]['fields'][0]['high']=reduce(lambda a,_:['add',a,['const',0]],range(1500),['const',1]); json.dump(d, open(p, 'w'))"
 RUN: gdb -q -batch -ex "source %plang_schema_printers" -ex "break %s:34" -ex run -ex "print q^" %t 2>&1 | FileCheck %s
 *)
 
