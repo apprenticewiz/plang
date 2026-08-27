@@ -463,6 +463,24 @@ void plang_err_schema_disc(const char *Name, int64_t Dst, int64_t Src) {
     std::exit(PlangRuntimeErrorStatus);
 }
 
+/// ISO §6.7.5.6 / EP §6.7.5.6: it is a dynamic-violation to apply Put (write)
+/// to a file not currently generated (opened by rewrite/extend/update, or
+/// left positioned that way by seekwrite/seekupdate) or to apply Get (read)
+/// to one not currently inspected (opened by reset/extend/update, or left
+/// positioned that way by seekread/seekupdate).  The C stream underneath
+/// already refuses the mismatched operation -- fwrite/fprintf/fputc/fputs
+/// return a failure and fread/fscanf/fgetc set the stream's error indicator
+/// -- so plang_file.cpp's readers and writers check for that rather than
+/// carry on as though a discarded write or an unfilled read had succeeded
+/// (issue #124).
+[[noreturn]] void plang_err_file_wrong_mode(const char *Op) {
+    std::fflush(stdout);
+    std::fprintf(stderr,
+                 "plang runtime: %s: file is not open in the required mode\n",
+                 Op);
+    std::exit(PlangRuntimeErrorStatus);
+}
+
 } // extern "C"
 
 } // namespace plang
