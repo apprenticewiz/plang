@@ -172,23 +172,21 @@ llvm::DIType* CGDebugInfo::debugTypeOfSemaType(const Type& T) {
             break;
         case TypeKind::Schema:
         case TypeKind::SchemaInstance:
-            // EP §6.4.7.  SchemaBody is the body resolved against either
-            // the real discriminants (a SchemaInstance whose extent is
-            // fixed: this recursion lands on an ordinary, fully accurate
-            // Record/Array DIType) or a PROBE binding (T.ExtentVaries, or
-            // an undiscriminated Schema with no fixed layout at all --
-            // CodeGenSchema lays the real, per-instance storage out at run
-            // time and nothing here can predict its size).  Recursing into
-            // the probe body regardless is a deliberate, documented
-            // partial fix: it is only accurate for the fixed portion of the
-            // type and can UNDER- or OVER-state a varying field's real
-            // extent, but it is a real DIType with real field names rather
-            // than nothing, which is what every schema-typed variable had
-            // before this.  Full runtime-varying DWARF (a location
-            // expression that reads the object's own stored discriminants)
-            // is real design work left undone -- see this change's commit
-            // message.
-            DT = T.SchemaBody ? debugTypeOfSemaType(*T.SchemaBody) : nullptr;
+            // EP §6.4.7.  SchemaBody is the body resolved against either the
+            // real discriminants (a SchemaInstance whose extent is fixed:
+            // codegen stores it as a plain value with no header -- see
+            // CGTypes::llvmTypeOfSemaTypeImpl's own SchemaInstance case --
+            // so recursing straight into the body's DIType is exact) or a
+            // PROBE binding (T.ExtentVaries: an undiscriminated Schema, or
+            // one whose discriminant only arrives at run time).  The latter
+            // is where SchemaLayoutEngine::schemaHeaderBytes and
+            // SchemaAccess::emitNewSchema/schemaRefOf put a leading
+            // discriminant-word header in front of the body at run time --
+            // buildSchemaDIType accounts for it; see its own comment for why
+            // recursing into the probe body as if it had none (the previous
+            // behavior, issue #122) put every FIXED field, not just the
+            // varying one's own extent, at the wrong DWARF offset.
+            DT = buildSchemaDIType(T);
             break;
         default:
             break;
@@ -405,6 +403,81 @@ llvm::DIType* CGDebugInfo::buildRecordDIType(const Type& T) {
     auto* Full = DBuilder->createStructType(
         DebugFile, T.Name, DebugFile, 0, sizeBits, alignBits, llvm::DINode::FlagZero,
         nullptr, DBuilder->getOrCreateArray(Elements));
+    DBuilder->replaceTemporary(llvm::TempDIType(Fwd), Full);
+    debugTypes_[&T] = Full;
+    return Full;
+}
+
+llvm::DIType* CGDebugInfo::buildSchemaDIType(const Type& T) {
+    if (!T.SchemaBody) return nullptr;
+    llvm::DIType* BodyDT = debugTypeOfSemaType(*T.SchemaBody);
+    if (!BodyDT || !Types) return BodyDT;
+
+    // A fixed-extent instance (T.ExtentVaries false) is stored as a plain
+    // value with no header at all -- see CGTypes::llvmTypeOfSemaTypeImpl's
+    // own SchemaInstance case, which just lowers SchemaBody directly -- so
+    // BodyDT is already exact and there is nothing to wrap.
+    if (!T.ExtentVaries) return BodyDT;
+
+    llvm::Type* BodyLLTy = Types->llvmTypeOfSemaType(*T.SchemaBody);
+    if (!BodyLLTy) return BodyDT;
+
+    // Matches SchemaLayoutEngine::schemaHeaderBytes exactly: one 8-byte
+    // word per discriminant, aligned up to the body's own alignment (never
+    // below 8).  The body's ABI alignment does not depend on how many
+    // elements a varying array field really has (only its element type
+    // does), so computing it off the PROBE body here agrees with the real,
+    // per-instance header every run-time object actually carries.
+    const auto& DL = Mod.getDataLayout();
+    const uint64_t bodyAlign = std::max<uint64_t>(8, DL.getABITypeAlign(BodyLLTy).value());
+    const uint64_t rawHdr    = T.SchemaDiscs.size() * 8;
+    const uint64_t hdrBytes  = (rawHdr + bodyAlign - 1) / bodyAlign * bodyAlign;
+
+    auto* Fwd = DBuilder->createReplaceableCompositeType(
+        llvm::dwarf::DW_TAG_structure_type, T.Name, DebugFile, DebugFile, 0);
+    debugTypes_[&T] = Fwd;
+
+    // One named member per discriminant, in the header -- readable by name
+    // (`print q^.n`) exactly like an ordinary field, since that is what the
+    // header really holds -- followed by the body itself as one unnamed
+    // member just past the header.  DW_TAG_member with no DW_AT_name is the
+    // ordinary DWARF "anonymous struct/union member" shape (the same one a
+    // C `struct { struct { int x; }; }` anonymous nested struct gets):
+    // gdb/lldb read straight through it, so `q^.a`/`q^.k` still resolve to
+    // the body's own fields without one more `.` in the way -- only the
+    // OFFSET they are read at changed, not the access spelling.
+    std::vector<llvm::Metadata*> Elements;
+    auto* DiscDT = DBuilder->createBasicType("integer", 64, llvm::dwarf::DW_ATE_signed);
+    for (size_t i = 0; i < T.SchemaDiscs.size(); ++i) {
+        Elements.push_back(DBuilder->createMemberType(
+            Fwd, T.SchemaDiscs[i].Name, DebugFile, 0, 64, 64,
+            i * 64, llvm::DINode::FlagZero, DiscDT));
+    }
+    // BodyDT's own field offsets are still the PROBE's (issue #122's other
+    // half, left as-is here): a varying-extent field's real size can only
+    // be known from the discriminant this object carries at run time, which
+    // a DIType -- one static description shared by every instance of T, not
+    // rebuilt per allocation -- has no way to read.  Wrapping the header
+    // around it fixes the header itself and every field AT OR BEFORE the
+    // varying one exactly (nothing past this point in the body depends on
+    // any discriminant); a FIXED field written AFTER a varying one in the
+    // same record still inherits the varying field's own probe-approximated
+    // extent for its own offset, same as the varying field's own extent
+    // already did before this fix. A fully general fix needs a genuine
+    // per-object DWARF location expression (DW_OP_push_object_address off
+    // the header this call now places correctly) -- real design work left
+    // undone, same gap the original review already flagged for the varying
+    // field's own extent, now just stated precisely for what's downstream
+    // of it too.
+    Elements.push_back(DBuilder->createMemberType(
+        Fwd, "", DebugFile, 0, DL.getTypeSizeInBits(BodyLLTy),
+        DL.getABITypeAlign(BodyLLTy).value() * 8, hdrBytes * 8,
+        llvm::DINode::FlagZero, BodyDT));
+
+    const uint64_t sizeBits = hdrBytes * 8 + DL.getTypeSizeInBits(BodyLLTy);
+    auto* Full = DBuilder->createStructType(
+        DebugFile, T.Name, DebugFile, 0, sizeBits, bodyAlign * 8,
+        llvm::DINode::FlagZero, nullptr, DBuilder->getOrCreateArray(Elements));
     DBuilder->replaceTemporary(llvm::TempDIType(Fwd), Full);
     debugTypes_[&T] = Full;
     return Full;
