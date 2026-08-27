@@ -27,6 +27,14 @@ DIAG(err_restricted_component, Error, "'%0' is a restricted type, so its compone
 DIAG(err_restricted_file_component, Error,
      "'%0' is a restricted type and cannot be the component type of a file")
 DIAG(err_undefined_identifier, Error, "undefined identifier '%0'")
+// ISO §6.10: every program-parameter besides the required 'input' and
+// 'output' -- which the language understands without one -- must be given a
+// defining declaration somewhere in the program block.  The heading only
+// says which of the block's own declarations are external files (or, under
+// Extended Pascal, other bindable entities); it is not a declaration itself.
+DIAG(err_program_param_not_declared, Error,
+     "program parameter '%0' is never declared in the program block; only "
+     "'input' and 'output' need no declaration")
 DIAG(err_function_requires_args, Error, "function '%0' requires an argument list")
 DIAG(err_proc_as_value, Error, "procedure '%0' cannot be used as a value")
 DIAG(err_builtin_proc_as_value, Error, "built-in procedure '%0' cannot be used as a value")

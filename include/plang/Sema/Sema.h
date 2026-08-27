@@ -223,6 +223,24 @@ private:
     // Resolved return type of CurrentProc (null when not inside a function).
     std::shared_ptr<Type> CurrentRetType;
 
+    /// Lowercased names checkProcBody just defined into CurrentProc's own
+    /// parameter scope -- its formal parameters, EP named result variable, and
+    /// any conformant-array bound names -- while that scope is the immediately
+    /// enclosing one for the checkBlock call about to check its body.
+    ///
+    /// ISO §6.2.2 treats a procedure or function's formal-parameter-list and
+    /// its block as ONE region, so redeclaring a parameter's name as a local
+    /// constant, type, variable or nested procedure must be a duplicate-
+    /// declaration error. checkProcBody and checkBlock push two separate
+    /// SymbolTable scopes for the two halves of that one region (see their
+    /// comments), so Symtab.define's own per-scope duplicate check cannot see
+    /// the collision -- it looks only at the block's own (innermost) scope,
+    /// one level in from where the parameters live. checkBlock cross-checks
+    /// its declared names against this set instead. Empty outside a
+    /// procedure/function body: a program or module block has no enclosing
+    /// parameter scope of its own to collide with.
+    std::set<std::string> EnclosingParamNames_;
+
     /// Every function whose block contains the statement being checked,
     /// outermost first.
     ///
