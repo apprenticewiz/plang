@@ -8,6 +8,61 @@ version numbers follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 
 ## [Unreleased]
 
+A fifth adversarial review round, prompted directly by unease about 0.3.3's own new `-g`
+schema debug-info mechanism -- a broad sweep at the same scale as rounds 1-4, with 6 of 14
+lenses specifically targeting that mechanism. 19 confirmed bugs, several exactly the
+"confidently wrong, not honestly incomplete" failure mode the unease was about. One more real
+bug was found and fixed independently while merging: two of this round's own fixes (the
+sidecar identity redesign and the nested-schema-field bail-out) each passed CI and looked
+correct in isolation, but landing them together left a stray empty sidecar entry behind on a
+bail-out path neither fix's own tests exercised in combination -- a reminder that CI on each
+PR alone cannot catch a bug that only exists once two independent changes coexist; caught and
+fixed as part of this round's own merge, not filed as a separate numbered issue.
+
+### Fixed
+
+- **Silent wrong values (worst class), all in the 0.3.3 `-g` schema debug-info mechanism**:
+  the sidecar was keyed by bare schema NAME only -- two different procedures declaring a
+  same-named-but-differently-shaped schema collided, with the second's live objects printing
+  the first's wrong field names/values, no warning (#140). The sidecar had no staleness check
+  at all -- rebuilding the same source (even without `-g`) silently overwrote the one sidecar
+  file every previously-built `-g` binary from that source depends on (#141). Both fixed by
+  keying sidecar entries on `(name, structural fingerprint)` and embedding a random build ID
+  in both the sidecar and the binary's own `DW_AT_producer`, checked before trusting the
+  sidecar. A schema `var`/value parameter's ABI pointer is body-relative, not header-relative,
+  but both DWARF and the sidecar assumed header-relative unconditionally -- wrong values for
+  every field on one of the most common debugging actions (#142). A field typed as a nested
+  schema instantiation wasn't excluded by the recorder's bail-out logic -- wrong data or a
+  crash instead of a clean bail (#143). Non-integer field types (real/set/complex) had no type
+  tag in the sidecar -- printed as raw bit-pattern integers, or crashed outright for 16-byte
+  complex fields (#144, which also hardens the script against malformed/unexpected sidecar
+  content more generally).
+- **Documented-but-overclaimed limitation**: the 0.3.3 fix only ever corrects WHOLE-value
+  printing (`print q^`) -- a direct field-path access (`print q^.tail`) never invokes gdb's
+  pretty-printer at all, an architectural gdb API limitation, not fixable by more plang code.
+  The script now warns about this prominently at load time (#145).
+- CodeGen's own recursive expression emitter had no depth guard (unlike Sema, fixed in #123)
+  -- an expression well under Sema's cap could still crash under the project's own ASan CI
+  build, since ASan's larger per-frame stack usage drops the real crash threshold below Sema's
+  (#146).
+- `SchemaLayoutEngine::rtSizeOfTypeNode`'s array-FIELD-within-a-record byte-count multiply
+  (the more common shape) had no overflow guard, reproducing the same wraparound-causes-heap-
+  corruption bug an earlier fix only closed for a schema's own top-level array body (#147).
+- `plang foo.pas -o foo.pas` silently destroyed the source file with no diagnostic -- gcc and
+  clang both reject this; plang now does too (#148).
+- A schema discriminant of the wrong ordinal type was silently accepted when instantiating a
+  schema directly (`var v: Vec('a')`) -- only `new()`'s discriminant path had the type check
+  (#149).
+- File-open failures (`reset`/`rewrite`/`extend`/`update`) crashed with `std::abort()`
+  (SIGABRT, core dump) instead of the clean exit status every sibling runtime-error path uses
+  (#150).
+- A leading UTF-8 BOM produced three bogus per-byte lexer errors instead of being skipped
+  (#151).
+- The wrong-mode file-write/read trap added for named files never fired for INTERNAL
+  (unbound/temp) files, since the C-level `tmpfile()` behind them is always bidirectional
+  regardless of the Pascal-level intended direction -- the same silent-corruption class of bug,
+  left open for the arguably more common internal-file case (#152).
+
 ## [0.3.3] - 2026-08-27
 
 A fourth adversarial review round, prompted by "really shake bugs out" before starting the
