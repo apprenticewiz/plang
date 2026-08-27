@@ -363,7 +363,12 @@ private:
     // IsGlobalScope: true for a program block or a module body, where every
     // variable becomes a single linked object subject to the relocation-range
     // check in Phase 4 below; false for a procedure/function body, whose
-    // locals are stack storage and never hit that limit.
+    // locals are stack storage instead.  Phase 4 runs the same byte-size gate
+    // either way (#223) -- an oversized local has no relocation to overflow,
+    // but hangs the LLVM backend lowering its `alloca` well before it would
+    // fit any real stack -- and uses this flag only to choose which of
+    // err_global_var_too_large / err_local_var_too_large names the variable's
+    // scope accurately.
     void checkBlock(const BlockNode& Block,
                     llvm::function_ref<void()> BeforePop = {},
                     bool IsGlobalScope = false);

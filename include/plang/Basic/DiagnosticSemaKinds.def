@@ -48,6 +48,19 @@ DIAG(err_index_type_mismatch, Error, "array index type mismatch: index type is '
 DIAG(err_global_var_too_large, Error,
      "'%0' is too large to be a global variable (%1 bytes; the limit is %2 "
      "bytes) -- declare it on the heap (New/GetMem) instead")
+// A local (procedure/function-body) variable this large has no relocation to
+// overflow -- it is a stack allocation, not a linked object -- but it is no
+// safer: it never fits any real stack, and what actually breaks first is the
+// LLVM backend lowering the resulting `alloca`.  A single `string(maxint)`
+// local was observed driving `llc` to tens of gigabytes of RSS with no
+// termination in sight (issue #223), long before the process would ever hit
+// a stack-overflow signal.  Gated at the same threshold as
+// err_global_var_too_large and for the same "comfortably under any real
+// limit" reasoning -- only the wording differs, so the diagnostic names the
+// variable's actual scope instead of claiming it is a global.
+DIAG(err_local_var_too_large, Error,
+     "'%0' is too large to be a local variable (%1 bytes; the limit is %2 "
+     "bytes) -- declare it on the heap (New/GetMem) instead")
 DIAG(err_field_on_non_record, Error, "field access '.%0' on non-record type '%1'")
 DIAG(err_no_such_field, Error, "record type '%0' has no field '%1'")
 DIAG(err_deref_non_pointer, Error, "dereference operator '^' applied to non-pointer type '%0'")
