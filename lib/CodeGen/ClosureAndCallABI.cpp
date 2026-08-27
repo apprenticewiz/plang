@@ -230,14 +230,28 @@ llvm::Function* ClosureAndCallABI::procParamThunk(llvm::Function* target,
 
     // InsertPointGuard, not a bare saveIP/restoreIP pair: this builds a
     // whole separate function with no Pascal-level source identity of its
-    // own, so its instructions get no debug location at all (valid --
-    // AddMetadataToInst attaches nothing for an empty DebugLoc) rather
-    // than incorrectly inheriting whatever the caller's own current
-    // location happened to be, and a plain restoreIP would not restore
-    // the caller's location afterward either.
+    // own, so a plain restoreIP would not restore the caller's own insert
+    // point/debug location afterward either.
+    //
+    // The thunk still gets a real, minimal DISubprogram (DIFlagArtificial --
+    // "this frame exists but isn't user code," the
+    // standard DWARF way to mark a compiler-synthesized shim) rather than
+    // being left with none at all: an unattributed function gets no
+    // line-table entries whatsoever, which is not the harmless "no debug
+    // info" it looks like -- confirmed with gdb, `step` on a call made
+    // through a procedural parameter then runs the ENTIRE call to
+    // completion instead of entering anything, silently skipping over both
+    // the thunk and the real target. Every instruction below is given
+    // line 0 in the thunk's own new scope, not DebugLoc() -- that alone is
+    // what puts the thunk's address range into the line table at all, so a
+    // debugger's step steps transparently through the thunk into the real
+    // target instead of vaulting over the whole call.
     llvm::IRBuilderBase::InsertPointGuard guard(B);
     B.SetInsertPoint(llvm::BasicBlock::Create(Ctx, "entry", thunk));
-    B.SetCurrentDebugLocation(llvm::DebugLoc());
+    if (auto* SP = DbgInfo.emitThunkStart(thunk, DbgInfo.getFile(), thunk->getName().str()))
+        B.SetCurrentDebugLocation(llvm::DILocation::get(Ctx, 0, 0, SP));
+    else
+        B.SetCurrentDebugLocation(llvm::DebugLoc());
 
     std::vector<llvm::Value*> args;
     auto arg = thunk->arg_begin();

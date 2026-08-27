@@ -178,7 +178,7 @@ void Codegen::Impl::init(const std::string& progName) {
     // methods not yet extracted (CodeGenExprs.cpp/CodeGenRuntime.cpp/
     // CodeGenTypes.cpp).
     closureAbi_ = std::make_unique<ClosureAndCallABI>(ctx, *mod, builder,
-        *schemaAccess_, *schemaLayout_, *cgTypes_, *symTab_, *linkage_,
+        *schemaAccess_, *schemaLayout_, *cgTypes_, *symTab_, *linkage_, *dbgInfo_,
         i32Ty, i64Ty, ptrTy,
         [this](const ExprNode& e){ return emitLValue(e); },
         [this](const ExprNode& e, llvm::Type* t, bool byRef){
