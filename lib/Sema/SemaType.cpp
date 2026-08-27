@@ -169,6 +169,13 @@ void Sema::checkInitialState(const TypeNode& Node, const Type& T) {
         error(Node.InitialState->Loc, diag::err_value_init_type_mismatch,
               {VT->Name, T.Name});
     checkStringCapacity(T, *Node.InitialState);
+    // isAssignCompatible above only checks that a value of T's ORDINAL kind
+    // was written -- any integer literal satisfies a subrange -- so `1..5
+    // value 99` compiled clean and every variable of the type started life
+    // holding 99, already outside its own subrange.  The same constant is
+    // checked against T's actual bounds the way an assigned one is
+    // (checkAssignStmt's warnIfConstantOutOfRange call).
+    warnIfConstantOutOfRange(T, *Node.InitialState);
     adoptSetType(*Node.InitialState, Node.ResolvedType);
     // Folded HERE, in the scope the 'value' clause was actually written in --
     // constBound/constRealBound write the result onto InitialState's own
