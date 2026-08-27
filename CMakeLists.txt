@@ -115,8 +115,14 @@ if(GIT_EXECUTABLE AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.git")
         )
         if(PLANG_GIT_HASH_RESULT EQUAL 0 AND PLANG_GIT_HASH)
             set(PLANG_VERSION_STRING "${PLANG_BASE_VERSION}+g${PLANG_GIT_HASH}")
+            # --untracked-files=no keeps this consistent with the primary
+            # path above: `git describe --dirty` only ever reacts to
+            # modifications to tracked files, never to untracked files sitting
+            # in the tree (issue #127 -- a bare `git status --porcelain` here
+            # disagreed with that and marked a tree ".dirty" for an untracked
+            # file alone, which `git describe` never would have).
             execute_process(
-                COMMAND ${GIT_EXECUTABLE} status --porcelain
+                COMMAND ${GIT_EXECUTABLE} status --porcelain --untracked-files=no
                 WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
                 OUTPUT_VARIABLE PLANG_GIT_DIRTY_CHECK
                 OUTPUT_STRIP_TRAILING_WHITESPACE
