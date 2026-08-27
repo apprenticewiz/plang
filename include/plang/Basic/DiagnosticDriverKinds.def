@@ -61,3 +61,16 @@ DIAG(err_cannot_create_temp_file, Error, "cannot create temporary file: %0")
 // send a reader to a flag that does not exist.  A command line is syntax
 // and is not translated, even between two spellings of English.
 DIAG(warn_unrecognized_argument, Warning, "unrecognized argument '%0'")
+
+// A bare .o/.a on the command line alongside a mode that stops before the
+// link step -- -c, -S, -emit-llvm, or one of the -dump-* front-end-only
+// modes (issue #277).  parseArgs routes it into Opts.linkerArgs on the
+// assumption the pipeline will reach link() and consume it there; every one
+// of those modes returns out of compile() before that happens, so without
+// this the file was silently dropped -- not even checked for existing.
+// Wording matches gcc's own "linker input file unused because linking not
+// done"; a warning, not an error, for the same reason
+// warn_unrecognized_argument is one: it costs nothing to carry on without
+// the file, and -Werror is there for anyone who wants it fatal instead.
+DIAG(warn_linker_input_unused, Warning,
+     "linker input file '%0' unused because linking is not done in this mode")
