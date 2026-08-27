@@ -1588,9 +1588,14 @@ uint64_t Sema::byteAlignOf(const Type& T) {
     case TypeKind::Real:        return 8;
     case TypeKind::Complex:     return 8;
     case TypeKind::Set:         return intAlign(PlangMaxSetElements);
+    // The target's pointer width (issue #243's follow-up): Type::Width is
+    // repurposed for these three kinds -- see its comment -- and stamped by
+    // TypeContext from --target=, defaulting to 8 bytes where it was not
+    // given.  Alignment equals size for a bare pointer on every ABI plang
+    // targets.
     case TypeKind::String:
     case TypeKind::Pointer:
-    case TypeKind::Nil:         return 8;
+    case TypeKind::Nil:         return T.Width / 8;
     case TypeKind::VarString:   return 8;   // the length field leads it
     case TypeKind::File:        return 8;   // a pointer leads PascalFile
     case TypeKind::Array:       return T.ElemType ? byteAlignOf(*T.ElemType) : 1;
@@ -1620,9 +1625,10 @@ std::optional<uint64_t> Sema::byteSizeOf(const Type& T, FieldOffsets* Offsets) {
     case TypeKind::Real:        return 8;
     case TypeKind::Complex:     return 16;  // { double, double }
     case TypeKind::Set:         return intBytes(PlangMaxSetElements);
+    // The target's pointer width; see the identical case in byteAlignOf.
     case TypeKind::String:
     case TypeKind::Pointer:
-    case TypeKind::Nil:         return 8;
+    case TypeKind::Nil:         return T.Width / 8;
     // EP §6.4.3.3: { i64 length, [capacity x i8] }.
     case TypeKind::VarString:
         return roundUp(8 + static_cast<uint64_t>(T.StrCapacity > 0 ? T.StrCapacity

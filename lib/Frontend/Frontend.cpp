@@ -824,6 +824,7 @@ int frontendPC1Main(int Argc, char *Argv[]) {
     std::string               InputFile;
     std::string               OutputFile;
     std::string               Std;
+    std::string               Target;
     bool                      RangeChecks   = true;
     bool                      NilChecks     = true;
     unsigned                  OptLevel      = 0;
@@ -868,6 +869,8 @@ int frontendPC1Main(int Argc, char *Argv[]) {
             // chain ends in "unrecognized argument", and the driver forwards
             // both of these, so without it every driver-mediated compile would
             // warn about an option the driver itself just passed on.
+        } else if (Arg.starts_with("--target=")) {
+            Target = Arg.substr(9);
         } else if (Arg.starts_with("-std=")) {
             Std = Arg.substr(5);
             if (!LangOptions::parseDialect(Std)) {
@@ -982,6 +985,21 @@ int frontendPC1Main(int Argc, char *Argv[]) {
     Opts.NilChecks         = NilChecks;
     Opts.OptLevel          = OptLevel;
     Opts.Debug             = Debug;
+    Opts.TargetTriple      = std::move(Target);
+    // The one llvm::Triple query LangOptions::PointerWidthBits needs (see its
+    // comment): made here, where Frontend.cpp already depends on LLVM for
+    // printVersion's own Triple use below, so that Sema/TypeContext can stay
+    // free of the dependency and just read the plain integer this leaves in
+    // Opts.  isArch32Bit() rather than a hand-rolled architecture-name list:
+    // it is the same fact CodeGen's real DataLayout is about to derive from
+    // this identical triple string, by construction rather than by two
+    // implementations happening to agree, and it is what
+    // CGTypes::checkSizeAgreement/checkFieldOffsetAgreement's cross-check
+    // (issue #243's follow-up) needs Sema's answer to actually match.
+    if (!Opts.TargetTriple.empty()) {
+        const llvm::Triple T(llvm::Triple::normalize(Opts.TargetTriple));
+        Opts.PointerWidthBits = T.isArch32Bit() ? 32 : 64;
+    }
     Opts.ModuleSearchPaths = std::move(ModuleSearchPaths);
 
     // Route output: a dump mode or LLVM IR, to stdout or a named file.  Moved

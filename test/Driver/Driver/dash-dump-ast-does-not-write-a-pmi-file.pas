@@ -10,6 +10,10 @@ any such thing.
 Also checks that an ordinary (non-dump) compile of the same module still
 writes its .pmi file -- the fix reorders the DumpAst check ahead of
 writePMIFiles, it does not remove the write.
+
+The .pmi filename is lowercased (issues #168/#173/#175): module names are
+case-insensitive, so "m.pmi" is what a module declared "M" actually
+produces, not "M.pmi".
 *)
 
 (*
@@ -17,10 +21,10 @@ RUN: rm -rf %t.dir
 RUN: split-file %s %t.dir
 
 RUN: %plang -std=iso10206 -dump-ast %t.dir/mod.pas
-RUN: test ! -e %t.dir/M.pmi
+RUN: test ! -e %t.dir/m.pmi
 
 RUN: %plang -std=iso10206 -c %t.dir/mod.pas -o %t.dir/mod.o
-RUN: test -e %t.dir/M.pmi
+RUN: test -e %t.dir/m.pmi
 *)
 
 //--- mod.pas

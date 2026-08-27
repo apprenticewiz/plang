@@ -201,7 +201,7 @@ llvm::DIType* CGDebugInfo::debugTypeOfSemaType(const Type& T) {
             // recursing into whatever it itself contains.
             llvm::DIType* PointeeDT = T.PointeeType
                 ? debugTypeOfSemaType(*T.PointeeType) : nullptr;
-            DT = DBuilder->createPointerType(PointeeDT, 64);
+            DT = DBuilder->createPointerType(PointeeDT, ptrBits());
             break;
         }
         case TypeKind::Array:
@@ -224,7 +224,7 @@ llvm::DIType* CGDebugInfo::debugTypeOfSemaType(const Type& T) {
             // PlangMaxStringCapacity fallback is only ever a
             // REPRESENTATIVE shape here, not this particular instance's
             // real allocation size.
-            DT = DBuilder->createPointerType(buildStringDIType(T.StrCapacity), 64);
+            DT = DBuilder->createPointerType(buildStringDIType(T.StrCapacity), ptrBits());
             break;
         case TypeKind::Record:
             DT = buildRecordDIType(T);
@@ -353,7 +353,7 @@ llvm::DISubroutineType* CGDebugInfo::buildSubroutineDIType(const Type& T) {
         // address, not a value); wrap in a pointer so the DWARF signature
         // reflects the real calling convention, the same treatment every
         // by-reference parameter elsewhere in this pass gets.
-        if (PDT && P.IsVar) PDT = DBuilder->createPointerType(PDT, 64);
+        if (PDT && P.IsVar) PDT = DBuilder->createPointerType(PDT, ptrBits());
         Params.push_back(PDT);
     }
     return DBuilder->createSubroutineType(DBuilder->getOrCreateTypeArray(Params));
@@ -941,20 +941,21 @@ void CGDebugInfo::declareProcParam(const std::string& name, const ProcedureTypeN
                                     llvm::Value* ptr) {
     if (!DBuilder || !PT || !PT->ResolvedType || !CurScope || !B.GetInsertBlock()) return;
     llvm::DISubroutineType* SubTy = buildSubroutineDIType(*PT->ResolvedType);
-    auto* CodeTy  = DBuilder->createPointerType(SubTy, 64);
+    const unsigned PB = ptrBits(); // the pair's own two fields are both pointers
+    auto* CodeTy  = DBuilder->createPointerType(SubTy, PB);
     // The frame's own pointee varies per call site (whatever static link the
     // procedure passed happens to need) and nothing here knows its shape --
     // an untyped pointer, the same honest answer a C `void*` frame would
     // get, exactly like a null pointee elsewhere in this file.
-    auto* FrameTy = DBuilder->createPointerType(nullptr, 64);
+    auto* FrameTy = DBuilder->createPointerType(nullptr, PB);
     std::vector<llvm::Metadata*> Elems{
-        DBuilder->createMemberType(DebugFile, "code", DebugFile, 0, 64, 64, 0,
+        DBuilder->createMemberType(DebugFile, "code", DebugFile, 0, PB, PB, 0,
                                     llvm::DINode::FlagZero, CodeTy),
-        DBuilder->createMemberType(DebugFile, "frame", DebugFile, 0, 64, 64, 64,
+        DBuilder->createMemberType(DebugFile, "frame", DebugFile, 0, PB, PB, PB,
                                     llvm::DINode::FlagZero, FrameTy),
     };
     auto* PairTy = DBuilder->createStructType(
-        DebugFile, "procparam", DebugFile, 0, 128, 64, llvm::DINode::FlagZero,
+        DebugFile, "procparam", DebugFile, 0, 2 * PB, PB, llvm::DINode::FlagZero,
         nullptr, DBuilder->getOrCreateArray(Elems));
     const unsigned line = SrcMgr ? SrcMgr->getPresumedLoc(PT->Loc).Line : 0;
     auto* DV = DBuilder->createAutoVariable(CurScope, name, DebugFile, line, PairTy);
@@ -993,8 +994,9 @@ void CGDebugInfo::declareSchemaParamRef(const std::string& name, const TypeNode*
     // exactly the cost declareProcParam's own closure-pair storage already
     // pays for the same reason, and not on any hot path RangeGuards or the
     // like would care about.
+    const unsigned ptrBytes = ptrBits() / 8;
     auto* shadow = B.CreateAlloca(I8Ty,
-        llvm::ConstantInt::get(I64Ty, hdrBytes + 8), name + ".dbgref");
+        llvm::ConstantInt::get(I64Ty, hdrBytes + ptrBytes), name + ".dbgref");
     for (size_t i = 0; i < discs.size(); ++i) {
         auto* slot = B.CreateGEP(I8Ty, shadow,
             {llvm::ConstantInt::get(I64Ty, static_cast<uint64_t>(i) * 8)});
@@ -1020,12 +1022,12 @@ void CGDebugInfo::declareSchemaParamRef(const std::string& name, const TypeNode*
             DebugFile, T.SchemaDiscs[i].Name, DebugFile, 0, 64, 64,
             i * 64, llvm::DINode::FlagZero, DiscDT));
     }
-    auto* BodyPtrTy = DBuilder->createPointerType(BodyDT, 64);
+    auto* BodyPtrTy = DBuilder->createPointerType(BodyDT, ptrBits());
     Elements.push_back(DBuilder->createMemberType(
-        DebugFile, "", DebugFile, 0, 64, 64, hdrBytes * 8,
+        DebugFile, "", DebugFile, 0, ptrBits(), ptrBits(), hdrBytes * 8,
         llvm::DINode::FlagZero, BodyPtrTy));
 
-    const uint64_t sizeBits = (hdrBytes + 8) * 8;
+    const uint64_t sizeBits = hdrBytes * 8 + ptrBits();
     auto* RefTy = DBuilder->createStructType(
         DebugFile, T.Name + ".ref", DebugFile, 0, sizeBits, 64,
         llvm::DINode::FlagZero, nullptr, DBuilder->getOrCreateArray(Elements));
