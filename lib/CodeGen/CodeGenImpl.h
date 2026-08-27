@@ -788,6 +788,17 @@ struct Codegen::Impl {
     /// amount of stack rather than one allocation per iteration.
     llvm::Value* createDynStrAlloca(llvm::Value* capV, const std::string& name);
 
+    /// The header-less primitive createDynStrAlloca builds its { len, bytes }
+    /// shape on top of: \p bytes raw, 8-byte-aligned bytes wherever the
+    /// builder currently is, given back by the same StackScope.  A C-string
+    /// marshalled for a runtime entry point (emitCStrArg) is bytes with no
+    /// length header, sized off the same kind of discriminant-fixed runtime
+    /// value createDynStrAlloca answers for -- string(300)'s capacity is
+    /// legal and known at run time via exprStrCapV/strLoadLen, so its NUL-
+    /// terminated copy cannot be forced into a compile-time-sized buffer any
+    /// more than its concatenation result could.
+    llvm::Value* createDynAlloca(llvm::Value* bytes, const std::string& name);
+
     /// Restores the stack pointer on the way out, but only if something inside
     /// actually took a dynamic allocation -- a scope that costs nothing is one
     /// that can be put everywhere a statement is emitted without reading like

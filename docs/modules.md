@@ -500,6 +500,17 @@ a `.pmi` file.
 - **No dependency tracking.** The driver does not automatically recompile a
   module when its source changes. Run `plang -c Module.pas` manually to refresh
   `Module.o` and `Module.pmi` before recompiling dependents.
+- **No goto from a module's procedure into its own `to begin do`/`to end do`.**
+  A `goto` may reach a label placed directly in one of those statements from
+  within that same statement — it never leaves the module's initializer or
+  finalizer — but not from a procedure the module declares. Unlike a
+  program's block or an enclosing procedure, which stay on the call stack for
+  as long as anything nested in them could still run, a module's lifecycle
+  statement returns once it finishes, while the module's own procedures stay
+  callable for the rest of the program's life (including from another
+  compilation unit that only imports the module). A non-local goto reached
+  from one would not reliably find that statement's activation still there
+  to land in, so it is rejected at compile time instead.
 - **An expression the writer cannot put into words is left out.** Every
   type-denoter plang can parse can now be written back, so this reaches only
   constant values, and only those built from something other than literals,

@@ -36,7 +36,14 @@
 /// nothing here has a CLI-observable proxy even in principle. Two
 /// (TwoIntegersOfOneWidthAreOneType, ThePredefinedIntegerIsTheInternedOne)
 /// check raw C++ pointer identity on TypeContext's interning cache, which no
-/// compiled program can observe. Two (TheDialectDecidesHowWideAnIntegerIs,
+/// compiled program can observe. One
+/// (RebindPointerDropsTheStaleCacheKeyAtTheOldAddress, issue #288) goes
+/// further and placement-news over manually-owned storage so that two
+/// successive Type objects provably share one address -- there is no Pascal
+/// program that can make the allocator hand back a just-freed address on
+/// demand (and an ASan build would refuse to, on purpose), so a compiled-
+/// program proxy is not just unavailable today but cannot exist. Two
+/// (TheDialectDecidesHowWideAnIntegerIs,
 /// MaxintIsTheLargestValueTheDialectsIntegerHolds) are deliberately deferred
 /// whole, not partially converted: -std=turbo doesn't exist yet, and the
 /// ISO7185/EP halves are provably the same branch of the same ternary in
@@ -64,6 +71,7 @@
 #include <gtest/gtest.h>
 
 #include <cstdint>
+#include <new>
 #include <sstream>
 #include <string>
 
@@ -192,6 +200,78 @@ TEST(Storage, ThePredefinedIntegerIsTheInternedOne) {
     TypeContext C;
     EXPECT_EQ(C.getInteger().get(), C.getInt(64, true).get());
     EXPECT_TRUE(C.identical(C.getInteger(), C.getInt(64, true)));
+}
+
+TEST(Storage, RebindPointerDropsTheStaleCacheKeyAtTheOldAddress) {
+    // Issue #288.  `^node` written before `node` is declared interns its
+    // pointer type under its placeholder stub's address (getPointer keys on
+    // addresses everywhere -- see the class comment).  rebindPointer then
+    // re-files that entry under the real `node` type's address once it is
+    // known, but used to leave the placeholder's entry behind.  Sema pins
+    // every stub on the AST for the whole compilation (Sema::resolveType,
+    // SemaType.cpp), so nothing frees a stub while its TypeContext is alive
+    // today and the stale entry is inert in practice -- but that makes it a
+    // latent hazard on that pinning invariant, not a safe design: free a
+    // stub while its TypeContext lives on, and a later, unrelated Type
+    // placed at the freed address would collide with the stale key and
+    // getPointer would hand back the old pointer's identity instead of the
+    // new object's own.
+    //
+    // A real free-then-reuse pair can't be manufactured on demand -- it is
+    // exactly what the allocator owes no guarantee about, and an ASan build
+    // actively prevents it by quarantining freed memory. So this test
+    // controls the address itself: two Type objects are placement-new'd in
+    // turn over one manually-owned buffer, which deterministically gives them
+    // the same address without depending on allocator behavior at all.
+    alignas(Type) unsigned char Storage[sizeof(Type)];
+    // Declared after Storage, so C is destroyed (releasing every shared_ptr
+    // its caches hold, including into Storage) before Storage's storage
+    // duration ends -- see the reverse-construction-order destruction rule.
+    TypeContext C;
+
+    // The forward-declared pointer's placeholder, exactly as Sema's Phase 3a
+    // builds one (Kind=Error, Name=the not-yet-declared type's name).
+    auto* StubRaw = new (static_cast<void*>(Storage)) Type();
+    StubRaw->Kind = TypeKind::Error;
+    StubRaw->Name = "node";
+    auto Stub = std::shared_ptr<Type>(StubRaw, [](Type* P) { P->~Type(); });
+
+    // `^node`, resolved before `node`'s declaration: interned under the
+    // stub's address.
+    auto Ptr = C.getPointer(Stub);
+    ASSERT_EQ(Ptr->PointeeType.get(), StubRaw);
+
+    // `node`'s real declaration, arriving later in the same type section.
+    auto Real = std::make_shared<Type>();
+    Real->Kind = TypeKind::Record;
+    Real->Name = "node";
+
+    // Phase 3c's fixup: Ctx_.rebindPointer(T, Sym->Ty).
+    C.rebindPointer(Ptr, Real);
+    EXPECT_EQ(Ptr->PointeeType.get(), Real.get());
+    // The primary purpose still holds: a later `^node` finds the same
+    // pointer type rather than minting a second, non-identical one.
+    EXPECT_TRUE(C.identical(C.getPointer(Real), Ptr));
+
+    // Drop the stub -- rebindPointer's overwrite of Ptr->PointeeType left it
+    // with no other owner -- and placement-new an unrelated second
+    // forward-declared pointer's placeholder into the exact same bytes,
+    // standing in for whatever a future refactor that stops pinning stubs on
+    // the AST would let the allocator do for real.
+    Stub.reset();
+    auto* Stub2Raw = new (static_cast<void*>(Storage)) Type();
+    Stub2Raw->Kind = TypeKind::Error;
+    Stub2Raw->Name = "other";
+    auto Stub2 = std::shared_ptr<Type>(Stub2Raw, [](Type* P) { P->~Type(); });
+    ASSERT_EQ(static_cast<void*>(Stub2Raw), static_cast<void*>(StubRaw))
+        << "test setup: Stub2 must land at the freed stub's exact address";
+
+    // Before the fix, "ptr:<StubRaw's address>" still mapped to Ptr (which by
+    // now points at Real), so this call returned Ptr -- a `^node` handed back
+    // as `^other`.  After the fix it mints `^other`'s own pointer type.
+    auto Ptr2 = C.getPointer(Stub2);
+    EXPECT_NE(Ptr2.get(), Ptr.get());
+    EXPECT_EQ(Ptr2->PointeeType.get(), Stub2Raw);
 }
 
 TEST(Storage, TheDialectDecidesHowWideAnIntegerIs) {

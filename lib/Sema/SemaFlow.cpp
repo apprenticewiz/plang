@@ -57,6 +57,23 @@ const IdentExpr* rootVariable(const ExprNode* E) {
     return nullptr;
 }
 
+/// Whether reaching this access's root passes through a pointer dereference.
+/// `p^`, `p^.f`, and `p^[i]` all write to whatever `p` points at, which is not
+/// storage this walk tracks -- unlike `a[i]` or `r.f`, which write to a
+/// component of `a` or `r`'s own storage and so, by the same simplification
+/// rootVariable makes, give the whole of `a` or `r` a value.  `p` itself is
+/// only read here, to be followed; it is not given a value by this access.
+bool writesThroughDeref(const ExprNode* E) {
+    while (E) {
+        if (llvm::isa<DerefExpr>(E))                    return true;
+        if (auto* N = llvm::dyn_cast<IndexExpr>(E))     { E = N->Array.get();  continue; }
+        if (auto* N = llvm::dyn_cast<FieldExpr>(E))     { E = N->Record.get(); continue; }
+        if (auto* N = llvm::dyn_cast<SubstringExpr>(E)) { E = N->Str.get();    continue; }
+        return false;
+    }
+    return false;
+}
+
 // See NumSemaTypeKinds in Sema/Type.h.  A new scalar kind defaults to "not a
 // simple value", which does not report anything: it silently drops that type
 // out of the definite-assignment walk, so a variable of it used before it is
@@ -194,6 +211,13 @@ void Sema::flowRead(const ExprNode* E, FlowState& St) {
 }
 
 void Sema::flowWrite(const ExprNode* E, FlowState& St) {
+    // A write reached through a dereference lands in whatever the pointer
+    // points at, not in the pointer's own storage -- `p^ := 0` and a
+    // var-parameter pass of `p^` both need p's own value to know where to
+    // write, so p is read here (and, same as any other read, diagnosed if
+    // nothing has given it a value yet), and neither marks p itself assigned.
+    if (writesThroughDeref(E)) { flowRead(E, St); return; }
+
     const IdentExpr* Id = rootVariable(E);
     if (!Id) return;
     const std::string Key = toLower(Id->Name);

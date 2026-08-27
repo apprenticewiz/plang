@@ -450,6 +450,20 @@ void plang_err_schema_disc(const char *Name, int64_t Dst, int64_t Src) {
     std::exit(PlangRuntimeErrorStatus);
 }
 
+/// ISO §6.6.6.2: sqr(x) = x*x keeps an integer result for an integer
+/// argument, but -- like minint div -1 (plang_err_div_overflow), abs(minint)
+/// (plang_err_abs_overflow), and an out-of-range pow (plang_err_ipow_overflow)
+/// -- not every such result fits int64_t.  Unlike those three, any X with
+/// |X| > 2^31 (roughly) can overflow here, not just one fixed operand pair,
+/// so this reports which X it was rather than taking no argument.
+[[noreturn]] void plang_err_sqr_overflow(int64_t X) {
+    std::fflush(stdout);
+    std::fprintf(stderr,
+                 "plang runtime: sqr(%" PRId64 ") has no representable result\n",
+                 X);
+    std::exit(PlangRuntimeErrorStatus);
+}
+
 /// ISO §6.9.3.1 / EP §6.10.3.1: a write TotalWidth is a plain integer
 /// expression, so a program can compute one wider than the `int` printf's
 /// `%*d`/`%*c` take -- plang_io.cpp's and plang_file.cpp's checkedWidth call
@@ -492,6 +506,27 @@ void plang_err_schema_disc(const char *Name, int64_t Dst, int64_t Src) {
 [[noreturn]] void plang_err_cannot_open(const char *Msg) {
     std::fflush(stdout);
     std::fprintf(stderr, "plang runtime: %s\n", Msg);
+    std::exit(PlangRuntimeErrorStatus);
+}
+
+/// EP §6.7.5.2: SeekRead/SeekWrite/SeekUpdate reposition f to component n,
+/// measured from the index type's smallest value, but n itself is never
+/// range-checked against the file's extent before the seek is attempted --
+/// so a value the C library cannot honor (behind the index type's origin,
+/// most directly, which computes a negative byte offset) reaches fseek.
+/// Unlike a mismatched read/write, which trapOnStreamError catches because
+/// the failed C call leaves its own error indicator set, a failed fseek
+/// leaves the stream positioned exactly where it already was -- so ignoring
+/// the failure does not just skip the seek, it silently redirects whatever
+/// read or write comes next onto that unrelated, previously-current
+/// component instead. This traps it as the dynamic-violation EP's own
+/// pre-assertion calls for, rather than letting the corruption through
+/// (issue #233).
+[[noreturn]] void plang_err_seek_failed(const char *Op, int64_t N) {
+    std::fflush(stdout);
+    std::fprintf(stderr,
+                 "plang runtime: %s(%" PRId64 "): position is not reachable "
+                 "in this file\n", Op, N);
     std::exit(PlangRuntimeErrorStatus);
 }
 
