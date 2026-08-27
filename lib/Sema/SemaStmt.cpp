@@ -1051,6 +1051,16 @@ void Sema::checkGoto(const GotoStmt& S) {
     // block's statement part: landing anywhere else would resume in the middle
     // of a structured statement whose activation was just thrown away.
     if (!CurrentBlockLabels.contains(S.Label)) {
+        // EP §6.11.2: unlike a program's block or an enclosing procedure's,
+        // a module's 'to begin do'/'to end do' does not stay on the call
+        // stack for as long as the module's procedures stay callable -- see
+        // Symbol::LabelInModuleBlock.  Checked ahead of LabelNested: a label
+        // at the outermost level of a module's statement part is exactly as
+        // unreachable this way as one that is not.
+        if (Sym->LabelInModuleBlock) {
+            error(S.Loc, diag::err_goto_module_block, {S.Label});
+            return;
+        }
         if (Sym->LabelNested) {
             error(S.Loc, diag::err_goto_outer_block, {S.Label});
             return;

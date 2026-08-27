@@ -508,7 +508,7 @@ void Sema::processModuleBody(const ModuleNode& Mod) {
         if (Mod.InitStmt)  checkStmt(Mod.InitStmt.get());
         if (Mod.FinalStmt) checkStmt(Mod.FinalStmt.get());
         harvestModuleExports(Mod);
-    }, /*IsGlobalScope=*/true);
+    }, /*IsGlobalScope=*/true, /*IsModuleBlock=*/true);
 
     InModuleImplementation_ = SavedInImpl;
     CurrentUnit_ = SavedUnit;
@@ -832,7 +832,8 @@ void Sema::scanLabelNesting(const StmtNode* S,
 
 void Sema::checkBlock(const BlockNode& Block,
                       llvm::function_ref<void()> BeforePop,
-                      bool IsGlobalScope) {
+                      bool IsGlobalScope,
+                      bool IsModuleBlock) {
     Symtab.pushScope();
 
     // A block nested in this one checks its own body before this one does, and
@@ -858,6 +859,7 @@ void Sema::checkBlock(const BlockNode& Block,
         S.Kind    = SymbolKind::Label;
         S.Name    = Lbl;
         S.DeclLoc = Block.Loc;
+        S.LabelInModuleBlock = IsModuleBlock;
         if (!Symtab.define(S))
             error(T, diag::err_duplicate_label, {Lbl});
     }
