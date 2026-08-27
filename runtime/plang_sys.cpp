@@ -561,6 +561,46 @@ void plang_err_schema_disc(const char *Name, int64_t Dst, int64_t Src) {
     std::exit(PlangRuntimeErrorStatus);
 }
 
+/// ISO §6.9.1: the value read for read(f, v)/read(v) with v of an integer or
+/// real type is the longest sequence of characters starting at the current
+/// position that forms a value of that type -- which means a token that
+/// cannot even start one (any character that is not a digit, a sign, or --
+/// for a real -- a decimal point) is an error, exactly like every other
+/// dynamic-violation this file reports. Before this, a malformed token
+/// quietly left the destination variable unchanged: plang_io.cpp's
+/// scanNumber-based reader (stdin/readstr) built an empty token and skipped
+/// the assignment outright, and plang_file.cpp's fscanf-based reader got a
+/// plain match failure (return 0) that nothing distinguished from success.
+/// Neither reader had consumed anything either, so a loop driven by eof(f)
+/// never advanced past the bad token and so never terminated (issue #236).
+[[noreturn]] void plang_err_read_format(const char *Op) {
+    std::fflush(stdout);
+    std::fprintf(stderr,
+                 "plang runtime: %s: input does not start with a valid "
+                 "number\n", Op ? Op : "read");
+    std::exit(PlangRuntimeErrorStatus);
+}
+
+/// ISO §6.9.1: the value read for read(f, v)/read(v) with v of an integer
+/// type has to be assignment-compatible with it, which an arbitrarily long
+/// run of digits is not once it names something outside int64_t. Before
+/// this, plang_file.cpp's "%lld"-based fscanf silently clamped such a token
+/// (an overflowing scanf numeric conversion is undefined behaviour in C;
+/// glibc's happens to clamp to the nearest representable value) and
+/// plang_io.cpp's strtoll-based reader computed the same clamped value but
+/// never looked at ERANGE to notice -- so both accepted
+/// "9223372036854775808" as though it were the largest representable
+/// integer instead of reporting it (issue #240). \p Tok is the offending
+/// text: the value itself has no int64_t representation to show instead.
+[[noreturn]] void plang_err_read_int_range(const char *Op, const char *Tok) {
+    std::fflush(stdout);
+    std::fprintf(stderr,
+                 "plang runtime: %s: '%s' is out of range for an integer "
+                 "(%" PRId64 "..%" PRId64 ")\n",
+                 Op ? Op : "read", Tok ? Tok : "", INT64_MIN, INT64_MAX);
+    std::exit(PlangRuntimeErrorStatus);
+}
+
 } // extern "C"
 
 } // namespace plang
