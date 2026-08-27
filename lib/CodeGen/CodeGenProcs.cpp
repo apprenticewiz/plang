@@ -925,10 +925,14 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
                     // caller's own storage rather than copying into one of
                     // its own, so it is not an assignment and nothing new is
                     // checked here for that path.
+                    // Lo == Hi (e.g. `5..5`) is a legal singleton subrange,
+                    // not a sentinel for "no real bounds" -- Kind ==
+                    // Subrange already guarantees these are real, so
+                    // excluding Lo == Hi here would just let a value actual
+                    // arrive in a singleton-subrange formal uncaught.
                     llvm::Value* argVal = &*it;
                     if (const auto& rt = tn ? tn->ResolvedType : nullptr;
                             rt && rt->Kind == TypeKind::Subrange
-                            && rt->SubLo != rt->SubHi
                             && argVal->getType()->isIntegerTy())
                         emitRangeCheck(argVal, rt->SubLo, rt->SubHi,
                                        /*isIndex=*/false, tn->Loc);
