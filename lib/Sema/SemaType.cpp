@@ -862,8 +862,20 @@ std::shared_ptr<Type> Sema::resolveNamedUnrestricted(const NamedTypeNode& N) {
     // forward references in declarations is retained" -- so this is refused
     // here, the same as any other undefined type, rather than silently
     // handed to whatever resolves the reference.
+    //
+    // `Sym->Ty != TyErr` tells that legitimate case apart from a type whose
+    // OWN definition already failed to resolve (`type q = nosuchtype;`):
+    // Phase 3b (Sema.cpp) stores the TyErr singleton -- Kind=Error like a
+    // stub, but with the fixed, non-empty Name "<error>" -- over the stub
+    // once resolution comes back empty-handed, and every use of "q" landed
+    // here and looked exactly like a still-pending stub, so the one real
+    // "undefined type 'nosuchtype'" fanned out into a bogus "'q' is used
+    // here before its declaration" at every use (issue #269).  TyErr is a
+    // singleton, so identity alone distinguishes it from the per-type stub
+    // Phase 3a allocates fresh for each type name; a real error was already
+    // reported when TyErr was produced, so nothing further is said here.
     if (InPointerDomain_ <= 0 && Sym->Ty && Sym->Ty->Kind == TypeKind::Error
-            && !Sym->Ty->Name.empty()) {
+            && !Sym->Ty->Name.empty() && Sym->Ty != TyErr) {
         error(N.Loc, diag::err_forward_type_reference, {N.Name});
         return TyErr;
     }
