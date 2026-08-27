@@ -249,6 +249,22 @@ static std::string findRuntimeLib(const std::string &ExePath) {
 }
 
 // ---------------------------------------------------------------------------
+// Version-numbered directory sorting (shared by the GCC and Darwin toolchain
+// probes below, both of which pick the newest of several installed versions)
+// ---------------------------------------------------------------------------
+
+bool plang::versionDirLess(std::string_view A, std::string_view B) {
+    llvm::VersionTuple VA, VB;
+    // tryParse() returns true on FAILURE (llvm::VersionTuple convention).
+    const bool AOk = !VA.tryParse(A);
+    const bool BOk = !VB.tryParse(B);
+    if (AOk && BOk) return VA < VB;
+    if (AOk) return false; // A is a real version, B is not: A sorts after B.
+    if (BOk) return true;  // B is a real version, A is not: A sorts before B.
+    return A < B;          // Neither parses: fall back to a stable order.
+}
+
+// ---------------------------------------------------------------------------
 // GCC installation detection (for ld.lld CRT/library paths)
 // ---------------------------------------------------------------------------
 
@@ -257,6 +273,9 @@ struct GCCInstall {
     std::string LibDir; ///< system lib dir containing Scrt1.o
 };
 
+/// Direct children of \p Parent, sorted ascending by versionDirLess so that
+/// callers who want the newest installed version can walk the result
+/// back-to-front (see detectGCC and builtinsUnder below).
 static std::vector<std::string> subdirs(const std::string &Parent) {
     std::vector<std::string> Out;
     std::error_code EC;
@@ -266,7 +285,7 @@ static std::vector<std::string> subdirs(const std::string &Parent) {
         if (!Name.empty() && Name[0] != '.')
             Out.push_back(std::string(Name));
     }
-    std::sort(Out.begin(), Out.end());
+    std::sort(Out.begin(), Out.end(), versionDirLess);
     return Out;
 }
 
