@@ -175,8 +175,42 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
 endif()
 
 # ---- Sanitizer preset (-DPLANG_SANITIZE=address,undefined or similar) ----
-option(PLANG_SANITIZE "Comma-separated sanitizer list, e.g. 'address,undefined'" "")
+#
+# This used to be `option(PLANG_SANITIZE ...)`, but option() is specifically
+# for BOOL cache entries: it relabels whatever cache value is already
+# present as type BOOL without touching the stored string, so
+# `-DPLANG_SANITIZE=adress` (issue #186) configured clean --
+# `PLANG_SANITIZE:BOOL=adress` in CMakeCache.txt, "-- Sanitizers: adress" on
+# stdout, exit 0 -- and only failed minutes later, once real compilation
+# reached the first translation unit, with a compiler error easy to miss in
+# a wall of build output. Worse, cmake-gui/ccmake render a BOOL entry as a
+# plain checkbox; ticking it to "enable sanitizers" sets the literal string
+# "ON", which reaches `-fsanitize=${PLANG_SANITIZE}` unchanged and fails the
+# same way. CACHE STRING plus explicit validation below turns both cases
+# into an immediate, readable configure-time error instead.
+set(PLANG_SANITIZE "" CACHE STRING
+    "Comma-separated sanitizers to enable, e.g. 'address,undefined' (empty disables all)")
+# Curated for cmake-gui/ccmake discoverability: the individual sanitizers
+# this project validates below, plus the one combination CI and
+# docs/technical_info.md actually exercise. This list only shapes the GUI
+# drop-down -- it is not itself the validation, so any other combination of
+# the known keywords below is still accepted from the command line.
+set_property(CACHE PLANG_SANITIZE PROPERTY STRINGS
+    "" "address" "undefined" "address,undefined" "thread" "leak" "memory")
 if(PLANG_SANITIZE)
+    set(PLANG_SANITIZE_KNOWN_VALUES address undefined thread leak memory)
+    string(REPLACE "," ";" PLANG_SANITIZE_LIST "${PLANG_SANITIZE}")
+    foreach(_plang_sanitizer_name ${PLANG_SANITIZE_LIST})
+        string(STRIP "${_plang_sanitizer_name}" _plang_sanitizer_name)
+        if(NOT _plang_sanitizer_name IN_LIST PLANG_SANITIZE_KNOWN_VALUES)
+            message(FATAL_ERROR
+                "PLANG_SANITIZE: unrecognized sanitizer '${_plang_sanitizer_name}' "
+                "(from '${PLANG_SANITIZE}'). Valid values are: "
+                "${PLANG_SANITIZE_KNOWN_VALUES} (comma-separated, e.g. "
+                "'address,undefined').")
+        endif()
+    endforeach()
+
     message(STATUS "Sanitizers: ${PLANG_SANITIZE}")
     # -fno-sanitize=vptr: the libraries are built -fno-rtti (LLVM convention) and
     # UBSan's vptr check needs RTTI, so leaving it on reports every shared_ptr
