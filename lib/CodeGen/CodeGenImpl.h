@@ -1353,8 +1353,14 @@ struct Codegen::Impl {
     const TypeNode* schemaInstanceBody(const TypeNode* tn) const;
     /// EP §6.6: brings a variable of the denoter's type to the state such a
     /// variable begins in.
+    /// \p semaRec is the Sema record this instance's storage was laid out
+    /// under, when the recursion has one in hand (see CGTypes::layoutOf) --
+    /// passed to layoutOf so a record field that is itself a schema
+    /// instantiation is sized from THIS instance rather than from its
+    /// denoter's node-cached ResolvedBody, which may hold a different one.
     void emitInitialState(llvm::Value* ptr, llvm::Type* ty,
-                          const TypeNode* tn, int depth = 0);
+                          const TypeNode* tn, int depth = 0,
+                          const Type* semaRec = nullptr);
     /// EP §6.6 with §6.4.7: emitInitialState's counterpart for a schema
     /// instance new() just allocated.  new()'s discriminants need not be
     /// constants (EP §6.7.5.3), so the body below the header is laid out at
