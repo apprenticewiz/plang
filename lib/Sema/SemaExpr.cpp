@@ -100,23 +100,20 @@ void Sema::warnIfComparisonIsSettled(const BinaryExpr& E, const Type& Lt,
 // Expression checking
 // ---------------------------------------------------------------------------
 
-// Ceiling on live checkExpr activations (Sema::ExprDepth).  1000 levels of
-// recursion through checkExpr -> checkBinary/checkUnary/... -> checkExpr is
-// well under the crash threshold observed empirically on this build's
-// default 8MB stack (a flat chain starts crashing a few thousand terms in),
-// while no legitimate Pascal expression -- handwritten or reasonably
-// generated -- nests anywhere close to this deep. Unlike deeply NESTED
-// parenthesized input, which Parser::ExprDepth (see ParseExpr.cpp) already
-// bounds, a flat operator chain like `1+1+1+...+1` is parsed ITERATIVELY by
-// precedence climbing, so its AST can be arbitrarily deep with no parser-side
-// ceiling on it; checkExpr's own recursive walk of that AST is the first
-// place this needs a guard.
-static constexpr unsigned MaxExprDepth = 1000;
+// Ceiling on live checkExpr activations (Sema::ExprDepth).  Unlike deeply
+// NESTED parenthesized input, which Parser::ExprDepth (see ParseExpr.cpp)
+// already bounds, a flat operator chain like `1+1+1+...+1` is parsed
+// ITERATIVELY by precedence climbing, so its AST can be arbitrarily deep with
+// no parser-side ceiling on it; checkExpr's own recursive walk of that AST is
+// the first place this needs a guard.  MaxExprDepth/ExprDepth/
+// ExprDepthLimitHit/ExprDepthScope are declared on Sema (Sema.h) rather than
+// here, now that constBound/buildExtentForm (SemaType.cpp) share them too --
+// see the comment there.
 
 std::shared_ptr<Type> Sema::checkExpr(const ExprNode& E) {
-    // See MaxExprDepth above. Checked before the RAII bump: a caller already
-    // sitting at the ceiling must return without recursing again, not recurse
-    // once more and only then stop.
+    // See MaxExprDepth (Sema.h). Checked before the RAII bump: a caller
+    // already sitting at the ceiling must return without recursing again,
+    // not recurse once more and only then stop.
     if (ExprDepth >= MaxExprDepth) {
         if (!ExprDepthLimitHit) {
             ExprDepthLimitHit = true;
@@ -686,6 +683,15 @@ std::shared_ptr<Type> Sema::checkBinary(const BinaryExpr& E) {
                 // a base-0 mask.  Plain integer is skipped deliberately: it
                 // spans too much to be a window, so the constructor keeps the
                 // one it derived from its own elements.
+                //
+                // Ctx_.getSet is a bare interning factory with no width
+                // opinion of its own -- the OTHER caller (SemaType.cpp, for a
+                // named `set of Base`) checks the base type before ever
+                // calling it, and synthesizing a set type here has to be held
+                // to the same limit or a >256-value ordinal (an enum, most
+                // plausibly) silently truncates in the bitmask instead of
+                // being reported: `e in [v256]` read as false for e = v256.
+                checkSetBaseRange(*Lt, E.Loc);
                 adoptSetType(*E.Right, Ctx_.getSet(Lt, false));
             } else if (!Lt->isError() && Rt->ElemType && !Rt->ElemType->isError()) {
                 // Check base type compatibility.
@@ -775,6 +781,24 @@ std::shared_ptr<Type> Sema::checkCallExpr(const CallExpr& E) {
     if (Sym->Kind == SymbolKind::Builtin) {
         E.ResolvedBuiltin = Sym->BuiltinKind;
         std::string Lo = toLower(E.Name);
+
+        // Mirror of checkCallStmt's err_func_as_statement check, in the
+        // other direction: a builtin PROCEDURE has no result, so calling one
+        // where an expression is expected is exactly what
+        // checkUserDefinedCall already refuses for a user-defined procedure
+        // via err_proc_cannot_return_value.  Builtins skipped that check —
+        // Sym->ReturnType is null for a procedure, so this fell through
+        // every special-cased builtin below to the generic `return
+        // Sym->ReturnType ? ... : TyErr` at the end of this arm, handing
+        // back TyErr with no diagnostic at all.  Sema recorded no error, so
+        // the driver went on to CodeGen, which had a call to a void builtin
+        // where a value was expected and trapped (issue #222).
+        if (!Sym->IsFunction) {
+            error(E.Loc, diag::err_proc_cannot_return_value, {E.Name});
+            for (const auto& Arg : E.Args) (void)checkExpr(*Arg);
+            return TyErr;
+        }
+
         if (!checkEPOnly(*Sym, E.Loc)) {
             for (const auto& Arg : E.Args) (void)checkExpr(*Arg);
             return TyErr;
@@ -819,6 +843,26 @@ std::shared_ptr<Type> Sema::checkCallExpr(const CallExpr& E) {
                 return TyErr;
             }
             return ArgTy;
+        }
+        // ISO §6.6.6.4 (ord, chr) / §6.6.6.5 (odd): all three transfer between
+        // an ordinal value and its ordinal position -- ord(x) is x's position,
+        // chr(x) is the value at position x, odd(x) reads position x's low
+        // bit -- so, like succ/pred just above, the argument has to be
+        // ordinal. Unlike succ/pred none of the three were special-cased
+        // here, so they fell through to the generic "check each argument,
+        // trust the declared return type" path below with nothing stopping a
+        // non-ordinal argument. CodeGen has nothing valid to lower one to
+        // either: ord's case zext's its operand unconditionally, so
+        // ord(1.5) reached the LLVM verifier as `zext double ... to i64`
+        // and aborted the compiler instead of Sema reporting it (issue #212).
+        if ((Lo == "ord" || Lo == "chr" || Lo == "odd") && !E.Args.empty()) {
+            auto ArgTy = checkExpr(*E.Args[0]);
+            if (ArgTy->isError()) return TyErr;
+            if (!ArgTy->isOrdinal()) {
+                error(E.Loc, diag::err_ordinal_argument, {Lo, ArgTy->Name});
+                return TyErr;
+            }
+            return Sym->ReturnType ? Sym->ReturnType : TyErr;
         }
         // EP §6.7.6.7: substr/trim return the same string capacity as their
         // input.  ISO §6.4.3.2's other string shape -- a packed array[1..n] of

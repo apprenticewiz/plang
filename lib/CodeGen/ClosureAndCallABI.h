@@ -31,6 +31,7 @@
 #include "CGTypes.h"
 #include "SchemaAccess.h"
 #include "SchemaLayoutEngine.h"
+#include "SetOps.h"
 #include "VarEntry.h"
 
 namespace llvm {
@@ -53,6 +54,7 @@ public:
         llvm::LLVMContext& Ctx, llvm::Module& Mod, llvm::IRBuilder<>& B,
         SchemaAccess& Schema, SchemaLayoutEngine& SchemaLayout, CGTypes& Types,
         CGSymbolTable& SymTab, CGLinkage& Linkage, CGDebugInfo& DbgInfo,
+        SetOps& Sets,
         llvm::IntegerType* I32Ty, llvm::IntegerType* I64Ty, llvm::PointerType* PtrTy,
         std::function<llvm::Value*(const plang::ExprNode&)> EmitLValue,
         std::function<llvm::Value*(const plang::ExprNode&, llvm::Type*, bool)> EmitCallArg,
@@ -61,6 +63,7 @@ public:
         std::function<bool(const std::string&)> IsNestedFunction)
         : Ctx(Ctx), Mod(Mod), B(B), Schema(Schema), SchemaLayout(SchemaLayout),
           Types(Types), SymTab(SymTab), Linkage(Linkage), DbgInfo(DbgInfo),
+          Sets(Sets),
           I32Ty(I32Ty), I64Ty(I64Ty), PtrTy(PtrTy),
           EmitLValue(std::move(EmitLValue)), EmitCallArg(std::move(EmitCallArg)),
           CreateEntryAlloca(std::move(CreateEntryAlloca)),
@@ -104,6 +107,7 @@ private:
     CGSymbolTable& SymTab;
     CGLinkage& Linkage;
     CGDebugInfo& DbgInfo;
+    SetOps& Sets;
     llvm::IntegerType* I32Ty;
     llvm::IntegerType* I64Ty;
     llvm::PointerType* PtrTy;

@@ -127,6 +127,31 @@ private:
         ~BlockDepthScope() { if (--N == 0) LimitHit = false; }
     };
 
+    // Live activations of parseComponentValue and parseVariantPartValue
+    // together.  EP §6.8.7's structured-value-constructor grammar is a
+    // four-function cycle -- parseComponentValue <-> parseValueArms <->
+    // parseVariantPartValue <-> parseFieldListValue -- but unlike the other
+    // cycles above it has two funnel points rather than one: an arm's value
+    // recurses straight back into parseComponentValue ('value [1:[1: ... :0]]'),
+    // while a variant part's field-list recurses straight back into
+    // parseVariantPartValue ('value [case 1 of [case 1 of [... ]]]') without
+    // ever passing through parseComponentValue again.  parseValueArms and
+    // parseFieldListValue are plain iterative dispatchers that only ever
+    // reach deeper nesting by calling one of the two guarded functions, so
+    // bounding activations of both of them (see ValueDepthScope and
+    // MaxValueDepth in ParseInit.cpp) bounds the whole cycle against
+    // adversarial input shaped like either example above, which used to
+    // exhaust the real C++ stack instead of failing with a diagnostic.
+    unsigned                 ValueDepth{};
+    bool                     ValueDepthLimitHit{};
+    struct ValueDepthScope {
+        unsigned& N;
+        bool&     LimitHit;
+        explicit ValueDepthScope(unsigned& Counter, bool& LimitHitFlag)
+            : N(Counter), LimitHit(LimitHitFlag) { ++N; }
+        ~ValueDepthScope() { if (--N == 0) LimitHit = false; }
+    };
+
     // Appends an error diagnostic to the shared vector.
     void emitError(SourceLocation Loc, std::string Msg);
     void emitError(SourceLocation Loc, DiagID ID,

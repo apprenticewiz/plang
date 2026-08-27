@@ -187,9 +187,26 @@ Token Scanner::scanNumber(size_t TokenStart) {
     // EP §6.1.7: nondecimal integer literal  base '#' digits
     if (Opts.extendedPascal() && Pos < Text.size() && Text[Pos] == '#') {
         std::string BaseStr = std::string(Text.substr(Start, Pos - Start));
-        int Base = 0;
-        for (char C : BaseStr) Base = Base * 10 + (C - '0');
-        if (Base < 2 || Base > 36) {
+        // Checked before the multiply, exactly like the digit-value loop
+        // below: a plain `int` accumulator here let a base string like
+        // `4294967312` wrap mod 2^32 down to 16 and sail past the range
+        // check as valid hex (issue #213). Widening to int64_t alone isn't
+        // enough either -- a long enough digit string (e.g. 20 nines)
+        // overflows a 64-bit accumulator too -- so overflow is detected
+        // incrementally and folded into the same range-error diagnostic,
+        // which is correct: any base whose digits overflow is certainly
+        // not in [2, 36].
+        int64_t Base = 0;
+        bool BaseOverflowed = false;
+        for (char C : BaseStr) {
+            int D = C - '0';
+            if (Base > (INT64_MAX - D) / 10) {
+                BaseOverflowed = true;
+                break;
+            }
+            Base = Base * 10 + D;
+        }
+        if (BaseOverflowed || Base < 2 || Base > 36) {
             emitError(locAt(TokenStart),
                       diag::err_nondecimal_base_range);
             return make(TokenKind::Error, BaseStr, TokenStart);
