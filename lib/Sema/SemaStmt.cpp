@@ -970,18 +970,22 @@ void Sema::checkCallStmt(const CallStmt& S) {
         }
 
         // read: if first arg is a typed file, remaining args must match element type.
+        // Every argument was already checked once by the loop above, which set
+        // each S.Args[I]->ResolvedType as a side effect (checkExpr, SemaExpr.cpp):
+        // calling checkExpr on them again here reported anything wrong with an
+        // argument -- e.g. an undefined identifier -- a second time (issue #272).
+        // Read the cached type instead, the same way the readln arm just above
+        // already does for S.Args[0].
         if (Lo == "read" && !S.Args.empty()) {
-            auto T = checkExpr(*S.Args[0]);
-            if (T->Kind == TypeKind::File && T->ElemType && S.Args.size() >= 2) {
+            const auto& T = S.Args[0]->ResolvedType;
+            if (T && T->Kind == TypeKind::File && T->ElemType && S.Args.size() >= 2) {
                 for (size_t I = 1; I < S.Args.size(); ++I) {
-                    auto At = checkExpr(*S.Args[I]);
-                    if (!At->isError() && !T->ElemType->isError()
+                    const auto& At = S.Args[I]->ResolvedType;
+                    if (At && !At->isError() && !T->ElemType->isError()
                         && !isAssignCompatible(*At, *T->ElemType))
                         error(S.Args[I]->Loc, diag::err_read_type_mismatch,
                               {T->ElemType->Name, At->Name});
                 }
-            } else {
-                for (size_t I = 1; I < S.Args.size(); ++I) (void)checkExpr(*S.Args[I]);
             }
             return;
         }
