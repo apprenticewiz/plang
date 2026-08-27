@@ -121,6 +121,11 @@ void Codegen::Impl::init(const std::string& progName) {
     cgTypes_ = std::make_unique<CGTypes>(ctx, *mod, langOpts, *schemaLayout_,
         *complexOps_, *setOps_, typeAliases, consts,
         i1Ty, i8Ty, i32Ty, i64Ty, dblTy, ptrTy);
+    // -g: Record/Array/String DIType construction reads field layout out of
+    // cgTypes_ (see CGDebugInfo::setCGTypes's own comment for why this
+    // can't be a constructor argument -- dbgInfo_ is built before this
+    // exists).
+    dbgInfo_->setCGTypes(*cgTypes_);
     // Schema value/access-path resolution.  scopes stays an Impl field,
     // referenced -- touched directly by setVarStrCap/setVarSchemaPath from
     // outside this unit too.  EmitExpr/EmitLValue/EmitStrAddr/ToI64 and the
