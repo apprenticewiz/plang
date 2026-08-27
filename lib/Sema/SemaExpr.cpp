@@ -1242,11 +1242,31 @@ bool Sema::typeContainsFile(const Type& T) {
 namespace {
 
 // EP §6.4.7: Returns true if two SchemaInstance types represent the same
-// instantiation (same schema name and identical discriminant values).
+// instantiation of the same schema DECLARATION.
+//
+// A schema is identified by its declaration, not by its spelling -- see
+// isAssignCompatible's SchemaInstance arm (c03cd04) for the story: two
+// `vec(3)` from unconnected declarations are two different types even though
+// they print alike and share every discriminant value.  That fix taught
+// assignment compatibility the rule but left this function, which backs
+// var-parameter identity (ISO §6.6.3.3) and forward-declaration congruity
+// (ISO §6.6.3.6), still comparing spellings -- so a `var` formal happily
+// aliased an unrelated same-named schema instance across a scope boundary.
+//
+// Unlike isAssignCompatible there is no falling back to comparing bodies
+// when both declarations are known and differ: identity, not mere structural
+// resemblance, is what a var parameter and a re-declared heading require.
 bool schemaInstMatch(const Type& A, const Type& B) {
     if (A.Kind != TypeKind::SchemaInstance || B.Kind != TypeKind::SchemaInstance)
         return false;
-    if (A.SchemaName != B.SchemaName) return false;
+    // Where a declaration is unknown on either side -- separate compilation
+    // gives the same schema a different node in each unit -- the name and
+    // discriminants are all that is left to compare.
+    if (A.SchemaBodyNode && B.SchemaBodyNode && A.SchemaBodyNode != B.SchemaBodyNode)
+        return false;
+    // Pascal identifiers are case-insensitive; see e.g. sameParamType's
+    // undiscriminated-Schema arm and isLValue's discriminant check below.
+    if (!eqCI(A.SchemaName, B.SchemaName)) return false;
     if (A.SchemaDiscs.size() != B.SchemaDiscs.size()) return false;
     for (size_t I = 0; I < A.SchemaDiscs.size(); ++I)
         if (A.SchemaDiscs[I].Value != B.SchemaDiscs[I].Value) return false;
@@ -1639,7 +1659,12 @@ bool Sema::isAssignCompatible(const Type& Dst, const Type& Src,
         // which accepts an identical shape and rejects a different one.
         const bool SameDecl = !Dst.SchemaBodyNode || !Src.SchemaBodyNode
                            || Dst.SchemaBodyNode == Src.SchemaBodyNode;
-        if (Dst.SchemaName == Src.SchemaName && SameDecl
+        // Pascal identifiers are case-insensitive (eqCI, as the Schema arm
+        // just below already uses); a bare `==` here was academic while
+        // SameDecl gated it, but it stopped mattering only by accident of the
+        // body-comparison fallback below silently correcting a mismatch,
+        // rather than the comparison being right.
+        if (eqCI(Dst.SchemaName, Src.SchemaName) && SameDecl
                 && Dst.SchemaDiscs.size() == Src.SchemaDiscs.size()) {
             bool same = true;
             for (size_t I = 0; I < Dst.SchemaDiscs.size(); ++I)
