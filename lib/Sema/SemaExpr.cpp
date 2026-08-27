@@ -775,6 +775,24 @@ std::shared_ptr<Type> Sema::checkCallExpr(const CallExpr& E) {
     if (Sym->Kind == SymbolKind::Builtin) {
         E.ResolvedBuiltin = Sym->BuiltinKind;
         std::string Lo = toLower(E.Name);
+
+        // Mirror of checkCallStmt's err_func_as_statement check, in the
+        // other direction: a builtin PROCEDURE has no result, so calling one
+        // where an expression is expected is exactly what
+        // checkUserDefinedCall already refuses for a user-defined procedure
+        // via err_proc_cannot_return_value.  Builtins skipped that check —
+        // Sym->ReturnType is null for a procedure, so this fell through
+        // every special-cased builtin below to the generic `return
+        // Sym->ReturnType ? ... : TyErr` at the end of this arm, handing
+        // back TyErr with no diagnostic at all.  Sema recorded no error, so
+        // the driver went on to CodeGen, which had a call to a void builtin
+        // where a value was expected and trapped (issue #222).
+        if (!Sym->IsFunction) {
+            error(E.Loc, diag::err_proc_cannot_return_value, {E.Name});
+            for (const auto& Arg : E.Args) (void)checkExpr(*Arg);
+            return TyErr;
+        }
+
         if (!checkEPOnly(*Sym, E.Loc)) {
             for (const auto& Arg : E.Args) (void)checkExpr(*Arg);
             return TyErr;
