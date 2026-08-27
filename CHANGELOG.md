@@ -8,6 +8,8 @@ version numbers follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 
 ## [Unreleased]
 
+## [0.3.4] - 2026-08-27
+
 A fifth adversarial review round, prompted directly by unease about 0.3.3's own new `-g`
 schema debug-info mechanism -- a broad sweep at the same scale as rounds 1-4, with 6 of 14
 lenses specifically targeting that mechanism. 19 confirmed bugs, several exactly the
