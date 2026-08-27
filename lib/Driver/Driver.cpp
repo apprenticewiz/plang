@@ -14,6 +14,7 @@
 #include "plang/Basic/DiagnosticPrinter.h"
 #include "plang/Basic/LangOptions.h"
 #include "plang/Basic/MessageCatalog.h"
+#include "plang/Basic/StringUtil.h"
 #include "plang/Basic/Version.h"
 
 #include <algorithm>
@@ -561,18 +562,26 @@ int Driver::runTool(const std::string &Prog,
                     const std::vector<std::string> &Args,
                     bool Verbose, bool DryRun) {
     if (Verbose || DryRun) {
-        // Quoted the same way clang's own -### output is (llvm::sys::printArg,
-        // which always wraps its argument in quotes and backslash-escapes any
-        // embedded '"' or '\\') -- issue #286.  The plain space-joined line
-        // this replaces could not tell a two-word argument from two
-        // arguments once printed, so it could be neither read correctly nor
-        // pasted back into a shell.
+        // Args carries the input file straight from argv (see makeFEArgs and
+        // the Opts.inputFile push below): -v/-### echo it unsanitized
+        // otherwise, the same terminal-escape/log-injection hole a raw
+        // filename opens in a diagnostic's "file:line:col:" prefix -- see
+        // DiagnosticPrinter::printHeadline.  Each argument is control-char-
+        // escaped first (issue #281) and *then* quoted the same way clang's
+        // own -### output is (llvm::sys::printArg, which always wraps its
+        // argument in quotes and backslash-escapes any embedded '"' or '\\')
+        // -- issue #286.  The plain space-joined line this replaces could
+        // not tell a two-word argument from two arguments once printed, so
+        // it could be neither read correctly nor pasted back into a shell;
+        // escaping control bytes first means printArg's own backslash-
+        // escaping of the '\' that introduces each \xHH sequence keeps the
+        // pasted-back form round-tripping safely too.
         std::string Line;
         llvm::raw_string_ostream LineOS(Line);
-        llvm::sys::printArg(LineOS, Prog, /*Quote=*/true);
+        llvm::sys::printArg(LineOS, escapeControlChars(Prog), /*Quote=*/true);
         for (const auto &A : Args) {
             LineOS << ' ';
-            llvm::sys::printArg(LineOS, A, /*Quote=*/true);
+            llvm::sys::printArg(LineOS, escapeControlChars(A), /*Quote=*/true);
         }
         std::cerr << Line << '\n';
     }

@@ -2,6 +2,7 @@
 
 #include "plang/Basic/Diagnostic.h"
 #include "plang/Basic/SourceManager.h"
+#include "plang/Basic/StringUtil.h"
 
 #include <format>
 #include <string>
@@ -50,8 +51,11 @@ public:
             if (Prefix.empty()) return std::format("{}: {}", Sev, D.Message);
             return std::format("{}: {}: {}", Prefix, Sev, D.Message);
         }
-        return std::format("{}:{}:{}: {}: {}", P.Filename, P.Line, P.Column, Sev,
-                           D.Message);
+        // P.Filename is whatever the command line named -- not text plang
+        // wrote -- so it goes through escapeControlChars before it reaches
+        // stderr: see that function's comment for why.
+        return std::format("{}:{}:{}: {}: {}", escapeControlChars(P.Filename),
+                           P.Line, P.Column, Sev, D.Message);
     }
 
     /// The offending source line with a caret under it, or empty if there is
