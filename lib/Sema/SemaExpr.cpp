@@ -100,23 +100,20 @@ void Sema::warnIfComparisonIsSettled(const BinaryExpr& E, const Type& Lt,
 // Expression checking
 // ---------------------------------------------------------------------------
 
-// Ceiling on live checkExpr activations (Sema::ExprDepth).  1000 levels of
-// recursion through checkExpr -> checkBinary/checkUnary/... -> checkExpr is
-// well under the crash threshold observed empirically on this build's
-// default 8MB stack (a flat chain starts crashing a few thousand terms in),
-// while no legitimate Pascal expression -- handwritten or reasonably
-// generated -- nests anywhere close to this deep. Unlike deeply NESTED
-// parenthesized input, which Parser::ExprDepth (see ParseExpr.cpp) already
-// bounds, a flat operator chain like `1+1+1+...+1` is parsed ITERATIVELY by
-// precedence climbing, so its AST can be arbitrarily deep with no parser-side
-// ceiling on it; checkExpr's own recursive walk of that AST is the first
-// place this needs a guard.
-static constexpr unsigned MaxExprDepth = 1000;
+// Ceiling on live checkExpr activations (Sema::ExprDepth).  Unlike deeply
+// NESTED parenthesized input, which Parser::ExprDepth (see ParseExpr.cpp)
+// already bounds, a flat operator chain like `1+1+1+...+1` is parsed
+// ITERATIVELY by precedence climbing, so its AST can be arbitrarily deep with
+// no parser-side ceiling on it; checkExpr's own recursive walk of that AST is
+// the first place this needs a guard.  MaxExprDepth/ExprDepth/
+// ExprDepthLimitHit/ExprDepthScope are declared on Sema (Sema.h) rather than
+// here, now that constBound/buildExtentForm (SemaType.cpp) share them too --
+// see the comment there.
 
 std::shared_ptr<Type> Sema::checkExpr(const ExprNode& E) {
-    // See MaxExprDepth above. Checked before the RAII bump: a caller already
-    // sitting at the ceiling must return without recursing again, not recurse
-    // once more and only then stop.
+    // See MaxExprDepth (Sema.h). Checked before the RAII bump: a caller
+    // already sitting at the ceiling must return without recursing again,
+    // not recurse once more and only then stop.
     if (ExprDepth >= MaxExprDepth) {
         if (!ExprDepthLimitHit) {
             ExprDepthLimitHit = true;
@@ -696,6 +693,15 @@ std::shared_ptr<Type> Sema::checkBinary(const BinaryExpr& E) {
                 // a base-0 mask.  Plain integer is skipped deliberately: it
                 // spans too much to be a window, so the constructor keeps the
                 // one it derived from its own elements.
+                //
+                // Ctx_.getSet is a bare interning factory with no width
+                // opinion of its own -- the OTHER caller (SemaType.cpp, for a
+                // named `set of Base`) checks the base type before ever
+                // calling it, and synthesizing a set type here has to be held
+                // to the same limit or a >256-value ordinal (an enum, most
+                // plausibly) silently truncates in the bitmask instead of
+                // being reported: `e in [v256]` read as false for e = v256.
+                checkSetBaseRange(*Lt, E.Loc);
                 adoptSetType(*E.Right, Ctx_.getSet(Lt, false));
             } else if (!Lt->isError() && Rt->ElemType && !Rt->ElemType->isError()) {
                 // Check base type compatibility.
@@ -785,6 +791,24 @@ std::shared_ptr<Type> Sema::checkCallExpr(const CallExpr& E) {
     if (Sym->Kind == SymbolKind::Builtin) {
         E.ResolvedBuiltin = Sym->BuiltinKind;
         std::string Lo = toLower(E.Name);
+
+        // Mirror of checkCallStmt's err_func_as_statement check, in the
+        // other direction: a builtin PROCEDURE has no result, so calling one
+        // where an expression is expected is exactly what
+        // checkUserDefinedCall already refuses for a user-defined procedure
+        // via err_proc_cannot_return_value.  Builtins skipped that check —
+        // Sym->ReturnType is null for a procedure, so this fell through
+        // every special-cased builtin below to the generic `return
+        // Sym->ReturnType ? ... : TyErr` at the end of this arm, handing
+        // back TyErr with no diagnostic at all.  Sema recorded no error, so
+        // the driver went on to CodeGen, which had a call to a void builtin
+        // where a value was expected and trapped (issue #222).
+        if (!Sym->IsFunction) {
+            error(E.Loc, diag::err_proc_cannot_return_value, {E.Name});
+            for (const auto& Arg : E.Args) (void)checkExpr(*Arg);
+            return TyErr;
+        }
+
         if (!checkEPOnly(*Sym, E.Loc)) {
             for (const auto& Arg : E.Args) (void)checkExpr(*Arg);
             return TyErr;
@@ -829,6 +853,26 @@ std::shared_ptr<Type> Sema::checkCallExpr(const CallExpr& E) {
                 return TyErr;
             }
             return ArgTy;
+        }
+        // ISO §6.6.6.4 (ord, chr) / §6.6.6.5 (odd): all three transfer between
+        // an ordinal value and its ordinal position -- ord(x) is x's position,
+        // chr(x) is the value at position x, odd(x) reads position x's low
+        // bit -- so, like succ/pred just above, the argument has to be
+        // ordinal. Unlike succ/pred none of the three were special-cased
+        // here, so they fell through to the generic "check each argument,
+        // trust the declared return type" path below with nothing stopping a
+        // non-ordinal argument. CodeGen has nothing valid to lower one to
+        // either: ord's case zext's its operand unconditionally, so
+        // ord(1.5) reached the LLVM verifier as `zext double ... to i64`
+        // and aborted the compiler instead of Sema reporting it (issue #212).
+        if ((Lo == "ord" || Lo == "chr" || Lo == "odd") && !E.Args.empty()) {
+            auto ArgTy = checkExpr(*E.Args[0]);
+            if (ArgTy->isError()) return TyErr;
+            if (!ArgTy->isOrdinal()) {
+                error(E.Loc, diag::err_ordinal_argument, {Lo, ArgTy->Name});
+                return TyErr;
+            }
+            return Sym->ReturnType ? Sym->ReturnType : TyErr;
         }
         // EP §6.7.6.7: substr/trim return the same string capacity as their
         // input.  ISO §6.4.3.2's other string shape -- a packed array[1..n] of
@@ -1252,11 +1296,31 @@ bool Sema::typeContainsFile(const Type& T) {
 namespace {
 
 // EP §6.4.7: Returns true if two SchemaInstance types represent the same
-// instantiation (same schema name and identical discriminant values).
+// instantiation of the same schema DECLARATION.
+//
+// A schema is identified by its declaration, not by its spelling -- see
+// isAssignCompatible's SchemaInstance arm (c03cd04) for the story: two
+// `vec(3)` from unconnected declarations are two different types even though
+// they print alike and share every discriminant value.  That fix taught
+// assignment compatibility the rule but left this function, which backs
+// var-parameter identity (ISO §6.6.3.3) and forward-declaration congruity
+// (ISO §6.6.3.6), still comparing spellings -- so a `var` formal happily
+// aliased an unrelated same-named schema instance across a scope boundary.
+//
+// Unlike isAssignCompatible there is no falling back to comparing bodies
+// when both declarations are known and differ: identity, not mere structural
+// resemblance, is what a var parameter and a re-declared heading require.
 bool schemaInstMatch(const Type& A, const Type& B) {
     if (A.Kind != TypeKind::SchemaInstance || B.Kind != TypeKind::SchemaInstance)
         return false;
-    if (A.SchemaName != B.SchemaName) return false;
+    // Where a declaration is unknown on either side -- separate compilation
+    // gives the same schema a different node in each unit -- the name and
+    // discriminants are all that is left to compare.
+    if (A.SchemaBodyNode && B.SchemaBodyNode && A.SchemaBodyNode != B.SchemaBodyNode)
+        return false;
+    // Pascal identifiers are case-insensitive; see e.g. sameParamType's
+    // undiscriminated-Schema arm and isLValue's discriminant check below.
+    if (!eqCI(A.SchemaName, B.SchemaName)) return false;
     if (A.SchemaDiscs.size() != B.SchemaDiscs.size()) return false;
     for (size_t I = 0; I < A.SchemaDiscs.size(); ++I)
         if (A.SchemaDiscs[I].Value != B.SchemaDiscs[I].Value) return false;
@@ -1703,7 +1767,12 @@ bool Sema::isAssignCompatible(const Type& Dst, const Type& Src,
         // which accepts an identical shape and rejects a different one.
         const bool SameDecl = !Dst.SchemaBodyNode || !Src.SchemaBodyNode
                            || Dst.SchemaBodyNode == Src.SchemaBodyNode;
-        if (Dst.SchemaName == Src.SchemaName && SameDecl
+        // Pascal identifiers are case-insensitive (eqCI, as the Schema arm
+        // just below already uses); a bare `==` here was academic while
+        // SameDecl gated it, but it stopped mattering only by accident of the
+        // body-comparison fallback below silently correcting a mismatch,
+        // rather than the comparison being right.
+        if (eqCI(Dst.SchemaName, Src.SchemaName) && SameDecl
                 && Dst.SchemaDiscs.size() == Src.SchemaDiscs.size()) {
             bool same = true;
             for (size_t I = 0; I < Dst.SchemaDiscs.size(); ++I)
@@ -1822,7 +1891,18 @@ bool Sema::isAssignCompatible(const Type& Dst, const Type& Src,
                             && Dst.RecordDecl == Src.RecordDecl)
                         return true;
                 }
-                if (Depth > 16) return true;   // give up rather than misjudge
+                // The cap exists so a record reachable from itself only
+                // through a chain of distinct anonymous record types (no
+                // RecordDecl to short-circuit on) cannot recurse without end;
+                // it is not license to call two types compatible once the
+                // structure below it goes unexamined.  Two records that were
+                // never shown equal are not equal, so this refuses rather
+                // than misjudges -- the same conservative default the
+                // restricted-type check above makes when it cannot say yes.
+                // A false negative here is a diagnostic to rename or
+                // restructure a type; a false positive is a value of one
+                // layout copied over another's.
+                if (Depth > 16) return false;
                 // ISO §6.4.3.1: `packed` is part of what the type IS, and two
                 // records that differ in it have different layouts.  Ignoring
                 // it let a padded record be stored into a packed one --
@@ -1846,11 +1926,29 @@ bool Sema::isAssignCompatible(const Type& Dst, const Type& Src,
                 if (!Dst.ElemType || !Src.ElemType) return Dst.Name == Src.Name;
                 return isAssignCompatible(*Dst.ElemType, *Src.ElemType);
 
-            // Pointer: compatible when pointee types are compatible.
+            // Pointer: ISO §6.4.4 requires the two pointer-types' domain
+            // types to be the SAME type, not merely assignment-compatible
+            // with one another -- there is no covariance or contravariance
+            // through a pointer.  Recursing into isAssignCompatible on the
+            // pointees let a subrange's own compatibility with its base type
+            // leak through a pointer: `^integer` and `^(1..10)` were
+            // accepted either way round, though a range check the subrange
+            // requires never runs on a value read back through the integer
+            // pointer.
+            //
+            // Pointer types are interned by pointee identity (see
+            // TypeContext::getPointer) and Enum/Record types carry their own
+            // declaration as their identity (ISO §6.4.2.3, §6.4.3.3), so two
+            // pointers to the same domain type are already the same Type
+            // object and were caught by the `&Dst == &Src` shortcut above.
+            // Reaching here with Dst.Kind == Src.Kind == Pointer means the
+            // domain types are genuinely different, so isIdenticalType --
+            // the same canonical-identity test ISO §6.6.3.3 uses for a var
+            // parameter -- is what settles it, not the general assignability
+            // relation.
             case TypeKind::Pointer:
                 if (!Dst.PointeeType || !Src.PointeeType) return false;
-                return isAssignCompatible(*Dst.PointeeType, *Src.PointeeType,
-                                          /*ExactBounds=*/true);
+                return isIdenticalType(Dst.PointeeType, Src.PointeeType);
 
             default:
                 return Dst.Name == Src.Name;

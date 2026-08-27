@@ -24,6 +24,7 @@ extern "C" {
 [[noreturn]] void plang_err_ipow_zero_zero(void);
 [[noreturn]] void plang_err_ipow_overflow(int64_t Base, int64_t Exp);
 [[noreturn]] void plang_err_abs_overflow(void);
+[[noreturn]] void plang_err_sqr_overflow(int64_t X);
 [[noreturn]] void plang_err_real_to_int_range(const char *Op, double X);
 [[noreturn]] void plang_err_sqrt_domain(double X);
 [[noreturn]] void plang_err_ln_domain(double X);
@@ -101,7 +102,19 @@ int64_t plang_ipow(int64_t Base, int64_t Exp) {
 
 // ---- sqr ----
 
-int64_t plang_sqr_int (int64_t X) { return X * X; }
+/// ISO §6.6.6.2: sqr(x) = x*x, still an integer result for an integer
+/// argument -- but not every such result fits int64_t, the same
+/// signed-overflow-UB gap plang_ipow's multiplications are guarded against
+/// above (and plang_abs_int's negation, just below the multiplications, guards
+/// its own one fixed case).  Unlike ipow's loop this is exactly one
+/// multiplication, so exactly one overflow check covers it, unguarded here it
+/// is signed-overflow UB that in practice silently wraps to a negative value
+/// -- issue #219.
+int64_t plang_sqr_int (int64_t X) {
+    int64_t Result;
+    if (__builtin_mul_overflow(X, X, &Result)) plang_err_sqr_overflow(X);
+    return Result;
+}
 double  plang_sqr_real(double  X) { return X * X; }
 
 // ---- Conversion (double → i64) ----

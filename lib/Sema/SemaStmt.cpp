@@ -69,34 +69,46 @@ void Sema::checkStmt(const StmtNode* Stmt) {
 
 namespace {
 
-bool sequenceTransfers(const std::vector<std::unique_ptr<StmtNode>>& Stmts);
+bool sequenceTransfers(const std::vector<std::unique_ptr<StmtNode>>& Stmts,
+                        const SymbolTable& Symtab);
 
-bool alwaysTransfers(const StmtNode* S) {
+// Whether S calls the real halt builtin -- resolved to the symbol it names,
+// not matched on how that name is spelled.  A program is free to declare its
+// own procedure called `halt`, which shadows the builtin (ISO §6.2.2.10) and
+// returns like any other call; only the builtin itself never does.  `exit`
+// gets no such check at all: Builtins.def has no entry for it, so a call
+// spelled `exit` can only ever resolve to a declaration the program wrote,
+// never to a required procedure that leaves for good.
+bool callsHaltBuiltin(const CallStmt& C, const SymbolTable& Symtab) {
+    const Symbol* Callee = Symtab.lookup(C.Name);
+    return Callee && Callee->Kind == SymbolKind::Builtin
+                   && Callee->BuiltinKind == BuiltinID::Halt;
+}
+
+bool alwaysTransfers(const StmtNode* S, const SymbolTable& Symtab) {
     if (!S) return false;
     if (llvm::isa<GotoStmt>(S)) return true;
-    if (auto* C = llvm::dyn_cast<CallStmt>(S)) {
-        const std::string Lo = toLower(C->Name);
-        return Lo == "halt" || Lo == "exit";
-    }
-    if (auto* C = llvm::dyn_cast<CompoundStmt>(S)) return sequenceTransfers(C->Stmts);
-    if (auto* W = llvm::dyn_cast<WithStmt>(S))     return alwaysTransfers(W->Body.get());
+    if (auto* C = llvm::dyn_cast<CallStmt>(S)) return callsHaltBuiltin(*C, Symtab);
+    if (auto* C = llvm::dyn_cast<CompoundStmt>(S)) return sequenceTransfers(C->Stmts, Symtab);
+    if (auto* W = llvm::dyn_cast<WithStmt>(S))     return alwaysTransfers(W->Body.get(), Symtab);
     // An if reaches past itself unless neither arm does, which needs both arms
     // to exist.  A case is left alone: whether it can be fallen out of depends
     // on whether the arms cover the selector, and that is a separate question.
     if (auto* I = llvm::dyn_cast<IfStmt>(S))
-        return I->Else && alwaysTransfers(I->Then.get())
-                       && alwaysTransfers(I->Else.get());
+        return I->Else && alwaysTransfers(I->Then.get(), Symtab)
+                       && alwaysTransfers(I->Else.get(), Symtab);
     // A loop may run no times, a labeled statement may be jumped into, and
     // everything else simply finishes.
     return false;
 }
 
-bool sequenceTransfers(const std::vector<std::unique_ptr<StmtNode>>& Stmts) {
+bool sequenceTransfers(const std::vector<std::unique_ptr<StmtNode>>& Stmts,
+                        const SymbolTable& Symtab) {
     bool Gone = false;
     for (const auto& St : Stmts) {
         if (!St) continue;                                  // the empty statement
         if (llvm::isa<LabeledStmt>(St.get())) Gone = false; // a goto can land here
-        if (!Gone && alwaysTransfers(St.get())) Gone = true;
+        if (!Gone && alwaysTransfers(St.get(), Symtab)) Gone = true;
     }
     return Gone;
 }
@@ -115,7 +127,7 @@ void Sema::warnUnreachable(const std::vector<std::unique_ptr<StmtNode>>& Stmts) 
             warning(St->Loc, diag::warn_unreachable_code, {});
             Reported = true;
         }
-        if (!Gone && alwaysTransfers(St.get())) Gone = true;
+        if (!Gone && alwaysTransfers(St.get(), Symtab)) Gone = true;
     }
 }
 
@@ -367,16 +379,35 @@ void Sema::checkFor(const ForStmt& S) {
         // Driving a loop is a use: the control variable is named here, not in
         // an expression the identifier check would see.
         Sym->Referenced = true;
-        if (!Sym->Ty->isOrdinal())
-            error(S.Loc, diag::err_for_var_not_ordinal, {S.Var, Sym->Ty->Name});
 
-        // ISO §6.8.3.9: the control variable must be local to the block
-        // containing the for-statement.  A with-statement and a `for ... in`
-        // open a scope that is not a block, so asking only the innermost one
-        // rejected `with r do for i := 1 to 3 do ...` about an `i` that is
-        // declared exactly where the standard requires.
-        if (!Symtab.lookupInEnclosingBlock(S.Var))
-            error(S.Loc, diag::err_for_var_not_local, {S.Var});
+        // ISO §6.8.3.9: the control variable must be an entire variable. A
+        // bare identifier can just as well resolve to a procedure, a builtin,
+        // a constant, a type name, or a schema -- Ty is null for Proc/
+        // Builtin/Schema (registerBuiltins and friends never set it), so
+        // isOrdinal() below would null-deref, and for Const/TypeAlias/
+        // EnumValue it is set but describes the wrong thing (the constant's
+        // or alias's type, not any storage this loop could drive), which let
+        // a const or type-alias control variable sail through Sema only to
+        // hit "no storage" in codegen. VarParam is a variable too (isLValue
+        // treats it the same as Var); it is excluded from a for-statement
+        // only by not being LOCAL to this block, which the check below
+        // already catches.
+        const bool IsVar = Sym->Kind == SymbolKind::Var
+                         || Sym->Kind == SymbolKind::VarParam;
+        if (!IsVar) {
+            error(S.Loc, diag::err_for_var_not_variable, {S.Var});
+        } else {
+            if (!Sym->Ty->isOrdinal())
+                error(S.Loc, diag::err_for_var_not_ordinal, {S.Var, Sym->Ty->Name});
+
+            // ISO §6.8.3.9: the control variable must be local to the block
+            // containing the for-statement.  A with-statement and a `for ... in`
+            // open a scope that is not a block, so asking only the innermost one
+            // rejected `with r do for i := 1 to 3 do ...` about an `i` that is
+            // declared exactly where the standard requires.
+            if (!Symtab.lookupInEnclosingBlock(S.Var))
+                error(S.Loc, diag::err_for_var_not_local, {S.Var});
+        }
     }
     auto From  = checkExpr(*S.From);
     auto Limit = checkExpr(*S.Limit);
@@ -603,6 +634,20 @@ void Sema::checkCallStmt(const CallStmt& S) {
             return;
         }
 
+        // checkCallExpr (SemaExpr.cpp) asks this before dispatching on the
+        // builtin's spelling; this arm did not, so a call that is not one of
+        // the special cases below -- reset, close, dispose, ... -- reached
+        // codegen with whatever argument count was written.  `reset(f, 1, 2)`
+        // let its extra argument through to a runtime call already typed for
+        // two, which the IR verifier rejected as a compiler crash rather than
+        // a diagnostic; `reset()` reached emitUserProcCall and failed to link
+        // against an external symbol nothing defines.  Builtins.def's arity is
+        // the same source checkBuiltinArity already reads for expressions.
+        if (!checkBuiltinArity(Sym->BuiltinKind, Lo, S.Loc, S.Args.size())) {
+            for (const auto& Arg : S.Args) (void)checkExpr(*Arg);
+            return;
+        }
+
         // §6.9.4: page, like readln and writeln, is about lines, and only a
         // text file has any.  The other two are checked where their arguments
         // are already being walked, since checking an expression twice reports
@@ -817,6 +862,14 @@ void Sema::checkCallStmt(const CallStmt& S) {
         // formal discriminant and each must be ordinal.
         if (Lo == "new" && !S.Args.empty()) {
             auto PtrTy = checkExpr(*S.Args[0]);
+            // Every check below -- schema discriminants, variant/schema extra
+            // arguments -- is keyed off Pointee, which only a genuine Pointer
+            // arg0 computes; anything else left it null and every one of
+            // those checks silently no-opped rather than rejecting the call,
+            // so `new(i)` for a non-pointer i sailed through Sema and reached
+            // CodeGen with no pointee to size an allocation from.
+            if (!PtrTy->isError() && PtrTy->Kind != TypeKind::Pointer)
+                error(S.Args[0]->Loc, diag::err_new_arg_not_pointer, {PtrTy->Name});
             const Type* Pointee = PtrTy->Kind == TypeKind::Pointer
                                       ? PtrTy->PointeeType.get() : nullptr;
             const bool ToSchema = Pointee && Pointee->Kind == TypeKind::Schema;
@@ -875,7 +928,9 @@ void Sema::checkCallStmt(const CallStmt& S) {
             return;
         }
 
-        // Generic: evaluate arguments for side-effects / type errors, skip arity.
+        // Generic: arity was already checked against Builtins.def above.
+        // Evaluate arguments for side-effects / type errors and leave the
+        // rest -- which argument means what -- to codegen.
         for (const auto& Arg : S.Args) (void)checkExpr(*Arg);
         return;
     }
@@ -897,6 +952,24 @@ int Sema::pushWithScope(const WithStmt& S) {
     for (const auto& Rec : S.Records) {
         auto T = checkExpr(*Rec);
         if (T->isError()) continue;
+
+        // ISO §6.8.3.10 / EP §6.8.3.10: a with-statement's record-variable is
+        // a variable-access, not any record-valued expression -- without this,
+        // `with mk() do x := 5` for a function `mk` returning a record was
+        // accepted, and the assignment to `x` landed in a temporary nothing
+        // could ever read back.
+        if (!isLValue(*Rec)) {
+            error(Rec->Loc, diag::err_with_not_variable, {T->Name});
+            continue;
+        }
+
+        // EP §6.4.2.5: a restricted type's components are not reachable by
+        // any spelling of a component-access, and `with` opens exactly the
+        // same access `.field` does -- rejectRestrictedComponent is the same
+        // check checkField already applies there, so `with x do f := 1` on a
+        // `restricted` record is refused exactly where `x.f := 1` already is,
+        // rather than exposing every field a plain `.field` cannot reach.
+        if (rejectRestrictedComponent(*Rec, *T)) continue;
 
         // EP §6.7.3.1: `with` opens a new spelling for the SAME storage a
         // protected parameter denotes, and checkNotProtected only ever asks
@@ -1015,6 +1088,16 @@ void Sema::checkGoto(const GotoStmt& S) {
     // block's statement part: landing anywhere else would resume in the middle
     // of a structured statement whose activation was just thrown away.
     if (!CurrentBlockLabels.contains(S.Label)) {
+        // EP §6.11.2: unlike a program's block or an enclosing procedure's,
+        // a module's 'to begin do'/'to end do' does not stay on the call
+        // stack for as long as the module's procedures stay callable -- see
+        // Symbol::LabelInModuleBlock.  Checked ahead of LabelNested: a label
+        // at the outermost level of a module's statement part is exactly as
+        // unreachable this way as one that is not.
+        if (Sym->LabelInModuleBlock) {
+            error(S.Loc, diag::err_goto_module_block, {S.Label});
+            return;
+        }
         if (Sym->LabelNested) {
             error(S.Loc, diag::err_goto_outer_block, {S.Label});
             return;
