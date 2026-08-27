@@ -699,6 +699,7 @@ int frontendPC1Main(int Argc, char *Argv[]) {
     std::string              InputFile;
     std::string              OutputFile;
     std::string              Std;
+    std::string              Target;
     bool                     SuppressWarnings = false;
     bool                     WarningsAsErrors = false;
     bool                     RangeChecks      = true;
@@ -735,6 +736,8 @@ int frontendPC1Main(int Argc, char *Argv[]) {
             // chain ends in "unrecognized argument", and the driver forwards
             // both of these, so without it every driver-mediated compile would
             // warn about an option the driver itself just passed on.
+        } else if (Arg.starts_with("--target=")) {
+            Target = Arg.substr(9);
         } else if (Arg.starts_with("-std=")) {
             Std = Arg.substr(5);
             if (!LangOptions::parseDialect(Std)) {
@@ -850,6 +853,7 @@ int frontendPC1Main(int Argc, char *Argv[]) {
     Opts.NilChecks         = NilChecks;
     Opts.OptLevel          = OptLevel;
     Opts.Debug             = Debug;
+    Opts.TargetTriple      = std::move(Target);
     Opts.ModuleSearchPaths = std::move(ModuleSearchPaths);
 
     DiagnosticOptions DiagOpts;

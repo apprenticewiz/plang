@@ -115,7 +115,7 @@ OPTION("-Wl,",      "-Wl,<args>",       Joined,   Driver, "Pass comma-separated 
 OPTION("-Xlinker",  "-Xlinker <arg>",   Separate, Driver, "Pass <arg> to the linker")
 OPTION("-###",      "-###",             Flag,     Driver, "Print (but do not run) the compilation commands")
 OPTION("-save-temps", "-save-temps",    Flag,     Driver, "Keep intermediate .ll and .o files")
-OPTION("--target=", "--target=<triple>", Joined,  Driver, "Generate code for the given target")
+OPTION("--target=", "--target=<triple>", Joined,  Both, "Generate code for the given target")
 OPTION("-v",        "-v",               Flag,     Driver, "Show commands to run and use verbose output")
 
 //===----------------------------------------------------------------------===//

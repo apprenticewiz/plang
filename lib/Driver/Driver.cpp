@@ -774,6 +774,7 @@ static std::vector<std::string> makeFEArgs(const Options &Opts,
     if (DumpFlag)                Args.push_back(DumpFlag);
     Args.push_back(Opts.inputFile);
     if (!Opts.std.empty())     { Args.push_back("-std=" + Opts.std); }
+    if (!Opts.target.empty())  { Args.push_back("--target=" + Opts.target); }
     if (Opts.suppressWarnings)   Args.push_back("-w");
     if (Opts.warningsAsErrors)   Args.push_back("-Werror");
     if (!Opts.rangeChecks)       Args.push_back("-fno-range-checks");

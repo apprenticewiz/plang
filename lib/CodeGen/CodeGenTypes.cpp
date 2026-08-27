@@ -15,9 +15,17 @@ namespace {
 /// process reasons about offsets, at which point it silently reads the wrong
 /// field — so the optimizer refuses to run without this; see optimize.
 std::optional<llvm::DataLayout> layoutFor(const llvm::Triple& triple) {
+    // Every target, not just the host's: --target= (LangOptions::TargetTriple)
+    // asks by name for a triple that is routinely not the native one, and
+    // TargetRegistry::lookupTarget only ever finds a target that has been
+    // initialized.  plang links the combined libLLVM, which already carries
+    // every backend's code, so this costs nothing but the registration calls
+    // themselves -- unlike LLVM_TARGETS_TO_BUILD, it is not a link-time or
+    // binary-size choice.
     static const bool Init = [] {
-        llvm::InitializeNativeTarget();
-        llvm::InitializeNativeTargetAsmPrinter();
+        llvm::InitializeAllTargetInfos();
+        llvm::InitializeAllTargets();
+        llvm::InitializeAllTargetMCs();
         return true;
     }();
     (void)Init;
@@ -39,7 +47,12 @@ std::optional<llvm::DataLayout> layoutFor(const llvm::Triple& triple) {
 
 void Codegen::Impl::init(const std::string& progName) {
     mod = std::make_unique<llvm::Module>(progName, ctx);
-    llvm::Triple triple(llvm::sys::getDefaultTargetTriple());
+    // --target=, threaded down from the driver through LangOptions; the host
+    // triple when it was not given, same as every version before -target
+    // reached this far.
+    llvm::Triple triple(langOpts.TargetTriple.empty()
+                             ? llvm::sys::getDefaultTargetTriple()
+                             : llvm::Triple::normalize(langOpts.TargetTriple));
     mod->setTargetTriple(triple);
     if (auto dl = layoutFor(triple)) mod->setDataLayout(*dl);
 

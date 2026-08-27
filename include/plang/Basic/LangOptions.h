@@ -54,6 +54,13 @@ struct LangOptions {
     /// -g.  Whether codegen attaches DWARF debug info (DISubprogram,
     /// DILocation, DILocalVariable) to the module it emits.
     bool     Debug        = false;
+    /// --target=<triple>.  Empty means the host: the module's triple and data
+    /// layout come from llvm::sys::getDefaultTargetTriple() instead of this
+    /// string.  Not validated here; an unknown or misspelled triple is still
+    /// set as the module's triple verbatim, and simply fails the data-layout
+    /// lookup that keys off it (see Codegen::Impl::init), the same way any
+    /// other target LLVM was not built with does.
+    std::string TargetTriple;
 
     // ---- Positional switch state ------------------------------------------
 
