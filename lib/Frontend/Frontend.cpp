@@ -41,6 +41,7 @@
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/Path.h"
+#include "llvm/Support/raw_ostream.h"
 #include "llvm/TargetParser/Host.h"
 #include "llvm/TargetParser/Triple.h"
 
@@ -644,7 +645,11 @@ static std::string buildPMIContent(const ModuleNode& Mod,
 
 /// Write PMI files for all module bodies in the program.
 /// PMI files are written to the same directory as the input source file.
-static void writePMIFiles(const ProgramNode& Program,
+/// Returns false, having reported a diagnostic to stderr, if any interface
+/// could not be published -- the caller then fails the whole compilation
+/// rather than let it succeed without a usable interface for something that
+/// imports this module later.
+static bool writePMIFiles(const ProgramNode& Program,
                            const std::string& InputFile) {
     // Determine directory from input file path.
     std::string PmiDir = ".";
@@ -669,10 +674,55 @@ static void writePMIFiles(const ProgramNode& Program,
         std::string Content = buildPMIContent(*Mod, Iface);
         if (Content.empty()) continue;
 
-        std::string PmiPath = PmiDir + "/" + Mod->Name + ".pmi";
-        std::ofstream F(PmiPath);
-        if (F) F << Content;
+        // Canonicalized (lowercased): Pascal identifiers are case-insensitive,
+        // and Sema::processImports looks a module up by its lowercased import
+        // spelling (see the matching toLower(Clause.ModuleName) there), which
+        // need not be how this module's own declaration spelled its name. A
+        // module declared ReviewCaseModule but imported as reviewcasemodule
+        // must find the same file on a case-sensitive filesystem; the module's
+        // true identity still travels inside the file itself (the "module ...
+        // interface" heading loadPMI validates against the import).
+        std::string PmiPath = PmiDir + "/" + toLower(Mod->Name) + ".pmi";
+
+        // Publish atomically: write to a sibling temp file, checking every
+        // step, and only rename it into place once it is known-good. A crash
+        // or a write failure (disk full, permission denied, ...) partway
+        // through must never leave a corrupt or truncated ModName.pmi sitting
+        // where a valid one used to be for a later, unrelated compile to load
+        // and trust.
+        llvm::SmallString<128> TmpPath;
+        int TmpFd = -1;
+        if (auto EC = llvm::sys::fs::createUniqueFile(PmiPath + "-%%%%%%.tmp",
+                                                        TmpFd, TmpPath)) {
+            std::cerr << "plang -pc1: cannot create module interface file '"
+                       << PmiPath << "': " << EC.message() << "\n";
+            return false;
+        }
+
+        {
+            llvm::raw_fd_ostream OS(TmpFd, /*shouldClose=*/true);
+            OS << Content;
+            OS.close();
+            if (OS.has_error()) {
+                std::error_code EC = OS.error();
+                OS.clear_error();
+                std::cerr << "plang -pc1: cannot write module interface '"
+                           << Mod->Name << "' to '" << PmiPath << "': "
+                           << EC.message() << "\n";
+                llvm::sys::fs::remove(TmpPath);
+                return false;
+            }
+        }
+
+        if (auto EC = llvm::sys::fs::rename(TmpPath, PmiPath)) {
+            std::cerr << "plang -pc1: cannot publish module interface '"
+                       << Mod->Name << "' to '" << PmiPath << "': "
+                       << EC.message() << "\n";
+            llvm::sys::fs::remove(TmpPath);
+            return false;
+        }
     }
+    return true;
 }
 
 } // namespace
@@ -917,9 +967,11 @@ int frontendPC1Main(int Argc, char *Argv[]) {
     if (!Ok) return 1;
 
     // Write .pmi files for any module bodies found in this compilation unit.
-    // This is a no-op for pure-program files (no OwnedModules).
-    if (!Program->OwnedModules.empty())
-        writePMIFiles(*Program, InputFile);
+    // This is a no-op for pure-program files (no OwnedModules). A failure
+    // here has already been diagnosed to stderr; let it fail the compile
+    // rather than report success for a module nothing can now import.
+    if (!Program->OwnedModules.empty() && !writePMIFiles(*Program, InputFile))
+        return 1;
 
     if (DumpAst)
         return withOutput([&](std::ostream& Os) { printAst(*Program, Os); });
