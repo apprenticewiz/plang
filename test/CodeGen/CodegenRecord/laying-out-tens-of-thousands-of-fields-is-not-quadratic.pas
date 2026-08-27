@@ -1,5 +1,5 @@
 (*
-RUN: timeout 120 %plang %s -o %t
+RUN: %plang %s -o %t
 RUN: %run %t | FileCheck --strict-whitespace --match-full-lines %s
 *)
 
@@ -11,10 +11,13 @@ CHECK-NEXT:20000
 (* Record field layout is O(n) in the number of fields, not O(n^2) -- a
    record this wide used to take multiple minutes to compile because both
    the static layout's Sema-field lookup and its differential run-time-walk
-   cross-check restarted a linear scan once PER FIELD.  `timeout` above is
-   the regression guard: this compiles in a few seconds fixed (120s of
-   headroom for slow Debug/sanitizer CI runners), and the unfixed quadratic
-   code does not finish in that window. *)
+   cross-check restarted a linear scan once PER FIELD.  This compiles in a
+   few seconds fixed; the unfixed quadratic code takes multiple minutes,
+   which is enough to fail via the CI job's own wall-clock budget. No
+   RUN-line `timeout` wrapper is used here: GNU `timeout` is not installed
+   on this project's macOS CI runners (no coreutils step), and no other
+   test in this suite uses one -- a per-line timeout looked useful here
+   but isn't actually portable across the CI matrix. *)
 
 program p;
 type
