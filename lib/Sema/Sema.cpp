@@ -331,7 +331,7 @@ bool Sema::check(const ProgramNode& Prog) {
     if (!Prog.Imports.empty())
         processImports(Prog.Imports);
 
-    checkBlock(*Prog.Block);
+    checkBlock(*Prog.Block, /*BeforePop=*/{}, /*IsGlobalScope=*/true);
     Symtab.popScope();
     return !hasErrors();
 }
@@ -508,7 +508,7 @@ void Sema::processModuleBody(const ModuleNode& Mod) {
         if (Mod.InitStmt)  checkStmt(Mod.InitStmt.get());
         if (Mod.FinalStmt) checkStmt(Mod.FinalStmt.get());
         harvestModuleExports(Mod);
-    });
+    }, /*IsGlobalScope=*/true);
 
     InModuleImplementation_ = SavedInImpl;
     CurrentUnit_ = SavedUnit;
@@ -831,7 +831,8 @@ void Sema::scanLabelNesting(const StmtNode* S,
 }
 
 void Sema::checkBlock(const BlockNode& Block,
-                      llvm::function_ref<void()> BeforePop) {
+                      llvm::function_ref<void()> BeforePop,
+                      bool IsGlobalScope) {
     Symtab.pushScope();
 
     // A block nested in this one checks its own body before this one does, and
@@ -1060,6 +1061,24 @@ void Sema::checkBlock(const BlockNode& Block,
     // Phase 4 — Variables
     for (const auto& Vg : Block.Vars) {
         auto T = resolveType(*Vg.Type);
+
+        // A global (program- or module-level) variable becomes one linked
+        // object, and every access to it -- including ones from the runtime
+        // library plang links against -- is a 32-bit PC-relative relocation.
+        // Past a couple of GiB those relocations overflow at link time with a
+        // confusing ld.lld error pointing at some unrelated runtime function
+        // rather than at this declaration.  Caught here instead, well under
+        // that ceiling: see err_global_var_too_large's comment for why 1 GiB.
+        if (IsGlobalScope && !T->isError()) {
+            constexpr uint64_t GlobalVarByteLimit = 1ull << 30; // 1 GiB
+            if (auto Sz = byteSizeOf(*T); Sz && *Sz > GlobalVarByteLimit) {
+                for (const auto& Nm : Vg.Names)
+                    error(Vg.Type->Loc, diag::err_global_var_too_large,
+                          {Nm, std::to_string(*Sz),
+                           std::to_string(GlobalVarByteLimit)});
+            }
+        }
+
         const bool Bindable = isBindableDenoter(*Vg.Type);
         for (const auto& Nm : Vg.Names) {
             Symbol S;
