@@ -8,6 +8,8 @@ version numbers follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 
 ## [Unreleased]
 
+## [0.3.5] - 2026-08-27
+
 A sixth adversarial review round, and by far the largest: three external models,
 independent of this project's own review process, each did a full pass and filed
 what they found as GitHub issues rather than reporting back directly. 119 confirmed
