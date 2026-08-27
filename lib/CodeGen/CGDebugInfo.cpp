@@ -559,6 +559,20 @@ void CGDebugInfo::recordSchemaLayoutForScript(const Type& T, const RecordTypeNod
     bool firstField = true;
     for (const auto& fd : rt.Fields) {
         auto* at = llvm::dyn_cast<ArrayTypeNode>(fd.Type.get());
+        // A field whose type is itself another schema instantiation (or an
+        // array of one) never carries ExtentLow/ExtentHigh -- those belong
+        // only to a string capacity/subrange/array-bound denoter (see
+        // TypeNode::ExtentLow's own comment) -- so neither guard below would
+        // fire for it, and it would otherwise fall through to the generic
+        // scalar branch and record that field's compile-time-probe size as
+        // if it were the field's real, run-time-varying size.  Bail the
+        // WHOLE containing schema's recording instead, same as the variant-
+        // part and varying-non-array-field cases just below: a partial,
+        // silently-wrong entry is worse than none (plang_schema_printers.py's
+        // own fallback -- plain DWARF -- is exactly as good as not having
+        // run this pass at all).
+        if (llvm::isa<SchemaTypeNode>(fd.Type.get())) return;
+        if (at && llvm::isa<SchemaTypeNode>(at->Element.get())) return;
         if (at && (!at->ExtentLow || !at->ExtentHigh)) return; // see comment above
         if (!at && (fd.Type->ExtentLow || fd.Type->ExtentHigh)) return; // varying non-array field, out of scope
 
