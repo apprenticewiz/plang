@@ -23,9 +23,14 @@ corrected in the same PR.
 - **A schema's DIType under `-g` was missing its runtime discriminant header**, corrupting
   every field's apparent value under a debugger (not just an approximated extent for the
   varying field, as previously documented -- every field, including the discriminant itself,
-  read completely wrong). Partially fixed: the discriminant field and fields at or before a
-  varying-extent field are now exact; a fixed field declared *after* a varying field remains a
-  known, tracked gap (needs a DWARF location expression, real design work beyond this fix).
+  read completely wrong). Fixed in two parts: the DIType itself now gets the discriminant
+  header right, making the discriminant and every field at or before a varying-extent field
+  exact; a field declared *after* a varying one has no correct static DWARF offset possible at
+  all (confirmed directly from LLVM's own DWARF emitter -- a computed member address has no
+  implementation there, only a narrower bitfield-offset feature that crashes gdb if misused for
+  this), so a companion gdb Python pretty-printer (`share/plang/gdb/plang_schema_printers.py`)
+  is shipped instead, computing the correct value from live memory at print time and
+  bypassing DWARF's limitation entirely for `print`ing the whole value.
 - A long flat chain of same-precedence binary operators (tens of thousands of terms, no
   parentheses) overflowed the stack in Sema's recursive expression walk, crashing with a raw
   SIGSEGV instead of a diagnostic -- the existing depth guard only covered parenthesized
