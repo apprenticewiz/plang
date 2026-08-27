@@ -180,8 +180,13 @@ void CGProcCall::emitCallStmt(const CallStmt& s) {
         if (const auto& pt = s.Args[0]->ResolvedType;
                 pt && pt->Kind == TypeKind::Pointer && pt->PointeeType
                 && pt->PointeeType->Kind == TypeKind::Schema) {
-            Schema.emitNewSchema(*s.Args[0], *pt->PointeeType,
+            auto ref = Schema.emitNewSchema(*s.Args[0], *pt->PointeeType,
                           std::span(s.Args).subspan(1));
+            // EP §6.6 with §6.7.5.3: the instance new() creates begins in the
+            // same initial state a declared one would (see the plain-pointer
+            // case below) -- plang_new's calloc zeroed it instead, which is
+            // not the same thing wherever the body has a `value` clause.
+            EmitSchemaInitialState(ref.data, *pt->PointeeType, ref.discs);
             return;
         }
         auto* addr = EmitLValue(*s.Args[0]);

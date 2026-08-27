@@ -134,7 +134,13 @@ llvm::Value* CGExprCore::emitExpr(const ExprNode& e) {
         }
         // VarString: return the struct address directly — callers use it as ptr.
         if (ExprIsVarStr(e)) return ve->ptr;
-        return B.CreateLoad(ve->type, ve->ptr, n->Name);
+        auto* ld = B.CreateLoad(ve->type, ve->ptr, n->Name);
+        // Issue #192: a with-bound field of a packed record is an ordinary
+        // IdentExpr by the time it gets here, and IRBuilder's default ABI
+        // alignment for it is a promise the byte-packed layout cannot keep;
+        // see packedAccessAlign (CGFieldAccess.cpp).
+        if (auto A = FieldAccess.packedAccessAlign(e)) ld->setAlignment(*A);
+        return ld;
     }
 
     if (auto* n = llvm::dyn_cast<BinaryExpr>(&e))  return BinaryOps.emitBinary(*n);
@@ -173,8 +179,6 @@ llvm::Value* CGExprCore::emitExpr(const ExprNode& e) {
     }
     if (auto* n = llvm::dyn_cast<SubstringExpr>(&e)) {
         // s[i..j] as an rvalue: produce a new string(cap) containing the substring.
-        auto* strAddr = emitLValue(*n->Str);
-        if (!strAddr) codegenICE("substring applied to a non-addressable operand");
         // The capacity is a property of the operand's type, and Sema has it.
         // This used to hunt for it by scanning every scope for a variable whose
         // address was object-identical to the one just emitted, defaulting to
@@ -196,11 +200,31 @@ llvm::Value* CGExprCore::emitExpr(const ExprNode& e) {
         // told about the SOURCE is the capacity that source really has.
         int64_t cap = ExprStrCapStatic(*n->Str);
         if (cap <= 0) cap = PlangMaxStringCapacity;
+        // R6: address and capacity of a varying-capacity source from ONE walk
+        // of its access path, the same strAddrAndCap the substring's own
+        // ASSIGNMENT form (CodeGenStmts/CGAssign) already uses -- emitLValue
+        // for the address and exprStrCapV for the source capacity (below)
+        // each started a fresh walk from n->Str, so `q^.a[next].s[1..2]` as
+        // a value (not an assignment target) ran `next` more than once, and
+        // by a second route -- emitLValue's own fallback for a
+        // varying-extent record field, CGFieldAccess::emitFieldGEP, tries
+        // its own walk and then, when the record's extent varies, discards
+        // it for a SchemaAccess one -- more than twice.
+        //
         // The source capacity falls back to the same widest-capacity answer
         // when the operand is not typed as a string(n); exprStrCapV reports 0
         // there, and telling the runtime the source holds nothing put every
         // substring of one outside its own bounds.
-        auto* srcCap = ExprIsVarStr(*n->Str) ? Schema.exprStrCapV(*n->Str) : i64c(cap);
+        llvm::Value* strAddr;
+        llvm::Value* srcCap;
+        if (ExprIsVarStr(*n->Str)) {
+            auto sp = Schema.strAddrAndCap(*n->Str);
+            strAddr = sp.first; srcCap = sp.second;
+        } else {
+            strAddr = emitLValue(*n->Str);
+            srcCap  = i64c(cap);
+        }
+        if (!strAddr) codegenICE("substring applied to a non-addressable operand");
         auto* resPtr = CreateEntryAlloca(Types.strStructType(cap), "substr.res");
         auto* low    = ToI64(emitExpr(*n->Low));
         auto* high   = ToI64(emitExpr(*n->High));

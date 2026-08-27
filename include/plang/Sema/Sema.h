@@ -246,6 +246,24 @@ private:
     // Resolved return type of CurrentProc (null when not inside a function).
     std::shared_ptr<Type> CurrentRetType;
 
+    /// Lowercased names checkProcBody just defined into CurrentProc's own
+    /// parameter scope -- its formal parameters, EP named result variable, and
+    /// any conformant-array bound names -- while that scope is the immediately
+    /// enclosing one for the checkBlock call about to check its body.
+    ///
+    /// ISO §6.2.2 treats a procedure or function's formal-parameter-list and
+    /// its block as ONE region, so redeclaring a parameter's name as a local
+    /// constant, type, variable or nested procedure must be a duplicate-
+    /// declaration error. checkProcBody and checkBlock push two separate
+    /// SymbolTable scopes for the two halves of that one region (see their
+    /// comments), so Symtab.define's own per-scope duplicate check cannot see
+    /// the collision -- it looks only at the block's own (innermost) scope,
+    /// one level in from where the parameters live. checkBlock cross-checks
+    /// its declared names against this set instead. Empty outside a
+    /// procedure/function body: a program or module block has no enclosing
+    /// parameter scope of its own to collide with.
+    std::set<std::string> EnclosingParamNames_;
+
     /// Every function whose block contains the statement being checked,
     /// outermost first.
     ///
@@ -383,9 +401,6 @@ private:
     // block's scope is still current.  A module body needs that: its exports
     // and its 'to begin do' / 'to end do' statements are written in terms of
     // names the scope is about to discard.
-    // IsGlobalScope: true for a program block or a module body, where every
-    // variable becomes a single linked object subject to the relocation-range
-    // check in Phase 4 below; false for a procedure/function body, whose
     // locals are stack storage instead.  Phase 4 runs the same byte-size gate
     // either way (#223) -- an oversized local has no relocation to overflow,
     // but hangs the LLVM backend lowering its `alloca` well before it would
@@ -396,10 +411,16 @@ private:
     // Stamped onto each label this block declares (Symbol::LabelInModuleBlock)
     // so checkGoto can refuse a non-local goto from one of the module's own
     // procedures back into it -- see that field's comment for why.
+    // IsInterfaceBlock: true for a module INTERFACE's own block.  Every
+    // heading there is recorded IsForward regardless of the 'forward'
+    // keyword (EP §6.11.2: the heading alone is the whole declaration, its
+    // body given later in a separate implementation block) so the
+    // forward-declaration completion audit below does not apply to it.
     void checkBlock(const BlockNode& Block,
                     llvm::function_ref<void()> BeforePop = {},
                     bool IsGlobalScope = false,
-                    bool IsModuleBlock = false);
+                    bool IsModuleBlock = false,
+                    bool IsInterfaceBlock = false);
     void checkProcSignature(const ProcDecl& Proc);
     void checkProcBody     (const ProcDecl& Proc);
     /// Records which value parameters a body modifies; see ProcDecl::ModifiedParams.
@@ -421,6 +442,18 @@ private:
     /// Adds the fields of a variant part, and of the variants nested in it, to
     /// the record type T, so that field access can find them (§6.4.3.3).
     void walkVariantFields(const VariantPart& Vp, Type& T);
+    /// ISO §6.6.5.3: checks one of new/dispose's extra arguments -- \p Which
+    /// is "new" or "dispose", for the diagnostic -- against \p Vp, the
+    /// variant level it selects: the argument must be a value of \p Vp's own
+    /// tag type.  Returns the NestedVariant of whichever of \p Vp's arms the
+    /// argument names (or null if it named none, or was not itself a
+    /// constant), i.e. the level the *next* argument, if any, must answer
+    /// for -- so the caller can walk as many levels as arguments were given
+    /// and tell a valid path from one with more arguments than the record
+    /// has nesting to check them against.
+    const VariantPart* checkVariantTagArg(const std::string& Which,
+                                          const ExprNode& Arg, const Type& At,
+                                          const VariantPart& Vp);
     [[nodiscard]] std::shared_ptr<Type> resolveNamed(const NamedTypeNode& N);
     /// EP §6.6: checks a denoter's 'value' clause against the type it denotes.
     void checkInitialState(const TypeNode& Node, const Type& T);
@@ -588,6 +621,15 @@ private:
     [[nodiscard]] std::optional<std::pair<int64_t, int64_t>>
     foldBounds(const ExprNode& Low, const ExprNode& High,
                const Type& Base, DiagID LowID, DiagID HighID);
+
+    // ISO §6.4.2.2/§6.4.3.2: reports err_bound_types_differ (against High's
+    // location) and returns false when LoTy and HiTy are both ordinal but
+    // not of the same ordinal type.  True (nothing to report here) when
+    // either side is already an error, or is not ordinal at all -- that half
+    // of the question belongs to the caller, which already has its own
+    // not-ordinal diagnostic in scope.
+    [[nodiscard]] bool boundsShareOrdinalType(const Type& LoTy, const ExprNode& High,
+                                              const Type& HiTy);
 
     // ---- statement checking ----
     void checkStmt      (const StmtNode*   Stmt);

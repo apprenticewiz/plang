@@ -710,12 +710,19 @@ Symbol* Sema::protectedBaseOf(const ExprNode& Target) {
     auto* Id = llvm::dyn_cast<IdentExpr>(Base);
     if (!Id) return nullptr;
     Symbol* Sym = Symtab.lookup(Id->Name);
-    return (Sym && Sym->IsProtected) ? Sym : nullptr;
+    // EP §6.7.3.7.1 NOTE 2: a conformant-array bound identifier is refused an
+    // assignment the same way a protected parameter is -- see
+    // checkNotProtected, which tells the two apart for the diagnostic.
+    return (Sym && (Sym->IsProtected || Sym->IsConformantBound)) ? Sym : nullptr;
 }
 
 void Sema::checkNotProtected(const ExprNode& Target, SourceLocation Loc) {
     Symbol* Sym = protectedBaseOf(Target);
     if (!Sym) return;
+    if (Sym->IsConformantBound) {
+        error(Loc, diag::err_conformant_bound_assigned, {Sym->Name});
+        return;
+    }
     // EP §6.11.2: a variable exported 'protected' is protected in the same way,
     // but for a different reason, and saying "parameter" about a module's
     // variable would only mislead.
@@ -963,18 +970,22 @@ void Sema::checkCallStmt(const CallStmt& S) {
         }
 
         // read: if first arg is a typed file, remaining args must match element type.
+        // Every argument was already checked once by the loop above, which set
+        // each S.Args[I]->ResolvedType as a side effect (checkExpr, SemaExpr.cpp):
+        // calling checkExpr on them again here reported anything wrong with an
+        // argument -- e.g. an undefined identifier -- a second time (issue #272).
+        // Read the cached type instead, the same way the readln arm just above
+        // already does for S.Args[0].
         if (Lo == "read" && !S.Args.empty()) {
-            auto T = checkExpr(*S.Args[0]);
-            if (T->Kind == TypeKind::File && T->ElemType && S.Args.size() >= 2) {
+            const auto& T = S.Args[0]->ResolvedType;
+            if (T && T->Kind == TypeKind::File && T->ElemType && S.Args.size() >= 2) {
                 for (size_t I = 1; I < S.Args.size(); ++I) {
-                    auto At = checkExpr(*S.Args[I]);
-                    if (!At->isError() && !T->ElemType->isError()
+                    const auto& At = S.Args[I]->ResolvedType;
+                    if (At && !At->isError() && !T->ElemType->isError()
                         && !isAssignCompatible(*At, *T->ElemType))
                         error(S.Args[I]->Loc, diag::err_read_type_mismatch,
                               {T->ElemType->Name, At->Name});
                 }
-            } else {
-                for (size_t I = 1; I < S.Args.size(); ++I) (void)checkExpr(*S.Args[I]);
             }
             return;
         }
@@ -1003,9 +1014,39 @@ void Sema::checkCallStmt(const CallStmt& S) {
             if (!ArrTy->isError() && !ArrOk)
                 error(ArrArg.Loc, diag::err_pack_operand_not_array_unpacked,
                       {Lo, ArrTy->Name});
-            if (!PkdTy->isError() && PkdTy->Kind != TypeKind::Array)
+            const bool PkdOk = PkdTy->Kind == TypeKind::Array;
+            if (!PkdTy->isError() && !PkdOk)
                 error(PkdArg.Loc, diag::err_pack_operand_not_array_packed,
                       {Lo, PkdTy->Name});
+
+            // ISO §6.6.5.4: pack/unpack is the one place an array crosses
+            // between packed and unpacked, and the direction is fixed -- `a`
+            // unpacked, `z` packed.  Neither Packed flag was looked at, so a
+            // packed `a` or an unpacked `z` was accepted and copied exactly
+            // as if the direction had been the one actually declared.
+            if (ArrOk && ArrTy->Packed)
+                error(ArrArg.Loc, diag::err_pack_operand_not_unpacked,
+                      {Lo, ArrTy->Name});
+            if (PkdOk && !PkdTy->Packed)
+                error(PkdArg.Loc, diag::err_pack_operand_not_packed,
+                      {Lo, PkdTy->Name});
+
+            // ISO §6.6.5.4: the component types of a and z shall be
+            // identical.  CGPackUnpack lowers the whole transfer as a single
+            // memcpy sized and aligned from `a`'s element type alone, so a
+            // mismatch here is not a value that fails to convert -- it is
+            // bytes moved under the wrong element's size, e.g. an
+            // `array of integer` packed into a `packed array of char`
+            // copying 4 bytes per character instead of 1.  isAssignCompatible
+            // permits integer -> real widening that a raw copy cannot
+            // perform, so it is the wrong tool here; isIdenticalType is what
+            // congruousConformant uses for the same "no conversion happens"
+            // reason.
+            if (ArrOk && PkdOk && ArrTy->ElemType && PkdTy->ElemType
+                && !isIdenticalType(ArrTy->ElemType, PkdTy->ElemType))
+                error(ArrArg.Loc, diag::err_pack_element_type_mismatch,
+                      {Lo, ArrTy->ElemType->Name, PkdTy->ElemType->Name});
+
             // The index type of a conformant array is the ordinal its bounds
             // were declared with, which is as much a type as a written range.
             if (ArrOk && ArrTy->IndexType && !IdxTy->isError()
@@ -1032,6 +1073,20 @@ void Sema::checkCallStmt(const CallStmt& S) {
             const Type* Pointee = PtrTy->Kind == TypeKind::Pointer
                                       ? PtrTy->PointeeType.get() : nullptr;
             const bool ToSchema = Pointee && Pointee->Kind == TypeKind::Schema;
+            // ISO §6.6.5.3: for a record with a variant part, new's extra
+            // arguments are its case-constants -- one per nested variant
+            // level actually reached, each a value of that level's own tag
+            // type -- not schema discriminants.  Vp is walked one level
+            // deeper per argument by checkVariantTagArg; once it runs out
+            // (the reached level's case-constants nest no further, or an
+            // argument did not name any of them), ExtraReported flags that
+            // every argument from there on is one too many.  This used to be
+            // entirely unchecked: neither the count nor the type of these
+            // arguments was validated for a variant record.
+            const bool ToVariant = !ToSchema && Pointee && Pointee->Kind == TypeKind::Record
+                                    && Pointee->RecordDecl && Pointee->RecordDecl->Variant;
+            const VariantPart* Vp = ToVariant ? Pointee->RecordDecl->Variant.get() : nullptr;
+            bool ExtraReported = false;
             for (size_t I = 1; I < S.Args.size(); ++I) {
                 auto At = checkExpr(*S.Args[I]);
                 if (ToSchema && !At->isError() && I - 1 < Pointee->SchemaDiscs.size()) {
@@ -1051,6 +1106,14 @@ void Sema::checkCallStmt(const CallStmt& S) {
                                  && !isAssignCompatible(*Disc.Ty, *At))
                         error(S.Args[I]->Loc, diag::err_assign_mismatch,
                               {At->Name, Disc.Ty->Name});
+                } else if (ToVariant) {
+                    if (Vp) {
+                        Vp = checkVariantTagArg(Lo, *S.Args[I], *At, *Vp);
+                    } else if (!ExtraReported) {
+                        error(S.Args[I]->Loc, diag::err_variant_tag_arg_extra,
+                              {Lo, Pointee->Name});
+                        ExtraReported = true;
+                    }
                 }
             }
             if (ToSchema && S.Args.size() - 1 != Pointee->SchemaDiscs.size())
@@ -1064,9 +1127,7 @@ void Sema::checkCallStmt(const CallStmt& S) {
             // evaluated and then dropped, so `new(p, 20)` for a `^string` --
             // where `string` is the unbounded string and not the schema --
             // allocated the default and silently lost the 20.
-            if (!ToSchema && S.Args.size() > 1 && Pointee && !Pointee->isError()
-                    && !(Pointee->Kind == TypeKind::Record && Pointee->RecordDecl
-                         && Pointee->RecordDecl->Variant))
+            if (!ToSchema && !ToVariant && S.Args.size() > 1 && Pointee && !Pointee->isError())
                 // EP §6.4.3.3 does make `string` a schema with a capacity
                 // discriminant, so `new(p, 20)` for a `^string` is legal there
                 // and only plang's modelling of the bare name as the unbounded
@@ -1077,6 +1138,38 @@ void Sema::checkCallStmt(const CallStmt& S) {
                           ? diag::err_new_string_capacity
                           : diag::err_new_extra_args,
                       {Pointee->Name});
+            return;
+        }
+
+        // ISO §6.6.5.3: dispose's extra arguments are new's, read the same
+        // way -- case-constants selecting a path through a variant record's
+        // nesting, each checked against that level's own tag type.  dispose
+        // had no argument checking of any kind before this, schema or
+        // variant: arity aside, `dispose(p, 42)` was accepted whatever
+        // `p`'s domain type was and whatever 42 was supposed to select.
+        // Schema discriminants are deliberately not re-checked here: unlike
+        // a variant's case-constants, they are not re-supplied to dispose at
+        // all (the instance already carries them from new), so there is
+        // nothing here for them to be checked against.
+        if (Lo == "dispose" && !S.Args.empty()) {
+            auto PtrTy = checkExpr(*S.Args[0]);
+            const Type* Pointee = PtrTy->Kind == TypeKind::Pointer
+                                      ? PtrTy->PointeeType.get() : nullptr;
+            const bool ToVariant = Pointee && Pointee->Kind == TypeKind::Record
+                                    && Pointee->RecordDecl && Pointee->RecordDecl->Variant;
+            const VariantPart* Vp = ToVariant ? Pointee->RecordDecl->Variant.get() : nullptr;
+            bool ExtraReported = false;
+            for (size_t I = 1; I < S.Args.size(); ++I) {
+                auto At = checkExpr(*S.Args[I]);
+                if (!ToVariant) continue;
+                if (Vp) {
+                    Vp = checkVariantTagArg(Lo, *S.Args[I], *At, *Vp);
+                } else if (!ExtraReported) {
+                    error(S.Args[I]->Loc, diag::err_variant_tag_arg_extra,
+                          {Lo, Pointee->Name});
+                    ExtraReported = true;
+                }
+            }
             return;
         }
 

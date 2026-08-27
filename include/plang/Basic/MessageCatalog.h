@@ -68,7 +68,8 @@ struct CatalogReport {
     unsigned Loaded{0};   ///< entries accepted and now in use
     unsigned Fuzzy{0};    ///< skipped for being marked `#, fuzzy`
     unsigned Untranslated{0}; ///< skipped for an empty msgstr
-    unsigned Unknown{0};  ///< msgctxt naming something this plang has no message for
+    unsigned Unknown{0};  ///< msgctxt naming something this plang has no message for,
+                          ///< or no msgctxt at all on an entry that is not the header
     unsigned Malformed{0};///< entries dropped; the rest of the file was still read
     /// Set only when the file was rejected outright, and then nothing was
     /// loaded and the previous contents are untouched.

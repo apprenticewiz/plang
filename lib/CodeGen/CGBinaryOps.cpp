@@ -162,9 +162,26 @@ llvm::Value* CGBinaryOps::emitBinary(const BinaryExpr& e) {
             return {tmp, i64c(1)};
         };
         auto [lv, capL] = strOperand(*e.Left);
-        auto* capR = ExprIsVarStr(*e.Right) ? Schema.exprStrCapV(*e.Right)
-                   : ExprIsCharStr(*e.Right) ? i64c(ExprCharStrLen(*e.Right))
-                   : i64c(1);
+        // R6: the right operand's address and capacity used to be two
+        // separate walks of its access path -- exprStrCapV here, then
+        // emitStrAddr down where the runtime call is built -- so
+        // `q^.a[next].s + 'x'` ran `next` twice over for a right operand
+        // alone. strAddrAndCap answers both from the one walk its own fast
+        // path already takes (and, unlike emitStrAddr's route through
+        // emitLValue, never falls into CGFieldAccess::emitFieldGEP's own
+        // extra walk of a varying-extent record field).
+        llvm::Value* rv;
+        llvm::Value* capR;
+        if (ExprIsVarStr(*e.Right)) {
+            auto rp = Schema.strAddrAndCap(*e.Right);
+            rv = rp.first; capR = rp.second;
+        } else if (ExprIsCharStr(*e.Right)) {
+            rv   = StrCall.emitCharStrAsStr(*e.Right);
+            capR = i64c(ExprCharStrLen(*e.Right));
+        } else {
+            rv   = EmitExpr(*e.Right);
+            capR = i64c(1);
+        }
         // A non-string operand is one character, as it was before: returning
         // zero for it sized the result temporary at 1 and cut 'x' + 'y' to "x".
         auto staticCap = [&](const ExprNode& x) -> int64_t {
@@ -194,9 +211,6 @@ llvm::Value* CGBinaryOps::emitBinary(const BinaryExpr& e) {
             ? CreateDynStrAlloca(capResV, "str.concat")
             : static_cast<llvm::Value*>(
                   CreateEntryAlloca(Types.strStructType(capRes), "str.concat"));
-        auto*   rv     = ExprIsVarStr(*e.Right)  ? StrCall.emitStrAddr(*e.Right)
-                        : ExprIsCharStr(*e.Right) ? StrCall.emitCharStrAsStr(*e.Right)
-                                                : EmitExpr(*e.Right);
         if (ExprIsVarStr(*e.Right) || ExprIsCharStr(*e.Right)) {
             auto* fn = Strings.getStrFn("plang_str_concat", llvm::Type::getVoidTy(Ctx),
                 {PtrTy, I64Ty, PtrTy, I64Ty, PtrTy, I64Ty});

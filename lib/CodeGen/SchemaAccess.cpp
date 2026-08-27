@@ -84,16 +84,27 @@ SchemaAccess::schemaActual(const ExprNode& arg, unsigned discCount) {
     }
 
     // EP §6.4.3.3: a string(n) IS an instance of the `string` schema, and its
-    // one discriminant is the capacity -- a constant here.  This is what lets
-    // `procedure p(var s: string)` take a string of any capacity.
+    // one discriminant is the capacity.  This is what lets `procedure p(var
+    // s: string)` take a string of any capacity.
+    //
+    // ExprStrCap is exprStrCapStatic: the probe's answer (typically 1), sized
+    // for a TEMPORARY rather than for this object -- see its own comment in
+    // CodeGenImpl.h.  A string(n) *field* of a schema is VarString +
+    // ExtentVaries, not SchemaInstance, so it took this branch rather than
+    // the schemaRefOf one above, and every discriminant-sized field passed
+    // to `work(var s: string)` handed the callee a string(1): `work(q^.s)`
+    // on a real capacity of 10 raised "string of length 5 assigned to a
+    // string(1)" on the callee's very first assignment.  exprStrCapV is the
+    // same answer assignment already asks for its target -- the path's own
+    // extent form when the capacity varies, and ExprStrCap's constant
+    // otherwise -- so it is correct for both an ordinary string(n) and a
+    // schema-varying one.
     const plang::Type* T = arg.ResolvedType.get();
     if (T && T->Kind == TypeKind::VarString && discCount == 1) {
         auto* data = EmitLValue(arg);
         if (!data) codegenICE("string argument for a schema parameter is not "
                               "addressable");
-        return {data, {llvm::ConstantInt::get(I64Ty,
-                           static_cast<uint64_t>(ExprStrCap(arg)),
-                           /*isSigned=*/true)}};
+        return {data, {exprStrCapV(arg)}};
     }
 
     // A discriminated instance knows them at compile time.
@@ -270,7 +281,7 @@ llvm::Value* SchemaAccess::schemaBodySize(const plang::Type& schema,
                        "sch.bytes");
 }
 
-void SchemaAccess::emitNewSchema(const ExprNode& ptrArg,
+SchemaAccess::SchemaRef SchemaAccess::emitNewSchema(const ExprNode& ptrArg,
                                   const plang::Type& schema,
                                   std::span<const std::unique_ptr<ExprNode>> discArgs) {
     const size_t s = schema.SchemaDiscs.size();
@@ -280,10 +291,22 @@ void SchemaAccess::emitNewSchema(const ExprNode& ptrArg,
 
     std::vector<llvm::Value*> discs;
     discs.reserve(s);
-    for (const auto& a : discArgs) {
-        auto* v = ToI64(EmitExpr(*a));
+    for (size_t i = 0; i < s; ++i) {
+        auto* v = ToI64(EmitExpr(*discArgs[i]));
         if (!v) codegenICE("discriminant of new() for schema '" + schema.SchemaName
                            + "' is not an integer value");
+        // EP §6.7.5.3: an actual discriminant must be assignment-compatible
+        // with its formal's declared type -- the same rule an ordinary
+        // assignment enforces (CGAssign.cpp).  Sema already rejects an
+        // actual whose static TYPE is flatly incompatible (checkBuiltinCall,
+        // SemaStmt.cpp); a value that is in-domain but out of RANGE --
+        // `new(p, 500)` for a discriminant declared `n: 1..10` -- is a
+        // run-time question exactly as `x := 500` is for `var x: 1..10`,
+        // and was going straight into the header with no check at all.
+        if (const auto& Ty = schema.SchemaDiscs[i].Ty;
+                Ty && Ty->Kind == TypeKind::Subrange && Ty->SubLo != Ty->SubHi)
+            RangeGuards.emitRangeCheck(v, Ty->SubLo, Ty->SubHi, /*isIndex=*/false,
+                                       discArgs[i]->Loc);
         discs.push_back(v);
     }
 
@@ -301,6 +324,14 @@ void SchemaAccess::emitNewSchema(const ExprNode& ptrArg,
     auto* addr = EmitLValue(ptrArg);
     if (!addr) codegenICE("new() target is not addressable");
     B.CreateStore(base, addr);
+
+    // The body starts just past the header just written; handed back so a
+    // caller can apply the body's initial state (EP §6.6) against the SAME
+    // discriminants, rather than re-evaluating discArgs -- which ISO
+    // §6.8.2.2 asks be evaluated once -- a second time to get them again.
+    auto* data = B.CreateGEP(I8Ty, base,
+        {llvm::ConstantInt::get(I64Ty, static_cast<int64_t>(hdrBytes))}, "sch.data");
+    return SchemaRef{&schema, data, std::move(discs)};
 }
 
 llvm::Value* SchemaAccess::exprStrCapV(const ExprNode& e) {
@@ -374,10 +405,34 @@ llvm::Value* SchemaAccess::exprStrCapV(const ExprNode& e) {
 /// only the varying case ever had two to collapse.
 std::pair<llvm::Value*, llvm::Value*>
 SchemaAccess::strAddrAndCap(const ExprNode& e) {
+    // R6: a substr/trim call primed below, answered instead of re-walked --
+    // see pendingArgExpr_'s own comment for why this exists and why a bare
+    // pointer compare is enough to key it.
+    if (pendingArgExpr_ == &e) return pendingArgVal_;
     if (ExprIsVarStr(e) && e.ResolvedType && e.ResolvedType->ExtentVaries)
         if (auto path = schemaPathOf(e))
             if (auto* cap = strCapFromPath(*path))
                 return {path->addr, cap};
+    // R6: substr and trim's result carries its ARGUMENT's capacity (the
+    // CallExpr branch of exprStrCapV, below), not one of its own -- so
+    // asking this function for the call's (address, capacity) is really two
+    // questions about Args[0]: what the call's own evaluation marshals it
+    // as, and what its capacity is.  Walking Args[0] for the second after
+    // EmitStrAddr already walked it once for the first, inside the call's
+    // argument marshalling, repeated whatever side effect sits in that
+    // path.  Args[0] is walked here, ONCE, and handed to that nested
+    // marshalling through pendingArgExpr_ instead.
+    if (auto* call = llvm::dyn_cast<CallExpr>(&e)) {
+        const std::string fn = toLower(call->Name);
+        if ((fn == "substr" || fn == "trim") && !call->Args.empty()) {
+            auto argAddrCap = strAddrAndCap(*call->Args[0]);
+            pendingArgExpr_ = call->Args[0].get();
+            pendingArgVal_  = argAddrCap;
+            auto* addr = EmitStrAddr(e);
+            pendingArgExpr_ = nullptr;
+            return {addr, argAddrCap.second};
+        }
+    }
     auto* addr = EmitStrAddr(e);
     return {addr, exprStrCapV(e)};
 }

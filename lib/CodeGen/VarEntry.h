@@ -99,4 +99,17 @@ struct VarEntry {
     /// compiler on a legal program.
     const plang::Type* pathRootTy{nullptr};
     std::vector<llvm::Value*> pathDiscs{};
+    /// ISO §6.4.3.1 / issue #192: set when `ptr` was bound by a with-statement
+    /// to a field of a PACKED record.  The address sits at a byte offset the
+    /// field's own LLVM type need not satisfy -- exactly like an ordinary
+    /// r.field access once the record is packed -- but once bound to a bare
+    /// name the AST shows an IdentExpr with no FieldExpr left for
+    /// packedAccessAlign (CGFieldAccess.cpp) to inspect, so the fact is kept
+    /// here instead.  Mirrors Sema's own FromPackedWith (SymbolTable.h), set
+    /// by the same with-statement field binding for the same underlying
+    /// reason: that one blocks passing the name as a var parameter, this one
+    /// blocks IRBuilder's default load/store alignment.  Last, and
+    /// default-initialised, so that every existing aggregate initialisation
+    /// of this struct is unaffected.
+    bool packedWithField{false};
 };

@@ -31,20 +31,51 @@ std::size_t PlangInPos = 0;
 
 namespace {
 
-/// writestr's destination.  Null while output is going to stdout.  Grown on
-/// demand and kept between statements so the common case does not re-allocate.
-char*       CapBuf = nullptr;
-std::size_t CapLen = 0;
-std::size_t CapCap = 0;
-bool        Capturing = false;
+/// One level of writestr's destination buffer.  Grown on demand and kept
+/// between calls at the same nesting depth so the common (non-nested) case
+/// does not re-allocate.
+struct CapFrame {
+    char*       Buf = nullptr;
+    std::size_t Len = 0;
+    std::size_t Cap = 0;
+};
 
-void capReserve(std::size_t Need) {
-    if (Need <= CapCap) return;
-    std::size_t NewCap = CapCap ? CapCap : 256;
+/// Stack of capture frames, one per writestr currently in progress.  A
+/// writestr's write-parameters are ordinary expressions, so one of them may
+/// call a function that itself calls writestr (e.g. `writestr(s, 'x', f())`
+/// where f writes into a string of its own) -- capture state has to nest
+/// rather than share a single buffer, or the inner call clobbers the outer
+/// call's in-progress text, and the inner call's `Capturing = false` sends
+/// the rest of the outer call's output to stdout instead of into its buffer.
+/// Index CapDepth-1 is the innermost (currently-writing) frame; CapDepth ==
+/// 0 means output goes to stdout.
+CapFrame*   CapStack    = nullptr;
+std::size_t CapStackCap = 0;   // allocated slots in CapStack
+std::size_t CapDepth    = 0;   // active frames
+
+/// Grows CapStack, if needed, to hold at least \p Need frames.
+void capStackReserve(std::size_t Need) {
+    if (Need <= CapStackCap) return;
+    std::size_t NewCap = CapStackCap ? CapStackCap : 4;
     while (NewCap < Need) NewCap *= 2;
-    if (char* P = static_cast<char*>(std::realloc(CapBuf, NewCap))) {
-        CapBuf = P;
-        CapCap = NewCap;
+    auto* P = static_cast<CapFrame*>(std::realloc(CapStack, NewCap * sizeof(CapFrame)));
+    if (!P) return;   // allocation failed; caller sees CapStackCap unchanged
+    for (std::size_t I = CapStackCap; I < NewCap; ++I) {
+        P[I].Buf = nullptr;
+        P[I].Len = 0;
+        P[I].Cap = 0;
+    }
+    CapStack    = P;
+    CapStackCap = NewCap;
+}
+
+void capReserve(CapFrame& F, std::size_t Need) {
+    if (Need <= F.Cap) return;
+    std::size_t NewCap = F.Cap ? F.Cap : 256;
+    while (NewCap < Need) NewCap *= 2;
+    if (char* P = static_cast<char*>(std::realloc(F.Buf, NewCap))) {
+        F.Buf = P;
+        F.Cap = NewCap;
     }
 }
 
@@ -52,11 +83,12 @@ void capReserve(std::size_t Need) {
 
 void plangOutN(const char* Data, std::size_t N) {
     if (N == 0) return;
-    if (!Capturing) { std::fwrite(Data, 1, N, stdout); return; }
-    capReserve(CapLen + N);
-    if (CapLen + N > CapCap) return;   // allocation failed; drop the excess
-    std::memcpy(CapBuf + CapLen, Data, N);
-    CapLen += N;
+    if (CapDepth == 0) { std::fwrite(Data, 1, N, stdout); return; }
+    CapFrame& F = CapStack[CapDepth - 1];
+    capReserve(F, F.Len + N);
+    if (F.Len + N > F.Cap) return;   // allocation failed; drop the excess
+    std::memcpy(F.Buf + F.Len, Data, N);
+    F.Len += N;
 }
 
 void plangOutStr(const char* S) {
@@ -326,22 +358,32 @@ void plang_writeln_str_w (const char *S, int64_t W) { plang_write_str_w(S, W); p
 // writestr and readstr inherit the full set of formats and parsing rules.
 
 void plang_writestr_begin() {
-    CapLen    = 0;
-    Capturing = true;
+    capStackReserve(CapDepth + 1);
+    if (CapDepth >= CapStackCap) return;   // allocation failed; degrade to a no-op frame
+    CapStack[CapDepth].Len = 0;
+    ++CapDepth;
 }
 
 /// Ends capture, storing the formatted text into the string(N) at \p S.
 /// Characters beyond \p Cap are dropped, matching truncating assignment.
+/// Pops this writestr's frame off CapStack so an enclosing writestr (if any)
+/// resumes capturing into its own buffer instead of falling through to stdout.
 void plang_writestr_end(void *S, int64_t Cap) {
-    Capturing = false;
+    std::size_t Len = 0;
+    const char* Buf = nullptr;
+    if (CapDepth > 0) {
+        CapFrame& F = CapStack[--CapDepth];
+        Len = F.Len;
+        Buf = F.Buf;
+    }
     if (!S) return;
-    auto Len = static_cast<int64_t>(CapLen);
-    if (Len > Cap) Len = Cap;
+    auto L = static_cast<int64_t>(Len);
+    if (L > Cap) L = Cap;
     // string(N) is { i64 length, [N x i8] data }; see strStructType in codegen.
     auto* Base = static_cast<char*>(S);
-    *reinterpret_cast<int64_t*>(Base) = Len;
-    if (Len > 0)
-        std::memcpy(Base + sizeof(int64_t), CapBuf, static_cast<std::size_t>(Len));
+    *reinterpret_cast<int64_t*>(Base) = L;
+    if (L > 0)
+        std::memcpy(Base + sizeof(int64_t), Buf, static_cast<std::size_t>(L));
 }
 
 /// The fixed-string-type sibling: EP §6.7.5.5 defines writestr(s, ...) as
@@ -350,13 +392,19 @@ void plang_writestr_end(void *S, int64_t Cap) {
 /// whatever is short of capacity N is padded with spaces rather than left
 /// out of a length count.
 void plang_writestr_end_fixed(void *Buf, int64_t N) {
-    Capturing = false;
+    std::size_t Len = 0;
+    const char* Src = nullptr;
+    if (CapDepth > 0) {
+        CapFrame& F = CapStack[--CapDepth];
+        Len = F.Len;
+        Src = F.Buf;
+    }
     if (!Buf) return;
-    auto Len = static_cast<int64_t>(CapLen);
-    if (Len > N) Len = N;
+    auto L = static_cast<int64_t>(Len);
+    if (L > N) L = N;
     auto* Data = static_cast<char*>(Buf);
-    if (Len > 0) std::memcpy(Data, CapBuf, static_cast<std::size_t>(Len));
-    for (int64_t I = Len; I < N; ++I) Data[I] = ' ';
+    if (L > 0) std::memcpy(Data, Src, static_cast<std::size_t>(L));
+    for (int64_t I = L; I < N; ++I) Data[I] = ' ';
 }
 
 void plang_readstr_begin(const void *S, int64_t Len) {
