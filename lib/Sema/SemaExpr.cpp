@@ -173,8 +173,11 @@ std::shared_ptr<Type> Sema::checkIdent(const IdentExpr& E) {
     // as a Builtin symbol -- so a plain lookup finds `eof` in every program
     // ever written.  What matters here is a declaration nearer than that one.
     if (const Symbol* S = Symtab.lookup(E.Name);
-            S && S->Kind != SymbolKind::Builtin)
+            S && S->Kind != SymbolKind::Builtin) {
         E.UserDeclared = true;
+        if (S->Kind == SymbolKind::Proc)
+            E.UserDeclaredCallable = true;
+    }
 
     // Inside a function body, the function's own name (or named result variable,
     // EP §6.7.2) is the result pseudo-variable.

@@ -80,14 +80,17 @@ llvm::Value* CGExprCore::emitExpr(const ExprNode& e) {
         // FUNCTION (ISO §6.2.2.10) -- e.g. `function pi: real`.  That leaves
         // no VarEntry for `ve` to catch, so `writeln(pi)` returned the
         // builtin constant while `writeln(pi())` already correctly called the
-        // user's function.  Sema's UserDeclared flag (set whenever the name
-        // resolves to a non-Builtin symbol in the scope it was written) is
-        // the same determination the CallExpr/CallStmt fix uses, so check it
-        // here too before falling back to the builtin.
+        // user's function. UserDeclaredCallable is narrower than the plain
+        // UserDeclared flag on purpose: an ordinary enum literal or named
+        // constant is also UserDeclared, and excluding those from the
+        // constant table here (as an earlier version of this fix did)
+        // broke their normal resolution -- only a redeclaration as a
+        // *procedure/function* should fall through to the call-resolution
+        // path below instead of the constant table.
         auto cit = Consts.find(toLower(n->Name));
         if (cit != Consts.end()
                 && !(ve && SymTab.isRequiredConst(toLower(n->Name)))
-                && !n->UserDeclared)
+                && !n->UserDeclaredCallable)
             return cit->second;
         // ISO §6.6.3.1 with §6.8.2.2: a parameterless functional parameter
         // named in an expression is a call too.  It has a VarEntry, so it
