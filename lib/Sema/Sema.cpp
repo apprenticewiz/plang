@@ -836,7 +836,33 @@ void Sema::checkBlock(const BlockNode& Block,
     // A type may be as wide as a constant says (array[1..max]), so constants
     // come first.  EP §6.8.7 then lets a constant be a structured value, which
     // names a type — the one thing here that has to wait for the types below.
+    //
+    // EP §6.2.1 also lets const and type sections interleave in any order, so
+    // a constant may just as well name an enum value whose type section
+    // appears LATER in this same block -- textual position within the
+    // free-order declaration part carries no meaning.  Phase 3 below is what
+    // actually defines those enum-value symbols, so any const that reaches
+    // for one not yet in scope has to wait for it too, the same as a
+    // structured-value const waits for the type it names.  Collecting the
+    // pending names up front (rather than just catching "undefined
+    // identifier" after the fact) is what tells that case apart from a
+    // genuinely undefined identifier, which must still be reported here.
     std::vector<const ConstDef*> StructuredConsts;
+    std::set<std::string> PendingEnumNames;
+    for (const auto& Td : Block.Types)
+        if (auto* En = llvm::dyn_cast<EnumTypeNode>(Td.Type.get()))
+            for (const auto& Val : En->Values)
+                PendingEnumNames.insert(toLower(Val));
+    auto refsPendingEnum = [&](const ExprNode* E) {
+        bool Found = false;
+        walkExprs(E, [&](const ExprNode* X) {
+            if (Found) return;
+            if (auto* Id = llvm::dyn_cast<IdentExpr>(X))
+                if (!Symtab.lookup(Id->Name) && PendingEnumNames.count(toLower(Id->Name)))
+                    Found = true;
+        });
+        return Found;
+    };
     auto defineConst = [&](const ConstDef& Cd) {
         auto ValType = checkExpr(*Cd.Value);
         Symbol S;
@@ -855,7 +881,8 @@ void Sema::checkBlock(const BlockNode& Block,
             error(Cd.Value->Loc, diag::err_duplicate_declaration, {Cd.Name});
     };
     for (const auto& Cd : Block.Consts) {
-        if (llvm::isa<StructuredValueExpr>(Cd.Value.get()))
+        if (llvm::isa<StructuredValueExpr>(Cd.Value.get())
+                || refsPendingEnum(Cd.Value.get()))
             StructuredConsts.push_back(&Cd);
         else
             defineConst(Cd);
@@ -995,7 +1022,9 @@ void Sema::checkBlock(const BlockNode& Block,
         // Schema symbols: skip (lazily resolved)
     }
 
-    // Phase 3d — The constants that name a type, now that the types exist.
+    // Phase 3d — The constants deferred above: ones that name a type, and
+    // ones that reach for an enum value whose type section sits later in
+    // this block, now that the types exist.
     for (const ConstDef* Cd : StructuredConsts) defineConst(*Cd);
 
     // Phase 4 — Variables
