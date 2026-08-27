@@ -76,9 +76,18 @@ llvm::Value* CGExprCore::emitExpr(const ExprNode& e) {
         // has not declared the name for something of its own: reading `pi`
         // gave 3.14159 in a program whose own `pi` had just been assigned to,
         // since the write went to the variable and the read never looked.
+        // A program may also redeclare a required constant's name as a
+        // FUNCTION (ISO §6.2.2.10) -- e.g. `function pi: real`.  That leaves
+        // no VarEntry for `ve` to catch, so `writeln(pi)` returned the
+        // builtin constant while `writeln(pi())` already correctly called the
+        // user's function.  Sema's UserDeclared flag (set whenever the name
+        // resolves to a non-Builtin symbol in the scope it was written) is
+        // the same determination the CallExpr/CallStmt fix uses, so check it
+        // here too before falling back to the builtin.
         auto cit = Consts.find(toLower(n->Name));
         if (cit != Consts.end()
-                && !(ve && SymTab.isRequiredConst(toLower(n->Name))))
+                && !(ve && SymTab.isRequiredConst(toLower(n->Name)))
+                && !n->UserDeclared)
             return cit->second;
         // ISO §6.6.3.1 with §6.8.2.2: a parameterless functional parameter
         // named in an expression is a call too.  It has a VarEntry, so it
