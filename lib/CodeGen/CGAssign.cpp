@@ -80,6 +80,25 @@ void CGAssign::emitAssign(const AssignStmt& s) {
         if (ExprIsVarStr(*s.Value)) {
             auto [addr, cap] = Schema.strAddrAndCap(*s.Value);
             dataPtr = addr ? Strings.strDataPtr(addr) : nullptr;
+            // EP §6.4.6(f): a string value is assignment-compatible with a
+            // char VARIABLE only when its length is exactly 1 -- char's own
+            // capacity, per §6.4.3.3.1.  Sema's isAssignCompatible allows the
+            // assignment on the strength of the TYPE alone (see
+            // SemaExpr.cpp), because unlike a char-array source, whose
+            // length the declared array size already answers at compile
+            // time, a string(n)'s length is a mutable run-time field of the
+            // value -- `s := 'xy'` on a string(5) leaves it at 2, not 1 --
+            // so this is the one check no earlier phase could make.
+            if (addr) {
+                auto* len = Strings.strLoadLen(addr);
+                auto* bad = B.CreateICmpNE(len, i64c(1), "charofstr.len.bad");
+                RangeGuards.emitGuard(bad, "charofstr", [&] {
+                    B.CreateCall(
+                        Strings.getStrFn("plang_err_str_length",
+                                         llvm::Type::getVoidTy(Ctx), {I64Ty, I64Ty}),
+                        {len, i64c(1)});
+                });
+            }
         } else if (ExprIsCharStr(*s.Value)) {
             dataPtr = EmitLValue(*s.Value);
         } else {
