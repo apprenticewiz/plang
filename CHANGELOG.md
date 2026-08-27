@@ -8,6 +8,8 @@ version numbers follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-08-27
+
 A third adversarial review round, prompted by the goal of making plang "bulletproof" before
 starting the Turbo Pascal (0.4.0) extensions -- 14 lenses, deliberately targeting ground the
 first two rounds left thin: deep `-g` interaction with every other feature, an `-O1`/`-O2`/`-O3`
