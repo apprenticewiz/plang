@@ -11,18 +11,35 @@ find_program(NOT_EXECUTABLE NAMES not
 find_program(SPLIT_FILE_EXECUTABLE NAMES split-file
              HINTS ${LLVM_TOOLS_BINARY_DIR})
 
-# WARNING, not FATAL_ERROR: PLANG_ENABLE_TESTS is already opt-in specifically
-# so building the compiler itself never forces a test dependency on anyone --
-# a developer who enabled it for the GoogleTest tier alone should not be
-# blocked by one lit tool's absence on their machine.  Not every LLVM
-# packaging bundles lit/FileCheck with the C++ tools the way this project's
-# own dev machine's does; see issue #34.
+# WARNING, not FATAL_ERROR by default: PLANG_ENABLE_TESTS is already opt-in
+# specifically so building the compiler itself never forces a test dependency
+# on anyone -- a developer who enabled it for the GoogleTest tier alone
+# should not be blocked by one lit tool's absence on their machine.  Not
+# every LLVM packaging bundles lit/FileCheck with the C++ tools the way this
+# project's own dev machine's does; see issue #34.
+#
+# PLANG_TESTS_REQUIRE_LIT flips this to FATAL_ERROR: CI sets it (issue #184)
+# because there, silently registering zero check-lit-*/lit-* CTest entries
+# is not a graceful degradation -- it is ctest exiting 0 having quietly run
+# only the small GoogleTest tier, with the ~2,000+ black-box tests never
+# even attempted.  A missing tool on a CI runner is a packaging regression,
+# not a matter of developer preference, and should fail the build the same
+# way any other missing required dependency would.
 if(NOT LIT_EXECUTABLE OR NOT FILECHECK_EXECUTABLE)
-    message(WARNING
+    # string(CONCAT ...), not set() with multiple arguments: set() joins
+    # multiple arguments into a semicolon-separated CMake *list*, and
+    # message() would then print those semicolons literally.
+    string(CONCAT _plang_lit_missing_msg
         "lit/FileCheck not found (looked in ${LLVM_TOOLS_BINARY_DIR} and "
         "PATH) -- the check-lit-* targets and their ctest entries will not "
         "be available. Try 'pip install lit' and re-configure, or pass "
         "-DLIT_EXECUTABLE=/path/to/lit directly.")
+    if(PLANG_TESTS_REQUIRE_LIT)
+        message(FATAL_ERROR
+            "${_plang_lit_missing_msg} PLANG_TESTS_REQUIRE_LIT is ON, so "
+            "this is fatal rather than a silent reduction in test coverage.")
+    endif()
+    message(WARNING "${_plang_lit_missing_msg}")
     return()
 endif()
 
