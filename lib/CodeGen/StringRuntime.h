@@ -50,6 +50,12 @@ public:
     void emitStrAssign(llvm::Value* dst, llvm::Value* capDst,
                        llvm::Value* src, llvm::Value* capSrc);
     void emitStrFromCStr(llvm::Value* dst, llvm::Value* cap, llvm::Value* cstr);
+    /// Length-aware counterpart to emitStrFromCStr: for a source whose
+    /// byte count is already known at compile time (a string literal),
+    /// so the runtime doesn't have to (and can't safely) rediscover it
+    /// with strlen -- a literal is free to contain an embedded NUL.
+    void emitStrFromBytes(llvm::Value* dst, llvm::Value* cap, llvm::Value* cstr,
+                          llvm::Value* len);
     void emitStrFromChar(llvm::Value* dst, llvm::Value* cap, llvm::Value* c);
 
 private:

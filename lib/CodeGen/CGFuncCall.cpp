@@ -245,7 +245,8 @@ llvm::Value* CGFuncCall::emitCallExpr(const CallExpr& e) {
         if (auto* sl = llvm::dyn_cast<StringLitExpr>(&arg)) {
             int64_t cap = (int64_t)sl->Value.size();
             auto* tmp = CreateEntryAlloca(Types.strStructType(cap), "str.arg");
-            Strings.emitStrFromCStr(tmp, i64c(cap), Strings.internStrPtr(sl->Value));
+            Strings.emitStrFromBytes(tmp, i64c(cap), Strings.internStrPtr(sl->Value),
+                                     i64c(cap));
             return {tmp, i64c(cap)};
         }
         // A bare char (a variable, not a literal): EP §6.7.6.7 accepts

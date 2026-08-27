@@ -72,6 +72,13 @@ void StringRuntime::emitStrFromCStr(llvm::Value* dst, llvm::Value* cap,
     B.CreateCall(fn, {dst, cap, cstr});
 }
 
+void StringRuntime::emitStrFromBytes(llvm::Value* dst, llvm::Value* cap,
+                                     llvm::Value* cstr, llvm::Value* len) {
+    auto* fn = getStrFn("plang_str_from_bytes",
+        llvm::Type::getVoidTy(Ctx), {ptrTy(), i64Ty(), ptrTy(), i64Ty()});
+    B.CreateCall(fn, {dst, cap, cstr, len});
+}
+
 void StringRuntime::emitStrFromChar(llvm::Value* dst, llvm::Value* cap,
                                     llvm::Value* c) {
     auto* fn = getStrFn("plang_str_from_char",
