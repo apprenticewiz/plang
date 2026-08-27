@@ -746,39 +746,92 @@ static bool reportIfWriteFailed(std::ostream& Os, const std::string& Name) {
 
 int frontendPC1Main(int Argc, char *Argv[]) {
     // The front end is a separate process from the driver and prints its own
-    // diagnostics, so it resolves its own catalog.  This is a prescan rather
-    // than a case in the loop below, because that loop reports as it goes and
-    // a locale chosen partway through would translate only the messages after
-    // it.
+    // diagnostics, so it resolves its own catalog and applies its own
+    // -w/-Werror/-Wno-<name>/-W<name>/-fcolor-diagnostics policy.  Both are a
+    // prescan rather than a case in the loop below, because that loop reports
+    // as it goes: a locale chosen partway through would translate only the
+    // messages after it, and a policy known only partway through would let
+    // "-Wbogus -w" print a warning that "-w -Wbogus" -- the same two flags,
+    // the other order -- would have suppressed.  Driver::configureDiagnostics
+    // is the same prescan for the same reason.
+    std::string_view         Lang;
+    bool                     ShowFuzzy        = false;
+    bool                     SuppressWarnings = false;
+    bool                     WarningsAsErrors = false;
+    std::vector<std::string> DisabledWarnings;
+    ColorDiagnostics         Color            = ColorDiagnostics::Auto;
     {
-        std::string_view Lang;
-        bool ShowFuzzy = false;
         constexpr std::string_view LangOpt = "-fdiagnostics-language=";
         for (int I = 2; I < Argc; ++I) {
             const std::string_view A = Argv[I];
-            if (A.starts_with(LangOpt))            Lang = A.substr(LangOpt.size());
+            if (A.starts_with(LangOpt))               Lang = A.substr(LangOpt.size());
             else if (A == "-fdiagnostics-show-fuzzy") ShowFuzzy = true;
+            else if (A == "-w")                       SuppressWarnings = true;
+            else if (A == "-Werror")                  WarningsAsErrors = true;
+            else if (A == "-Wall")                     DisabledWarnings.clear();
+            else if (A.starts_with("-Wno-") && A.size() > 5) {
+                const std::string Name(A.substr(5));
+                if (Name == "all") SuppressWarnings = true;
+                else                DisabledWarnings.push_back(Name);
+            } else if (A.starts_with("-W") && A.size() > 2) {
+                std::erase(DisabledWarnings, std::string(A.substr(2)));
+            } else if (auto C = colorDiagnosticsArg(A); C != ColorDiagnostics::Auto) {
+                Color = C;
+            }
         }
         (void)selectLocale(Lang, findInstallDir(Argc > 0 ? Argv[0] : nullptr),
                            ShowFuzzy);
     }
 
-    std::string              InputFile;
-    std::string              OutputFile;
-    std::string              Std;
-    bool                     SuppressWarnings = false;
-    bool                     WarningsAsErrors = false;
-    bool                     RangeChecks      = true;
-    bool                     NilChecks        = true;
-    unsigned                 OptLevel         = 0;
-    bool                     Debug            = false;
-    bool                     DumpAst          = false;
-    bool                     DumpTokens       = false;
-    bool                     DumpParseTree    = false;
-    std::vector<std::string> ModuleSearchPaths;
-    std::vector<std::string> DisabledWarnings;
-    unsigned                 ErrorLimit = 0;
-    ColorDiagnostics         Color      = ColorDiagnostics::Auto;
+    DiagnosticOptions DiagOpts;
+    DiagOpts.SuppressWarnings = SuppressWarnings;
+    DiagOpts.WarningsAsErrors = WarningsAsErrors;
+    DiagOpts.DisabledWarnings = std::move(DisabledWarnings);
+
+    DiagnosticsEngine Diags(std::move(DiagOpts));
+    SourceManager     SrcMgr;
+    // No Prefix: a front-end diagnostic with nowhere to point (a bad
+    // argument, same as a missing input file already reported this way)
+    // prints bare "error: ...", not "plang -pc1: error: ...".  clang -cc1
+    // differs from clang the same way, and the existing
+    // err_file_not_found/DriverDiagnostics tests already pin this down for
+    // the front end -- this Printer has to agree with them, since it is the
+    // one Scanner/Parser/Sema also print through.
+    DiagnosticPrinter Printer(SrcMgr, useColor(Color, isatty(STDERR_FILENO)));
+
+    // Prints whatever has not been printed yet.  report() below calls this
+    // after every command-line diagnostic, so each one appears as soon as it
+    // is found -- like Driver::diag() -- while the Scanner/Parser/Sema
+    // pipeline further down calls it in batches instead.  Tracking how much
+    // has already been printed, rather than replaying every diagnostic in
+    // Diags each time, is what keeps the two from ever printing the same one
+    // twice, whichever runs first.
+    size_t Flushed = 0;
+    auto emitAll = [&] {
+        for (; Flushed < Diags.size(); ++Flushed)
+            std::cerr << Printer.print(Diags[Flushed]) << "\n";
+    };
+    // Issue #276: every command-line diagnostic below used to print straight
+    // to std::cerr, so -w, -Werror and -Wno-<name> had no effect on any of
+    // them.  report() is this file's equivalent of Driver::diag(): apply
+    // that policy through DiagnosticsEngine like everything else in the
+    // compiler, and print immediately if it was not suppressed.
+    auto report = [&](DiagID ID, std::initializer_list<std::string_view> Args = {}) {
+        Diags.report(SourceLocation(), ID, Args);
+        emitAll();
+    };
+
+    std::string               InputFile;
+    std::string               OutputFile;
+    std::string               Std;
+    bool                      RangeChecks   = true;
+    bool                      NilChecks     = true;
+    unsigned                  OptLevel      = 0;
+    bool                      Debug         = false;
+    bool                      DumpAst       = false;
+    bool                      DumpTokens    = false;
+    bool                      DumpParseTree = false;
+    std::vector<std::string>  ModuleSearchPaths;
 
     // Options start at Argv[2]; Argv[0]="plang", Argv[1]="-pc1".
     for (int I = 2; I < Argc; ++I) {
@@ -805,7 +858,7 @@ int frontendPC1Main(int Argc, char *Argv[]) {
             OutputFile = Arg.substr(2);
         } else if (Arg == "-o") {
             if (I + 1 >= Argc) {
-                std::cerr << "plang -pc1: -o requires an argument\n";
+                report(diag::err_arg_requires_value, {"-o"});
                 return 1;
             }
             OutputFile = Argv[++I];
@@ -818,20 +871,18 @@ int frontendPC1Main(int Argc, char *Argv[]) {
         } else if (Arg.starts_with("-std=")) {
             Std = Arg.substr(5);
             if (!LangOptions::parseDialect(Std)) {
-                std::cerr << "plang -pc1: unknown Pascal dialect '" << Std
-                          << "'; known: " << LangOptions::knownDialects() << "\n";
+                report(diag::err_unknown_dialect,
+                       {Std, LangOptions::knownDialects()});
                 return 1;
             }
             if (!LangOptions::isImplementedDialect(Std)) {
-                std::cerr << "plang -pc1: dialect '" << Std
-                          << "' is not yet implemented; implemented dialects: "
-                          << LangOptions::implementedDialects() << "\n";
+                report(diag::err_dialect_not_implemented,
+                       {Std, LangOptions::implementedDialects()});
                 return 1;
             }
-        } else if (Arg == "-w") {
-            SuppressWarnings = true;
-        } else if (Arg == "-Werror") {
-            WarningsAsErrors = true;
+        } else if (Arg == "-w" || Arg == "-Werror") {
+            // Acted on by the prescan above; still matched here so this
+            // chain does not end in "unrecognized argument".
         } else if (Arg == "-frange-checks") {
             RangeChecks = true;
         } else if (Arg == "-fno-range-checks") {
@@ -841,7 +892,7 @@ int frontendPC1Main(int Argc, char *Argv[]) {
         } else if (Arg == "-fno-nil-checks") {
             NilChecks = false;
         } else if (Arg == "-fcolor-diagnostics" || Arg == "-fno-color-diagnostics") {
-            Color = colorDiagnosticsArg(Arg);
+            // Acted on by the prescan above; Printer's color is already set.
         } else if (Arg.size() == 3 && Arg.starts_with("-O")
                                    && Arg[2] >= '0' && Arg[2] <= '3') {
             OptLevel = static_cast<unsigned>(Arg[2] - '0');
@@ -857,7 +908,7 @@ int frontendPC1Main(int Argc, char *Argv[]) {
             ModuleSearchPaths.push_back(Arg.substr(2));
         } else if (Arg == "-I") {
             if (I + 1 >= Argc) {
-                std::cerr << "plang -pc1: -I requires an argument\n";
+                report(diag::err_arg_requires_value, {"-I"});
                 return 1;
             }
             ModuleSearchPaths.push_back(Argv[++I]);
@@ -865,7 +916,7 @@ int frontendPC1Main(int Argc, char *Argv[]) {
             const std::string N = Arg.substr(14);
             if (N.find_first_not_of("0123456789") != std::string::npos ||
                 N.empty()) {
-                std::cerr << "plang -pc1: -ferror-limit= requires a number\n";
+                report(diag::err_ferror_limit_not_a_number);
                 return 1;
             }
             // N is all-digits and non-empty, but that alone does not mean it
@@ -878,42 +929,43 @@ int frontendPC1Main(int Argc, char *Argv[]) {
             unsigned Parsed = 0;
             auto [Ptr, Ec] = std::from_chars(N.data(), N.data() + N.size(), Parsed);
             if (Ec != std::errc{}) {
-                std::cerr << "plang -pc1: -ferror-limit= value '" << N
-                           << "' is too large\n";
+                report(diag::err_ferror_limit_too_large, {N});
                 return 1;
             }
-            ErrorLimit = Parsed;
+            DiagnosticOptions O = Diags.options();
+            O.ErrorLimit = Parsed;
+            Diags.setOptions(std::move(O));
         } else if (Arg == "-Wall") {
-            // Every warning is on already; -Wall is accepted so that a command
-            // line written for another compiler does not have to be edited.
-            DisabledWarnings.clear();
+            // Acted on by the prescan above.
         } else if (Arg.starts_with("-Wno-") && Arg.size() > 5) {
-            std::string Name = Arg.substr(5);
-            if (Name == "all") { SuppressWarnings = true; continue; }
-            if (getWarningNamed(Name) == diag::none) {
-                std::cerr << "plang -pc1: warning: unknown warning '" << Arg
-                          << "'\n";
-                continue;
-            }
-            DisabledWarnings.push_back(std::move(Name));
+            const std::string Name = Arg.substr(5);
+            if (Name != "all" && getWarningNamed(Name) == diag::none)
+                report(diag::warn_unknown_warning_name, {Arg});
+            // DisabledWarnings, and -Wno-all's SuppressWarnings, were
+            // already captured by the prescan above.
         } else if (Arg.starts_with("-W") && Arg.size() > 2) {
-            std::string Name = Arg.substr(2);
-            if (getWarningNamed(Name) == diag::none) {
-                std::cerr << "plang -pc1: warning: unknown warning '" << Arg
-                          << "'\n";
-                continue;
-            }
-            std::erase(DisabledWarnings, Name);
+            const std::string Name = Arg.substr(2);
+            if (getWarningNamed(Name) == diag::none)
+                report(diag::warn_unknown_warning_name, {Arg});
+            // DisabledWarnings already updated by the prescan above.
         } else if (!Arg.empty() && Arg[0] == '-') {
-            std::cerr << "plang -pc1: warning: unrecognized argument '" << Arg << "'\n";
+            report(diag::warn_unrecognized_argument, {Arg});
         } else {
             if (!InputFile.empty()) {
-                std::cerr << "plang -pc1: error: only one input file is supported\n";
+                report(diag::err_multiple_input_files);
                 return 1;
             }
             InputFile = Arg;
         }
     }
+
+    // -Werror can turn a warning reported above (an unknown -W name, an
+    // unrecognized argument) into an error; checked once here, after the
+    // whole command line has been read, so a -Werror anywhere on the line
+    // still catches a warning from earlier on it -- order-independent, the
+    // same way Driver::run() checks its own Diags_ once after parseArgs
+    // rather than after each diagnostic.
+    if (Diags.hasErrors()) return 1;
 
     if (InputFile.empty()) {
         usagePC1();
@@ -932,20 +984,6 @@ int frontendPC1Main(int Argc, char *Argv[]) {
     Opts.Debug             = Debug;
     Opts.ModuleSearchPaths = std::move(ModuleSearchPaths);
 
-    DiagnosticOptions DiagOpts;
-    DiagOpts.SuppressWarnings = SuppressWarnings;
-    DiagOpts.WarningsAsErrors = WarningsAsErrors;
-    DiagOpts.DisabledWarnings = std::move(DisabledWarnings);
-    DiagOpts.ErrorLimit       = ErrorLimit;
-
-    DiagnosticsEngine Diags(std::move(DiagOpts));
-    SourceManager     SrcMgr;
-
-    DiagnosticPrinter Printer(SrcMgr, useColor(Color, isatty(STDERR_FILENO)));
-    auto emitAll = [&] {
-        for (const auto &D : Diags) std::cerr << Printer.print(D) << "\n";
-    };
-
     // Route output: a dump mode or LLVM IR, to stdout or a named file.  Moved
     // above the Scanner/Parser/Sema pipeline so -dump-tokens (Scanner-only)
     // and -dump-parse-tree (Scanner+Parser, no Sema) can both use it to stop
@@ -958,7 +996,7 @@ int frontendPC1Main(int Argc, char *Argv[]) {
         }
         std::ofstream F(OutputFile);
         if (!F) {
-            std::cerr << "plang -pc1: cannot open output file '" << OutputFile << "'\n";
+            report(diag::err_cannot_open_output_file, {OutputFile});
             return 1;
         }
         action(F);
@@ -966,8 +1004,20 @@ int frontendPC1Main(int Argc, char *Argv[]) {
         return reportIfWriteFailed(F, OutputFile) ? 1 : 0;
     };
 
+    // A path that exists but names a directory reads back empty through
+    // std::ifstream (issue #275 -- the front end's own entry point never got
+    // the guard issue #125/#134 added to the driver's): without this, Scanner
+    // below would construct successfully with no tokens at all, and every
+    // stage past it would report nothing but "expected 'program', got end of
+    // file" and the cascade that follows, instead of one diagnostic naming
+    // the real problem.
+    if (llvm::sys::fs::is_directory(InputFile)) {
+        report(diag::err_is_a_directory, {InputFile});
+        return 1;
+    }
+
     Scanner Sc(SrcMgr, InputFile, Diags, Opts);
-    if (!Diags.empty()) { emitAll(); return 1; }
+    if (Diags.hasErrors()) { emitAll(); return 1; }
     // Captured before the move below takes Sc apart; -g's DIFile/DICompileUnit
     // need it and have no other way to ask which buffer was the main one.
     const FileID MainFileID = Sc.fileID();
@@ -982,7 +1032,7 @@ int frontendPC1Main(int Argc, char *Argv[]) {
                 if (T.Kind == TokenKind::Eof) break;
             }
         });
-        if (!Diags.empty()) { emitAll(); return 1; }
+        if (Diags.hasErrors()) { emitAll(); return 1; }
         return Rc;
     }
 
@@ -1029,7 +1079,7 @@ int frontendPC1Main(int Argc, char *Argv[]) {
 
     std::ofstream F(OutputFile);
     if (!F) {
-        std::cerr << "plang -pc1: cannot open output file '" << OutputFile << "'\n";
+        report(diag::err_cannot_open_output_file, {OutputFile});
         return 1;
     }
     const bool EmitOk = Cg.emit(*Program, F);

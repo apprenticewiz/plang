@@ -1,21 +1,33 @@
-// DiagnosticDriverKinds.def — Driver diagnostics.
+// DiagnosticDriverKinds.def — Driver / front-end command-line diagnostics.
 // Included by DiagnosticMessages.def.
 //
-// These are the only diagnostics with nothing to point at: the driver is
-// reporting on the command line or on the toolchain, not on a place in a
-// Pascal source file.  DiagnosticPrinter writes them under the program name
-// instead of a file, line and column — "plang: error: no input files".
+// These are the only diagnostics with nothing to point at: the driver or the
+// front end (plang -pc1, reached directly or re-invoked as a subprocess by
+// the driver) is reporting on the command line or on the toolchain, not on a
+// place in a Pascal source file.  The driver's DiagnosticPrinter writes them
+// under the program name in place of a file, line and column — "plang:
+// error: no input files".  The front end's does not: like clang -cc1, it
+// prints "error: ..." with no program-name prefix, the same as it already
+// did for err_file_not_found — see the DriverDiagnostics tests that check
+// the driver and the front end agree on that message except for the prefix.
 //
 // A missing input file is not here.  The scanner already catalogs that as
 // err_file_not_found, with the wording the driver was using anyway, and one
 // message for one condition is the point of a shared catalog.
 
 DIAG(err_no_input_files, Error, "no input files")
+// The front end's own complaint when given more than one bare filename.
+// The driver never causes this: multi-file mode re-invokes the front end
+// once per input, one bare filename apiece.
+DIAG(err_multiple_input_files, Error, "only one input file is supported")
 // A path that exists but names a directory, not a file -- passed where an
 // input file is expected.  Without this check the front end went on to try
 // reading it as source, which succeeds at open() but reads back empty,
 // producing a cascade of unrelated "expected X, got end of file" parser
-// errors instead of one diagnostic naming the real problem.
+// errors instead of one diagnostic naming the real problem.  Issue #275 was
+// this same gap in the front end's own entry point: issue #125/#134 added
+// the check (and this diagnostic) only to the driver's, which a direct
+// "plang -pc1 somedir/" never passes through.
 DIAG(err_is_a_directory, Error, "is a directory, not a file: '%0'")
 // -o names the same file as one of the inputs (issue #148).  Compared on
 // resolved (canonical/absolute) paths, not the literal command-line
@@ -25,6 +37,9 @@ DIAG(err_is_a_directory, Error, "is a directory, not a file: '%0'")
 // "fatal error: input file ... is the same as output file".
 DIAG(err_input_output_same, Error,
      "input file '%0' is the same as output file")
+// The front end's own -o, or a dump mode's implicit output file, named a
+// path that could not be opened for writing.
+DIAG(err_cannot_open_output_file, Error, "cannot open output file '%0'")
 DIAG(err_arg_requires_value, Error, "%0 requires an argument")
 // -o given an explicitly empty value (issue #286), e.g. "plang -o "$X" foo.pas"
 // where $X is unset -- a shell passes that through as a real, if empty,
@@ -38,6 +53,15 @@ DIAG(err_unknown_dialect, Error,
      "unknown Pascal dialect '%0'; valid dialects: %1")
 DIAG(err_dialect_not_implemented, Error,
      "dialect '%0' is not yet implemented; implemented dialects: %1")
+// -ferror-limit=<N>: N was not all-digits (including empty, or a leading
+// '-'), so there is no number to parse at all.
+DIAG(err_ferror_limit_not_a_number, Error, "-ferror-limit= requires a number")
+// -ferror-limit=<N>: N was all-digits but too big for ErrorLimit's unsigned
+// range.  Caught with std::from_chars's own error code rather than
+// std::stoul, which would throw std::out_of_range under this project's
+// -fno-exceptions build.
+DIAG(err_ferror_limit_too_large, Error,
+     "-ferror-limit= value '%0' is too large")
 
 // Toolchain: plang drives llc and a linker.  On ELF targets that is ld.lld,
 // linking against the C runtime that the host GCC installation provides the
@@ -69,3 +93,12 @@ DIAG(err_cannot_create_temp_file, Error, "cannot create temporary file: %0")
 // send a reader to a flag that does not exist.  A command line is syntax
 // and is not translated, even between two spellings of English.
 DIAG(warn_unrecognized_argument, Warning, "unrecognized argument '%0'")
+// -Wno-<name> or -W<name> where <name> answers to no cataloged warning.
+// Cataloged as its own warning, like warn_unrecognized_argument above, so
+// that -Werror still makes it fatal and -w or -Wno-unknown-warning-name
+// still silences it -- issue #276: this used to be an unconditional
+// std::cerr print in the front end that neither honoured.  Only the front
+// end reports this: the driver parses the same -W options but leaves
+// naming an unknown one to the front end, so it is not said twice (see
+// Driver::configureDiagnostics).
+DIAG(warn_unknown_warning_name, Warning, "unknown warning '%0'")
