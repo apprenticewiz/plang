@@ -100,7 +100,33 @@ void Sema::warnIfComparisonIsSettled(const BinaryExpr& E, const Type& Lt,
 // Expression checking
 // ---------------------------------------------------------------------------
 
+// Ceiling on live checkExpr activations (Sema::ExprDepth).  1000 levels of
+// recursion through checkExpr -> checkBinary/checkUnary/... -> checkExpr is
+// well under the crash threshold observed empirically on this build's
+// default 8MB stack (a flat chain starts crashing a few thousand terms in),
+// while no legitimate Pascal expression -- handwritten or reasonably
+// generated -- nests anywhere close to this deep. Unlike deeply NESTED
+// parenthesized input, which Parser::ExprDepth (see ParseExpr.cpp) already
+// bounds, a flat operator chain like `1+1+1+...+1` is parsed ITERATIVELY by
+// precedence climbing, so its AST can be arbitrarily deep with no parser-side
+// ceiling on it; checkExpr's own recursive walk of that AST is the first
+// place this needs a guard.
+static constexpr unsigned MaxExprDepth = 1000;
+
 std::shared_ptr<Type> Sema::checkExpr(const ExprNode& E) {
+    // See MaxExprDepth above. Checked before the RAII bump: a caller already
+    // sitting at the ceiling must return without recursing again, not recurse
+    // once more and only then stop.
+    if (ExprDepth >= MaxExprDepth) {
+        if (!ExprDepthLimitHit) {
+            ExprDepthLimitHit = true;
+            error(E.Loc, diag::err_expr_too_deeply_nested);
+        }
+        E.ResolvedType = TyErr;
+        return TyErr;
+    }
+    ExprDepthScope DepthGuard(ExprDepth, ExprDepthLimitHit);
+
     std::shared_ptr<Type> T;
 
     if (llvm::dyn_cast<IntLitExpr>(&E))
