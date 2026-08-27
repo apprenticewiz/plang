@@ -916,13 +916,20 @@ int frontendPC1Main(int Argc, char *Argv[]) {
     emitAll();
     if (!Ok) return 1;
 
+    // -dump-ast is a read-only inspection mode -- like -dump-tokens and
+    // -dump-parse-tree above, it must return before anything that writes to
+    // the source tree.  Checked before writePMIFiles below, not after: Sema
+    // has already run by this point (the AST dump reflects its results), but
+    // the .pmi side effect that normal compilation needs for later separate
+    // compilation must not happen just because someone asked to look at the
+    // AST.
+    if (DumpAst)
+        return withOutput([&](std::ostream& Os) { printAst(*Program, Os); });
+
     // Write .pmi files for any module bodies found in this compilation unit.
     // This is a no-op for pure-program files (no OwnedModules).
     if (!Program->OwnedModules.empty())
         writePMIFiles(*Program, InputFile);
-
-    if (DumpAst)
-        return withOutput([&](std::ostream& Os) { printAst(*Program, Os); });
 
     // withOutput opens the file then calls the action; we need emit's bool result.
     Codegen Cg(Opts);
