@@ -1455,11 +1455,28 @@ std::optional<uint64_t> Sema::byteSizeOf(const Type& T, FieldOffsets* Offsets) {
         return roundUp(8 + 8 + 8 + 4 + 1 + 1 + 1, 8);
     case TypeKind::Array: {
         if (!T.IndexType || !T.ElemType) return std::nullopt;
-        const int64_t Count = T.IndexType->SubHi - T.IndexType->SubLo + 1;
-        if (Count <= 0) return std::nullopt;
+        // ordinalRangeCount, not "SubHi - SubLo + 1" directly: that plain
+        // int64_t subtraction is signed-overflow UB once the bounds are far
+        // enough apart (array[0..maxint], array[-maxint-1..maxint], ...),
+        // and used to silently wrap into a plausible-looking small or
+        // negative count instead of the astronomically large one the
+        // declaration actually asks for -- which let it slip past the
+        // "Count <= 0" rejection below and past the 1 GiB global-variable
+        // gate this function feeds (issue #214).
+        const auto Count = ordinalRangeCount(T.IndexType->SubLo, T.IndexType->SubHi);
+        // A count that does not even fit a uint64_t is not "unknown" the way
+        // a missing IndexType/ElemType is -- it is known to be enormous,
+        // just not exactly.  Reporting it as the largest size this function
+        // can return keeps every caller's size comparison (the global
+        // variable gate, codegen's cross-check against what it actually laid
+        // out) a rejection instead of a silently skipped one, without either
+        // of them having to know this function's own arithmetic.
+        if (!Count) return UINT64_MAX;
+        if (*Count == 0) return std::nullopt; // empty range: no storage to size
         const auto Elem = byteSizeOf(*T.ElemType);
         if (!Elem) return std::nullopt;
-        return static_cast<uint64_t>(Count) * *Elem;
+        const auto Size = checkedMul64(*Count, *Elem);
+        return Size ? *Size : UINT64_MAX;
     }
     // A schema instance is deliberately absent.  One declaration serves every
     // instantiation and its field denoters carry the annotation of whichever
