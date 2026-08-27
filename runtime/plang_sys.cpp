@@ -481,6 +481,20 @@ void plang_err_schema_disc(const char *Name, int64_t Dst, int64_t Src) {
     std::exit(PlangRuntimeErrorStatus);
 }
 
+/// EP §6.7.5.6: reset/rewrite/extend/update failing to open the external
+/// file they were given (missing file, permission denied, an internal
+/// temporary that could not even be created, ...) is a dynamic-violation
+/// exactly like the file-wrong-mode check just above -- not an
+/// internal-invariant abort()/SIGABRT.  \p Msg is the diagnostic detail
+/// plang_file.cpp's caller has already worded for its own open attempt; this
+/// only supplies the shared "flush stdout, report, exit" convention every
+/// other runtime check here follows (issue #150).
+[[noreturn]] void plang_err_cannot_open(const char *Msg) {
+    std::fflush(stdout);
+    std::fprintf(stderr, "plang runtime: %s\n", Msg);
+    std::exit(PlangRuntimeErrorStatus);
+}
+
 } // extern "C"
 
 } // namespace plang

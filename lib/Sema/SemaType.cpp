@@ -595,13 +595,37 @@ std::shared_ptr<Type> Sema::resolveTypeImpl(const TypeNode& Node) {
         std::vector<Type::SchemaDisc> Discs;
         bool HasError = false;
         for (size_t I = 0; I < Sym->SchemaDeclParams.size(); ++I) {
-            (void)checkExpr(*N->Actuals[I]); // type-check for diagnostics
+            auto At = checkExpr(*N->Actuals[I]); // type-check for diagnostics
+            // Check ordinality first and independently of constness -- unlike
+            // new()'s discriminant path (see its own comment on this exact
+            // class of bug), which checks isOrdinal()/isAssignCompatible()
+            // against the discriminant's own declared type, this loop used to
+            // call only constBound() and accept whatever value happened to
+            // fold. `Vec('a')` for `Vec(n: integer)` folded 'a' to its ordinal
+            // value and sailed through uncaught; `Vec(3.5)` is a real constant
+            // (not ordinal at all) but reported the misleading "must be a
+            // constant expression", conflating "not constant" with "wrong
+            // type". Checking ordinality up front, ahead of constBound(),
+            // gives Vec(3.5) the correct wrong-type diagnostic too.
+            if (At && !At->isError() && !At->isOrdinal()) {
+                error(N->Actuals[I]->Loc, diag::err_schema_new_disc_type,
+                      {Sym->SchemaDeclParams[I].Name, N->Name});
+                HasError = true;
+                continue;
+            }
             const auto Val = constBound(*N->Actuals[I]);
             if (!Val) {
                 error(N->Actuals[I]->Loc, diag::err_schema_disc_not_const,
                       {Sym->SchemaDeclParams[I].Name});
                 HasError = true;
             } else {
+                if (At && !At->isError() && Sym->SchemaDeclParams[I].Ty
+                        && !Sym->SchemaDeclParams[I].Ty->isError()
+                        && !isAssignCompatible(*Sym->SchemaDeclParams[I].Ty, *At)) {
+                    error(N->Actuals[I]->Loc, diag::err_assign_mismatch,
+                          {At->Name, Sym->SchemaDeclParams[I].Ty->Name});
+                    HasError = true;
+                }
                 Discs.push_back({.Name  = Sym->SchemaDeclParams[I].Name,
                                  .Value = *Val,
                                  .Ty    = Sym->SchemaDeclParams[I].Ty});

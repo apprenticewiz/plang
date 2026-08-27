@@ -1,6 +1,9 @@
 #include "SchemaLayoutEngine.h"
 
+#include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/Constants.h"
+#include "llvm/IR/Function.h"
+#include "llvm/IR/Intrinsics.h"
 #include "llvm/Support/Casting.h"
 
 #include "plang/AST/Ast.h"
@@ -241,7 +244,71 @@ llvm::Value* SchemaLayoutEngine::rtSizeOfTypeNode(const TypeNode* tn) {
             B.CreateICmpSLT(count, i64c(1)), i64c(1), count, "arr.count.min");
         auto* stride = alignUpV(rtSizeOfTypeNode(at->Element.get()),
                                 rtAlignOfTypeNode(at->Element.get()));
-        return B.CreateMul(count, stride, "arr.size");
+        // Sibling to the overflow guard in SchemaAccess::schemaBodySize, for
+        // the far more common shape that walk does not cover: a schema whose
+        // body is a RECORD with a run-time-varying array FIELD, rather than
+        // an array body directly.  There the element size is a compile-time
+        // constant, so the threshold on count could be folded at codegen
+        // time; here `stride` is itself a run-time value (the element may
+        // itself be a nested varying array/record), so the multiply needs an
+        // actual overflow check rather than a precomputed bound.
+        // `new(q, 2305843009213693953)` on a record field `array[1..n] of
+        // real` makes count 2^61+1 and stride 8 at run time: count*stride
+        // wraps past 2^64 and lands back on a small positive i64, which
+        // plang_new's own negative-size check does not catch, so the wrapped
+        // allocation succeeds at a fraction of its real size while every
+        // index up to the original, unwrapped bound still range-checks
+        // against the full declared extent -- a silent heap buffer overflow
+        // on the first out-of-range-but-in-bound store.
+        //
+        // This same walk also runs from CGTypes' static-layout cross-check
+        // (checkSizeAgreement/checkSchemaFieldOffsetAgreement) purely to
+        // compare its answer against the DataLayout's, for a FIXED
+        // (non-varying) schema instance with every discriminant bound to a
+        // ConstantInt -- sometimes with no live function/insertion point at
+        // all.  A fixed instance's own extent was already validated by Sema
+        // (Sema::byteSizeOf succeeds before this cross-check ever runs), so
+        // count and stride fold to ConstantInt there and neither branch nor
+        // overflow is reachable; the multiply is done directly on the
+        // constants so nothing needs to insert an instruction.  A literal
+        // discriminant in real user code (`new(q, 2305843...)`) folds count
+        // to a ConstantInt too, but that happens inside an actual function
+        // body being emitted for a genuinely run-time-varying schema, where
+        // Sema draws no such bound on the discriminant's value -- there
+        // count*stride is checked for overflow at compile time and, only
+        // when it actually does overflow, a real function/block is
+        // guaranteed to be live to hold the trap.
+        if (auto* countC = llvm::dyn_cast<llvm::ConstantInt>(count)) {
+            if (auto* strideC = llvm::dyn_cast<llvm::ConstantInt>(stride)) {
+                bool overflow = false;
+                llvm::APInt product =
+                    countC->getValue().umul_ov(strideC->getValue(), overflow);
+                if (!overflow)
+                    return llvm::ConstantInt::get(i64Ty(), product);
+                // Falls through to the run-time guard below, which needs a
+                // live function to branch in -- guaranteed here since a
+                // fixed, Sema-validated instance can never reach this arm.
+            }
+        }
+
+        auto* mulFn = llvm::Intrinsic::getOrInsertDeclaration(
+            &Mod, llvm::Intrinsic::umul_with_overflow, {i64Ty()});
+        auto* pair = B.CreateCall(mulFn, {count, stride}, "arr.size.mul");
+        auto* size = B.CreateExtractValue(pair, 0, "arr.size");
+        auto* overflowed = B.CreateExtractValue(pair, 1, "arr.size.overflow");
+
+        auto* curFn = B.GetInsertBlock()->getParent();
+        auto* failBB = llvm::BasicBlock::Create(Ctx, "arr.size.fail", curFn);
+        auto* contBB = llvm::BasicBlock::Create(Ctx, "arr.size.ok", curFn);
+        B.CreateCondBr(overflowed, failBB, contBB);
+        B.SetInsertPoint(failBB);
+        B.CreateCall(
+            RtFns.getExternFnN("plang_err_bad_alloc_size",
+                               llvm::Type::getVoidTy(Ctx), {i64Ty()}),
+            {count});
+        B.CreateUnreachable(); // the reporter is [[noreturn]]
+        B.SetInsertPoint(contBB);
+        return size;
     }
     if (auto* rt = llvm::dyn_cast<RecordTypeNode>(d)) {
         llvm::Value* off = rtWalkFields(rt->Fields, i64c(0), rt->Packed,

@@ -495,8 +495,9 @@ void Codegen::Impl::init(const std::string& progName) {
 // ====================================================================
 
 void Codegen::Impl::defVar(const std::string& name, llvm::Value* ptr, llvm::Type* type,
-                            const TypeNode* typeNode, llvm::Value* debugIndirectPtr) {
-    symTab_->defVar(name, ptr, type, typeNode, debugIndirectPtr);
+                            const TypeNode* typeNode, llvm::Value* debugIndirectPtr,
+                            bool suppressDebugDecl) {
+    symTab_->defVar(name, ptr, type, typeNode, debugIndirectPtr, suppressDebugDecl);
 }
 
 const VarEntry* Codegen::Impl::findVar(const std::string& name) const {

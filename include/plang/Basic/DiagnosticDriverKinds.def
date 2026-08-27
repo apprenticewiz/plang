@@ -17,6 +17,14 @@ DIAG(err_no_input_files, Error, "no input files")
 // producing a cascade of unrelated "expected X, got end of file" parser
 // errors instead of one diagnostic naming the real problem.
 DIAG(err_is_a_directory, Error, "is a directory, not a file: '%0'")
+// -o names the same file as one of the inputs (issue #148).  Compared on
+// resolved (canonical/absolute) paths, not the literal command-line
+// spellings, so "plang foo.pas -o ./foo.pas" is caught too -- and checked
+// before any compilation or writing starts, so the source is never
+// truncated out from under itself.  Wording matches gcc/clang's
+// "fatal error: input file ... is the same as output file".
+DIAG(err_input_output_same, Error,
+     "input file '%0' is the same as output file")
 DIAG(err_arg_requires_value, Error, "%0 requires an argument")
 DIAG(err_unknown_dialect, Error,
      "unknown Pascal dialect '%0'; valid dialects: %1")
