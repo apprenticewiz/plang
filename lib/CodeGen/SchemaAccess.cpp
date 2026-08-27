@@ -270,7 +270,7 @@ llvm::Value* SchemaAccess::schemaBodySize(const plang::Type& schema,
                        "sch.bytes");
 }
 
-void SchemaAccess::emitNewSchema(const ExprNode& ptrArg,
+SchemaAccess::SchemaRef SchemaAccess::emitNewSchema(const ExprNode& ptrArg,
                                   const plang::Type& schema,
                                   std::span<const std::unique_ptr<ExprNode>> discArgs) {
     const size_t s = schema.SchemaDiscs.size();
@@ -280,10 +280,22 @@ void SchemaAccess::emitNewSchema(const ExprNode& ptrArg,
 
     std::vector<llvm::Value*> discs;
     discs.reserve(s);
-    for (const auto& a : discArgs) {
-        auto* v = ToI64(EmitExpr(*a));
+    for (size_t i = 0; i < s; ++i) {
+        auto* v = ToI64(EmitExpr(*discArgs[i]));
         if (!v) codegenICE("discriminant of new() for schema '" + schema.SchemaName
                            + "' is not an integer value");
+        // EP §6.7.5.3: an actual discriminant must be assignment-compatible
+        // with its formal's declared type -- the same rule an ordinary
+        // assignment enforces (CGAssign.cpp).  Sema already rejects an
+        // actual whose static TYPE is flatly incompatible (checkBuiltinCall,
+        // SemaStmt.cpp); a value that is in-domain but out of RANGE --
+        // `new(p, 500)` for a discriminant declared `n: 1..10` -- is a
+        // run-time question exactly as `x := 500` is for `var x: 1..10`,
+        // and was going straight into the header with no check at all.
+        if (const auto& Ty = schema.SchemaDiscs[i].Ty;
+                Ty && Ty->Kind == TypeKind::Subrange && Ty->SubLo != Ty->SubHi)
+            RangeGuards.emitRangeCheck(v, Ty->SubLo, Ty->SubHi, /*isIndex=*/false,
+                                       discArgs[i]->Loc);
         discs.push_back(v);
     }
 
@@ -301,6 +313,14 @@ void SchemaAccess::emitNewSchema(const ExprNode& ptrArg,
     auto* addr = EmitLValue(ptrArg);
     if (!addr) codegenICE("new() target is not addressable");
     B.CreateStore(base, addr);
+
+    // The body starts just past the header just written; handed back so a
+    // caller can apply the body's initial state (EP §6.6) against the SAME
+    // discriminants, rather than re-evaluating discArgs -- which ISO
+    // §6.8.2.2 asks be evaluated once -- a second time to get them again.
+    auto* data = B.CreateGEP(I8Ty, base,
+        {llvm::ConstantInt::get(I64Ty, static_cast<int64_t>(hdrBytes))}, "sch.data");
+    return SchemaRef{&schema, data, std::move(discs)};
 }
 
 llvm::Value* SchemaAccess::exprStrCapV(const ExprNode& e) {

@@ -6,6 +6,7 @@
 #include <functional>
 #include <optional>
 #include <string>
+#include <vector>
 
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/IRBuilder.h"
@@ -44,6 +45,8 @@ public:
                std::function<const plang::TypeNode*(const plang::TypeNode*)> InitialStateShapeOf,
                std::function<bool(const plang::TypeNode*)> HasInitialState,
                std::function<void(llvm::Value*, llvm::Type*, const plang::TypeNode*)> EmitInitialState,
+               std::function<void(llvm::Value*, const plang::Type&,
+                                  const std::vector<llvm::Value*>&)> EmitSchemaInitialState,
                std::function<llvm::Value*(const std::string&)> BuildStaticLinkFrame,
                std::function<const plang::ProcedureTypeNode*(const std::string&, size_t)> ProcParamArg,
                std::function<bool(const std::string&, size_t)> ParamIsByRef,
@@ -59,6 +62,7 @@ public:
           InitialStateShapeOf(std::move(InitialStateShapeOf)),
           HasInitialState(std::move(HasInitialState)),
           EmitInitialState(std::move(EmitInitialState)),
+          EmitSchemaInitialState(std::move(EmitSchemaInitialState)),
           BuildStaticLinkFrame(std::move(BuildStaticLinkFrame)),
           ProcParamArg(std::move(ProcParamArg)), ParamIsByRef(std::move(ParamIsByRef)),
           ConformantDimsOf(std::move(ConformantDimsOf)),
@@ -91,6 +95,13 @@ private:
     std::function<const plang::TypeNode*(const plang::TypeNode*)> InitialStateShapeOf;
     std::function<bool(const plang::TypeNode*)> HasInitialState;
     std::function<void(llvm::Value*, llvm::Type*, const plang::TypeNode*)> EmitInitialState;
+    /// EP §6.6 with §6.4.7: the same idea as EmitInitialState, for a schema
+    /// instance's body -- which, new()'s discriminants being run-time values
+    /// in general, is laid out at run time and so cannot share that one's
+    /// static llvm::Type* / GEP-by-index walk.  See Codegen::Impl::
+    /// emitSchemaInitialState.
+    std::function<void(llvm::Value*, const plang::Type&,
+                       const std::vector<llvm::Value*>&)> EmitSchemaInitialState;
     std::function<llvm::Value*(const std::string&)> BuildStaticLinkFrame;
     std::function<const plang::ProcedureTypeNode*(const std::string&, size_t)> ProcParamArg;
     std::function<bool(const std::string&, size_t)> ParamIsByRef;

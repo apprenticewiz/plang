@@ -1,0 +1,21 @@
+(*
+RUN: %plang -std=iso10206 %s -o %t
+RUN: %run %t | FileCheck --strict-whitespace --match-full-lines %s
+*)
+
+(*
+CHECK:7
+CHECK-NEXT:hello 7 20
+*)
+
+program p(output);
+type t(n: integer) = record
+       s: string(n); k: integer value 7;
+       a: array[1..n] of integer end;
+var q: ^t; i: integer;
+begin
+  new(q, 20);
+  writeln(q^.k:1);
+  q^.s := 'hello'; for i := 1 to 20 do q^.a[i] := i;
+  writeln(q^.s, ' ', q^.k:1, ' ', q^.a[20]:1)
+end.

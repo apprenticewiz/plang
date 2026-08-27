@@ -306,6 +306,9 @@ void Codegen::Impl::init(const std::string& progName) {
         [this](const TypeNode* tn){ return hasInitialState(tn); },
         [this](llvm::Value* ptr, llvm::Type* ty, const TypeNode* tn){
             emitInitialState(ptr, ty, tn); },
+        [this](llvm::Value* bodyAddr, const plang::Type& schema,
+               const std::vector<llvm::Value*>& discs){
+            emitSchemaInitialState(bodyAddr, schema, discs); },
         [this](const std::string& mangledName){ return buildStaticLinkFrame(mangledName); },
         [this](const std::string& mangledName, size_t astArgIdx){
             return procParamArg(mangledName, astArgIdx); },

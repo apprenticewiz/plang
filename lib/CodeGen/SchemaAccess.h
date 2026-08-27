@@ -109,7 +109,11 @@ public:
     llvm::Type* schemaStorageType(const SchemaRef& ref);
     llvm::Value* schemaBodySize(const plang::Type& schema,
                                 const std::vector<llvm::Value*>& discs);
-    void emitNewSchema(const plang::ExprNode& ptrArg, const plang::Type& schema,
+    /// Allocates and writes the header; returns the new object's run-time
+    /// view (body address + discriminants) so a caller can apply the body's
+    /// `value` clauses (EP §6.6) without re-evaluating discArgs a second
+    /// time.
+    SchemaRef emitNewSchema(const plang::ExprNode& ptrArg, const plang::Type& schema,
                        std::span<const std::unique_ptr<plang::ExprNode>> discArgs);
     llvm::Value* exprStrCapV(const plang::ExprNode& e);
     /// R5: the address AND the capacity of a string from ONE walk of its
