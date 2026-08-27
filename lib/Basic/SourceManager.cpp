@@ -20,6 +20,17 @@ bool SourceManager::wouldOverflow(size_t TextSize) const {
 }
 
 std::optional<FileID> SourceManager::addBuffer(std::string Name, std::string Text) {
+    // A leading UTF-8 BOM (EF BB BF) is invisible in whatever editor wrote
+    // it and isn't part of the Pascal source; drop it here, once, for every
+    // buffer this SourceManager ever holds (file or in-memory), so the
+    // scanner never sees it and every downstream offset/line/column is
+    // computed on the real text.  Checked only at Text's own start (offset
+    // 0 of *this* buffer), so the same three bytes elsewhere -- inside a
+    // string literal, say -- are left alone.
+    static constexpr std::string_view UTF8BOM = "\xEF\xBB\xBF";
+    if (Text.starts_with(UTF8BOM))
+        Text.erase(0, UTF8BOM.size());
+
     // A buffer big enough to wrap NextBase would silently alias two
     // different positions -- every SourceLocation past the wrap would
     // resolve into whatever buffer next claimed that coordinate range.
