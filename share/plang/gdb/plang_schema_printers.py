@@ -252,17 +252,21 @@ def _type_fingerprint(t):
     return "%016x" % _fnv1a64(canon)
 
 
-def _layout_walk(schema, base_addr, inferior):
+def _layout_walk(schema, base_addr, inferior, discs, hdr_override=None):
     """Returns a list of (name, addr, kind, extra) for every field in
     declaration order, mirroring SchemaLayoutEngine::rtWalkFields/alignUpV
     exactly: align the running offset up to each field's own alignment,
     record it, then advance past that field's real (possibly
-    discriminant-dependent) size."""
-    discs = []
-    for i, _ in enumerate(schema["discs"]):
-        discs.append(_read_i64(inferior, base_addr + i * 8))
+    discriminant-dependent) size.
 
-    off = schema["hdrBytes"]
+    discs is supplied by the caller rather than read from base_addr here:
+    for a var-parameter reference (see PlangSchemaValue.children's own
+    "ref" branch) the discriminants live in the shadow block, not adjacent
+    to the body base_addr is about to become -- issue #142.  hdr_override
+    lets that same caller start the walk at the body's own offset 0 rather
+    than schema["hdrBytes"], which still (correctly) describes the header a
+    DIRECT object of this schema carries, not a reference's shadow block."""
+    off = schema["hdrBytes"] if hdr_override is None else hdr_override
     results = []
     for field in schema["fields"]:
         align = field.get("alignBytes", 8)
@@ -289,15 +293,31 @@ def _read_i64(inferior, addr):
     return int.from_bytes(bytes(data), byteorder="little", signed=True)
 
 
+def _read_ptr(inferior, addr):
+    data = inferior.read_memory(addr, 8)
+    return int.from_bytes(bytes(data), byteorder="little", signed=False)
+
+
 class PlangSchemaValue(object):
     """gdb pretty-printer for one schema-typed value. children() drives
     both `print` (gdb formats a struct-shaped printer by its children
-    automatically) and `print var.field`-style field access."""
+    automatically) and `print var.field`-style field access.
 
-    def __init__(self, val, schema, type_name):
+    is_ref (issue #142): true for a schema var/value PARAMETER, whose ABI
+    pointer addresses the object's BODY, never its header -- CGDebugInfo::
+    declareSchemaParamRef builds a small debug-only shadow block instead of
+    describing the real object directly: [hdrBytes worth of discriminant
+    words][one pointer to the real body], tagged "<name>.ref" so this class
+    can tell it apart from a direct object's own header-at-offset-0 layout
+    (self.val.address IS that header, for a direct object -- for a
+    reference it is the shadow block's own address, and the real body sits
+    wherever the trailing pointer says, not necessarily anywhere near it)."""
+
+    def __init__(self, val, schema, type_name, is_ref):
         self.val = val
         self.schema = schema
         self.type_name = type_name
+        self.is_ref = is_ref
 
     def to_string(self):
         return self.type_name
@@ -308,13 +328,24 @@ class PlangSchemaValue(object):
         except gdb.error:
             return
         inferior = gdb.selected_inferior()
+        discs = [_read_i64(inferior, base_addr + i * 8)
+                 for i in range(len(self.schema["discs"]))]
         # Discriminants first, exactly where DWARF already puts them
         # correctly -- shown here too so this printer's output is a
         # complete, self-consistent replacement rather than a partial one
         # a reader has to mentally merge with gdb's own default view.
-        for i, name in enumerate(self.schema["discs"]):
-            yield name, _read_i64(inferior, base_addr + i * 8)
-        for name, addr, kind, extra in _layout_walk(self.schema, base_addr, inferior):
+        for name, value in zip(self.schema["discs"], discs):
+            yield name, value
+        if self.is_ref:
+            # The shadow block's trailing member: a plain pointer to the
+            # real body, stored (not computed) at the header's own size --
+            # matches declareSchemaParamRef's own layout exactly.
+            body_addr = _read_ptr(inferior, base_addr + self.schema["hdrBytes"])
+            field_addr, hdr_for_walk = body_addr, 0
+        else:
+            field_addr, hdr_for_walk = base_addr, None
+        for name, addr, kind, extra in _layout_walk(
+                self.schema, field_addr, inferior, discs, hdr_for_walk):
             if kind == "scalar":
                 size = extra
                 yield name, _read_i64(inferior, addr) if size == 8 else \
@@ -337,7 +368,16 @@ def _plang_schema_pretty_printer(val):
         return None
     schemas = sidecar.get("schemas", {})
     type_name = val.type.strip_typedefs().tag
-    if not type_name or type_name not in schemas:
+    if not type_name:
+        return None
+    # ".ref": CGDebugInfo::declareSchemaParamRef's own tag suffix for a
+    # schema var/value parameter's shadow block (issue #142) -- the schema
+    # layout data itself is recorded under the bare name either way (the
+    # body's own shape does not depend on how its caller reached it), only
+    # how this printer reads the discriminants/body out of memory differs.
+    is_ref = type_name.endswith(".ref")
+    lookup_name = type_name[:-len(".ref")] if is_ref else type_name
+    if lookup_name not in schemas:
         return None
 
     # Issue #141: an older/newer binary loading a sidecar some OTHER compile
@@ -348,32 +388,38 @@ def _plang_schema_pretty_printer(val):
     live_id = _live_build_id()
     if sidecar_id and live_id and sidecar_id.lower() != live_id.lower():
         _warn_once(
-            "buildid:" + type_name,
+            "buildid:" + lookup_name,
             "sidecar buildId %s does not match this binary's own %s -- the "
             "sidecar was written by a DIFFERENT compile of this source "
             "(likely a later rebuild). Falling back to gdb's default "
             "DWARF-only printing for '%s' rather than trust it."
-            % (sidecar_id, live_id, type_name))
+            % (sidecar_id, live_id, lookup_name))
         return None
 
-    variants = schemas[type_name]
+    variants = schemas[lookup_name]
     if len(variants) == 1:
-        return PlangSchemaValue(val, variants[0], type_name)
+        return PlangSchemaValue(val, variants[0], lookup_name, is_ref)
 
     # Issue #140: more than one schema was recorded under this same name --
     # pick the variant whose structural fingerprint matches this LIVE
-    # value's own DWARF type, rather than just the first one.
+    # value's own DWARF type, rather than just the first one. Note: for a
+    # ".ref" shadow block, val.type is shaped differently from a direct
+    # object's wrapper type (discs + a trailing POINTER field, not discs +
+    # an embedded body struct), so _type_fingerprint returns None here and
+    # this can't disambiguate a same-named collision reached through a var/
+    # value parameter -- falls through to the safe "ambiguous" warning
+    # below rather than guessing, same as any other unmatched fingerprint.
     fp = _type_fingerprint(val.type)
     for variant in variants:
         if fp is not None and variant.get("fp") == fp:
-            return PlangSchemaValue(val, variant, type_name)
+            return PlangSchemaValue(val, variant, lookup_name, is_ref)
 
     _warn_once(
-        "ambiguous:" + type_name,
+        "ambiguous:" + lookup_name,
         "%d incompatible layouts are recorded for schema type '%s' and none "
         "of their fingerprints match this value's own DWARF type -- falling "
         "back to gdb's default DWARF-only printing rather than guess which "
-        "one applies." % (len(variants), type_name))
+        "one applies." % (len(variants), lookup_name))
     return None
 
 

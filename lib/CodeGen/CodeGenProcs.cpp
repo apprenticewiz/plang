@@ -763,8 +763,15 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
                 // paramValTypes[flatIdx] narrows to for GEP striding, so
                 // describing it by that TypeNode gives -g a real (if
                 // probe-approximate; see debugTypeOfSemaType's own Schema
-                // case) DIType instead of none at all.
-                defVar(nm, bodyPtr, paramValTypes[flatIdx], paramTypeNodes[flatIdx]);
+                // case) DIType instead of none at all.  The debug
+                // declaration itself is suppressed here and built
+                // separately, through declareSchemaParamRef below: bodyPtr
+                // is the object's BODY, not its header (issue #142), which
+                // is a different shape than declareLocal's ordinary
+                // TypeNode path assumes for a Schema/ExtentVaries type.
+                defVar(nm, bodyPtr, paramValTypes[flatIdx], paramTypeNodes[flatIdx],
+                       /*debugIndirectPtr=*/nullptr, /*suppressDebugDecl=*/true);
+                dbgInfo_->declareSchemaParamRef(nm, paramTypeNodes[flatIdx], discs, bodyPtr);
                 auto& ve       = scopes.back()[toLower(nm)];
                 ve.schemaTy    = schemaTypes[ci];
                 // Spilled to cells, and named, so that a procedure nested

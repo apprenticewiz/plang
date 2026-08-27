@@ -6,7 +6,8 @@
 using namespace plang;
 
 void CGSymbolTable::defVar(const std::string& name, llvm::Value* ptr, llvm::Type* type,
-                            const TypeNode* typeNode, llvm::Value* debugIndirectPtr) {
+                            const TypeNode* typeNode, llvm::Value* debugIndirectPtr,
+                            bool suppressDebugDecl) {
     if (Scopes.empty()) return;
     const std::string Key = toLower(name);
     // A variable of this name hides a constant of it for as long as the scope
@@ -38,7 +39,7 @@ void CGSymbolTable::defVar(const std::string& name, llvm::Value* ptr, llvm::Type
         DbgInfo.enterShadowScope(typeNode ? typeNode->Loc : plang::SourceLocation{});
     Scopes.back()[Key] = VarEntry{ ptr, type, typeNode, name };
 
-    DbgInfo.declareLocal(name, typeNode, ptr, debugIndirectPtr);
+    DbgInfo.declareLocal(name, typeNode, ptr, debugIndirectPtr, suppressDebugDecl);
 }
 
 const VarEntry* CGSymbolTable::findVar(const std::string& name) const {

@@ -815,7 +815,14 @@ llvm::DISubprogram* CGDebugInfo::emitThunkStart(llvm::Function* Fn, llvm::DIScop
 }
 
 void CGDebugInfo::declareLocal(const std::string& name, const TypeNode* typeNode,
-                                llvm::Value* ptr, llvm::Value* debugIndirectPtr) {
+                                llvm::Value* ptr, llvm::Value* debugIndirectPtr,
+                                bool suppress) {
+    // Issue #142: the caller is about to (or already has) built this
+    // variable's real debug declaration a different way -- see
+    // declareSchemaParamRef's own comment for why a schema var/value
+    // parameter is the one case that needs to skip the ordinary path below
+    // rather than go through it.
+    if (suppress) return;
     // -g: the single choke point every named Pascal variable, parameter,
     // local, captured outer variable and with-bound field passes through,
     // so this is the one place a DILocalVariable/DIGlobalVariableExpression
@@ -914,6 +921,92 @@ void CGDebugInfo::declareProcParam(const std::string& name, const ProcedureTypeN
     const unsigned line = SrcMgr ? SrcMgr->getPresumedLoc(PT->Loc).Line : 0;
     auto* DV = DBuilder->createAutoVariable(CurScope, name, DebugFile, line, PairTy);
     DBuilder->insertDeclare(ptr, DV, DBuilder->createExpression(),
+                             llvm::DILocation::get(Ctx, line, 0, CurScope), B.GetInsertBlock());
+}
+
+void CGDebugInfo::declareSchemaParamRef(const std::string& name, const TypeNode* typeNode,
+                                         const std::vector<llvm::Value*>& discs,
+                                         llvm::Value* bodyPtr) {
+    if (!DBuilder || !typeNode || !typeNode->ResolvedType || !CurScope
+            || !B.GetInsertBlock() || !Types)
+        return;
+    const Type& T = *typeNode->ResolvedType;
+    if (!T.SchemaBody) return;
+    llvm::DIType* BodyDT = debugTypeOfSemaType(*T.SchemaBody);
+    llvm::Type*   BodyLLTy = Types->llvmTypeOfSemaType(*T.SchemaBody);
+    if (!BodyDT || !BodyLLTy) return;
+
+    // Same formula as buildSchemaDIType's own hdrBytes -- the SIZE of the
+    // header this schema's own discriminants take when they DO sit in real
+    // memory (SchemaAccess::emitNewSchema's own allocation).  Here it only
+    // sizes the debug-only shadow block below; nothing about a parameter's
+    // real storage is aligned by it.
+    const auto& DL = Mod.getDataLayout();
+    const uint64_t bodyAlign = std::max<uint64_t>(8, DL.getABITypeAlign(BodyLLTy).value());
+    const uint64_t rawHdr    = T.SchemaDiscs.size() * 8;
+    const uint64_t hdrBytes  = (rawHdr + bodyAlign - 1) / bodyAlign * bodyAlign;
+
+    llvm::Type* I8Ty  = llvm::Type::getInt8Ty(Ctx);
+    llvm::Type* I64Ty = llvm::Type::getInt64Ty(Ctx);
+
+    // The shadow block: [hdrBytes worth of discriminant words][one pointer
+    // to the real body].  Built fresh every time this is reached (once per
+    // activation of a procedure with a schema var/value parameter) --
+    // exactly the cost declareProcParam's own closure-pair storage already
+    // pays for the same reason, and not on any hot path RangeGuards or the
+    // like would care about.
+    auto* shadow = B.CreateAlloca(I8Ty,
+        llvm::ConstantInt::get(I64Ty, hdrBytes + 8), name + ".dbgref");
+    for (size_t i = 0; i < discs.size(); ++i) {
+        auto* slot = B.CreateGEP(I8Ty, shadow,
+            {llvm::ConstantInt::get(I64Ty, static_cast<uint64_t>(i) * 8)});
+        B.CreateStore(discs[i], slot);
+    }
+    auto* bodySlot = B.CreateGEP(I8Ty, shadow,
+        {llvm::ConstantInt::get(I64Ty, hdrBytes)});
+    B.CreateStore(bodyPtr, bodySlot);
+
+    // The DIType: discriminant members exactly like buildSchemaDIType's own
+    // header, followed by a POINTER-typed member (not BodyDT inline) --
+    // this is the one structural difference from a direct object's wrapped
+    // struct, and it is exactly what makes the shadow block's layout
+    // correct: the body is somewhere else, reached through one indirection,
+    // never assumed to sit right after the header the way a real
+    // in-memory-adjacent object's does. Tagged "<name>.ref", not T.Name --
+    // plang_schema_printers.py tells the two shapes apart by that suffix
+    // alone, no extra sidecar field needed (see its own comment).
+    std::vector<llvm::Metadata*> Elements;
+    auto* DiscDT = DBuilder->createBasicType("integer", 64, llvm::dwarf::DW_ATE_signed);
+    for (size_t i = 0; i < T.SchemaDiscs.size(); ++i) {
+        Elements.push_back(DBuilder->createMemberType(
+            DebugFile, T.SchemaDiscs[i].Name, DebugFile, 0, 64, 64,
+            i * 64, llvm::DINode::FlagZero, DiscDT));
+    }
+    auto* BodyPtrTy = DBuilder->createPointerType(BodyDT, 64);
+    Elements.push_back(DBuilder->createMemberType(
+        DebugFile, "", DebugFile, 0, 64, 64, hdrBytes * 8,
+        llvm::DINode::FlagZero, BodyPtrTy));
+
+    const uint64_t sizeBits = (hdrBytes + 8) * 8;
+    auto* RefTy = DBuilder->createStructType(
+        DebugFile, T.Name + ".ref", DebugFile, 0, sizeBits, 64,
+        llvm::DINode::FlagZero, nullptr, DBuilder->getOrCreateArray(Elements));
+
+    // Recorded under T.Name itself (not the ".ref"-suffixed tag above) --
+    // this is the SAME field-layout data a direct object of this schema
+    // would record, since the body's own shape does not depend on how its
+    // caller reached it; a program whose only use of this schema name is
+    // through a var parameter would otherwise never populate the sidecar
+    // at all, since buildSchemaDIType (the only other recorder) is never
+    // reached for it.
+    if (const TypeNode* bodyNode = SchemaTypes ? SchemaTypes->schemaBodyNodeOf(T) : nullptr) {
+        if (const auto* rt = llvm::dyn_cast<RecordTypeNode>(bodyNode))
+            recordSchemaLayoutForScript(T, *rt, hdrBytes);
+    }
+
+    const unsigned line = SrcMgr ? SrcMgr->getPresumedLoc(typeNode->Loc).Line : 0;
+    auto* DV = DBuilder->createAutoVariable(CurScope, name, DebugFile, line, RefTy);
+    DBuilder->insertDeclare(shadow, DV, DBuilder->createExpression(),
                              llvm::DILocation::get(Ctx, line, 0, CurScope), B.GetInsertBlock());
 }
 

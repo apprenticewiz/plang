@@ -58,9 +58,14 @@ public:
     /// debug declare against the alloca with a DW_OP_deref expression
     /// instead of against ptr directly with an empty one; ordinary codegen
     /// still reads/writes through ptr, unchanged.
+    /// \p suppressDebugDecl: issue #142's one exception -- see CGDebugInfo::
+    /// declareLocal's own \p suppress for why a schema var/value parameter
+    /// needs its VarEntry bound here (typeNode and all) while its debug
+    /// declaration is built separately, through declareSchemaParamRef.
     void defVar(const std::string& name, llvm::Value* ptr, llvm::Type* type,
                 const plang::TypeNode* typeNode = nullptr,
-                llvm::Value* debugIndirectPtr = nullptr);
+                llvm::Value* debugIndirectPtr = nullptr,
+                bool suppressDebugDecl = false);
     const VarEntry* findVar(const std::string& name) const;
 
     /// Whether \p name is bound by a scope opened INSIDE the current function

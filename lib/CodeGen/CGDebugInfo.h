@@ -177,8 +177,17 @@ public:
     /// object was constructed with -- there is only ever one, threaded
     /// throughout codegen by reference, the same one defVar's caller used
     /// before this split.
+    /// \p suppress is issue #142's one deliberate exception to "every named
+    /// Pascal ... passes through this": a schema var/value parameter is
+    /// bound through the ordinary defVar (its VarEntry::typeNode is real
+    /// codegen state -- CGIndexAccess.cpp reads it for the schema's own
+    /// array bound), but its OWN debug declaration needs
+    /// declareSchemaParamRef's different shape instead of this method's
+    /// header-at-offset-0 assumption -- see declareSchemaParamRef's own
+    /// comment for why. Defaulted false: every other caller is unaffected.
     void declareLocal(const std::string& name, const plang::TypeNode* typeNode,
-                       llvm::Value* ptr, llvm::Value* debugIndirectPtr);
+                       llvm::Value* ptr, llvm::Value* debugIndirectPtr,
+                       bool suppress = false);
 
     /// -g, ISO §6.6.3.1: a procedural/functional parameter's own storage is
     /// a two-pointer closure pair (ClosureAndCallABI::procPairTy -- the
@@ -195,6 +204,34 @@ public:
     /// insertion point), plus an unresolved \p PT.
     void declareProcParam(const std::string& name, const plang::ProcedureTypeNode* PT,
                            llvm::Value* ptr);
+
+    /// -g, issue #142: a schema var/value PARAMETER's ABI pointer (see
+    /// CodeGenProcs.cpp's schema-param binding, and SchemaAccess::
+    /// schemaActual/schemaRefOf) addresses the object's BODY directly, never
+    /// its header -- unlike a directly-allocated ExtentVaries object (built
+    /// by SchemaAccess::emitNewSchema, header included), a schema parameter
+    /// carries its discriminants as separate SSA arguments with no header in
+    /// memory at all: not just at a different offset from \p bodyPtr, but
+    /// for a fixed-extent actual (a SchemaInstance local passed `var`)
+    /// genuinely absent from memory altogether, since that actual's own
+    /// storage (CGTypes::llvmTypeOfSemaTypeImpl's SchemaInstance case) is
+    /// the body value with nothing in front of it.  buildSchemaDIType's
+    /// header-at-offset-0 struct is therefore never right for a parameter,
+    /// whichever shape the actual is -- declareLocal's ordinary TypeNode
+    /// path can't describe this any more than declareProcParam's pair could.
+    ///
+    /// Builds a small debug-only shadow block instead: \p discs (already
+    /// correct SSA values, straight off the call's own arguments) written
+    /// into header-shaped slots, followed by \p bodyPtr itself stored as a
+    /// plain pointer member -- so the discriminants are always read from
+    /// real memory this activation owns, and the body is reached through an
+    /// explicit indirection rather than assumed adjacent.
+    /// plang_schema_printers.py recognizes the resulting struct's distinct
+    /// ".ref" tag and reads it the same way.  A no-op under every condition
+    /// declareLocal already bails under, plus an unresolved schema body.
+    void declareSchemaParamRef(const std::string& name, const plang::TypeNode* typeNode,
+                                const std::vector<llvm::Value*>& discs,
+                                llvm::Value* bodyPtr);
 
     /// -g, issue #19: opens a DILexicalBlock nested inside the current
     /// scope and makes it the current scope from now on, for a caller
