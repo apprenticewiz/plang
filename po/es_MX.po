@@ -74,11 +74,6 @@ msgid "value parameter '%0' has a type containing a file component, which is not
 msgstr "el parámetro por valor «%0» tiene un tipo que contiene un componente de archivo, lo cual no está permitido"
 
 #, fuzzy
-msgctxt "diag/err_readln_not_text"
-msgid "readln is only valid for text files, got 'file of %0'"
-msgstr "readln solo es válido para archivos de texto, se obtuvo «file of %0»"
-
-#, fuzzy
 msgctxt "diag/err_read_type_mismatch"
 msgid "type mismatch in read: file element type is '%0', but variable has type '%1'"
 msgstr "tipo incompatible en read: el tipo de elemento del archivo es «%0», pero la variable es de tipo «%1»"
