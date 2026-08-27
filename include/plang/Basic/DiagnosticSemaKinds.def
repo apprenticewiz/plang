@@ -83,6 +83,21 @@ DIAG(err_not_requires_boolean, Error, "'not' requires a boolean operand, got '%0
 DIAG(err_unknown_unop, Error, "unknown unary operator")
 DIAG(err_undefined_function, Error, "undefined function '%0'")
 DIAG(err_ordinal_argument, Error, "'%0' requires an ordinal argument, got '%1'")
+// issue #261: a required function whose argument is not ordinal-shaped --
+// abs, sqr, sqrt, sin, cos, exp, ln, arctan, trunc, round -- is required to
+// be numeric instead.  Kept apart from err_ordinal_argument rather than
+// folding the two into one "ordinal or numeric" message: a translator
+// reading either in isolation can tell what the call actually needed.
+DIAG(err_numeric_argument, Error, "'%0' requires a numeric argument, got '%1'")
+// issue #261: eof/eoln read a file's status, so their (optional) argument
+// names the file to test.
+DIAG(err_file_argument, Error, "'%0' requires a file argument, got '%1'")
+// issue #261: EP §6.7.6.3's card is the cardinality of a set.
+DIAG(err_set_argument, Error, "'%0' requires a set argument, got '%1'")
+// EP §6.7.6.5: succ/pred's optional second argument is a step count, always
+// of type integer regardless of what the first argument's type is.
+DIAG(err_step_argument_not_integer, Error,
+     "the second argument of '%0' must be an integer, got '%1'")
 DIAG(err_write_param_type, Error, "'%0' cannot be written; a write-parameter is an integer, real, boolean, char or string value")
 // EP §6.9.2.2: the value assigned shall not be longer than the capacity.
 DIAG(err_string_too_long, Error, "string of length %0 does not fit a string(%1)")
