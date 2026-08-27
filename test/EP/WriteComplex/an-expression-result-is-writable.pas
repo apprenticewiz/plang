@@ -4,7 +4,7 @@ RUN: %run %t | FileCheck --strict-whitespace --match-full-lines %s
 *)
 
 (*
-CHECK:( 4.00000000000000e+000, 6.00000000000000e+000)
+CHECK:( 4.0000000000000000e+000, 6.0000000000000000e+000)
 *)
 
 program p(output); var a, b: complex;

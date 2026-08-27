@@ -4,8 +4,8 @@ RUN: %run %t | FileCheck --strict-whitespace --match-full-lines %s
 *)
 
 (*
-CHECK: 1.00000000000000e+308
-CHECK-NEXT: 1.00000000000000e-010
+CHECK: 1.0000000000000000e+308
+CHECK-NEXT: 1.0000000000000000e-010
 *)
 
 program p(output);
