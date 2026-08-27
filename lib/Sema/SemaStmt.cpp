@@ -914,6 +914,22 @@ void Sema::checkCallStmt(const CallStmt& S) {
                     error(S.Args[I]->Loc, diag::err_restricted_used, {T.Name});
                 else if (!(HasFile && I == 0) && FromText && !T.isError())
                     checkReadParamType(T, S.Args[I]->Loc);
+                // ISO §6.9.1: read(v) is defined as v := f^, so a read target
+                // must be a variable-access, the same requirement checkAssign
+                // enforces on an ordinary assignment's left-hand side via
+                // isLValue.  This was never asked here, so `read(5)`,
+                // `read(someConst)` and `read(someFunc())` all reached
+                // emitReadArg (CodeGen/BuiltinIO.cpp) with no address to
+                // store into: some aborted the compiler outright
+                // (codegenICE("read/readln target is not an assignable
+                // variable")), others silently read into a throwaway
+                // temporary nothing could ever see.  Gated the same way as
+                // checkReadParamType and checkNotProtected: I == 0 is the
+                // file itself when HasFile, not something read INTO, and a
+                // T that is already an error type has been diagnosed once
+                // and should not be piled onto here.
+                if (!(HasFile && I == 0) && !T.isError() && !isLValue(*S.Args[I]))
+                    error(S.Args[I]->Loc, diag::err_read_not_variable, {T.Name});
                 // read(v) assigns to v -- §6.9.1 makes it `v := f^` -- so a
                 // protected variable may no more be read into than assigned
                 // to.  Gated the same way as checkReadParamType above: I == 0
