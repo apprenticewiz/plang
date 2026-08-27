@@ -832,12 +832,26 @@ std::shared_ptr<Type> Sema::checkCallExpr(const CallExpr& E) {
             for (const auto& Arg : E.Args) (void)checkExpr(*Arg);
             return TyErr;
         }
-        // §6.6.6.5: eoln asks whether the position is at a line marker, and
-        // only a text file has those.  eof applies to any file and is not
-        // restricted here.
-        if (Lo == "eoln" && !E.Args.empty()) {
+        // §6.6.6.5: eof and eoln read a file's status, so an argument, when
+        // given, names the file being tested.  An ordinary variable was
+        // accepted here with no check at all -- the diagnostic just below
+        // this one fires only once the argument is already known to be a
+        // file, so an integer or any other non-file type sailed past both.
+        // CodeGen's lowering only recognizes a genuine file variable
+        // (FileVars.isFileVar) and falls back to testing the standard input
+        // file for anything else, so `eof(i)` for a plain integer i compiled
+        // to testing INPUT's own eof status and silently discarded 'i'
+        // (issue #261).
+        if ((Lo == "eof" || Lo == "eoln") && !E.Args.empty()) {
             auto ArgTy = checkExpr(*E.Args[0]);
-            if (ArgTy->Kind == TypeKind::File && ArgTy->ElemType
+            if (!ArgTy->isError() && ArgTy->Kind != TypeKind::File) {
+                error(E.Args[0]->Loc, diag::err_file_argument, {Lo, ArgTy->Name});
+                return TyErr;
+            }
+            // eoln asks whether the position is at a line marker, and only a
+            // text file has those.  eof applies to any file and is not
+            // restricted here.
+            if (Lo == "eoln" && ArgTy->Kind == TypeKind::File && ArgTy->ElemType
                 && ArgTy->ElemType->Kind != TypeKind::Char)
                 error(E.Args[0]->Loc, diag::err_line_proc_not_text,
                       {Lo, ArgTy->ElemType->Name});
@@ -850,14 +864,32 @@ std::shared_ptr<Type> Sema::checkCallExpr(const CallExpr& E) {
             // EP §6.7.6.2: abs(complex) → real; sqr(complex) → complex.
             if (ArgTy->Kind == TypeKind::Complex)
                 return (Lo == "abs") ? TyReal : TyComplex;
-            return (ArgTy->isNumeric() || ArgTy->isOrdinal()) ? ArgTy : TyErr;
+            // ISO §6.6.6.2: abs and sqr take an integer-type or real-type
+            // argument.  isOrdinal() also admits boolean, char and
+            // enumerations -- ordinal but not numeric -- so this accepted
+            // `abs(true)` and typed it as boolean (abs of an ordinal
+            // returned the argument's own type unexamined) instead of
+            // rejecting it.  The rejecting branch also reported nothing at
+            // all: an argument that failed both checks (a string, record,
+            // or set) produced TyErr with no diagnostic, so Sema recorded no
+            // error and the driver went on to CodeGen with a call it cannot
+            // lower (issue #261).
+            if (!ArgTy->isError() && !ArgTy->isNumeric()) {
+                error(E.Args[0]->Loc, diag::err_numeric_argument, {Lo, ArgTy->Name});
+                return TyErr;
+            }
+            return ArgTy;
         }
         // ISO §6.6.6.4: succ and pred stay in the argument's type, so
         // succ('a') is a char and succ(red) is the enumeration's next value.
         // EP §6.7.6.5 adds the two-argument form, which does not change this.
         if ((Lo == "succ" || Lo == "pred") && !E.Args.empty()) {
             auto ArgTy = checkExpr(*E.Args[0]);
-            for (size_t I = 1; I < E.Args.size(); ++I) (void)checkExpr(*E.Args[I]);
+            std::shared_ptr<Type> StepTy;
+            for (size_t I = 1; I < E.Args.size(); ++I) {
+                auto T = checkExpr(*E.Args[I]);
+                if (I == 1) StepTy = T;
+            }
             if (E.Args.size() > 1 && !Opts.extendedPascal()) {
                 error(E.Loc, diag::err_ep_two_arg_form, {Lo});
                 return TyErr;
@@ -865,6 +897,17 @@ std::shared_ptr<Type> Sema::checkCallExpr(const CallExpr& E) {
             if (ArgTy->isError()) return TyErr;
             if (!ArgTy->isOrdinal()) {
                 error(E.Loc, diag::err_ordinal_argument, {Lo, ArgTy->Name});
+                return TyErr;
+            }
+            // EP §6.7.6.5: the step count k is a separate value from x and is
+            // always of type integer, whatever x's type is -- succ(x, k)
+            // does not walk k steps through x's own type the way succ(x)
+            // walks one, so a char or boolean k has no more meaning than a
+            // real one does.  This was never checked, so `succ(5, 'a')`
+            // silently walked ord('a') steps (issue #261).
+            if (StepTy && !StepTy->isError() && !StepTy->isIntegral()) {
+                error(E.Args[1]->Loc, diag::err_step_argument_not_integer,
+                      {Lo, StepTy->Name});
                 return TyErr;
             }
             return ArgTy;
@@ -889,6 +932,25 @@ std::shared_ptr<Type> Sema::checkCallExpr(const CallExpr& E) {
             }
             return Sym->ReturnType ? Sym->ReturnType : TyErr;
         }
+        // ISO §6.6.6.3: trunc and round convert a real value to an integer,
+        // so the argument has to be numeric the same way sqrt/sin/... below
+        // require -- and, unlike those, there is no complex extension for
+        // either (EP does not give trunc/round a complex form).  Neither was
+        // special-cased here, so they fell through with nothing to stop a
+        // non-numeric argument: CodeGen's lowering (ToDouble, an
+        // unconditional signed-int-to-double conversion) has no case for a
+        // non-scalar type such as a string or record, and turns a char or
+        // boolean's raw ordinal value into a number nobody asked for instead
+        // of being rejected (issue #261).
+        if ((Lo == "trunc" || Lo == "round") && !E.Args.empty()) {
+            auto ArgTy = checkExpr(*E.Args[0]);
+            if (ArgTy->isError()) return TyErr;
+            if (!ArgTy->isNumeric() || ArgTy->Kind == TypeKind::Complex) {
+                error(E.Args[0]->Loc, diag::err_numeric_argument, {Lo, ArgTy->Name});
+                return TyErr;
+            }
+            return Sym->ReturnType ? Sym->ReturnType : TyErr;
+        }
         // EP §6.7.6.7: substr/trim return the same string capacity as their
         // input.  ISO §6.4.3.2's other string shape -- a packed array[1..n] of
         // char -- is string-like too (isCharStringType), and was missing here:
@@ -901,7 +963,54 @@ std::shared_ptr<Type> Sema::checkCallExpr(const CallExpr& E) {
             if (isVarStringLike(ArgTy.get())) return ArgTy;
             if (!ArgTy->isError() && isCharStringType(*ArgTy))
                 return Ctx_.getVarString(charStringLength(*ArgTy));
+            // A bare char and the generic (unsized) string kind are
+            // string-like too -- neither isVarStringLike nor isCharStringType
+            // covers them, the same widening the eq/ne/lt/gt/le/ge case below
+            // already makes -- and this fell through to `return TyStr` for
+            // those the same as it did for a genuinely wrong argument: every
+            // shape that reached here type-checked with no diagnostic at
+            // all, so `substr(i, 1, 2)` for a plain integer i compiled
+            // silently and reached a CodeGen path with no call to lower it
+            // to (issue #261).
+            if (!ArgTy->isError() && ArgTy->Kind != TypeKind::Char
+                    && ArgTy->Kind != TypeKind::String)
+                error(E.Args[0]->Loc, diag::err_string_fn_arg_type, {Lo, ArgTy->Name});
             return TyStr;
+        }
+        // EP §6.7.6.7: length and index are the same string-function family
+        // as substr/trim just above and eq/ne/... below, and had no argument
+        // check of their own: every argument type-checked regardless, so
+        // `length(i)` or `index(i, c)` for a plain integer i compiled with
+        // nothing to reject them.  CodeGen's fallback for anything it does
+        // not recognize as string-shaped is worse for length than the link
+        // failure substr's got: it calls libc strlen on the raw integer
+        // value reinterpreted as a pointer (issue #261).
+        if ((Lo == "length" || Lo == "index") && !E.Args.empty()) {
+            for (const auto& Arg : E.Args) {
+                auto T = checkExpr(*Arg);
+                if (T->isError()) continue;
+                const bool StringLike = isVarStringLike(T.get())
+                    || isCharStringType(*T)
+                    || T->Kind == TypeKind::Char || T->Kind == TypeKind::String;
+                if (!StringLike)
+                    error(Arg->Loc, diag::err_string_fn_arg_type, {Lo, T->Name});
+            }
+            return Sym->ReturnType ? Sym->ReturnType : TyErr;
+        }
+        // EP §6.7.6.3: card is the cardinality of a set, so its argument must
+        // be one.  This had no check at all, so `card(i)` for a plain
+        // integer i type-checked with nothing to reject it: CodeGen's
+        // lowering (population-count on the set's own bit-vector
+        // representation) reads whatever value is there regardless, so it
+        // silently population-counted i's bit pattern instead (issue #261).
+        if (Lo == "card" && !E.Args.empty()) {
+            auto ArgTy = checkExpr(*E.Args[0]);
+            if (ArgTy->isError()) return TyErr;
+            if (ArgTy->Kind != TypeKind::Set) {
+                error(E.Args[0]->Loc, diag::err_set_argument, {Lo, ArgTy->Name});
+                return TyErr;
+            }
+            return Sym->ReturnType ? Sym->ReturnType : TyErr;
         }
         // EP §6.7.6.2: math functions extended to complex — return complex when
         // the argument is complex, real otherwise.
@@ -910,6 +1019,14 @@ std::shared_ptr<Type> Sema::checkCallExpr(const CallExpr& E) {
             auto ArgTy = checkExpr(*E.Args[0]);
             for (size_t I = 1; I < E.Args.size(); ++I) (void)checkExpr(*E.Args[I]);
             if (ArgTy->Kind == TypeKind::Complex) return TyComplex;
+            // ISO §6.6.6.2: these take an integer-type or real-type argument
+            // (isNumeric() covers both, plus a subrange of either) -- this
+            // was never checked, so `sqrt('a')` compiled with no diagnostic
+            // at all and was always typed real (issue #261).
+            if (!ArgTy->isError() && !ArgTy->isNumeric()) {
+                error(E.Args[0]->Loc, diag::err_numeric_argument, {Lo, ArgTy->Name});
+                return TyErr;
+            }
             return Sym->ReturnType ? Sym->ReturnType : TyErr; // TyReal
         }
         // EP §6.7.6.3: complex constructors.
