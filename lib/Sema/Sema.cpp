@@ -1069,13 +1069,21 @@ void Sema::checkBlock(const BlockNode& Block,
         // confusing ld.lld error pointing at some unrelated runtime function
         // rather than at this declaration.  Caught here instead, well under
         // that ceiling: see err_global_var_too_large's comment for why 1 GiB.
-        if (IsGlobalScope && !T->isError()) {
-            constexpr uint64_t GlobalVarByteLimit = 1ull << 30; // 1 GiB
-            if (auto Sz = byteSizeOf(*T); Sz && *Sz > GlobalVarByteLimit) {
+        //
+        // A local (procedure/function-body) variable hits no relocation, but
+        // gets no pass on size either (#223): it is a stack `alloca`, and one
+        // this large hangs the LLVM backend lowering it long before it would
+        // ever fit a real stack. Same threshold, same reasoning -- only the
+        // diagnostic differs, so it names the variable's actual scope.
+        if (!T->isError()) {
+            constexpr uint64_t VarByteLimit = 1ull << 30; // 1 GiB
+            if (auto Sz = byteSizeOf(*T); Sz && *Sz > VarByteLimit) {
+                const DiagID Id = IsGlobalScope ? diag::err_global_var_too_large
+                                                 : diag::err_local_var_too_large;
                 for (const auto& Nm : Vg.Names)
-                    error(Vg.Type->Loc, diag::err_global_var_too_large,
+                    error(Vg.Type->Loc, Id,
                           {Nm, std::to_string(*Sz),
-                           std::to_string(GlobalVarByteLimit)});
+                           std::to_string(VarByteLimit)});
             }
         }
 
