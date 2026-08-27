@@ -307,6 +307,16 @@ install(DIRECTORY ${PLANG_LOCALE_BUILD_DIR}/
     DESTINATION ${CMAKE_INSTALL_DATADIR}/plang/locale
     FILES_MATCHING PATTERN "*.po"
 )
+# gdb pretty-printer for issue #130 (a schema field after a varying-extent
+# one has no correct static DWARF offset LLVM's own emitter can express --
+# see share/plang/gdb/plang_schema_printers.py's own header comment for the
+# full account). Not auto-loaded -- `(gdb) source
+# <prefix>/share/plang/gdb/plang_schema_printers.py`, or add that line to
+# ~/.gdbinit.
+install(DIRECTORY share/plang/gdb/
+    DESTINATION ${CMAKE_INSTALL_DATADIR}/plang/gdb
+    FILES_MATCHING PATTERN "*.py"
+)
 
 # ---- Tests ----
 # Off by default: the suite needs GoogleTest, which someone building the
