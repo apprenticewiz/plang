@@ -115,7 +115,8 @@ bool Codegen::emit(const ProgramNode& prog, std::ostream& os) {
         PImpl->currentUnit_  = Unit;
         PImpl->namePrefix    = PlangProcPrefix   + Unit + PlangScopeSep;
         PImpl->globalPrefix  = PlangGlobalPrefix + Unit + PlangScopeSep;
-        PImpl->moduleIfaceBlock_ = nullptr;
+        PImpl->moduleIfaceBlock_   = nullptr;
+        PImpl->moduleIfaceImports_ = nullptr;
         if (Mod->Body) {
             PImpl->emitGlobals(*Mod->Body);
             // EP §6.11.1: whatever the module's heading declares is the
@@ -123,7 +124,8 @@ bool Codegen::emit(const ProgramNode& prog, std::ostream& os) {
             for (auto* Iface : prog.Modules)
                 if (Iface->IsInterface && Iface->Body
                         && eqCI(Iface->Name, Mod->Name)) {
-                    PImpl->moduleIfaceBlock_ = Iface->Body.get();
+                    PImpl->moduleIfaceBlock_   = Iface->Body.get();
+                    PImpl->moduleIfaceImports_ = &Iface->Imports;
                     PImpl->emitInheritedGlobals(*Iface->Body, *Mod->Body);
                     break;
                 }
@@ -137,7 +139,8 @@ bool Codegen::emit(const ProgramNode& prog, std::ostream& os) {
                                               *Mod->FinalStmt);
         PImpl->emitModuleInitFn(*Mod);
         InitModules.push_back(Mod->Name);
-        PImpl->moduleIfaceBlock_ = nullptr;
+        PImpl->moduleIfaceBlock_   = nullptr;
+        PImpl->moduleIfaceImports_ = nullptr;
         PImpl->popScope();
     }
     PImpl->currentUnit_.clear();
