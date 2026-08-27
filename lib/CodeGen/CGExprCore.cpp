@@ -134,7 +134,13 @@ llvm::Value* CGExprCore::emitExpr(const ExprNode& e) {
         }
         // VarString: return the struct address directly — callers use it as ptr.
         if (ExprIsVarStr(e)) return ve->ptr;
-        return B.CreateLoad(ve->type, ve->ptr, n->Name);
+        auto* ld = B.CreateLoad(ve->type, ve->ptr, n->Name);
+        // Issue #192: a with-bound field of a packed record is an ordinary
+        // IdentExpr by the time it gets here, and IRBuilder's default ABI
+        // alignment for it is a promise the byte-packed layout cannot keep;
+        // see packedAccessAlign (CGFieldAccess.cpp).
+        if (auto A = FieldAccess.packedAccessAlign(e)) ld->setAlignment(*A);
+        return ld;
     }
 
     if (auto* n = llvm::dyn_cast<BinaryExpr>(&e))  return BinaryOps.emitBinary(*n);

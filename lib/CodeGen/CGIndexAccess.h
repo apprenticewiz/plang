@@ -5,10 +5,12 @@
 
 #include <cstdint>
 #include <functional>
+#include <optional>
 
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/LLVMContext.h"
+#include "llvm/Support/Alignment.h"
 
 #include "CGSymbolTable.h"
 #include "CGTypes.h"
@@ -32,13 +34,15 @@ public:
                   std::function<llvm::Value*(const plang::ExprNode&)> EmitLValue,
                   std::function<llvm::Value*(llvm::Value*)> ToI64,
                   std::function<const plang::TypeNode*(const plang::TypeNode*)> DenoterOf,
-                  std::function<bool(const plang::ExprNode&)> ExprIsVarStr)
+                  std::function<bool(const plang::ExprNode&)> ExprIsVarStr,
+                  std::function<std::optional<llvm::Align>(const plang::ExprNode&)> PackedAccessAlign)
         : Ctx(Ctx), B(B), Schema(Schema), StrCall(StrCall), RangeGuards(RangeGuards),
           Strings(Strings), RtFns(RtFns), SymTab(SymTab), Types(Types),
           I8Ty(I8Ty), I64Ty(I64Ty),
           EmitExpr(std::move(EmitExpr)), EmitLValue(std::move(EmitLValue)),
           ToI64(std::move(ToI64)), DenoterOf(std::move(DenoterOf)),
-          ExprIsVarStr(std::move(ExprIsVarStr)) {}
+          ExprIsVarStr(std::move(ExprIsVarStr)),
+          PackedAccessAlign(std::move(PackedAccessAlign)) {}
 
     llvm::Value* emitConformantElemPtr(const plang::IndexExpr& e);
     llvm::Value* emitIndexGEP(const plang::IndexExpr& e);
@@ -64,4 +68,5 @@ private:
     std::function<llvm::Value*(llvm::Value*)> ToI64;
     std::function<const plang::TypeNode*(const plang::TypeNode*)> DenoterOf;
     std::function<bool(const plang::ExprNode&)> ExprIsVarStr;
+    std::function<std::optional<llvm::Align>(const plang::ExprNode&)> PackedAccessAlign;
 };
