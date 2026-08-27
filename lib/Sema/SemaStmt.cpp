@@ -367,16 +367,35 @@ void Sema::checkFor(const ForStmt& S) {
         // Driving a loop is a use: the control variable is named here, not in
         // an expression the identifier check would see.
         Sym->Referenced = true;
-        if (!Sym->Ty->isOrdinal())
-            error(S.Loc, diag::err_for_var_not_ordinal, {S.Var, Sym->Ty->Name});
 
-        // ISO §6.8.3.9: the control variable must be local to the block
-        // containing the for-statement.  A with-statement and a `for ... in`
-        // open a scope that is not a block, so asking only the innermost one
-        // rejected `with r do for i := 1 to 3 do ...` about an `i` that is
-        // declared exactly where the standard requires.
-        if (!Symtab.lookupInEnclosingBlock(S.Var))
-            error(S.Loc, diag::err_for_var_not_local, {S.Var});
+        // ISO §6.8.3.9: the control variable must be an entire variable. A
+        // bare identifier can just as well resolve to a procedure, a builtin,
+        // a constant, a type name, or a schema -- Ty is null for Proc/
+        // Builtin/Schema (registerBuiltins and friends never set it), so
+        // isOrdinal() below would null-deref, and for Const/TypeAlias/
+        // EnumValue it is set but describes the wrong thing (the constant's
+        // or alias's type, not any storage this loop could drive), which let
+        // a const or type-alias control variable sail through Sema only to
+        // hit "no storage" in codegen. VarParam is a variable too (isLValue
+        // treats it the same as Var); it is excluded from a for-statement
+        // only by not being LOCAL to this block, which the check below
+        // already catches.
+        const bool IsVar = Sym->Kind == SymbolKind::Var
+                         || Sym->Kind == SymbolKind::VarParam;
+        if (!IsVar) {
+            error(S.Loc, diag::err_for_var_not_variable, {S.Var});
+        } else {
+            if (!Sym->Ty->isOrdinal())
+                error(S.Loc, diag::err_for_var_not_ordinal, {S.Var, Sym->Ty->Name});
+
+            // ISO §6.8.3.9: the control variable must be local to the block
+            // containing the for-statement.  A with-statement and a `for ... in`
+            // open a scope that is not a block, so asking only the innermost one
+            // rejected `with r do for i := 1 to 3 do ...` about an `i` that is
+            // declared exactly where the standard requires.
+            if (!Symtab.lookupInEnclosingBlock(S.Var))
+                error(S.Loc, diag::err_for_var_not_local, {S.Var});
+        }
     }
     auto From  = checkExpr(*S.From);
     auto Limit = checkExpr(*S.Limit);
