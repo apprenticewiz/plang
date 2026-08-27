@@ -55,6 +55,7 @@ static const char* findBinding(PascalFile *F);
 /// Defined with the other runtime error reporters in plang_sys.cpp.
 [[noreturn]] void plang_err_bind_already_bound(void);
 [[noreturn]] void plang_err_binding_table_full(void);
+[[noreturn]] void plang_err_cannot_open(const char *Msg);
 [[noreturn]] void plang_err_field_width(int64_t W);
 [[noreturn]] void plang_err_file_wrong_mode(const char *Op);
 
@@ -135,8 +136,9 @@ static void closeStream(PascalFile *F) {
 static std::FILE *openTemp(const char *Op) {
     std::FILE *Fp = std::tmpfile();
     if (!Fp) {
-        std::fprintf(stderr, "plang runtime: cannot create temporary file in '%s'\n", Op);
-        std::abort();
+        char Msg[128];
+        std::snprintf(Msg, sizeof(Msg), "cannot create temporary file in '%s'", Op);
+        plang_err_cannot_open(Msg);
     }
     return Fp;
 }
@@ -178,8 +180,9 @@ void plang_reset(PascalFile *F, const char *Name, int8_t IsText) {
         closeStream(F);
         F->Fp = std::fopen(Name, "r");
         if (!F->Fp) {
-            std::fprintf(stderr, "plang runtime: cannot open '%s' for reading\n", Name);
-            std::abort();
+            char Msg[512];
+            std::snprintf(Msg, sizeof(Msg), "cannot open '%s' for reading", Name);
+            plang_err_cannot_open(Msg);
         }
     }
     F->Readable = 1;
@@ -202,8 +205,9 @@ void plang_rewrite(PascalFile *F, const char *Name, int8_t /*IsText*/) {
     } else {
         F->Fp = std::fopen(Name, "w");
         if (!F->Fp) {
-            std::fprintf(stderr, "plang runtime: cannot open '%s' for writing\n", Name);
-            std::abort();
+            char Msg[512];
+            std::snprintf(Msg, sizeof(Msg), "cannot open '%s' for writing", Name);
+            plang_err_cannot_open(Msg);
         }
     }
     F->Buf      = PlangFileUninit;
@@ -612,8 +616,9 @@ void plang_extend(PascalFile *F, const char *Name) {
         if (!F->Fp) {
             F->Fp = std::fopen(Name, "w+b");
             if (!F->Fp) {
-                std::fprintf(stderr, "plang runtime: cannot open '%s' for extend\n", Name);
-                std::abort();
+                char Msg[512];
+                std::snprintf(Msg, sizeof(Msg), "cannot open '%s' for extend", Name);
+                plang_err_cannot_open(Msg);
             }
         }
         std::fseek(F->Fp, 0, SEEK_END);
@@ -640,8 +645,9 @@ void plang_update(PascalFile *F, const char *Name) {
         if (!F->Fp) {
             F->Fp = std::fopen(Name, "w+b");
             if (!F->Fp) {
-                std::fprintf(stderr, "plang runtime: cannot open '%s' for update\n", Name);
-                std::abort();
+                char Msg[512];
+                std::snprintf(Msg, sizeof(Msg), "cannot open '%s' for update", Name);
+                plang_err_cannot_open(Msg);
             }
         }
         std::rewind(F->Fp);
