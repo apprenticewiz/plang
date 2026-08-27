@@ -83,13 +83,36 @@ llvm::Type* CGTypes::variantBlobType(uint64_t size, uint64_t align) {
 /// Sema's RecordFields is flattened -- §6.4.3.3 lets a variant field be
 /// selected by name like any other, so every alternative's fields are in that
 /// list -- which is why one lookup serves both parts of the record.
+/// Name (lowercased) -> the first field of \p semaRec that semaFieldType
+/// would have returned for that name, built once and cached by record
+/// pointer.  This is the same linear walk semaFieldType used to do inline
+/// on every call; doing it once per record instead of once per field turns
+/// the whole record layout from O(fields^2) into O(fields).
+const std::unordered_map<std::string, const Type::Field*>&
+CGTypes::semaFieldIndexFor(const Type* semaRec) {
+    auto it = semaFieldIndex_.find(semaRec);
+    if (it != semaFieldIndex_.end()) return it->second;
+    auto& index = semaFieldIndex_[semaRec];
+    if (semaRec) {
+        for (const auto& F : semaRec->RecordFields) {
+            const std::string key = toLower(F.Name);
+            // A name whose first occurrence fails the type test keeps
+            // looking for a later one with the same name, matching
+            // semaFieldType's original scan exactly.
+            if (index.contains(key)) continue;
+            if (F.Ty && !F.Ty->isError() && canLowerSemaType(*F.Ty))
+                index.emplace(key, &F);
+        }
+    }
+    return index;
+}
+
 llvm::Type* CGTypes::semaFieldType(const Type* semaRec, const std::string& nm) {
     if (!semaRec) return nullptr;
-    for (const auto& F : semaRec->RecordFields)
-        if (eqCI(F.Name, nm) && F.Ty && !F.Ty->isError()
-                && canLowerSemaType(*F.Ty))
-            return llvmTypeOfSemaType(*F.Ty);
-    return nullptr;
+    const auto& index = semaFieldIndexFor(semaRec);
+    auto it = index.find(toLower(nm));
+    if (it == index.end()) return nullptr;
+    return llvmTypeOfSemaType(*it->second->Ty);
 }
 
 uint64_t CGTypes::layoutVariantCase(const VariantCase& vc, RecordLayout& L,
@@ -593,6 +616,14 @@ void CGTypes::checkSchemaFieldOffsetAgreement(const Type& T, llvm::Type* Built) 
     if (!L) return;
     const auto* SL = Mod.getDataLayout().getStructLayout(st);
 
+    // One run-time walk of the whole record, not one restarted per field --
+    // see rtAllFieldOffsets.  A name repeated across variant alternatives
+    // keeps its FIRST walk-order offset, matching what rtFieldOffset itself
+    // would have returned for it.
+    std::unordered_map<std::string, llvm::Value*> RtOffsets;
+    for (auto& [Name, Off] : SchemaLayout.rtAllFieldOffsets(*T.RecordDecl))
+        RtOffsets.try_emplace(toLower(Name), Off);
+
     for (const auto& F : T.RecordFields) {
         auto It = L->Fields.find(toLower(F.Name));
         if (It == L->Fields.end()) continue;
@@ -601,8 +632,9 @@ void CGTypes::checkSchemaFieldOffsetAgreement(const Type& T, llvm::Type* Built) 
         const uint64_t FromLayout = SL->getElementOffset(P.Index)
                                   + (P.InVariant ? P.Offset : 0);
 
-        auto* RtOff = SchemaLayout.rtFieldOffset(*T.RecordDecl, F.Name);
-        auto* RtC   = llvm::dyn_cast_or_null<llvm::ConstantInt>(RtOff);
+        auto RtIt = RtOffsets.find(toLower(F.Name));
+        auto* RtC = RtIt != RtOffsets.end()
+            ? llvm::dyn_cast_or_null<llvm::ConstantInt>(RtIt->second) : nullptr;
         if (!RtC)
             codegenICE("field '" + F.Name + "' of type '" + T.Name + "' has "
                        "no constant offset in the run-time walk, though the "
@@ -630,6 +662,14 @@ void CGTypes::checkFieldOffsetAgreement(const Type& T, llvm::Type* Built) {
     const auto* L = layoutOfRecord(T);
     if (!L) return;
     const auto* SL = Mod.getDataLayout().getStructLayout(st);
+
+    // One run-time walk of the whole record instead of one restarted per
+    // field -- see rtAllFieldOffsets.  Below used to call rtFieldOffset
+    // (itself an O(fields) walk from the top) once per entry in Want, an
+    // O(fields) loop, making this whole check O(fields^2).
+    std::unordered_map<std::string, llvm::Value*> RtOffsets;
+    for (auto& [Name, Off] : SchemaLayout.rtAllFieldOffsets(*T.RecordDecl))
+        RtOffsets.try_emplace(toLower(Name), Off);
 
     for (const auto& [Name, Offset] : Want) {
         auto It = L->Fields.find(toLower(Name));
@@ -662,8 +702,9 @@ void CGTypes::checkFieldOffsetAgreement(const Type& T, llvm::Type* Built) {
         // not only on the ones a test exercises.  A result that does not fold
         // is itself the finding: it means this walk thinks something varies
         // that the static layout was certain did not.
-        auto* RtOff = SchemaLayout.rtFieldOffset(*T.RecordDecl, Name);
-        auto* RtC   = llvm::dyn_cast_or_null<llvm::ConstantInt>(RtOff);
+        auto RtIt = RtOffsets.find(toLower(Name));
+        auto* RtC = RtIt != RtOffsets.end()
+            ? llvm::dyn_cast_or_null<llvm::ConstantInt>(RtIt->second) : nullptr;
         if (!RtC)
             codegenICE("field '" + Name + "' of type '" + T.Name + "' has no "
                        "constant offset in the run-time walk, though the type "
