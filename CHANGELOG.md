@@ -32,7 +32,15 @@ corrected in the same PR.
   implementation there, only a narrower bitfield-offset feature that crashes gdb if misused for
   this), so a companion gdb Python pretty-printer (`share/plang/gdb/plang_schema_printers.py`)
   is shipped instead, computing the correct value from live memory at print time and
-  bypassing DWARF's limitation entirely for `print`ing the whole value.
+  bypassing DWARF's limitation entirely for `print`ing the whole value. **Caveat added in
+  issue #145: this only covers WHOLE-value printing (`print q^`)** -- a direct field-path
+  access (`print q^.field`) never invokes the pretty-printer at all, since gdb's
+  pretty-printer API only intercepts formatting of an already-resolved value, never
+  sub-expression evaluation; such an access is resolved by gdb's own evaluator straight off
+  the (potentially wrong) DWARF offset and can still read incorrectly for a field after a
+  varying one. This is a fundamental gdb API limitation, not fixable with more plang code;
+  the script now warns about it prominently at load time, and its docstring and the README
+  state it plainly.
 - A long flat chain of same-precedence binary operators (tens of thousands of terms, no
   parentheses) overflowed the stack in Sema's recursive expression walk, crashing with a raw
   SIGSEGV instead of a diagnostic -- the existing depth guard only covered parenthesized
