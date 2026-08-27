@@ -1271,6 +1271,14 @@ bool Sema::sameParamType(const std::shared_ptr<Type>& A,
     // schema; the discriminants arrive with the actual either way.
     if (A->Kind == TypeKind::Schema)
         return toLower(A->SchemaName) == toLower(B->SchemaName);
+    // A fixed-discriminant schema instance (e.g. Vec(5)) is written out afresh
+    // at every occurrence -- a forward declaration's parameter and its
+    // matching definition's parameter are two distinct Type objects even when
+    // they denote the same instantiation -- so pointer identity would call a
+    // schema instance incongruous with itself.  Compare structurally instead:
+    // same schema name and identical (constant-folded) discriminant values.
+    if (A->Kind == TypeKind::SchemaInstance)
+        return schemaInstMatch(*A, *B);
     return isIdenticalType(A, B);
 }
 
