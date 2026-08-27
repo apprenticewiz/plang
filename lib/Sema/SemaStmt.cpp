@@ -615,6 +615,20 @@ void Sema::checkCallStmt(const CallStmt& S) {
             return;
         }
 
+        // checkCallExpr (SemaExpr.cpp) asks this before dispatching on the
+        // builtin's spelling; this arm did not, so a call that is not one of
+        // the special cases below -- reset, close, dispose, ... -- reached
+        // codegen with whatever argument count was written.  `reset(f, 1, 2)`
+        // let its extra argument through to a runtime call already typed for
+        // two, which the IR verifier rejected as a compiler crash rather than
+        // a diagnostic; `reset()` reached emitUserProcCall and failed to link
+        // against an external symbol nothing defines.  Builtins.def's arity is
+        // the same source checkBuiltinArity already reads for expressions.
+        if (!checkBuiltinArity(Sym->BuiltinKind, Lo, S.Loc, S.Args.size())) {
+            for (const auto& Arg : S.Args) (void)checkExpr(*Arg);
+            return;
+        }
+
         // §6.9.4: page, like readln and writeln, is about lines, and only a
         // text file has any.  The other two are checked where their arguments
         // are already being walked, since checking an expression twice reports
@@ -895,7 +909,9 @@ void Sema::checkCallStmt(const CallStmt& S) {
             return;
         }
 
-        // Generic: evaluate arguments for side-effects / type errors, skip arity.
+        // Generic: arity was already checked against Builtins.def above.
+        // Evaluate arguments for side-effects / type errors and leave the
+        // rest -- which argument means what -- to codegen.
         for (const auto& Arg : S.Args) (void)checkExpr(*Arg);
         return;
     }
