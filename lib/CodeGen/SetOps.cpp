@@ -43,6 +43,13 @@ int64_t SetOps::setBaseOf(const ExprNode& e) {
     return (t && t->Kind == TypeKind::Set) ? setOffsetOf(*t) : 0;
 }
 
+std::optional<std::pair<int64_t, int64_t>>
+SetOps::declaredRangeOf(const ExprNode& e) {
+    const auto& t = e.ResolvedType;
+    if (!t || t->Kind != TypeKind::Set || !t->ElemType) return std::nullopt;
+    return ordinalRange(*t->ElemType);
+}
+
 llvm::Value* SetOps::alignSet(llvm::Value* v, int64_t from, int64_t to) {
     if (!v || from == to) return v;
     // A member sits at the bit given by its ordinal less the window's origin,
@@ -77,7 +84,17 @@ llvm::Value* SetOps::setBitIndex(llvm::Value* ordinal, int64_t base) {
                        "set.rebase");
 }
 
-llvm::Value* SetOps::emitSetSingleton(llvm::Value* ordinal, int64_t base) {
+llvm::Value* SetOps::emitSetSingleton(llvm::Value* ordinal, int64_t base,
+        std::optional<std::pair<int64_t, int64_t>> declaredRange,
+        plang::SourceLocation Loc) {
+    // Checked against the set's own declared base type, not merely clamped
+    // into [0, PlangMaxSetElements) below: that window is the bitmask's
+    // physical width, wider than most base types actually declare, so an
+    // ordinal like 999 for a `set of 1..10` cleared clampOrdinal's check
+    // and was folded into the bitmask as an unrelated, undeclared member.
+    if (declaredRange)
+        RangeGuards.emitRangeCheck(ordinal, declaredRange->first,
+                                    declaredRange->second, /*isIndex=*/false, Loc);
     auto* st    = setTy();
     auto* zero  = llvm::ConstantInt::get(st, 0);
     llvm::Value* inRange = nullptr;
@@ -87,7 +104,19 @@ llvm::Value* SetOps::emitSetSingleton(llvm::Value* ordinal, int64_t base) {
     return B.CreateSelect(inRange, bit, zero, "set.single");
 }
 
-llvm::Value* SetOps::emitSetRange(llvm::Value* lo, llvm::Value* hi, int64_t base) {
+llvm::Value* SetOps::emitSetRange(llvm::Value* lo, llvm::Value* hi, int64_t base,
+        std::optional<std::pair<int64_t, int64_t>> declaredRange,
+        plang::SourceLocation Loc) {
+    // As emitSetSingleton: each endpoint is checked against the declared base
+    // type before it is ever turned into a bit position, regardless of
+    // whether lo > hi leaves the range empty -- an endpoint outside the base
+    // type is still not a value of that type.
+    if (declaredRange) {
+        RangeGuards.emitRangeCheck(lo, declaredRange->first, declaredRange->second,
+                                    /*isIndex=*/false, Loc);
+        RangeGuards.emitRangeCheck(hi, declaredRange->first, declaredRange->second,
+                                    /*isIndex=*/false, Loc);
+    }
     auto* st       = setTy();
     auto* zero     = llvm::ConstantInt::get(st, 0);
     auto* allOnes  = llvm::ConstantInt::getAllOnesValue(st);

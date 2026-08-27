@@ -63,15 +63,16 @@ llvm::Value* CGStructuredValue::emitStructuredValue(const StructuredValueExpr& e
     // ---- Set constructor with type prefix: emit as bitmask ----
     if (e.ResolvedType->Kind == TypeKind::Set) {
         const int64_t base = Sets.setBaseOf(e);
+        const auto declaredRange = Sets.declaredRangeOf(e);
         llvm::Value* result = llvm::ConstantInt::get(Sets.setTy(), 0);
         for (const auto& arm : e.Arms) {
             for (const auto& lbl : arm.Labels) {
                 llvm::Value* bits = nullptr;
                 if (auto* rng = llvm::dyn_cast<SetRangeExpr>(lbl.get()))
                     bits = Sets.emitSetRange(EmitExpr(*rng->Low), EmitExpr(*rng->High),
-                                        base);
+                                        base, declaredRange, rng->Loc);
                 else
-                    bits = Sets.emitSetSingleton(EmitExpr(*lbl), base);
+                    bits = Sets.emitSetSingleton(EmitExpr(*lbl), base, declaredRange, lbl->Loc);
                 if (bits) result = B.CreateOr(result, bits, "set");
             }
             // Arms with Values in a set constructor are unusual but tolerated.

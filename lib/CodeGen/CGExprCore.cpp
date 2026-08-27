@@ -136,13 +136,15 @@ llvm::Value* CGExprCore::emitExpr(const ExprNode& e) {
     if (auto* n = llvm::dyn_cast<SetLiteralExpr>(&e)) {
         // Empty set → 0.
         const int64_t base = Sets.setBaseOf(*n);
+        const auto declaredRange = Sets.declaredRangeOf(*n);
         llvm::Value* result = llvm::ConstantInt::get(Sets.setTy(), 0);
         for (const auto& elem : n->Elements) {
             llvm::Value* bits = nullptr;
             if (auto* rng = llvm::dyn_cast<SetRangeExpr>(elem.get()))
-                bits = Sets.emitSetRange(emitExpr(*rng->Low), emitExpr(*rng->High), base);
+                bits = Sets.emitSetRange(emitExpr(*rng->Low), emitExpr(*rng->High), base,
+                                          declaredRange, rng->Loc);
             else
-                bits = Sets.emitSetSingleton(emitExpr(*elem), base);
+                bits = Sets.emitSetSingleton(emitExpr(*elem), base, declaredRange, elem->Loc);
             result = B.CreateOr(result, bits, "set");
         }
         return result;

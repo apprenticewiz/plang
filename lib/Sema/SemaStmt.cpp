@@ -222,7 +222,27 @@ void Sema::checkAssign(const AssignStmt& S) {
     // Also covers A[i] := ... where A is a protected conformant array param.
     checkNotProtected(*S.Target, S.Loc);
 
-    auto Src = checkExpr(*S.Value);
+    // A bare set literal (`s := [999]`, no E.TypeName of its own) has no way
+    // to know Dst is coming by the time generic checkExpr reaches
+    // checkSetLit -- routing it there directly, with Dst as a hint, lets an
+    // out-of-range element be caught the same warn-then-trap way a named
+    // constructor's already is, instead of checkSetLit's own context-free
+    // element-count check (sized for a literal with no destination at all)
+    // firing first and refusing to compile.
+    std::shared_ptr<Type> Src;
+    if (Dst->Kind == TypeKind::Set) {
+        if (auto* SL = llvm::dyn_cast<SetLiteralExpr>(S.Value.get())) {
+            Src = checkSetLit(*SL, Dst);
+            // checkExpr's generic dispatch is what normally stamps this --
+            // bypassing it here means doing that stamp by hand, both for
+            // codegen (which reads ResolvedType off the AST node) and so
+            // isLooseSet sees a Set-kind type if anything downstream still
+            // asks (adoptSetType below is a no-op either way once Src is
+            // already exactly Dst).
+            S.Value->ResolvedType = Src;
+        }
+    }
+    if (!Src) Src = checkExpr(*S.Value);
 
     // EP §6.9.2.2: the value has to suit the type of the variable — except for
     // a function result, where it has to suit that type's underlying type.
@@ -255,6 +275,13 @@ void Sema::checkAssign(const AssignStmt& S) {
     }
     checkStringCapacity(*Dst, *S.Value);
     warnIfConstantOutOfRange(*Dst, *S.Value);
+    // warnIfConstantOutOfRange only looks at Dst.Kind == Subrange; a set's own
+    // constant-out-of-range members are checked here instead, against the
+    // base type Dst names -- an untyped `[999]` only learns it is a TinySet
+    // (set of 1..10) from Dst, so this has to wait for Dst the same way
+    // adoptSetType below does.
+    if (Dst->Kind == TypeKind::Set && Dst->ElemType)
+        warnIfSetLitOutOfRange(*Dst->ElemType, *S.Value);
     adoptSetType(*S.Value, Dst);
 }
 
