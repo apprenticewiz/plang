@@ -1100,8 +1100,22 @@ void Codegen::Impl::emitBlockAllocas(const BlockNode& block) {
 // The capacity of a string-typed declaration, or 0 when it is not a string.
 int64_t Codegen::Impl::declaredStrCapacity(const TypeNode* tn) {
     if (!tn) return 0;
-    if (auto* sn = llvm::dyn_cast<StringTypeNode>(tn))
-        return evalConstInt(*sn->Capacity, 255, &consts);
+    if (auto* sn = llvm::dyn_cast<StringTypeNode>(tn)) {
+        if (auto v = tryEvalConstInt(*sn->Capacity, &consts)) return *v;
+        // A capacity that does not fold here is not fabricated as
+        // PlangMaxStringCapacity (255): that fallback is the same fabrication
+        // R2 deleted at the sibling sites below and in SchemaLayoutEngine.
+        // Sema resolves every StringTypeNode -- including one reached through
+        // a foreign denoter whose capacity is a discriminant -- and records
+        // ITS OWN answer on ResolvedType even where the AST expression itself
+        // has no ConstVal (a discriminant read is deliberately never folded
+        // onto the shared node, see Sema::constBound).  Falling back to that
+        // answer instead is exactly what the "written through a name" arm
+        // below already does for the same reason.
+        if (tn->ResolvedType && tn->ResolvedType->Kind == TypeKind::VarString)
+            return tn->ResolvedType->StrCapacity;
+        return 0;
+    }
     // Written through a name, so the syntax says nothing; Sema resolved it.
     if (tn->ResolvedType && tn->ResolvedType->Kind == TypeKind::VarString)
         return tn->ResolvedType->StrCapacity;
