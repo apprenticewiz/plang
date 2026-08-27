@@ -686,6 +686,15 @@ std::shared_ptr<Type> Sema::checkBinary(const BinaryExpr& E) {
                 // a base-0 mask.  Plain integer is skipped deliberately: it
                 // spans too much to be a window, so the constructor keeps the
                 // one it derived from its own elements.
+                //
+                // Ctx_.getSet is a bare interning factory with no width
+                // opinion of its own -- the OTHER caller (SemaType.cpp, for a
+                // named `set of Base`) checks the base type before ever
+                // calling it, and synthesizing a set type here has to be held
+                // to the same limit or a >256-value ordinal (an enum, most
+                // plausibly) silently truncates in the bitmask instead of
+                // being reported: `e in [v256]` read as false for e = v256.
+                checkSetBaseRange(*Lt, E.Loc);
                 adoptSetType(*E.Right, Ctx_.getSet(Lt, false));
             } else if (!Lt->isError() && Rt->ElemType && !Rt->ElemType->isError()) {
                 // Check base type compatibility.
