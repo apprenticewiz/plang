@@ -891,6 +891,24 @@ int Sema::pushWithScope(const WithStmt& S) {
         auto T = checkExpr(*Rec);
         if (T->isError()) continue;
 
+        // ISO §6.8.3.10 / EP §6.8.3.10: a with-statement's record-variable is
+        // a variable-access, not any record-valued expression -- without this,
+        // `with mk() do x := 5` for a function `mk` returning a record was
+        // accepted, and the assignment to `x` landed in a temporary nothing
+        // could ever read back.
+        if (!isLValue(*Rec)) {
+            error(Rec->Loc, diag::err_with_not_variable, {T->Name});
+            continue;
+        }
+
+        // EP §6.4.2.5: a restricted type's components are not reachable by
+        // any spelling of a component-access, and `with` opens exactly the
+        // same access `.field` does -- rejectRestrictedComponent is the same
+        // check checkField already applies there, so `with x do f := 1` on a
+        // `restricted` record is refused exactly where `x.f := 1` already is,
+        // rather than exposing every field a plain `.field` cannot reach.
+        if (rejectRestrictedComponent(*Rec, *T)) continue;
+
         // EP §6.7.3.1: `with` opens a new spelling for the SAME storage a
         // protected parameter denotes, and checkNotProtected only ever asks
         // Symtab about the identifier actually written -- which, inside a
