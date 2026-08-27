@@ -84,16 +84,27 @@ SchemaAccess::schemaActual(const ExprNode& arg, unsigned discCount) {
     }
 
     // EP §6.4.3.3: a string(n) IS an instance of the `string` schema, and its
-    // one discriminant is the capacity -- a constant here.  This is what lets
-    // `procedure p(var s: string)` take a string of any capacity.
+    // one discriminant is the capacity.  This is what lets `procedure p(var
+    // s: string)` take a string of any capacity.
+    //
+    // ExprStrCap is exprStrCapStatic: the probe's answer (typically 1), sized
+    // for a TEMPORARY rather than for this object -- see its own comment in
+    // CodeGenImpl.h.  A string(n) *field* of a schema is VarString +
+    // ExtentVaries, not SchemaInstance, so it took this branch rather than
+    // the schemaRefOf one above, and every discriminant-sized field passed
+    // to `work(var s: string)` handed the callee a string(1): `work(q^.s)`
+    // on a real capacity of 10 raised "string of length 5 assigned to a
+    // string(1)" on the callee's very first assignment.  exprStrCapV is the
+    // same answer assignment already asks for its target -- the path's own
+    // extent form when the capacity varies, and ExprStrCap's constant
+    // otherwise -- so it is correct for both an ordinary string(n) and a
+    // schema-varying one.
     const plang::Type* T = arg.ResolvedType.get();
     if (T && T->Kind == TypeKind::VarString && discCount == 1) {
         auto* data = EmitLValue(arg);
         if (!data) codegenICE("string argument for a schema parameter is not "
                               "addressable");
-        return {data, {llvm::ConstantInt::get(I64Ty,
-                           static_cast<uint64_t>(ExprStrCap(arg)),
-                           /*isSigned=*/true)}};
+        return {data, {exprStrCapV(arg)}};
     }
 
     // A discriminated instance knows them at compile time.
