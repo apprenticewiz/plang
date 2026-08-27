@@ -384,6 +384,24 @@ void Sema::checkFor(const ForStmt& S) {
         && !(From->isNumeric() && Limit->isNumeric()))
         error(S.Loc, diag::err_for_bounds_incompatible, {From->Name, Limit->Name});
 
+    // ISO §6.8.3.9: a bound's value is assigned to the control variable on
+    // entry (and each iteration), so each one must be assignment-compatible
+    // with ITS type too -- checking them only against each other above waived
+    // through `for c := 1 to 10 do` for a char c (the ordinals print, not
+    // 'a'..'j') and `for i := 1 to 10.5 do` (the real bound silently
+    // truncates): two numeric types can agree with each other without either
+    // agreeing with the variable both are being assigned into.  Skipped once
+    // the variable itself is not ordinal (or unresolved): that is already
+    // err_for_var_not_ordinal's diagnostic to give, not a second one here.
+    if (Sym && Sym->Ty->isOrdinal()) {
+        if (!From->isError() && !isAssignCompatible(*Sym->Ty, *From))
+            error(S.From->Loc, diag::err_for_bound_wrong_type,
+                  {From->Name, S.Var, Sym->Ty->Name});
+        if (!Limit->isError() && !isAssignCompatible(*Sym->Ty, *Limit))
+            error(S.Limit->Loc, diag::err_for_bound_wrong_type,
+                  {Limit->Name, S.Var, Sym->Ty->Name});
+    }
+
     // ISO §6.8.3.9: the body must not threaten the control variable (assign to it).
     checkForBody(S.Body.get(), S.Var, S.Loc);
     checkStmt(S.Body.get());
@@ -425,16 +443,114 @@ void Sema::checkProcForThreats(
         checkProcForThreats(*Q, VarName, ForLoc, P.Body->Procs);
 }
 
+/// Static type of a `with`-clause record expression; see the Sema.h doc
+/// comment for why this does not simply call checkExpr.  Handles the forms
+/// ISO §6.8.3.1's variable-access production allows in a with-record: a plain
+/// name, a field selection, a pointer dereference, and an indexed component.
+/// Anything else (a call, say) is out of that grammar and returns null.
+std::shared_ptr<Type> Sema::quietWithRecordType(const ExprNode* E) {
+    if (auto* Id = llvm::dyn_cast<IdentExpr>(E)) {
+        Symbol* Sym = Symtab.lookup(Id->Name);
+        return Sym ? Sym->Ty : nullptr;
+    }
+    if (auto* F = llvm::dyn_cast<FieldExpr>(E)) {
+        auto RecTy = quietWithRecordType(F->Record.get());
+        if (!RecTy) return nullptr;
+        // EP §6.4.7: `v.d` on a schematic value is the discriminant when d
+        // names one -- checkField's own precedence, mirrored here.
+        if (RecTy->Kind == TypeKind::Schema || RecTy->Kind == TypeKind::SchemaInstance)
+            for (const auto& D : RecTy->SchemaDiscs)
+                if (eqCI(D.Name, F->Field)) return D.Ty;
+        const Type* Body = schemaUnderlying(RecTy.get());
+        const Type::Field* Fld = Body && Body->Kind == TypeKind::Record
+                                ? Body->fieldByName(F->Field) : nullptr;
+        return Fld ? Fld->Ty : nullptr;
+    }
+    if (auto* D = llvm::dyn_cast<DerefExpr>(E)) {
+        auto PtrTy = quietWithRecordType(D->Pointer.get());
+        return (PtrTy && PtrTy->Kind == TypeKind::Pointer) ? PtrTy->PointeeType : nullptr;
+    }
+    if (auto* Ix = llvm::dyn_cast<IndexExpr>(E)) {
+        auto ArrTy = quietWithRecordType(Ix->Array.get());
+        return (ArrTy && ArrTy->Kind == TypeKind::Array) ? ArrTy->ElemType : nullptr;
+    }
+    return nullptr;
+}
+
+bool Sema::withExposesName(const WithStmt& S, const std::string& Name) {
+    for (const auto& Rec : S.Records) {
+        auto T = quietWithRecordType(Rec.get());
+        if (!T) continue;
+        // EP §6.4.7: an undiscriminated or instantiated schema exposes its
+        // discriminants alongside its body's fields (see pushWithScope).
+        if (T->Kind == TypeKind::Schema || T->Kind == TypeKind::SchemaInstance)
+            for (const auto& Dc : T->SchemaDiscs)
+                if (eqCI(Dc.Name, Name)) return true;
+        const Type* Body = schemaUnderlying(T.get());
+        if (Body && Body->Kind == TypeKind::Record && Body->fieldByName(Name))
+            return true;
+    }
+    return false;
+}
+
 // Unified for-loop threat scanner (ISO §6.8.3.9).
 // When `Callables` is null the symbol table resolves var-param flags (intra-procedural).
 // When `Callables` is non-null the symbol table scope is already closed; the supplied
 // AST proc list is used instead (inter-procedural mode).
+// `Shadowed` says whether an enclosing `with`, somewhere between the
+// for-statement and `Stmt`, already exposes a field or discriminant spelled
+// like `VarName` -- see withExposesName and the Sema.h doc comment.
 void Sema::checkForBody(const StmtNode* Stmt, const std::string& VarName,
                          SourceLocation ForLoc,
-                         const std::vector<const ProcDecl*>* Callables) {
+                         const std::vector<const ProcDecl*>* Callables,
+                         bool Shadowed) {
+    if (!Stmt) return;
     const bool InterProc = Callables != nullptr;
-    walkStmts(Stmt, [&](const StmtNode* S) {
-        if (auto* A = llvm::dyn_cast<AssignStmt>(S)) {
+
+    // A var-parameter actual threatens the control variable whether the call
+    // stands alone as a statement (CallStmt) or sits inside an expression
+    // (CallExpr) -- `y := f(i)` threatens exactly as a bare `f(i)` would.
+    // Shared so both call forms resolve a callee's var-parameters identically,
+    // in both intra- and inter-procedural mode.
+    auto checkVarParamArgs = [&](const std::string& Name,
+                                  const std::vector<std::unique_ptr<ExprNode>>& Args,
+                                  SourceLocation Loc) {
+        if (InterProc) {
+            // Resolve var-param flags from AST proc list (symbol table scope is closed).
+            for (const ProcDecl* Pd : *Callables) {
+                if (!eqCI(Pd->Name, Name)) continue;
+                size_t ArgIdx = 0;
+                for (const auto& Pg : Pd->Params) {
+                    for (size_t K = 0; K < Pg.Names.size(); ++K, ++ArgIdx) {
+                        if (ArgIdx >= Args.size()) break;
+                        if (!Pg.IsVar) continue;
+                        if (auto* Id = llvm::dyn_cast<IdentExpr>(Args[ArgIdx].get()))
+                            if (eqCI(Id->Name, VarName))
+                                error(Loc, diag::err_for_inter_var_param, {VarName});
+                    }
+                }
+                break;
+            }
+        } else {
+            // Resolve var-param flags from the symbol table (intra-procedural).
+            Symbol* Callee = Symtab.lookup(Name);
+            if (Callee && (Callee->Kind == SymbolKind::Proc || Callee->Kind == SymbolKind::Builtin)) {
+                for (size_t I = 0; I < Callee->Params.size() && I < Args.size(); ++I) {
+                    if (!Callee->Params[I].IsVar) continue;
+                    if (auto* Id = llvm::dyn_cast<IdentExpr>(Args[I].get()))
+                        if (eqCI(Id->Name, VarName))
+                            error(Loc, diag::err_for_body_var_param, {VarName});
+                }
+            }
+        }
+    };
+
+    // A with-exposed field or discriminant spelled like VarName shadows it:
+    // every check below is about the CONTROL VARIABLE specifically, and none
+    // of them apply to a bare mention that with-scope resolution would send
+    // somewhere else entirely (issue #291).
+    if (!Shadowed) {
+        if (auto* A = llvm::dyn_cast<AssignStmt>(Stmt)) {
             if (auto* Id = llvm::dyn_cast<IdentExpr>(A->Target.get()))
                 if (eqCI(Id->Name, VarName))
                     error(A->Loc,
@@ -443,52 +559,75 @@ void Sema::checkForBody(const StmtNode* Stmt, const std::string& VarName,
                           {VarName});
         } else if (!InterProc) {
             // Inner for-loop reuse: only checked in the direct (intra-procedural) scan.
-            if (auto* Fs = llvm::dyn_cast<ForStmt>(S))
+            if (auto* Fs = llvm::dyn_cast<ForStmt>(Stmt))
                 if (eqCI(Fs->Var, VarName))
                     error(Fs->Loc, diag::err_for_body_reuses, {VarName});
         }
-        if (auto* Cs = llvm::dyn_cast<CallStmt>(S)) {
+        if (auto* Cs = llvm::dyn_cast<CallStmt>(Stmt)) {
             std::string Lo = toLower(Cs->Name);
-            if ((Lo == "read" || Lo == "readln") && !Cs->Args.empty()) {
-                for (const auto& Arg : Cs->Args) {
-                    if (auto* Id = llvm::dyn_cast<IdentExpr>(Arg.get()))
-                        if (eqCI(Id->Name, VarName))
-                            error(Cs->Loc,
-                                  InterProc ? diag::err_for_inter_reads
-                                            : diag::err_for_body_reads,
-                                  {VarName});
-                }
+            // EP §6.7.5.5: readstr(e, v1,...,vn) reads e and assigns every v --
+            // the mirror of read/readln, except its first argument is the
+            // SOURCE rather than the first destination.  writestr(e, ...) is
+            // the other mirror, assigning only e.  Neither was recognized
+            // here, so `for i := 1 to 3 do readstr(s, i)` passed unchallenged.
+            auto isWriteArg = [&](size_t I) {
+                if (Lo == "read" || Lo == "readln") return true;
+                if (Lo == "readstr")                return I >= 1;
+                if (Lo == "writestr")               return I == 0;
+                return false;
+            };
+            for (size_t I = 0; I < Cs->Args.size(); ++I) {
+                if (!isWriteArg(I)) continue;
+                if (auto* Id = llvm::dyn_cast<IdentExpr>(Cs->Args[I].get()))
+                    if (eqCI(Id->Name, VarName))
+                        error(Cs->Loc,
+                              InterProc ? diag::err_for_inter_reads
+                                        : diag::err_for_body_reads,
+                              {VarName});
             }
-            if (InterProc) {
-                // Resolve var-param flags from AST proc list (symbol table scope is closed).
-                for (const ProcDecl* Pd : *Callables) {
-                    if (!eqCI(Pd->Name, Cs->Name)) continue;
-                    size_t ArgIdx = 0;
-                    for (const auto& Pg : Pd->Params) {
-                        for (size_t K = 0; K < Pg.Names.size(); ++K, ++ArgIdx) {
-                            if (ArgIdx >= Cs->Args.size()) break;
-                            if (!Pg.IsVar) continue;
-                            if (auto* Id = llvm::dyn_cast<IdentExpr>(Cs->Args[ArgIdx].get()))
-                                if (eqCI(Id->Name, VarName))
-                                    error(Cs->Loc, diag::err_for_inter_var_param, {VarName});
-                        }
-                    }
-                    break;
-                }
-            } else {
-                // Resolve var-param flags from the symbol table (intra-procedural).
-                Symbol* Callee = Symtab.lookup(Cs->Name);
-                if (Callee && (Callee->Kind == SymbolKind::Proc || Callee->Kind == SymbolKind::Builtin)) {
-                    for (size_t I = 0; I < Callee->Params.size() && I < Cs->Args.size(); ++I) {
-                        if (!Callee->Params[I].IsVar) continue;
-                        if (auto* Id = llvm::dyn_cast<IdentExpr>(Cs->Args[I].get()))
-                            if (eqCI(Id->Name, VarName))
-                                error(Cs->Loc, diag::err_for_body_var_param, {VarName});
-                    }
-                }
-            }
+            checkVarParamArgs(Cs->Name, Cs->Args, Cs->Loc);
         }
-    });
+        // A var-parameter call need not be a statement of its own: `y := f(i)`
+        // threatens exactly as `f(i)` alone would, through an expression the
+        // statement walk never used to look inside (issue #265).  Every
+        // CallExpr hanging off this one statement, at any depth, is checked
+        // the same way a top-level CallStmt already is above.
+        forEachStmtExpr(Stmt, [&](const ExprNode* E) {
+            walkExprs(E, [&](const ExprNode* Ex) {
+                if (auto* Ce = llvm::dyn_cast<CallExpr>(Ex))
+                    checkVarParamArgs(Ce->Name, Ce->Args, Ce->Loc);
+            });
+        });
+    }
+
+    // Recurse exactly where walkStmts (SemaUtil.h) would; unlike that shared
+    // walk, a with-body's Shadowed state may differ from what it was on the
+    // way in, which is why this is not simply `walkStmts(Stmt, ...)` above.
+    if (auto* Cs = llvm::dyn_cast<CompoundStmt>(Stmt)) {
+        for (const auto& St : Cs->Stmts)
+            checkForBody(St.get(), VarName, ForLoc, Callables, Shadowed);
+    } else if (auto* Is = llvm::dyn_cast<IfStmt>(Stmt)) {
+        checkForBody(Is->Then.get(), VarName, ForLoc, Callables, Shadowed);
+        checkForBody(Is->Else.get(), VarName, ForLoc, Callables, Shadowed);
+    } else if (auto* Fs = llvm::dyn_cast<ForStmt>(Stmt)) {
+        checkForBody(Fs->Body.get(), VarName, ForLoc, Callables, Shadowed);
+    } else if (auto* Fi = llvm::dyn_cast<ForInStmt>(Stmt)) {
+        checkForBody(Fi->Body.get(), VarName, ForLoc, Callables, Shadowed);
+    } else if (auto* Ws = llvm::dyn_cast<WhileStmt>(Stmt)) {
+        checkForBody(Ws->Body.get(), VarName, ForLoc, Callables, Shadowed);
+    } else if (auto* Rs = llvm::dyn_cast<RepeatStmt>(Stmt)) {
+        for (const auto& St : Rs->Stmts)
+            checkForBody(St.get(), VarName, ForLoc, Callables, Shadowed);
+    } else if (auto* Cas = llvm::dyn_cast<CaseStmt>(Stmt)) {
+        for (const auto& Arm : Cas->Arms)
+            checkForBody(Arm.Body.get(), VarName, ForLoc, Callables, Shadowed);
+        checkForBody(Cas->Else.get(), VarName, ForLoc, Callables, Shadowed);
+    } else if (auto* Wts = llvm::dyn_cast<WithStmt>(Stmt)) {
+        checkForBody(Wts->Body.get(), VarName, ForLoc, Callables,
+                     Shadowed || withExposesName(*Wts, VarName));
+    } else if (auto* Ls = llvm::dyn_cast<LabeledStmt>(Stmt)) {
+        checkForBody(Ls->Stmt.get(), VarName, ForLoc, Callables, Shadowed);
+    }
 }
 
 void Sema::checkRepeat(const RepeatStmt& S) {
