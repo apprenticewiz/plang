@@ -467,7 +467,7 @@ void plang_write_file_f64_e (PascalFile *F, double V, int64_t W) {
 void plang_write_file_f64_f (PascalFile *F, double V, int64_t W, int64_t D) {
     abortIfClosed(F,"write");
     if (D < 0) { plang_write_file_f64_e(F, V, W); return; }
-    std::fprintf(F->Fp, "%*.*f", checkedWidth(W), static_cast<int>(D), V);
+    std::fprintf(F->Fp, "%*.*f", checkedWidth(W), checkedWidth(D), V);
 }
 // §6.9.3.6: the field is exactly W characters, so a longer string loses its
 // tail; the `%*s` a width otherwise maps onto pads but never truncates.
