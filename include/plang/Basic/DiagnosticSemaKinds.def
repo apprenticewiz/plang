@@ -242,6 +242,14 @@ DIAG(err_set_lit_too_wide, Error,
      "set constructor spans %0..%1, which exceeds the %2-element limit on sets")
 DIAG(err_file_component_is_file, Error, "file component type must not itself be a file type")
 DIAG(err_file_field_has_file, Error, "file component type must not contain a file field (field '%0' is a file type)")
+// Issue #241: get/read/put/position all derive the file's component stride
+// from this type's byte size, and disagree about what a zero-size component
+// means -- fread and an fseek(0) are no-ops, so read never moves the file
+// position (eof can never become true: an infinite loop), while get's
+// single-character lookahead fallback moves it by one byte regardless, as
+// though the component were a char. No stride reconciles both, so the type
+// is rejected instead.
+DIAG(err_file_component_zero_size, Error, "'%0' has zero size and cannot be a file's component type")
 DIAG(err_string_cap_not_int, Error, "string capacity must be an integer constant expression")
 DIAG(err_string_cap_not_positive, Error, "string capacity must be positive; got %0")
 // ISO §6.4.3.2, §6.4.2.4: an index type and a subrange are written with
