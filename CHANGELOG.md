@@ -8,6 +8,47 @@ version numbers follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 
 ## [Unreleased]
 
+A fourth adversarial review round, prompted by "really shake bugs out" before starting the
+Turbo Pascal extensions -- 14 lenses, including a dedicated adversarial re-review of round 3's
+own brand-new `-g` debug-info code, file I/O edge cases, driver/CLI flag combinations, module
+diamond-import stress under genuine separate compilation, and a second opinion on the
+versioning code from earlier the same day. Eleven bugs (one independently found by three
+separate lenses at once -- a strong signal), every fix carrying a regression test verified to
+fail against the code it fixes. One fix's own first draft introduced a real regression
+(broke ordinary enum-literal resolution), caught by independent verification before merge and
+corrected in the same PR.
+
+### Fixed
+
+- **A schema's DIType under `-g` was missing its runtime discriminant header**, corrupting
+  every field's apparent value under a debugger (not just an approximated extent for the
+  varying field, as previously documented -- every field, including the discriminant itself,
+  read completely wrong). Partially fixed: the discriminant field and fields at or before a
+  varying-extent field are now exact; a fixed field declared *after* a varying field remains a
+  known, tracked gap (needs a DWARF location expression, real design work beyond this fix).
+- A long flat chain of same-precedence binary operators (tens of thousands of terms, no
+  parentheses) overflowed the stack in Sema's recursive expression walk, crashing with a raw
+  SIGSEGV instead of a diagnostic -- the existing depth guard only covered parenthesized
+  nesting, never a flat operator chain.
+- `write()` to a file opened via `reset()` (read-only) silently discarded the write; `read()`
+  from a file still open write-only from `rewrite()` returned stale caller-memory garbage --
+  both from unchecked `fwrite`/`fread` return values.
+- `plang` couldn't link pre-compiled `.o`/`.a` files without at least one `.pas` source,
+  breaking the standard compile-then-link workflow every C toolchain supports.
+- A directory passed as the input file produced six misleading cascading parser errors instead
+  of one clear diagnostic.
+- A diamond-imported module failed to initialize in the correct order (or at all, in some
+  cases) when compiled as genuinely separate translation units, even though the single-file
+  case already worked correctly.
+- The version-string fallback path (used with no reachable release tag, e.g. a shallow clone)
+  disagreed with the primary path on whether untracked files count as "dirty".
+- `warn_unused_variable`/`warn_unused_parameter` pointed at the shared type token, not the
+  actual identifier, for multi-name declaration groups (`a, b: integer`).
+- A non-ordinal array index produced two overlapping diagnostics for one root cause.
+- A bare-identifier reference to a required constant (`pi`, `maxint`, ...) redeclared as a
+  function returned the builtin instead of calling the user's function, inconsistent with
+  explicit call syntax which was already fixed for this class of bug.
+
 ## [0.3.2] - 2026-08-27
 
 A third adversarial review round, prompted by the goal of making plang "bulletproof" before
