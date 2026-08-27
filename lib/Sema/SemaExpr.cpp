@@ -321,8 +321,18 @@ std::shared_ptr<Type> Sema::checkIndex(const IndexExpr& E) {
     }
     // EP §6.7.3.7: conformant arrays are indexed like regular arrays.
     if (ArrTy->Kind == TypeKind::ConformantArray) {
-        if (!IdxTy->isError() && !IdxTy->isOrdinal())
+        const bool IdxNotOrdinal = !IdxTy->isError() && !IdxTy->isOrdinal();
+        if (IdxNotOrdinal)
             error(E.Loc, diag::err_index_not_ordinal, {IdxTy->Name});
+        // ISO §6.5.3.2: same assignment-compatibility check the plain-Array
+        // branch below makes against IndexType, but against the ordinal type
+        // named in this dimension's index-type-specification -- a conformant
+        // array leaves the BOUNDS unknown until the call, not the index type.
+        const std::shared_ptr<Type> IdxSpecTy = !ArrTy->ConformantBounds.empty()
+            ? ArrTy->ConformantBounds[0].OrdType : nullptr;
+        if (!IdxNotOrdinal && !IdxTy->isError() && IdxSpecTy
+            && !IdxSpecTy->isError() && !isAssignCompatible(*IdxSpecTy, *IdxTy))
+            error(E.Loc, diag::err_index_type_mismatch, {IdxTy->Name, IdxSpecTy->Name});
         return ArrTy->ElemType ? ArrTy->ElemType : TyErr;
     }
     if (ArrTy->Kind != TypeKind::Array) {
@@ -1392,6 +1402,20 @@ void Sema::checkProcedureActual(const Type& Formal, const std::string& ParamName
     }
 }
 
+/// The ordinal index type of \p T's outermost dimension, for an actual that
+/// may conform to a conformant-array schema: a plain Array's IndexType, or
+/// (when relaying an already-conformant parameter to another one) a
+/// ConformantArray's own first bound's declared type.  Null for anything
+/// else, or when that dimension's type never resolved.  Shared by
+/// isConformable and its caller's diagnostic, so the two cannot disagree on
+/// what "the actual's index type" means.
+static std::shared_ptr<Type> outerIndexTypeOf(const Type& T) {
+    if (T.Kind == TypeKind::Array) return T.IndexType;
+    if (T.Kind == TypeKind::ConformantArray && !T.ConformantBounds.empty())
+        return T.ConformantBounds[0].OrdType;
+    return nullptr;
+}
+
 void Sema::checkCallArgs(const Symbol& Sym, SourceLocation CallLoc,
                          std::span<const std::unique_ptr<ExprNode>> Args) {
     if (Args.size() != Sym.Params.size()) {
@@ -1455,10 +1479,30 @@ void Sema::checkCallArgs(const Symbol& Sym, SourceLocation CallLoc,
                     Actual = Underlying;
             }
             if (!isConformable(*Param.Ty, *Actual)) {
+                // ISO §6.7.3.8: report whichever of a)/d)/the element type
+                // actually failed, in the same order isConformable checks
+                // them -- otherwise a packedness or index-type mismatch was
+                // reported as an element-type mismatch with the SAME type
+                // named on both sides ("expected 'integer', got 'integer'"),
+                // which only isConformable's old element-only check could
+                // never produce and this one now can.
+                const std::shared_ptr<Type> FormalOrdTy =
+                    !Param.Ty->ConformantBounds.empty()
+                        ? Param.Ty->ConformantBounds[0].OrdType : nullptr;
+                const std::shared_ptr<Type> ActualIdxTy = outerIndexTypeOf(*Actual);
                 if (Actual->Kind != TypeKind::Array
                         && Actual->Kind != TypeKind::ConformantArray) {
                     error(ArgNode.Loc, diag::err_conformant_actual_not_array,
                           {Param.Name, At->Name});
+                } else if (Param.Ty->Packed != Actual->Packed) {
+                    error(ArgNode.Loc, diag::err_conformant_packed_mismatch,
+                          {Param.Name, Param.Ty->Packed ? "packed" : "unpacked",
+                           Actual->Packed ? "packed" : "unpacked"});
+                } else if (FormalOrdTy && !FormalOrdTy->isError()
+                               && ActualIdxTy && !ActualIdxTy->isError()
+                               && !isAssignCompatible(*FormalOrdTy, *ActualIdxTy)) {
+                    error(ArgNode.Loc, diag::err_conformant_index_type_mismatch,
+                          {Param.Name, FormalOrdTy->Name, ActualIdxTy->Name});
                 } else {
                     error(ArgNode.Loc, diag::err_conformant_elem_mismatch,
                           {Param.Name,
@@ -1586,6 +1630,26 @@ bool Sema::isConformable(const Type& Formal, const Type& Actual) const {
     if (Actual.Kind != TypeKind::Array
             && Actual.Kind != TypeKind::ConformantArray)
         return false;
+    // ISO §6.7.3.8 d): a packed conformant-array-form requires a packed
+    // actual, and an unpacked one requires an unpacked actual -- checked at
+    // every nesting level this function recurses into, same as a) below.
+    if (Formal.Packed != Actual.Packed) return false;
+    // ISO §6.7.3.8 a): the index-type of the actual has to be *compatible*
+    // with the ordinal-type-name of this dimension's index-type-specification
+    // -- e.g. a `char` schema does not conform to an `integer`-indexed actual
+    // even when the element types agree.  isAssignCompatible, asked with the
+    // schema's ordinal type as Dst, is this codebase's stand-in for §6.4.5
+    // "compatible types" between two ordinal types (same type, or subranges
+    // sharing a host type) -- the plain-Array index check above relies on the
+    // same equivalence.
+    if (!Formal.ConformantBounds.empty()) {
+        const auto& FormalOrdTy = Formal.ConformantBounds[0].OrdType;
+        auto ActualIdxTy = outerIndexTypeOf(Actual);
+        if (FormalOrdTy && !FormalOrdTy->isError()
+                && ActualIdxTy && !ActualIdxTy->isError()
+                && !isAssignCompatible(*FormalOrdTy, *ActualIdxTy))
+            return false;
+    }
     if (!Formal.ElemType || !Actual.ElemType) return true;
     // ISO §6.6.3.8: the element type of the actual conforms in its turn when
     // the formal's is another schema, which is how a parameter of more than

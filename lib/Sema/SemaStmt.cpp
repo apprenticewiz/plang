@@ -529,12 +529,19 @@ Symbol* Sema::protectedBaseOf(const ExprNode& Target) {
     auto* Id = llvm::dyn_cast<IdentExpr>(Base);
     if (!Id) return nullptr;
     Symbol* Sym = Symtab.lookup(Id->Name);
-    return (Sym && Sym->IsProtected) ? Sym : nullptr;
+    // EP §6.7.3.7.1 NOTE 2: a conformant-array bound identifier is refused an
+    // assignment the same way a protected parameter is -- see
+    // checkNotProtected, which tells the two apart for the diagnostic.
+    return (Sym && (Sym->IsProtected || Sym->IsConformantBound)) ? Sym : nullptr;
 }
 
 void Sema::checkNotProtected(const ExprNode& Target, SourceLocation Loc) {
     Symbol* Sym = protectedBaseOf(Target);
     if (!Sym) return;
+    if (Sym->IsConformantBound) {
+        error(Loc, diag::err_conformant_bound_assigned, {Sym->Name});
+        return;
+    }
     // EP §6.11.2: a variable exported 'protected' is protected in the same way,
     // but for a different reason, and saying "parameter" about a module's
     // variable would only mislead.

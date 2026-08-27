@@ -287,11 +287,24 @@ DIAG(err_function_no_result_type, Error,
 
 // EP Tier 5 — Function/Procedure Enhancements
 DIAG(err_protected_param_assigned, Error, "assignment to protected parameter '%0' (EP §6.7.3.1)")
+// EP §6.7.3.7.1 NOTE 2: a conformant-array bound identifier denotes the
+// actual argument's bound and is neither constant nor a variable -- it may
+// be read but not assigned.
+DIAG(err_conformant_bound_assigned, Error,
+     "assignment to conformant-array bound '%0' (EP §6.7.3.7.1)")
 DIAG(err_type_of_undefined, Error, "'type of %0': '%0' is not defined")
 DIAG(err_for_in_not_set, Error, "'for ... in' requires a set-type expression, got '%0'")
 DIAG(err_for_in_var_scope, Error, "loop variable '%0' in 'for ... in' must be a new name in this scope")
 DIAG(err_conformant_actual_not_array, Error, "conformant array parameter '%0' requires an array argument, got '%1'")
 DIAG(err_conformant_elem_mismatch, Error, "element type mismatch for conformant array parameter '%0': expected '%1', got '%2'")
+// ISO §6.7.3.8 a) and d): the other two ways an array argument can fail to
+// be conformable with a conformant-array-schema, checked before the element
+// type so a mismatch there is not misreported as an element-type mismatch
+// when the element types actually agree (see isConformable).
+DIAG(err_conformant_index_type_mismatch, Error,
+     "index type mismatch for conformant array parameter '%0': schema expects '%1', argument has '%2'")
+DIAG(err_conformant_packed_mismatch, Error,
+     "conformant array parameter '%0' is %1 but the argument is %2")
 
 // EP §6.4.7: Schema types
 DIAG(err_schema_not_defined, Error, "'%0' is not a schema type")

@@ -1418,8 +1418,9 @@ void Sema::checkProcBody(const ProcDecl& Proc) {
                 error(Pg.Type->Loc, diag::err_duplicate_param, {Nm});
 
             // EP §6.7.3.7: for conformant array params, register each lo/hi bound
-            // variable as an integer Var in the function scope.  Walk nested
-            // ConformantArray types to register all dimensions.
+            // variable as a Var, typed with the dimension's declared ordinal
+            // type (index-type-specification), in the function scope.  Walk
+            // nested ConformantArray types to register all dimensions.
             if (T && T->Kind == TypeKind::ConformantArray) {
                 auto* Ct = T.get();
                 while (Ct && Ct->Kind == TypeKind::ConformantArray) {
@@ -1429,8 +1430,18 @@ void Sema::checkProcBody(const ProcDecl& Proc) {
                             Symbol Bs;
                             Bs.Kind    = SymbolKind::Var;
                             Bs.Name    = BoundName;
-                            Bs.Ty      = TyInt;
+                            // EP §6.7.3.7: "applied occurrences ... shall
+                            // denote the smallest [largest] value specified
+                            // by the corresponding index-type" -- the type
+                            // written in the schema, not always integer.
+                            Bs.Ty      = Cb.OrdType ? Cb.OrdType : TyInt;
                             Bs.DeclLoc = Pg.Type->Loc;
+                            // EP §6.7.3.7.1 NOTE 2: "The object denoted by a
+                            // bound-identifier is neither constant nor a
+                            // variable" -- it may be used but never assigned.
+                            // Reuse the protected-parameter enforcement path
+                            // (checkNotProtected) rather than a parallel one.
+                            Bs.IsConformantBound = true;
                             if (!Symtab.define(Bs))
                                 error(Pg.Type->Loc, diag::err_duplicate_param, {BoundName});
                         };
