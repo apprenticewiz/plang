@@ -83,6 +83,7 @@ void Codegen::Impl::init(const std::string& progName) {
     // langOpts.Debug is unset.
     dbgInfo_ = std::make_unique<CGDebugInfo>(*mod, ctx, builder, langOpts,
         srcMgr_, mainFileID_, progName);
+    dbgInfo_->setSchemaTypes(*schemaTypes_);
 
     // scopes/consts/shadowedConsts/requiredConsts/curFuncScopeDepth stay
     // Impl fields (see CGSymbolTable.h's own comment); symTab_ holds
