@@ -69,6 +69,45 @@ static bool isDir(const llvm::Twine &Path) {
     return llvm::sys::fs::is_directory(Path);
 }
 
+/// Resolves \p Path to a canonical, absolute form for same-file comparison
+/// (issue #148: -o naming the same file as an input, just spelled
+/// differently -- "./foo.pas" vs. "foo.pas").
+///
+/// real_path resolves symlinks too, but only answers for a path that already
+/// exists -- which an -o target usually does not, since the whole point of
+/// -o is to create or replace it.  When Path itself does not resolve, fall
+/// back to resolving its parent directory (which normally does exist) and
+/// reattaching the leaf name, so a same-directory-different-spelling case is
+/// still caught without requiring the output file to pre-exist.
+static std::string resolvePath(const std::string &Path) {
+    llvm::SmallString<256> Real;
+    if (!llvm::sys::fs::real_path(Path, Real, /*expand_tilde=*/false))
+        return std::string(Real);
+
+    llvm::SmallString<256> Abs(Path);
+    llvm::sys::fs::make_absolute(Abs);
+    const llvm::StringRef Leaf = llvm::sys::path::filename(Abs);
+    llvm::SmallString<256> Dir(llvm::sys::path::parent_path(Abs));
+
+    llvm::SmallString<256> RealDir;
+    if (!Dir.empty() &&
+        !llvm::sys::fs::real_path(Dir, RealDir, /*expand_tilde=*/false)) {
+        llvm::sys::path::append(RealDir, Leaf);
+        return std::string(RealDir);
+    }
+
+    // Neither the path nor its parent directory resolves (also missing) --
+    // last resort is a purely lexical normalization.
+    llvm::sys::path::remove_dots(Abs, /*remove_dot_dot=*/true);
+    return std::string(Abs);
+}
+
+/// True if \p A and \p B name the same file once resolved, regardless of how
+/// differently each is spelled on the command line.
+static bool sameResolvedFile(const std::string &A, const std::string &B) {
+    return !A.empty() && !B.empty() && resolvePath(A) == resolvePath(B);
+}
+
 /// Runs Prog and returns what it wrote to its standard output, with trailing
 /// whitespace removed; "" if it could not be run or did not succeed.
 ///
@@ -1079,6 +1118,44 @@ int Driver::run(int Argc, char *Argv[]) {
         diag(diag::err_no_input_files);
         return 1;
     }
+
+    // Refuse to let -o overwrite one of the inputs (issue #148): without this
+    // check "plang hello.pas -o hello.pas" ran the whole pipeline and let the
+    // final write step truncate the very source it had just parsed, silently
+    // destroying it.  gcc and clang have refused this for exactly the same
+    // reason since forever ("fatal error: input file ... is the same as
+    // output file"); this matches their wording and their exit-before-doing-
+    // anything behavior.  Computed the same way compile() computes the real
+    // output name, so a defaulted name (e.g. the bare "a.out" a linker-only
+    // invocation falls back to) is checked too, not just an explicit -o.
+    {
+        const std::string OutFile = Opts.outputFile.empty()
+            ? defaultOutput(Opts.inputFile, Opts.mode)
+            : Opts.outputFile;
+        if (!OutFile.empty()) {
+            std::vector<std::string> Inputs;
+            if (!Opts.inputFile.empty()) Inputs.push_back(Opts.inputFile);
+            for (const auto &F : Opts.extraInputFiles) Inputs.push_back(F);
+            // Bare .o/.a filenames that parseArgs routed into linkerArgs --
+            // as opposed to -l/-L/-Wl,-prefixed flags, which never name a
+            // file plang itself reads or writes.  gcc applies this identical
+            // check to them too ("gcc t.o -o t.o" fails the same way, verified
+            // empirically), and an already-compiled object being fed to the
+            // link step is no less worth protecting than a .pas source.
+            for (const auto &A : Opts.linkerArgs) {
+                if (A.empty() || A[0] == '-' || A.size() < 2) continue;
+                const std::string_view Ext(A.data() + A.size() - 2, 2);
+                if (Ext == ".o" || Ext == ".a") Inputs.push_back(A);
+            }
+            for (const auto &In : Inputs) {
+                if (sameResolvedFile(In, OutFile)) {
+                    diag(diag::err_input_output_same, {In});
+                    return 1;
+                }
+            }
+        }
+    }
+
     // Both names and both lists come from Dialects.def, so the driver and the
     // front end cannot disagree about what -std= takes.
     if (!Opts.std.empty()) {
