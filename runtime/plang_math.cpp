@@ -22,6 +22,7 @@ extern "C" {
 
 [[noreturn]] void plang_err_ipow_negative(int64_t E);
 [[noreturn]] void plang_err_ipow_zero_zero(void);
+[[noreturn]] void plang_err_ipow_overflow(int64_t Base, int64_t Exp);
 [[noreturn]] void plang_err_abs_overflow(void);
 [[noreturn]] void plang_err_real_to_int_range(const char *Op, double X);
 [[noreturn]] void plang_err_sqrt_domain(double X);
@@ -75,7 +76,27 @@ int64_t plang_ipow(int64_t Base, int64_t Exp) {
     // initial Result of 1: silently, and for the one shape the standard
     // singles out as undefined before its "1 if y is zero" clause applies.
     if (Base == 0 && Exp == 0) plang_err_ipow_zero_zero();
-    return isoPow(Base, Exp);
+    // isoPow's square-and-multiply, but with each multiplication checked for
+    // signed overflow before it happens: like minint div -1 and abs(minint),
+    // an int64 base/exponent pair the true (unbounded) result can't fit is
+    // signed-overflow UB left to run its course, and in practice wraps to a
+    // silently wrong value instead of the error the language expects for a
+    // result outside the destination type's range.
+    int64_t Result = 1;
+    int64_t B       = Base;
+    int64_t E       = Exp;
+    while (E > 0) {
+        if (E & 1) {
+            if (__builtin_mul_overflow(Result, B, &Result))
+                plang_err_ipow_overflow(Base, Exp);
+        }
+        E >>= 1;
+        if (E) {
+            if (__builtin_mul_overflow(B, B, &B))
+                plang_err_ipow_overflow(Base, Exp);
+        }
+    }
+    return Result;
 }
 
 // ---- sqr ----
