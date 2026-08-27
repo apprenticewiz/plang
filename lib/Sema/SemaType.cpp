@@ -430,6 +430,16 @@ std::shared_ptr<Type> Sema::resolveTypeImpl(const TypeNode& Node) {
             else if (Elem->isRestricted())
                 error(N->Loc, diag::err_restricted_file_component,
                       {Elem->Name});
+            // Issue #241: a zero-size component (an empty record, or one
+            // whose fields are all themselves zero-size) gives every runtime
+            // file operation a zero stride, and get/read/put don't agree on
+            // what to do with that -- see the diagnostic's own definition.
+            // byteSizeOf returns nullopt rather than 0 for a conformant
+            // array or an undiscriminated schema, so this does not fire for
+            // a component whose size is merely unknown here.
+            else if (const auto Sz = byteSizeOf(*Elem); Sz && *Sz == 0)
+                error(N->Loc, diag::err_file_component_zero_size,
+                      {Elem->Name});
             else {
                 // Check for records that contain a file field
                 for (const auto& F : Elem->RecordFields) {
