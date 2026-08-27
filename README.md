@@ -143,6 +143,13 @@ gdb program
 # a schema and you want every field to print correctly, source the
 # companion gdb pretty-printer once per session:
 gdb -ex "source /path/to/plang/share/plang/gdb/plang_schema_printers.py" program
+# IMPORTANT (issue #145): that pretty-printer only ever corrects WHOLE-value
+# printing, e.g. `print q^`. A direct field-path access, e.g. `print
+# q^.field`, bypasses it entirely and can still show a wrong value for a
+# field declared after a varying one -- gdb resolves that expression itself,
+# off the DWARF member offset, before the pretty-printer ever runs. This is
+# a limitation of gdb's pretty-printer API, not something more plang code
+# can fix; always print the whole value (`print q^`) for a correct view.
 
 # Dialect selection (iso7185 is the default; turbo, delphi and fpc are planned)
 plang -std=iso10206 program.pas -o program   # Extended Pascal

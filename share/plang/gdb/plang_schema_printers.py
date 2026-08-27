@@ -27,11 +27,27 @@ approach that turned out not to work) DWARF opcodes.
 
 Usage: from a running gdb session,
     (gdb) source /path/to/plang_schema_printers.py
-(or add that line to your ~/.gdbinit). Once loaded, `print`/`ptype` on any
-plang schema-typed value with a varying extent shows every field's real
-value, not just the ones DWARF alone could already get right.
+(or add that line to your ~/.gdbinit).
+
+IMPORTANT -- WHOLE-VALUE PRINTING ONLY (issue #145): once loaded, `print q^`
+(printing a plang schema-typed value AS A WHOLE) shows every field's real
+value, not just the ones DWARF alone could already get right. But a DIRECT
+FIELD-PATH expression -- `print q^.tail`, `print q^.k`, `ptype q^.field` --
+NEVER goes through this printer at all and may show a wrong value for any
+field declared after a varying-extent one. This is not a bug in this script
+and cannot be fixed by more plang-side code: gdb's pretty-printer API only
+ever intercepts formatting of an already-fully-resolved value; a
+sub-expression like `q^.k` is resolved by gdb's own C-expression evaluator,
+straight off the (in this case wrong) DWARF member offset, before this
+printer is ever invoked. Always use `print q^` (the whole value) to get a
+correct field-by-field view of such a schema; never trust a direct
+field-path access to a field declared after a varying one.
 
 Known limitations, honestly stated rather than silently wrong:
+- Direct field-path access (`print q^.field`, not the whole value `print
+  q^`) always bypasses this printer -- see the callout above; this is a
+  fundamental limitation of gdb's pretty-printer API, not something this
+  script can work around.
 - Only a plain (non-variant) schema body is handled; a body with a `case`
   variant part falls back to gdb's own default (DWARF-only, still
   approximate past a varying field) printing.
@@ -221,4 +237,29 @@ def register(objfile=None):
         objfile, _plang_schema_pretty_printer, replace=True)
 
 
+def _print_field_path_warning_once():
+    """Issue #145: print a one-time, impossible-to-miss reminder that this
+    printer only ever corrects WHOLE-value printing (`print q^`); a direct
+    field-path expression (`print q^.field`) is resolved entirely by gdb's
+    own C-expression evaluator, off the (potentially wrong) DWARF member
+    offset, before this printer is ever consulted -- gdb's pretty-printer
+    API has no hook into sub-expression evaluation, only into formatting an
+    already-resolved value, so there is no way for this script to intercept
+    or correct a field-path access. This is stated here, at load time, in
+    addition to the module docstring, because a user who never reads the
+    docstring but does source this script interactively should still see it
+    before they trust a `print q^.field` result."""
+    gdb.write(
+        "plang_schema_printers.py loaded: for a schema with a run-time-"
+        "varying extent (EP Section 6.4.7), use `print <var>^` (the WHOLE "
+        "value) to see every field's correct value. Direct field-path "
+        "access such as `print <var>^.field` bypasses this printer "
+        "entirely -- gdb resolves that expression itself, straight off the "
+        "DWARF member offset, before the pretty-printer ever runs -- and "
+        "may show an incorrect value for a field declared after a varying "
+        "one. See issue #145.\n")
+    gdb.flush()
+
+
+_print_field_path_warning_once()
 register(gdb.current_objfile())
