@@ -290,6 +290,23 @@ int8_t plang_eoln_file(PascalFile *F) {
 
 // ---- ISO §6.5.5: the buffer variable f^ ----
 
+/// Issue #199: codegen loads and stores f^ at the component type's ABI
+/// alignment whenever nothing tells IRBuilder otherwise -- the same default
+/// that made a `packed record` field's store an empty promise (see
+/// packedAccessAlign in lib/CodeGen/CGFieldAccess.cpp).  There the promise
+/// could not be kept, because a packed field genuinely sits at an offset its
+/// own type does not require, and the fix was to stop making it.  Here it CAN
+/// be kept -- f^ is a fresh heap allocation, not a byte offset into something
+/// else -- so this makes it true instead: `set of char` is `i256`, which this
+/// project's data layout aligns to 16 (confirmed empirically fixing the
+/// packed-field case: a `movaps` of an under-aligned i256 there SIGSEGVs from
+/// -O1), and no wider scalar exists for a Pascal component to lower to. A
+/// plain malloc does not documented-ly guarantee even that much -- glibc's
+/// x86-64 allocator happens to hand back 16-aligned memory for any request
+/// today, but nothing in the C or C++ standard requires it to, and other
+/// allocators / targets are not obliged to follow suit.
+inline constexpr std::size_t PlangFileBufferAlign = 16;
+
 /// The address of f^, holding the component at the current position.
 ///
 /// A component is read by peeking: it is read and the position put back, so
@@ -301,7 +318,13 @@ void *plang_file_buffer(PascalFile *F, int64_t ElemSize, int8_t IsText) {
     if (ElemSize < 1) ElemSize = 1;
     if (F->CompSize != ElemSize) {
         std::free(F->Comp);
-        F->Comp = std::malloc(static_cast<std::size_t>(ElemSize));
+        // aligned_alloc requires the size to be a whole multiple of the
+        // alignment; ElemSize need not be (a `file of char` asks for one
+        // byte), so round up rather than passing ElemSize through directly.
+        const std::size_t AllocSize =
+            (static_cast<std::size_t>(ElemSize) + PlangFileBufferAlign - 1)
+            / PlangFileBufferAlign * PlangFileBufferAlign;
+        F->Comp = std::aligned_alloc(PlangFileBufferAlign, AllocSize);
         if (!F->Comp) {
             std::fprintf(stderr, "plang runtime: out of memory for a file buffer\n");
             std::abort();
