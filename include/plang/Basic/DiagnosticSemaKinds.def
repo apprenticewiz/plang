@@ -201,9 +201,6 @@ DIAG(err_undefined_procedure, Error, "undefined procedure '%0'")
 // ISO 7185 §6.9.3: write/writeln require at least one value argument.
 // ISO 7185 §6.9.3: write/writeln require at least one value argument.
 DIAG(err_write_requires_args, Error, "write requires at least one argument")
-// ISO 7185 §6.9.2: readln is only valid for text files.
-// ISO 7185 §6.9.2: readln is only valid for text files.
-DIAG(err_readln_not_text, Error, "readln is only valid for text files, got 'file of %0'")
 // ISO 7185 §6.6.5.2: The type read from a file must match the variable type.
 // ISO 7185 §6.6.5.2: The type read from a file must match the variable type.
 DIAG(err_read_type_mismatch, Error, "type mismatch in read: file element type is '%0', but variable has type '%1'")
@@ -434,7 +431,6 @@ DIAG(err_schema_not_defined, Error, "'%0' is not a schema type")
 // TRANSLATORS: "discriminant(s)" is an English plural dodge.
 DIAG(err_schema_wrong_arg_count, Error, "schema '%0' expects %1 discriminant(s), got %2")
 DIAG(err_schema_disc_not_const, Error, "schema discriminant '%0' must be a constant expression")
-DIAG(err_schema_disc_type_mismatch, Error, "schema discriminant '%0' has wrong type")
 DIAG(err_schema_undiscriminated, Error,
      "schema '%0' needs its discriminants here, as in '%0(...)'; a schema name "
      "stands alone only as a parameter type or as the domain of a pointer")
