@@ -242,6 +242,15 @@ private:
     /// of any one instance -- see the concerns note where this is called.
     llvm::DIType* buildStringDIType(int64_t cap);
     llvm::DISubroutineType* buildSubroutineDIType(const plang::Type& T);
+    /// Schema/SchemaInstance whose extent a discriminant fixes only at run
+    /// time (Type::ExtentVaries): SchemaLayoutEngine::schemaHeaderBytes /
+    /// SchemaAccess::emitNewSchema store a leading discriminant header in
+    /// front of the body at run time, so this wraps the body's own DIType
+    /// in a synthetic outer struct that accounts for it -- see the
+    /// definition for why recursing into the body directly (as the
+    /// fixed-extent case still does) put every field, not just the varying
+    /// one, at the wrong DWARF offset.
+    llvm::DIType* buildSchemaDIType(const plang::Type& T);
     /// A record field's own DIType via debugTypeOfSemaType(*SemaTy) where
     /// that resolves to something (the ordinary case); otherwise -- no
     /// matching Sema::Type::Field found, or that field's own type has no
