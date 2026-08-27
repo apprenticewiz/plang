@@ -364,9 +364,14 @@ private:
     // variable becomes a single linked object subject to the relocation-range
     // check in Phase 4 below; false for a procedure/function body, whose
     // locals are stack storage and never hit that limit.
+    // IsModuleBlock: true only for a module's own body (Sema::processModuleBody).
+    // Stamped onto each label this block declares (Symbol::LabelInModuleBlock)
+    // so checkGoto can refuse a non-local goto from one of the module's own
+    // procedures back into it -- see that field's comment for why.
     void checkBlock(const BlockNode& Block,
                     llvm::function_ref<void()> BeforePop = {},
-                    bool IsGlobalScope = false);
+                    bool IsGlobalScope = false,
+                    bool IsModuleBlock = false);
     void checkProcSignature(const ProcDecl& Proc);
     void checkProcBody     (const ProcDecl& Proc);
     /// Records which value parameters a body modifies; see ProcDecl::ModifiedParams.
