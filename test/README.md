@@ -67,6 +67,12 @@ to the same-terminator rule above.
 
 `REQUIRES: fpc-binary` (not bare `fpc` — `include/plang/Basic/Dialects.def`
 already reserves that name for a future, unrelated `-std=fpc` plang
-dialect) gates a test on a real, working `fpc` install, for the small,
-deliberately-scoped `test/Compat/FPC/` differential-testing area (see
-issue #34) — most tests here have no reason to need it.
+dialect) gates a test on a real, working `fpc` install. The feature
+itself is live — `test/lit.cfg.py` probes for a working `fpc -iV` and
+adds `fpc-binary` to `config.available_features` when it succeeds — but
+nothing under `test/` uses it yet: the small, deliberately-scoped FPC
+differential-testing area sketched in issue #34 (`test/Compat/FPC/`,
+gated on this feature, for spec-ambiguous/dialect-boundary constructs)
+was never actually built. Until it is, `REQUIRES: fpc-binary` is
+infrastructure with no consumer — don't go looking for `test/Compat/FPC/`,
+it doesn't exist.
