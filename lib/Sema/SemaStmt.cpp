@@ -412,7 +412,18 @@ void Sema::checkFor(const ForStmt& S) {
     // agreeing with the variable both are being assigned into.  Skipped once
     // the variable itself is not ordinal (or unresolved): that is already
     // err_for_var_not_ordinal's diagnostic to give, not a second one here.
-    if (Sym && Sym->Ty->isOrdinal()) {
+    // Sym->Ty is only meaningful (and only non-null) for a Var/VarParam
+    // symbol -- see the comment above IsVar's declaration.  A Builtin/Proc
+    // control variable already got err_for_var_not_variable above and has
+    // a null Ty (isOrdinal() would null-deref); a Const/TypeAlias/EnumValue
+    // one already got the same diagnostic and has a non-null Ty describing
+    // the wrong thing.  Both are excluded here the same way IsVar excludes
+    // them above, so this block never dereferences a null Ty and never
+    // piles a second diagnostic onto err_for_var_not_variable.
+    const bool BoundsCheckApplies = Sym
+        && (Sym->Kind == SymbolKind::Var || Sym->Kind == SymbolKind::VarParam)
+        && Sym->Ty->isOrdinal();
+    if (BoundsCheckApplies) {
         if (!From->isError() && !isAssignCompatible(*Sym->Ty, *From))
             error(S.From->Loc, diag::err_for_bound_wrong_type,
                   {From->Name, S.Var, Sym->Ty->Name});
