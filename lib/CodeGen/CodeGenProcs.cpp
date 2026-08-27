@@ -724,6 +724,12 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
                 auto* cell = createEntryAlloca(procPairTy(), nm + ".closure");
                 storeProcPair(cell, fnPtr, frame);
                 defVar(nm, cell, procPairTy());
+                // defVar/declareLocal's ordinary TypeNode path can't
+                // describe this one: pt's own ResolvedType is the
+                // procedural parameter's SIGNATURE, not the two-pointer
+                // closure-pair storage `cell` actually holds -- see
+                // declareProcParam's own comment.
+                dbgInfo_->declareProcParam(nm, paramMeta[ci].procType, cell);
                 auto& ve       = scopes.back()[toLower(nm)];
                 ve.isProcParam = true;
                 ve.procType    = paramMeta[ci].procType;
@@ -751,7 +757,14 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
                     builder.CreateMemCpy(copy, align, bodyPtr, align, bytes);
                     bodyPtr = copy;
                 }
-                defVar(nm, bodyPtr, paramValTypes[flatIdx]);
+                // paramTypeNodes[flatIdx] resolves (EP §6.4.7) to the
+                // undiscriminated Schema itself -- bodyPtr is the whole
+                // object's own base address regardless of what
+                // paramValTypes[flatIdx] narrows to for GEP striding, so
+                // describing it by that TypeNode gives -g a real (if
+                // probe-approximate; see debugTypeOfSemaType's own Schema
+                // case) DIType instead of none at all.
+                defVar(nm, bodyPtr, paramValTypes[flatIdx], paramTypeNodes[flatIdx]);
                 auto& ve       = scopes.back()[toLower(nm)];
                 ve.schemaTy    = schemaTypes[ci];
                 // Spilled to cells, and named, so that a procedure nested
