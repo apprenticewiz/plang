@@ -895,13 +895,18 @@ void plang_binding(PascalFile *F, PlangBindingType *Out) {
     Out->name.len = 0;
     if (!F) return;
     // The name survives even before the file is opened, so a program can read
-    // back what it bound.
+    // back what it bound.  EP §6.7.5.6: the binding itself survives a close,
+    // too -- it is removed only by an explicit unbind (or replaced by another
+    // bind), so `bound` must answer from the binding table rather than from
+    // whether the file happens to be open right now.  Gating on F->Fp used to
+    // report a just-bound-but-not-yet-opened file as unbound, and a bound
+    // file as unbound again the moment it was closed (issue #248).
     if (const char* Name = findBinding(F)) {
         auto N = static_cast<int64_t>(std::strlen(Name));
         if (N > PlangMaxBindingName) N = PlangMaxBindingName;
         std::memcpy(Out->name.data, Name, static_cast<size_t>(N));
         Out->name.len = N;
-        if (F->Fp) Out->bound = 1;
+        Out->bound = 1;
     }
     // Standard streams (input/output program parameters) are always bound.
     if (F->Fp && F->Binding == PlangBindStd) Out->bound = 1;
