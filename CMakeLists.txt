@@ -13,15 +13,27 @@ cmake_minimum_required(VERSION 3.16)
 # one in project(VERSION ...), and a shared library named
 # libplang-frontend.so.0.3.1-pre is not something anyone wants either. What a
 # human actually reads (PLANG_VERSION_STRING, below) is never hand-maintained
-# at all: it is git-describe's own answer to "how far is the working tree
-# from the last release tag," computed fresh at every configure. Sitting
-# exactly on a release tag with a clean tree gives the bare number back
-# ("0.3.0"); N commits past it gives "0.3.0+N.g<hash>" (SemVer build
-# metadata, which per the spec's own §10 carries no precedence meaning --
-# exactly right here, since this string is diagnostic, not a promise about
-# what the next real release will be numbered); a dirty tree appends
-# ".dirty". No git, or no matching tag (a source tarball export, say), falls
-# back to VERSION's bare number with no suffix.
+# at all in the common case: it is git-describe's own answer to "how far is
+# the working tree from the last release tag," computed fresh at every
+# configure. Sitting exactly on a release tag with a clean tree gives the
+# bare number back ("0.3.2"); N commits past it gives "0.3.2+N.g<hash>"
+# (SemVer build metadata, which per the spec's own §10 carries no precedence
+# meaning -- exactly right here, since this string is diagnostic, not a
+# promise about what the next real release will be numbered); a dirty tree
+# appends ".dirty".
+#
+# On `main`, VERSION itself is a deliberate, non-committal sentinel --
+# "99.99.99" -- not the last real release number. Two reasons: it is what
+# actually drives project(VERSION ...) and the shared library's SONAME
+# unconditionally, regardless of whether git-describe succeeds, so a plain
+# `main` build's library has never silently claimed to BE a shipped release;
+# and it is the only version string a source tarball export (no git, or no
+# matching tag) ever falls back to, where the previous scheme's "sits at the
+# last real release" behavior meant an export of `main` well past 0.3.2
+# claimed to be "0.3.0" with nothing to say otherwise. This mirrors Redis's
+# own long-standing "999.999.999" convention, surveyed and initially passed
+# over in favor of "just let it sit," then revisited once main's staleness
+# was seen as actively misleading rather than merely imprecise.
 #
 # Recomputed at configure time only, not on every incremental build --
 # `cmake`'s own version string has the identical property (its git-hash
@@ -29,12 +41,9 @@ cmake_minimum_required(VERSION 3.16)
 # this only means a local incremental build's --version can lag one commit
 # behind until the next `cmake -S . -B build`.
 #
-# The direct consequence, and the reason this replaced a hand-bumped "-pre"
-# suffix: VERSION does not need to change the moment a release ships, or get
-# guessed at in advance. It just sits at the last real release for as long as
-# `main` is between releases, however long that takes or whatever the next
-# one turns out to be numbered -- nothing here commits to that early. It only
-# changes when a release is actually being prepared:
+# VERSION only ever holds a real number on a release branch, set at the
+# point a release is actually being prepared, immediately reverting to
+# 99.99.99 on `main` (which is never itself touched by a release cut):
 #
 #   1. cut the release branch (or reuse an existing one, for a patch release)
 #   2. on that branch, set VERSION to the exact target number
