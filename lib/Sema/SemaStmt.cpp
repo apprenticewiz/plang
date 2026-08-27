@@ -69,34 +69,46 @@ void Sema::checkStmt(const StmtNode* Stmt) {
 
 namespace {
 
-bool sequenceTransfers(const std::vector<std::unique_ptr<StmtNode>>& Stmts);
+bool sequenceTransfers(const std::vector<std::unique_ptr<StmtNode>>& Stmts,
+                        const SymbolTable& Symtab);
 
-bool alwaysTransfers(const StmtNode* S) {
+// Whether S calls the real halt builtin -- resolved to the symbol it names,
+// not matched on how that name is spelled.  A program is free to declare its
+// own procedure called `halt`, which shadows the builtin (ISO §6.2.2.10) and
+// returns like any other call; only the builtin itself never does.  `exit`
+// gets no such check at all: Builtins.def has no entry for it, so a call
+// spelled `exit` can only ever resolve to a declaration the program wrote,
+// never to a required procedure that leaves for good.
+bool callsHaltBuiltin(const CallStmt& C, const SymbolTable& Symtab) {
+    const Symbol* Callee = Symtab.lookup(C.Name);
+    return Callee && Callee->Kind == SymbolKind::Builtin
+                   && Callee->BuiltinKind == BuiltinID::Halt;
+}
+
+bool alwaysTransfers(const StmtNode* S, const SymbolTable& Symtab) {
     if (!S) return false;
     if (llvm::isa<GotoStmt>(S)) return true;
-    if (auto* C = llvm::dyn_cast<CallStmt>(S)) {
-        const std::string Lo = toLower(C->Name);
-        return Lo == "halt" || Lo == "exit";
-    }
-    if (auto* C = llvm::dyn_cast<CompoundStmt>(S)) return sequenceTransfers(C->Stmts);
-    if (auto* W = llvm::dyn_cast<WithStmt>(S))     return alwaysTransfers(W->Body.get());
+    if (auto* C = llvm::dyn_cast<CallStmt>(S)) return callsHaltBuiltin(*C, Symtab);
+    if (auto* C = llvm::dyn_cast<CompoundStmt>(S)) return sequenceTransfers(C->Stmts, Symtab);
+    if (auto* W = llvm::dyn_cast<WithStmt>(S))     return alwaysTransfers(W->Body.get(), Symtab);
     // An if reaches past itself unless neither arm does, which needs both arms
     // to exist.  A case is left alone: whether it can be fallen out of depends
     // on whether the arms cover the selector, and that is a separate question.
     if (auto* I = llvm::dyn_cast<IfStmt>(S))
-        return I->Else && alwaysTransfers(I->Then.get())
-                       && alwaysTransfers(I->Else.get());
+        return I->Else && alwaysTransfers(I->Then.get(), Symtab)
+                       && alwaysTransfers(I->Else.get(), Symtab);
     // A loop may run no times, a labeled statement may be jumped into, and
     // everything else simply finishes.
     return false;
 }
 
-bool sequenceTransfers(const std::vector<std::unique_ptr<StmtNode>>& Stmts) {
+bool sequenceTransfers(const std::vector<std::unique_ptr<StmtNode>>& Stmts,
+                        const SymbolTable& Symtab) {
     bool Gone = false;
     for (const auto& St : Stmts) {
         if (!St) continue;                                  // the empty statement
         if (llvm::isa<LabeledStmt>(St.get())) Gone = false; // a goto can land here
-        if (!Gone && alwaysTransfers(St.get())) Gone = true;
+        if (!Gone && alwaysTransfers(St.get(), Symtab)) Gone = true;
     }
     return Gone;
 }
@@ -115,7 +127,7 @@ void Sema::warnUnreachable(const std::vector<std::unique_ptr<StmtNode>>& Stmts) 
             warning(St->Loc, diag::warn_unreachable_code, {});
             Reported = true;
         }
-        if (!Gone && alwaysTransfers(St.get())) Gone = true;
+        if (!Gone && alwaysTransfers(St.get(), Symtab)) Gone = true;
     }
 }
 
