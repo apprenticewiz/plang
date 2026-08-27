@@ -723,6 +723,19 @@ int frontendPC1Main(int Argc, char *Argv[]) {
         } else if (Arg == "-h" || Arg == "--help") {
             usagePC1();
             return 0;
+        } else if (Arg.starts_with("-o") && Arg.size() > 2) {
+            // Joined form (issue #244): "-ofile.ll".  Options.def has always
+            // declared -o JoinedOrSeparate, but this parser -- entirely
+            // separate from the driver's own, and from Options.def's table
+            // (see issue #181) -- implemented only the separate form below,
+            // same gap as the driver's had.  Normally masked when going
+            // through the driver, since compile() always constructs this
+            // process's own "-o" as two argv entries, the resolved path, no
+            // matter what the user typed; matters when -pc1 is invoked
+            // directly, as the driver itself does not for this exact option
+            // -- see the -I arm just below, which already has this shape for
+            // the same JoinedOrSeparate reason.
+            OutputFile = Arg.substr(2);
         } else if (Arg == "-o") {
             if (I + 1 >= Argc) {
                 std::cerr << "plang -pc1: -o requires an argument\n";
