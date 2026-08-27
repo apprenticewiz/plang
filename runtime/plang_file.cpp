@@ -52,6 +52,12 @@ extern "C" {
 /// honor a name established by an earlier bind (EP §6.7.5.6).
 static const char* findBinding(PascalFile *F);
 
+/// Defined with the other field-width writers further down (ISO §6.9.3.1);
+/// plang_str_write_file_w's string(N) writer sits earlier in the file and
+/// needs it to bound its own hand-rolled padding loop the same way the
+/// writers below it already do (issue #247).
+static int checkedWidth(int64_t W);
+
 /// Defined with the other runtime error reporters in plang_sys.cpp.
 [[noreturn]] void plang_err_bind_already_bound(void);
 [[noreturn]] void plang_err_binding_table_full(void);
@@ -478,6 +484,10 @@ void plang_str_write_file_w(PascalFile *F, const void *S, int64_t /*Cap*/,
         trapOnStreamError(F, "write");
         return;
     }
+    // W > 0 here: bound it before pacing the padding loop below one
+    // character at a time, or an oversized W (write(f, s:maxint)) just
+    // keeps calling fputc until it gets there (issue #247).
+    checkedWidth(W);
     for (int64_t I = Len; I < W; ++I) std::fputc(' ', F->Fp);
     if (Len > W) Len = W;
     if (Len > 0)
@@ -562,7 +572,11 @@ static void writePadded(PascalFile *F, const char *S, int64_t W) {
         trapOnStreamError(F, "write");
         return;
     }
-    const auto Width = static_cast<std::size_t>(W);
+    // W > 0 here: same reasoning as plang_io.cpp's plangOutPadded -- this
+    // paces its own padding loop rather than handing W to printf's `%*d`/
+    // `%*c`, so without checkedWidth's INT32_MAX trap an oversized W just
+    // pads one character at a time until it gets there (issue #247).
+    const auto Width = static_cast<std::size_t>(checkedWidth(W));
     for (std::size_t I = Len; I < Width; ++I) std::fputc(' ', F->Fp);
     if (Len) std::fwrite(S, 1, Len < Width ? Len : Width, F->Fp);
     trapOnStreamError(F, "write");

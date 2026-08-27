@@ -287,7 +287,15 @@ static void plangOutPadded(const char* S, int64_t W) {
     if (W == 0) return;
     const size_t Len = S ? std::strlen(S) : 0;
     if (W < 0) { if (Len) plangOutN(S, Len); return; }
-    const auto Width = static_cast<size_t>(W);
+    // W > 0 here: the numeric/char writers above hand W to printf's `%*d`/
+    // `%*c`, so checkedWidth's INT32_MAX trap guards their width argument
+    // from silently truncating (issue #15). This writer paces its own
+    // padding loop by hand instead of going through printf, so without the
+    // same call an oversized W (write(s:maxint)) just pads one character at
+    // a time until it gets there -- no truncation to guard against, but an
+    // unbounded amount of CPU and output for a value nothing could ever
+    // read (issue #247).
+    const auto Width = static_cast<size_t>(checkedWidth(W));
     for (size_t I = Len; I < Width; ++I) plangOutCh(' ');
     if (Len) plangOutN(S, Len < Width ? Len : Width);
 }
