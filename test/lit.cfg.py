@@ -138,3 +138,23 @@ if shutil.which("gdb") is not None:
 
 if os.name != "nt":
     config.available_features.add("posix")
+
+# asan-build: issue #146's CodeGen expression-depth guard (CGExprCore.h)
+# uses a much lower MaxExprDepth under a sanitizer build, where its real
+# per-frame stack cost is far higher than on a normal build, than on one
+# without -- so a test exercising that guard needs to know which case it is
+# running under to pick the right expectation (a normal build has plenty of
+# headroom and just compiles the same input; a sanitizer build's tighter
+# ceiling turns what used to be a raw SIGSEGV into a clean diagnostic
+# instead). Read straight out of this build tree's own CMakeCache.txt rather
+# than re-deriving it (e.g. from compiler flags), the same directness
+# fpc-binary/gdb-binary above use for what they gate on.
+try:
+    with open(os.path.join(config.plang_binary_dir, "CMakeCache.txt")) as f:
+        _cmake_cache = f.read()
+    for _line in _cmake_cache.splitlines():
+        if _line.startswith("PLANG_SANITIZE:") and _line.split("=", 1)[1] not in ("", "OFF"):
+            config.available_features.add("asan-build")
+            break
+except OSError:
+    pass
