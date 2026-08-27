@@ -68,6 +68,18 @@ public:
                 bool suppressDebugDecl = false);
     const VarEntry* findVar(const std::string& name) const;
 
+    /// Marks the innermost (just-defined) binding of \p name as one whose
+    /// address cannot claim its value type's ABI alignment -- a with-bound
+    /// field of a packed record (VarEntry::packedWithField; see
+    /// packedAccessAlign, CGFieldAccess.cpp).  Called right after defVar
+    /// binds such a field, rather than growing defVar's own signature for
+    /// the one caller (CGWith) that needs this: the same "define, then
+    /// mutate the entry" idiom the closure-capture loop in
+    /// CodeGenProcs.cpp already uses directly on Scopes, wrapped here
+    /// because CGWith, like every decomposed unit, only ever sees this
+    /// class and not Scopes itself.
+    void markPackedWithField(const std::string& name);
+
     /// Whether \p name is bound by a scope opened INSIDE the current function
     /// body -- which in practice means a with-statement.
     [[nodiscard]] const VarEntry* findVarInFunctionScope(const std::string& name) const;

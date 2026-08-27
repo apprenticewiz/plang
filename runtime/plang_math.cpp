@@ -28,6 +28,7 @@ extern "C" {
 [[noreturn]] void plang_err_real_to_int_range(const char *Op, double X);
 [[noreturn]] void plang_err_sqrt_domain(double X);
 [[noreturn]] void plang_err_ln_domain(double X);
+[[noreturn]] void plang_err_arg_domain(void);
 
 // ---- Floating-point math (double → double) ----
 
@@ -159,8 +160,16 @@ static inline std::complex<double> plang_mk(double re, double im) {
     return std::complex<double>(re, im);
 }
 
-// EP §6.7.6.2: arg(z) = atan2(im, re)
+/// EP §6.7.6.2: arg(z) = atan2(im, re), the phase angle of z -- undefined at
+/// the origin, where every angle is equally valid; std::atan2(0, 0) answers a
+/// silent 0 by convention instead of the error the runtime's other domain
+/// checks (plang_sqrt, plang_ln, plang_err_cpow_domain's zero complex base)
+/// give a program instead of an ordinary in-range result -- issue #249.
+/// CGFuncCall.cpp routes a real/integer argument through this same function
+/// as (x, 0.0), so a plain real/integer 0 -- the origin under the same
+/// definition -- traps here too, not just cmplx(0, 0).
 double plang_arg(double re, double im) {
+    if (re == 0.0 && im == 0.0) plang_err_arg_domain();
     return std::atan2(im, re);
 }
 
