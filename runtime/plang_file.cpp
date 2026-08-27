@@ -52,6 +52,15 @@ extern "C" {
 /// honor a name established by an earlier bind (EP §6.7.5.6).
 static const char* findBinding(PascalFile *F);
 
+/// Defined with the write-path table further down (see closeFinalLine): the
+/// path a file currently open for writing by name was opened with, so a
+/// later reset/rewrite/close/extend/update on the same file variable can
+/// finish its last line before the write-only stream that produced it is
+/// abandoned or reused for something else.
+static const char* findWritePath(PascalFile *F);
+static void setWritePath(PascalFile *F, const char *Name);
+static void clearWritePath(PascalFile *F);
+
 /// Defined with the other runtime error reporters in plang_sys.cpp.
 [[noreturn]] void plang_err_bind_already_bound(void);
 [[noreturn]] void plang_err_binding_table_full(void);
@@ -151,6 +160,61 @@ static void trapOnWrongDirection(PascalFile *F, const char *Op, int8_t WantWrite
 
 // ---- open / close ----
 
+// Shared by the binding table (further down) and the write-path table right
+// below: a bound name and a currently-open write path are the same shape of
+// entry, one small fixed array apiece, and Pascal programs rarely have more
+// than a handful of files open at once.
+#define PLANG_MAX_BINDINGS 64
+#define PLANG_MAX_NAME_LEN 512
+
+/// Remembers, for a file currently open for writing by name, the path it was
+/// opened with.  closeFinalLine (below) needs this: such a file is opened
+/// "w" -- write-only, so that a stray Pascal-level read against it is caught
+/// at the C level rather than silently succeeding (issue #124) -- and a
+/// write-only stream cannot be read back through itself to see what its last
+/// byte was.  An internal (tmpfile()-backed) file gets no entry here: it is
+/// always opened "w+b" and can check its own tail directly, no second stream
+/// required.
+static struct {
+    PascalFile *File;
+    char        Path[PLANG_MAX_NAME_LEN];
+    int         Active;
+} WritePathTable[PLANG_MAX_BINDINGS];
+
+static const char* findWritePath(PascalFile *F) {
+    for (int i = 0; i < PLANG_MAX_BINDINGS; ++i)
+        if (WritePathTable[i].Active && WritePathTable[i].File == F)
+            return WritePathTable[i].Path;
+    return nullptr;
+}
+
+static void clearWritePath(PascalFile *F) {
+    for (int i = 0; i < PLANG_MAX_BINDINGS; ++i)
+        if (WritePathTable[i].Active && WritePathTable[i].File == F)
+            WritePathTable[i].Active = 0;
+}
+
+/// Replaces whatever entry F had (if any) with Name.  A null or empty Name
+/// just clears the entry: plang_extend/plang_update fall back to it when
+/// their own Name argument is empty, and an internal file needs none.
+static void setWritePath(PascalFile *F, const char *Name) {
+    clearWritePath(F);
+    if (!Name || Name[0] == '\0') return;
+    for (int i = 0; i < PLANG_MAX_BINDINGS; ++i) {
+        if (!WritePathTable[i].Active) {
+            WritePathTable[i].Active = 1;
+            WritePathTable[i].File   = F;
+            std::strncpy(WritePathTable[i].Path, Name, PLANG_MAX_NAME_LEN - 1);
+            WritePathTable[i].Path[PLANG_MAX_NAME_LEN - 1] = '\0';
+            return;
+        }
+    }
+    // Table full: closeFinalLine's caller-facing behavior degrades to what
+    // it was before this table existed (a missed finalization on a
+    // write-only stream, not a crash) rather than aborting the program over
+    // a bookkeeping shortage.
+}
+
 static void closeStream(PascalFile *F) {
     if (F->Fp && F->Fp != stdin && F->Fp != stdout) std::fclose(F->Fp);
     F->Fp      = nullptr;
@@ -171,11 +235,34 @@ static std::FILE *openTemp(const char *Op) {
 /// marker ends it.  A file put together with write and no closing writeln has
 /// a part of one left over, and reading it back has to see the line the writer
 /// meant rather than stop short of its end.
+///
+/// A named file is opened "w" (see WritePathTable's comment above), and
+/// fgetc on a write-only stream fails outright -- glibc and friends refuse
+/// even to try, returning EOF -- which this function used to read exactly
+/// like "the file already ends in a marker" and so silently do nothing:
+/// dead code for every named file, only ever exercised by an internal
+/// (tmpfile()-backed) file's always-bidirectional "w+b" stream.  Where
+/// WritePathTable has a path for F, this checks the last byte through a
+/// second, independent read-only stream on that same path instead -- a
+/// different FILE* entirely, so there is no read immediately followed by a
+/// write on one stream to worry about -- and still writes the fix, if any,
+/// out through the original F->Fp exactly as before.
 static void closeFinalLine(PascalFile *F) {
     if (!F->Fp || F->Readable) return;
     std::fflush(F->Fp);
     const long End = std::ftell(F->Fp);
     if (End <= 0) return;                 // nothing written: no line to close
+
+    if (const char *Path = findWritePath(F)) {
+        std::FILE *Peek = std::fopen(Path, "rb");
+        if (!Peek) return;
+        int Last = EOF;
+        if (std::fseek(Peek, -1, SEEK_END) == 0) Last = std::fgetc(Peek);
+        std::fclose(Peek);
+        if (Last != '\n' && Last != EOF) std::fputc('\n', F->Fp);
+        return;
+    }
+
     if (std::fseek(F->Fp, -1, SEEK_CUR) != 0) return;
     const int Last = std::fgetc(F->Fp);
     if (Last != '\n' && Last != EOF) std::fputc('\n', F->Fp);
@@ -214,7 +301,12 @@ void plang_reset(PascalFile *F, const char *Name, int8_t IsText) {
     prime(F);
 }
 
-void plang_rewrite(PascalFile *F, const char *Name, int8_t /*IsText*/) {
+void plang_rewrite(PascalFile *F, const char *Name, int8_t IsText) {
+    // §6.4.3.5 makes a text file a sequence of lines, each ended by a line
+    // marker: starting a fresh rewrite abandons whatever F was writing
+    // before, and that has to be finished first, the same as turning it
+    // around to read (plang_reset) already does.
+    if (IsText) closeFinalLine(F);
     if (!Name || Name[0] == '\0') Name = findBinding(F);
     if ((!Name || Name[0] == '\0') && F->Binding == PlangBindStd) {
         F->Buf      = PlangFileUninit; // rewrite(output) keeps writing to stdout
@@ -226,6 +318,7 @@ void plang_rewrite(PascalFile *F, const char *Name, int8_t /*IsText*/) {
     if (!Name || Name[0] == '\0') {
         F->Fp      = openTemp("rewrite");
         F->Binding = PlangBindTemp;
+        clearWritePath(F);
     } else {
         F->Fp = std::fopen(Name, "w");
         if (!F->Fp) {
@@ -233,6 +326,7 @@ void plang_rewrite(PascalFile *F, const char *Name, int8_t /*IsText*/) {
             std::snprintf(Msg, sizeof(Msg), "cannot open '%s' for writing", Name);
             plang_err_cannot_open(Msg);
         }
+        setWritePath(F, Name);
     }
     F->Buf      = PlangFileUninit;
     F->Readable = 0;
@@ -257,7 +351,12 @@ void plang_bind_std(PascalFile *F, int8_t IsInput) {
     }
 }
 
-void plang_close(PascalFile *F) {
+void plang_close(PascalFile *F, int8_t IsText) {
+    // §6.4.3.5: closing a file being written has to finish its last line
+    // first (issue #234) -- this was the one caller closeFinalLine never
+    // had, so a program that wrote a partial line and just called close,
+    // with no intervening reset, got no finalization at all.
+    if (IsText) closeFinalLine(F);
     closeStream(F);
     F->Buf      = PlangFileUninit;
     F->Readable = 0;
@@ -265,6 +364,7 @@ void plang_close(PascalFile *F) {
     F->Comp     = nullptr;
     F->CompSize = 0;
     unloadComponent(F);
+    clearWritePath(F);
 }
 
 // ---- status ----
@@ -642,7 +742,13 @@ void plang_write_binary(PascalFile *F, const void *Buf, int64_t ElemSize) {
 
 // ---- EP §6.7.5.2: extend / update ----
 
-void plang_extend(PascalFile *F, const char *Name) {
+void plang_extend(PascalFile *F, const char *Name, int8_t IsText) {
+    // §6.4.3.5: extending reuses or reopens F's stream out from under
+    // whatever it was writing before -- finish that line first (issue #234),
+    // same as plang_reset/plang_rewrite/plang_close.  This is also what
+    // keeps a subsequent writeln from gluing onto an unterminated line left
+    // by an earlier rewrite+write+extend with no close in between.
+    if (IsText) closeFinalLine(F);
     if (!Name || Name[0] == '\0') {
         // Internal file: seek to end of existing temp storage.
         if (F->Fp) {
@@ -652,6 +758,7 @@ void plang_extend(PascalFile *F, const char *Name) {
             F->Fp      = openTemp("extend");
             F->Binding = PlangBindTemp;
         }
+        clearWritePath(F);
     } else {
         closeStream(F);
         // Open for read+append; create if absent.
@@ -665,6 +772,7 @@ void plang_extend(PascalFile *F, const char *Name) {
             }
         }
         std::fseek(F->Fp, 0, SEEK_END);
+        setWritePath(F, Name);
     }
     F->Buf      = PlangFileUninit;
     // 2, not 1: extend opens both directions (named files get "r+b" above,
@@ -674,7 +782,9 @@ void plang_extend(PascalFile *F, const char *Name) {
     unloadComponent(F);
 }
 
-void plang_update(PascalFile *F, const char *Name) {
+void plang_update(PascalFile *F, const char *Name, int8_t IsText) {
+    // §6.4.3.5 / issue #234: see the same call in plang_extend just above.
+    if (IsText) closeFinalLine(F);
     if (!Name || Name[0] == '\0') {
         // Internal file: reposition to start without truncating.
         if (F->Fp) {
@@ -684,6 +794,7 @@ void plang_update(PascalFile *F, const char *Name) {
             F->Fp      = openTemp("update");
             F->Binding = PlangBindTemp;
         }
+        clearWritePath(F);
     } else {
         closeStream(F);
         // Open for read+write; create if absent.
@@ -697,6 +808,7 @@ void plang_update(PascalFile *F, const char *Name) {
             }
         }
         std::rewind(F->Fp);
+        setWritePath(F, Name);
     }
     F->Buf      = PlangFileUninit;
     F->Readable = 2; // both directions -- see the same note in plang_extend
@@ -790,9 +902,9 @@ int8_t plang_empty(PascalFile *F, int64_t ElemSize) {
 // PlangMaxBindingName's own -- now the one capacity both sides read.
 
 // Binding name table — a small fixed array avoids C++ stdlib dependency.
-// Pascal programs rarely open more than a handful of files.
-#define PLANG_MAX_BINDINGS 64
-#define PLANG_MAX_NAME_LEN 512
+// Pascal programs rarely open more than a handful of files.  PLANG_MAX_BINDINGS
+// and PLANG_MAX_NAME_LEN are defined with WritePathTable, above, which needs
+// the same two constants for the same reason.
 
 static struct {
     PascalFile* file;
