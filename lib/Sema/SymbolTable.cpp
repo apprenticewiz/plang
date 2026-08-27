@@ -33,7 +33,15 @@ bool SymbolTable::define(Symbol Sym) {
     if (Scopes.empty()) return false;
     auto Key = lower(Sym.Name);
     auto& CurScope = Scopes.back();
-    if (CurScope.Symbols.count(Key)) return false;
+    auto Existing = CurScope.Symbols.find(Key);
+    if (Existing != CurScope.Symbols.end()) {
+        // A required identifier redeclaration -- see the declaration's
+        // comment.  Anything else colliding in this scope is a real clash.
+        if (!Existing->second.IsRequiredIdentifier) return false;
+        Sym.ScopeDepth = Scopes.size();
+        Existing->second = std::move(Sym);
+        return true;
+    }
     Sym.ScopeDepth = Scopes.size();
     CurScope.Symbols.emplace(Key, std::move(Sym));
     return true;

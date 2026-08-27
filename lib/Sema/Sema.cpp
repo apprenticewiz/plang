@@ -167,6 +167,7 @@ void Sema::registerBuiltins() {
         S.IsFunction  = builtinIsFunction(BuiltinID::Id_);                     \
         S.ReturnType  = resultType(builtinResult(BuiltinID::Id_));             \
         S.NotInDialect= !Opts.inDialect(builtinDialects(BuiltinID::Id_));      \
+        S.IsRequiredIdentifier = true;                                         \
         (void)Symtab.define(std::move(S));                                     \
     }
 #include "plang/Basic/Builtins.def"
@@ -189,6 +190,7 @@ void Sema::registerBuiltins() {
         Maxint.ConstOrdinal    = static_cast<int64_t>(
             (~0ULL >> (64 - Opts.defaultIntWidth() + 1)));
         Maxint.HasConstOrdinal = true;
+        Maxint.IsRequiredIdentifier = true;
         (void)Symtab.define(std::move(Maxint));
     }
     {
@@ -196,6 +198,7 @@ void Sema::registerBuiltins() {
         Pi.Kind = SymbolKind::Const;
         Pi.Name = "pi";
         Pi.Ty = TyReal;
+        Pi.IsRequiredIdentifier = true;
         (void)Symtab.define(std::move(Pi));
     }
 
@@ -210,6 +213,7 @@ void Sema::registerBuiltins() {
             // An ordinal constant carries its value so that a bound written with
             // it folds; the real ones have no ordinal value to carry.
             if (Ord) { S.ConstOrdinal = *Ord; S.HasConstOrdinal = true; }
+            S.IsRequiredIdentifier = true;
             return S;
         };
         (void)Symtab.define(makeConst("maxchar", TyChar, 255));
@@ -247,6 +251,7 @@ void Sema::registerBuiltins() {
             TSym.Kind = SymbolKind::TypeAlias;
             TSym.Name = "TimeStamp";
             TSym.Ty   = TyTS;
+            TSym.IsRequiredIdentifier = true;
             (void)Symtab.define(std::move(TSym));
         }
         // The BindingType record itself is built at the top, because the
@@ -257,6 +262,7 @@ void Sema::registerBuiltins() {
             BTSym.Kind = SymbolKind::TypeAlias;
             BTSym.Name = "BindingType";
             BTSym.Ty   = TyBindingType;
+            BTSym.IsRequiredIdentifier = true;
             (void)Symtab.define(std::move(BTSym));
         }
     }
