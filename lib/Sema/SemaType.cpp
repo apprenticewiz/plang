@@ -193,9 +193,20 @@ void Sema::walkVariantFields(const VariantPart& Vp, Type& T) {
     std::shared_ptr<Type> TagTy;
     if (!Vp.TagField.empty() && Vp.TagType) {
         TagTy = resolveType(*Vp.TagType);
-        if (!std::ranges::any_of(T.RecordFields,
-                [&](const Type::Field& F) { return eqCI(F.Name, Vp.TagField); }))
+        // §6.4.3.3: the tag field's name is a field name like any other, and
+        // must be distinct from the fixed part and every earlier variant --
+        // the same rule the loop below enforces for variant fields.  This
+        // used to be silently SKIPPED instead of diagnosed, which dropped
+        // the tag out of Sema's flattened field list while codegen still
+        // laid out storage for the discriminator, so the layout cross-check
+        // gate aborted the compiler with no file and no line.  A user's
+        // mistake reported as an internal error is still the wrong answer.
+        if (std::ranges::any_of(T.RecordFields,
+                [&](const Type::Field& F) { return eqCI(F.Name, Vp.TagField); })) {
+            error(Vp.TagType->Loc, diag::err_duplicate_field, {Vp.TagField});
+        } else {
             T.RecordFields.push_back({ .Name = Vp.TagField, .Ty = TagTy, .IsTagField = true });
+        }
     }
     // §6.4.3.3: the case-constants of a variant part shall be distinct, for the
     // reason they must be in a case-statement — the tag value has to name one
