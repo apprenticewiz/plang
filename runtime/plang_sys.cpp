@@ -509,6 +509,27 @@ void plang_err_schema_disc(const char *Name, int64_t Dst, int64_t Src) {
     std::exit(PlangRuntimeErrorStatus);
 }
 
+/// EP §6.7.5.2: SeekRead/SeekWrite/SeekUpdate reposition f to component n,
+/// measured from the index type's smallest value, but n itself is never
+/// range-checked against the file's extent before the seek is attempted --
+/// so a value the C library cannot honor (behind the index type's origin,
+/// most directly, which computes a negative byte offset) reaches fseek.
+/// Unlike a mismatched read/write, which trapOnStreamError catches because
+/// the failed C call leaves its own error indicator set, a failed fseek
+/// leaves the stream positioned exactly where it already was -- so ignoring
+/// the failure does not just skip the seek, it silently redirects whatever
+/// read or write comes next onto that unrelated, previously-current
+/// component instead. This traps it as the dynamic-violation EP's own
+/// pre-assertion calls for, rather than letting the corruption through
+/// (issue #233).
+[[noreturn]] void plang_err_seek_failed(const char *Op, int64_t N) {
+    std::fflush(stdout);
+    std::fprintf(stderr,
+                 "plang runtime: %s(%" PRId64 "): position is not reachable "
+                 "in this file\n", Op, N);
+    std::exit(PlangRuntimeErrorStatus);
+}
+
 } // extern "C"
 
 } // namespace plang
