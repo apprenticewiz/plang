@@ -15,9 +15,14 @@
 // memory (feedback_verify_debuginfo_with_real_debugger).
 #pragma once
 
+#include <filesystem>
 #include <map>
 #include <memory>
+#include <optional>
+#include <set>
 #include <string>
+#include <utility>
+#include <vector>
 
 #include "llvm/IR/DIBuilder.h"
 #include "llvm/IR/IRBuilder.h"
@@ -264,6 +269,18 @@ private:
     /// DW_AT_data_bit_offset's bitfield semantics allow.
     void recordSchemaLayoutForScript(const plang::Type& T, const plang::RecordTypeNode& rt,
                                       uint64_t hdrBytes);
+    /// Issue #140's disambiguation key: a 64-bit FNV-1a hash over the
+    /// discriminant count and every body field's (name, kind, byte size) in
+    /// DWARF declaration order -- the same quantities buildRecordDIType
+    /// gives each member (DL.getTypeSizeInBits(fp.Ty)/8), so this is
+    /// exactly the structural identity gdb's own DWARF-derived member list
+    /// can reproduce independently at print time. Returns std::nullopt for
+    /// exactly the shapes recordSchemaLayoutForScript already declines to
+    /// record (a variant body, a field whose bound isn't a closed const
+    /// form, or a field with no representable LLVM type) -- those never
+    /// reach a sidecar entry at all, so they need no fingerprint.
+    std::optional<uint64_t> computeSchemaFingerprint(const plang::RecordTypeNode& rt,
+                                                       size_t numDiscs);
     /// Serializes every schema recordSchemaLayoutForScript has collected to
     /// <source file>.plang-schemas.json, once, here in finalize() --
     /// silently does nothing if none were recorded (Debug set but no
@@ -271,6 +288,14 @@ private:
     /// -pc1 internal frontend always sets it when Debug is on; see
     /// Codegen::setSourceManager's own call site).
     void writeSchemaDebugScript();
+    /// <source file>.plang-schemas.json -- shared by writeSchemaDebugScript
+    /// and the constructor's own early truncation of any pre-existing
+    /// sidecar (issue #141: shrinks the window in which a stale sidecar
+    /// from a previous compile of this same source can be read against a
+    /// binary that this compile never finished, or never asked for -g at
+    /// all -- writeSchemaDebugScript still writes the real one at the very
+    /// end, same as before). Empty when SrcMgr is null.
+    std::filesystem::path schemaSidecarPath() const;
     /// True if F is expressible in the sidecar's tiny JSON-array encoding
     /// (append the encoded form to Out); Const/Disc/Add/Sub/Mul/Div/Mod/Neg/
     /// Pow all are, unlike DWARF -- Python's ** operator gives this format a
@@ -350,13 +375,48 @@ private:
     /// DILocation::get and createAutoVariable/createLexicalBlock's Scope
     /// parameter both already accept.
     llvm::DILocalScope* CurScope{nullptr};
-    /// One fully-formed JSON object body per ExtentVaries schema type, keyed
-    /// by T.Name, appended by recordSchemaLayoutForScript and assembled into
-    /// the final sidecar by writeSchemaDebugScript. A map (not a vector),
-    /// keyed on the same T.Name debugTypes_ already uses to identify a
-    /// schema's DWARF struct -- schemas with the same declared name are the
-    /// same schema (a Type* can differ per-instantiation-site probe, but the
-    /// name and body never do), so recording only needs to happen once per
-    /// name, not once per Type* debugTypeOfSemaType happens to see.
-    std::map<std::string, std::string> schemaScriptEntries_;
+    /// Issues #140/#141: two schemas can share a declared NAME while having
+    /// completely different bodies (two different procedures, or two
+    /// different modules, each with their own "Foo = schema(...)"), so the
+    /// bare name alone is not a valid sidecar key -- keying on it, as this
+    /// used to, let a second same-named-but-different schema silently
+    /// overwrite (get silently DROPPED behind) the first one's entry, and
+    /// the gdb pretty-printer would then apply the wrong layout to the
+    /// second schema's instances with no warning at all.
+    ///
+    /// Fixed by keying every entry on BOTH the name and a structural
+    /// fingerprint (computeSchemaFingerprint) hashed over the discriminant
+    /// count and every body field's name/kind/size, in DWARF declaration
+    /// order -- schemas that happen to share a name AND have a compatible
+    /// layout collapse to one entry exactly as before (the common,
+    /// intended case: the same schema recorded once from several probe
+    /// instantiation sites), while a genuine name collision gets a SECOND,
+    /// distinct (fingerprint, body) entry instead of silently overwriting
+    /// the first (recordSchemaLayoutForScript also warns to stderr once per
+    /// colliding name -- see warnedSchemaNames_ -- since this is exactly the
+    /// ambiguity a human should know their program has). The gdb
+    /// pretty-printer (share/plang/gdb/plang_schema_printers.py) recomputes
+    /// the identical fingerprint from the live DWARF type's own member list
+    /// at print time, so it can pick the matching variant rather than just
+    /// the first one with a matching name.
+    std::map<std::string, std::vector<std::pair<uint64_t, std::string>>> schemaScriptEntries_;
+    /// True once recordSchemaLayoutForScript has already warned about a
+    /// given name colliding -- keeps the stderr warning to one line per
+    /// ambiguous name rather than once per probe instantiation site that
+    /// happens to reach it.
+    std::set<std::string> warnedSchemaNames_;
+    /// A random 64-bit token minted once per CGDebugInfo construction (once
+    /// per compile), embedded both in DWARF (appended to the compile
+    /// unit's DW_AT_producer string, right after PLANG_VERSION_STRING) and
+    /// in the sidecar JSON's own top-level "buildId" field -- issue #141's
+    /// real fix for sidecar staleness. A rebuild (even of the very same
+    /// source, even to a binary that never asked for -g at all) always
+    /// mints a fresh token, so a gdb session against an OLDER already-built
+    /// -g binary that loads a NEWER (or just different) sidecar written by
+    /// a later compile of the same source path -- the exact scenario issue
+    /// #141 raised -- reads two different tokens and can detect the
+    /// mismatch instead of confidently printing a different program's
+    /// layout. Left default (0) when Debug is unset; never read in that
+    /// case since no sidecar is ever written.
+    uint64_t SchemaBuildId_{0};
 };
