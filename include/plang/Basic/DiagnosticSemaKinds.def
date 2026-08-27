@@ -136,6 +136,7 @@ DIAG(err_assign_mismatch_homonym, Error,
 DIAG(err_if_not_boolean, Error, "condition of 'if' must be boolean, got '%0'")
 DIAG(err_while_not_boolean, Error, "condition of 'while' must be boolean, got '%0'")
 DIAG(err_for_var_undefined, Error, "undefined variable '%0' in for statement")
+DIAG(err_for_var_not_variable, Error, "for-loop control variable '%0' is not a variable")
 DIAG(err_for_var_not_ordinal, Error, "for-loop variable '%0' must be an ordinal type; got '%1'")
 DIAG(err_for_var_not_local, Error, "for-loop control variable '%0' must be declared in the immediately enclosing block")
 DIAG(err_for_bounds_incompatible, Error, "for-loop bounds have incompatible types ('%0' and '%1')")
