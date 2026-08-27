@@ -7,6 +7,6 @@ program p; var s: string(20); b: boolean;
 begin b := s = 'hello' end.
 
 (*
-CHECK-DAG: plang_str_from_cstr
+CHECK-DAG: plang_str_from_bytes
 CHECK-DAG: plang_str_eq
 *)
