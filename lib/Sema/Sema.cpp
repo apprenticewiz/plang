@@ -1080,13 +1080,19 @@ void Sema::checkBlock(const BlockNode& Block,
         }
 
         const bool Bindable = isBindableDenoter(*Vg.Type);
-        for (const auto& Nm : Vg.Names) {
+        for (size_t Idx = 0; Idx < Vg.Names.size(); ++Idx) {
+            const auto& Nm = Vg.Names[Idx];
+            // Each name in a multi-name group ("a, b: integer") gets
+            // diagnostics (e.g. warn_unused_variable) pointed at its own
+            // token rather than at the shared type that follows the group.
+            SourceLocation NmLoc =
+                Idx < Vg.NameLocs.size() ? Vg.NameLocs[Idx] : Vg.Type->Loc;
             Symbol S;
             S.Kind    = SymbolKind::Var;
             S.Name    = Nm;
             S.Ty    = T;
             S.IsBindable = Bindable;
-            S.DeclLoc = Vg.Type->Loc;
+            S.DeclLoc = NmLoc;
             if (!Symtab.define(S))
                 error(Vg.Type->Loc, diag::err_duplicate_declaration, {Nm});
         }
@@ -1382,12 +1388,18 @@ void Sema::checkProcBody(const ProcDecl& Proc) {
     // Define parameters in the function's own scope.
     for (const auto& Pg : H.Params) {
         auto T = resolveParamType(*Pg.Type, Pg.IsVar);
-        for (const auto& Nm : Pg.Names) {
+        for (size_t Idx = 0; Idx < Pg.Names.size(); ++Idx) {
+            const auto& Nm = Pg.Names[Idx];
+            // Each name in a multi-name group ("a, b: integer") gets
+            // diagnostics (e.g. warn_unused_parameter) pointed at its own
+            // token rather than at the shared type that follows the group.
+            SourceLocation NmLoc =
+                Idx < Pg.NameLocs.size() ? Pg.NameLocs[Idx] : Pg.Type->Loc;
             Symbol S;
             S.Kind        = Pg.IsVar ? SymbolKind::VarParam : SymbolKind::Var;
             S.Name        = Nm;
             S.Ty          = T;
-            S.DeclLoc     = Pg.Type->Loc;
+            S.DeclLoc     = NmLoc;
             S.IsProtected = Pg.IsProtected; // EP §6.7.3.1
             // EP §6.4.1: a parameter whose denoter is bindable stands for a
             // bindable variable, so bind reaches it through the parameter.
