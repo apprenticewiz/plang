@@ -145,6 +145,16 @@ struct Symbol {
     /// function body is a compile-time error.
     bool IsProtected{false};
 
+    /// EP §6.7.3.7.1 NOTE 2: set for a conformant-array bound identifier (the
+    /// lo/hi pseudo-variable an index-type-specification introduces).  Such an
+    /// identifier "is neither constant nor a variable" — it denotes the actual
+    /// argument's bound and is readable but never an assignment target, so it
+    /// is kept as an ordinary Var (codegen still gives it a per-call storage
+    /// slot) and refused the same way a protected parameter is: see
+    /// checkNotProtected / protectedBaseOf, which treat this the same as
+    /// IsProtected but report the more specific diagnostic.
+    bool IsConformantBound{false};
+
     /// EP §6.7.2: set for a named result variable, registered as an ordinary
     /// Var so it can be assigned and read by name (Sema.cpp).  Lets
     /// resultFrameFor tell "this Var IS a result variable" apart from "this
