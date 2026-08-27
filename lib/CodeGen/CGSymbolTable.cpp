@@ -42,6 +42,12 @@ void CGSymbolTable::defVar(const std::string& name, llvm::Value* ptr, llvm::Type
     DbgInfo.declareLocal(name, typeNode, ptr, debugIndirectPtr, suppressDebugDecl);
 }
 
+void CGSymbolTable::markPackedWithField(const std::string& name) {
+    if (Scopes.empty()) return;
+    auto it = Scopes.back().find(toLower(name));
+    if (it != Scopes.back().end()) it->second.packedWithField = true;
+}
+
 const VarEntry* CGSymbolTable::findVar(const std::string& name) const {
     std::string key = toLower(name);
     for (size_t i = Scopes.size(); i-- > 0;) {
