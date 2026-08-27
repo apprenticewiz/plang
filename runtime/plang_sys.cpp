@@ -450,6 +450,20 @@ void plang_err_schema_disc(const char *Name, int64_t Dst, int64_t Src) {
     std::exit(PlangRuntimeErrorStatus);
 }
 
+/// ISO §6.6.6.2: sqr(x) = x*x keeps an integer result for an integer
+/// argument, but -- like minint div -1 (plang_err_div_overflow), abs(minint)
+/// (plang_err_abs_overflow), and an out-of-range pow (plang_err_ipow_overflow)
+/// -- not every such result fits int64_t.  Unlike those three, any X with
+/// |X| > 2^31 (roughly) can overflow here, not just one fixed operand pair,
+/// so this reports which X it was rather than taking no argument.
+[[noreturn]] void plang_err_sqr_overflow(int64_t X) {
+    std::fflush(stdout);
+    std::fprintf(stderr,
+                 "plang runtime: sqr(%" PRId64 ") has no representable result\n",
+                 X);
+    std::exit(PlangRuntimeErrorStatus);
+}
+
 /// ISO §6.9.3.1 / EP §6.10.3.1: a write TotalWidth is a plain integer
 /// expression, so a program can compute one wider than the `int` printf's
 /// `%*d`/`%*c` take -- plang_io.cpp's and plang_file.cpp's checkedWidth call
