@@ -45,10 +45,30 @@ std::size_t  ConfArrCap   = 0;
 
 extern "C" {
 
-/// Flush stdout then terminate (EP §6.7.5.7 \c halt).  The standard's halt takes
-/// no argument; \p Status carries the common extension halt(n), and is zero for
-/// a bare halt.
+/// EP §6.11.2: run every registered module finaliser, most recently
+/// initialized module first (defined below, once module registration has
+/// been introduced) -- forward-declared here because plang_halt, just
+/// below, is the other way a program can terminate and has to reach the
+/// same finalisers that falling off the end of the program block already
+/// does (CodeGenProcs.cpp's emitMain).
+void plang_module_finals_run(void);
+
+/// Run every registered module finaliser, flush stdout, then terminate
+/// (EP §6.7.5.7 \c halt).  The standard's halt takes no argument; \p Status
+/// carries the common extension halt(n), and is zero for a bare halt.
+///
+/// A module's 'to end do' (EP §6.11.2) is specified to run as the program
+/// terminates, not only when execution falls off the end of the program
+/// block -- halt is the other way a Pascal program ends.  Before this called
+/// in here too, halt reached std::exit directly, which no generated code
+/// stands between, so every module's finalisation side effects (a closing
+/// log line, a flushed handle) were silently lost whenever the program
+/// halted instead of ending normally (issue #242).  plang_module_finals_run
+/// pops each finaliser off its list before calling it, so one that itself
+/// calls halt -- reentering this function -- still cannot run anything a
+/// second time; it just drains whatever the outer call had not reached yet.
 void plang_halt(int64_t Status) {
+    plang_module_finals_run();
     std::fflush(stdout);
     std::exit(static_cast<int>(Status));
 }
@@ -308,6 +328,17 @@ void plang_err_mod_divisor(int64_t D) {
     std::exit(PlangRuntimeErrorStatus);
 }
 
+/// EP §6.7.6.2: arg(z) is z's phase angle, atan2(im, re) -- undefined at the
+/// origin, where every angle is equally valid.  Like plang_err_ipow_zero_zero,
+/// this fires for exactly one fixed input, so it takes no argument.
+[[noreturn]] void plang_err_arg_domain(void) {
+    std::fflush(stdout);
+    std::fprintf(stderr,
+                 "plang runtime: arg(0,0) is undefined (the origin has no "
+                 "phase angle)\n");
+    std::exit(PlangRuntimeErrorStatus);
+}
+
 /// ISO §6.5.4: the identifying value of a pointer variable being dereferenced
 /// shall not be nil.
 [[noreturn]] void plang_err_nil_deref(void) {
@@ -450,6 +481,20 @@ void plang_err_schema_disc(const char *Name, int64_t Dst, int64_t Src) {
     std::exit(PlangRuntimeErrorStatus);
 }
 
+/// ISO §6.6.6.2: sqr(x) = x*x keeps an integer result for an integer
+/// argument, but -- like minint div -1 (plang_err_div_overflow), abs(minint)
+/// (plang_err_abs_overflow), and an out-of-range pow (plang_err_ipow_overflow)
+/// -- not every such result fits int64_t.  Unlike those three, any X with
+/// |X| > 2^31 (roughly) can overflow here, not just one fixed operand pair,
+/// so this reports which X it was rather than taking no argument.
+[[noreturn]] void plang_err_sqr_overflow(int64_t X) {
+    std::fflush(stdout);
+    std::fprintf(stderr,
+                 "plang runtime: sqr(%" PRId64 ") has no representable result\n",
+                 X);
+    std::exit(PlangRuntimeErrorStatus);
+}
+
 /// ISO §6.9.3.1 / EP §6.10.3.1: a write TotalWidth is a plain integer
 /// expression, so a program can compute one wider than the `int` printf's
 /// `%*d`/`%*c` take -- plang_io.cpp's and plang_file.cpp's checkedWidth call
@@ -492,6 +537,67 @@ void plang_err_schema_disc(const char *Name, int64_t Dst, int64_t Src) {
 [[noreturn]] void plang_err_cannot_open(const char *Msg) {
     std::fflush(stdout);
     std::fprintf(stderr, "plang runtime: %s\n", Msg);
+    std::exit(PlangRuntimeErrorStatus);
+}
+
+/// EP §6.7.5.2: SeekRead/SeekWrite/SeekUpdate reposition f to component n,
+/// measured from the index type's smallest value, but n itself is never
+/// range-checked against the file's extent before the seek is attempted --
+/// so a value the C library cannot honor (behind the index type's origin,
+/// most directly, which computes a negative byte offset) reaches fseek.
+/// Unlike a mismatched read/write, which trapOnStreamError catches because
+/// the failed C call leaves its own error indicator set, a failed fseek
+/// leaves the stream positioned exactly where it already was -- so ignoring
+/// the failure does not just skip the seek, it silently redirects whatever
+/// read or write comes next onto that unrelated, previously-current
+/// component instead. This traps it as the dynamic-violation EP's own
+/// pre-assertion calls for, rather than letting the corruption through
+/// (issue #233).
+[[noreturn]] void plang_err_seek_failed(const char *Op, int64_t N) {
+    std::fflush(stdout);
+    std::fprintf(stderr,
+                 "plang runtime: %s(%" PRId64 "): position is not reachable "
+                 "in this file\n", Op, N);
+    std::exit(PlangRuntimeErrorStatus);
+}
+
+/// ISO §6.9.1: the value read for read(f, v)/read(v) with v of an integer or
+/// real type is the longest sequence of characters starting at the current
+/// position that forms a value of that type -- which means a token that
+/// cannot even start one (any character that is not a digit, a sign, or --
+/// for a real -- a decimal point) is an error, exactly like every other
+/// dynamic-violation this file reports. Before this, a malformed token
+/// quietly left the destination variable unchanged: plang_io.cpp's
+/// scanNumber-based reader (stdin/readstr) built an empty token and skipped
+/// the assignment outright, and plang_file.cpp's fscanf-based reader got a
+/// plain match failure (return 0) that nothing distinguished from success.
+/// Neither reader had consumed anything either, so a loop driven by eof(f)
+/// never advanced past the bad token and so never terminated (issue #236).
+[[noreturn]] void plang_err_read_format(const char *Op) {
+    std::fflush(stdout);
+    std::fprintf(stderr,
+                 "plang runtime: %s: input does not start with a valid "
+                 "number\n", Op ? Op : "read");
+    std::exit(PlangRuntimeErrorStatus);
+}
+
+/// ISO §6.9.1: the value read for read(f, v)/read(v) with v of an integer
+/// type has to be assignment-compatible with it, which an arbitrarily long
+/// run of digits is not once it names something outside int64_t. Before
+/// this, plang_file.cpp's "%lld"-based fscanf silently clamped such a token
+/// (an overflowing scanf numeric conversion is undefined behaviour in C;
+/// glibc's happens to clamp to the nearest representable value) and
+/// plang_io.cpp's strtoll-based reader computed the same clamped value but
+/// never looked at ERANGE to notice -- so both accepted
+/// "9223372036854775808" as though it were the largest representable
+/// integer instead of reporting it (issue #240). \p Tok is the offending
+/// text: the value itself has no int64_t representation to show instead.
+[[noreturn]] void plang_err_read_int_range(const char *Op, const char *Tok) {
+    std::fflush(stdout);
+    std::fprintf(stderr,
+                 "plang runtime: %s: '%s' is out of range for an integer "
+                 "(%" PRId64 "..%" PRId64 ")\n",
+                 Op ? Op : "read", Tok ? Tok : "", INT64_MIN, INT64_MAX);
     std::exit(PlangRuntimeErrorStatus);
 }
 

@@ -106,6 +106,30 @@ Sema::foldBounds(const ExprNode& Low, const ExprNode& High,
     return std::pair{*Lo, *Hi};
 }
 
+/// ISO §6.4.2.2: a subrange-type's two bounds shall be constants of the same
+/// ordinal type, which becomes the subrange's host type; ISO §6.4.3.2 makes
+/// an index type written as a range the same rule.  The callers used to pick
+/// a host type from "whichever bound is ordinal" -- Low if it qualified,
+/// else High, else a silent fallback to integer -- and never asked whether
+/// the OTHER bound agreed, so `1..b` (integer, enum) and `'a'..100` (char,
+/// integer) were each accepted as if the second bound's type were the
+/// first's (issue #251).
+///
+/// Silent (true) when either side is already Error, so one bad bound is not
+/// reported twice, and when either side is not ordinal at all: that is a
+/// different mistake than a mismatched PAIR of ordinal types, and is left
+/// for the caller's own not-ordinal diagnostic (or, failing that, for
+/// foldBounds/constBound to find nothing to fold).
+bool Sema::boundsShareOrdinalType(const Type& LoTy, const ExprNode& High,
+                                  const Type& HiTy) {
+    if (LoTy.isError() || HiTy.isError())     return true;
+    if (!LoTy.isOrdinal() || !HiTy.isOrdinal()) return true;
+    if (isAssignCompatible(LoTy, HiTy) || isAssignCompatible(HiTy, LoTy))
+        return true;
+    error(High.Loc, diag::err_bound_types_differ, {LoTy.Name, HiTy.Name});
+    return false;
+}
+
 std::shared_ptr<Type> Sema::resolveType(const TypeNode& Node) {
     auto T = resolveTypeImpl(Node);
     // Record the result on the node so codegen can lower type denoters whose
@@ -169,6 +193,13 @@ void Sema::checkInitialState(const TypeNode& Node, const Type& T) {
         error(Node.InitialState->Loc, diag::err_value_init_type_mismatch,
               {VT->Name, T.Name});
     checkStringCapacity(T, *Node.InitialState);
+    // isAssignCompatible above only checks that a value of T's ORDINAL kind
+    // was written -- any integer literal satisfies a subrange -- so `1..5
+    // value 99` compiled clean and every variable of the type started life
+    // holding 99, already outside its own subrange.  The same constant is
+    // checked against T's actual bounds the way an assigned one is
+    // (checkAssignStmt's warnIfConstantOutOfRange call).
+    warnIfConstantOutOfRange(T, *Node.InitialState);
     adoptSetType(*Node.InitialState, Node.ResolvedType);
     // Folded HERE, in the scope the 'value' clause was actually written in --
     // constBound/constRealBound write the result onto InitialState's own
@@ -187,27 +218,64 @@ void Sema::checkInitialState(const TypeNode& Node, const Type& T) {
 }
 
 void Sema::walkVariantFields(const VariantPart& Vp, Type& T) {
-    // Tag field (the discriminator variable, e.g. 'b' in 'case b: boolean of')
-    // Resolved once: an enumeration written out here declares its values, and
-    // resolving the denoter a second time would declare them again.
+    // Tag type (e.g. 'boolean' in 'case b: boolean of', or the anonymous
+    // '(aa, bb)' in 'case (aa, bb) of').  Resolved unconditionally -- not
+    // only when a tag FIELD NAME was also written -- and exactly once: an
+    // enumeration written out here declares its values as a side effect of
+    // resolveType, and resolving the denoter a second time would declare
+    // them again.  Gating this on the tag field's name used to leave an
+    // anonymous selector's type never resolved at all, which meant two
+    // things: a non-ordinal tag such as 'case real of' had nothing to check
+    // it against and was silently accepted, and an inline enumeration's
+    // values, such as aa/bb above, were never declared as symbols, so using
+    // either anywhere read as "undefined identifier" and the duplicate-label
+    // fold below could not fold them either.
     std::shared_ptr<Type> TagTy;
-    if (!Vp.TagField.empty() && Vp.TagType) {
+    if (Vp.TagType) {
         TagTy = resolveType(*Vp.TagType);
-        if (!std::ranges::any_of(T.RecordFields,
-                [&](const Type::Field& F) { return eqCI(F.Name, Vp.TagField); }))
-            T.RecordFields.push_back({ .Name = Vp.TagField, .Ty = TagTy, .IsTagField = true });
+        // ISO §6.4.3.3: tag-type is an ordinal-type.
+        if (!TagTy->isError() && !TagTy->isOrdinal())
+            error(Vp.TagType->Loc, diag::err_variant_tag_not_ordinal, {TagTy->Name});
+        if (!Vp.TagField.empty()) {
+            // §6.4.3.3: the tag field's name is a field name like any other, and
+            // must be distinct from the fixed part and every earlier variant --
+            // the same rule the loop below enforces for variant fields.  This
+            // used to be silently SKIPPED instead of diagnosed, which dropped
+            // the tag out of Sema's flattened field list while codegen still
+            // laid out storage for the discriminator, so the layout cross-check
+            // gate aborted the compiler with no file and no line.  A user's
+            // mistake reported as an internal error is still the wrong answer.
+            if (std::ranges::any_of(T.RecordFields,
+                    [&](const Type::Field& F) { return eqCI(F.Name, Vp.TagField); })) {
+                error(Vp.TagType->Loc, diag::err_duplicate_field, {Vp.TagField});
+            } else {
+                T.RecordFields.push_back({ .Name = Vp.TagField, .Ty = TagTy, .IsTagField = true });
+            }
+        }
     }
-    // §6.4.3.3: the case-constants of a variant part shall be distinct, for the
-    // reason they must be in a case-statement — the tag value has to name one
-    // variant and not two.
+    // §6.4.3.3: each case-constant of a variant part is a value of the tag
+    // type -- the same rule a case-statement's labels are held to against
+    // its selector (checkCase, SemaStmt.cpp) -- and, among themselves, the
+    // case-constants of a variant part shall be distinct, for the reason
+    // they must be in a case-statement: the tag value has to name one
+    // variant and not two.  The type check used to be entirely missing, so
+    // a boolean tag accepted case-constants that were not one of its two
+    // values at all.
     std::set<int64_t> SeenTags;
     for (const auto& Vc : Vp.Cases)
-        for (const auto& Lbl : Vc.Labels)
-            if (Lbl)
-                if (auto V = constBound(*Lbl); V && !SeenTags.insert(*V).second)
-                    error(Lbl->Loc, diag::err_variant_label_duplicate,
-                          {TagTy ? spellOrdinal(*TagTy, *V)
-                                 : std::to_string(*V)});
+        for (const auto& Lbl : Vc.Labels) {
+            if (!Lbl) continue;
+            auto LblTy = checkExpr(*Lbl);
+            if (TagTy && !TagTy->isError() && !LblTy->isError()
+                    && !isAssignCompatible(*TagTy, *LblTy)
+                    && !isAssignCompatible(*LblTy, *TagTy))
+                error(Lbl->Loc, diag::err_variant_label_type,
+                      {LblTy->Name, TagTy->Name});
+            if (auto V = constBound(*Lbl); V && !SeenTags.insert(*V).second)
+                error(Lbl->Loc, diag::err_variant_label_duplicate,
+                      {TagTy ? spellOrdinal(*TagTy, *V)
+                             : std::to_string(*V)});
+        }
 
     // All fixed fields from every variant case, plus recursion into nested
     // variants.
@@ -233,6 +301,35 @@ void Sema::walkVariantFields(const VariantPart& Vp, Type& T) {
         }
         if (Vc.NestedVariant) walkVariantFields(*Vc.NestedVariant, T);
     }
+}
+
+// ISO §6.6.5.3: see the declaration (Sema.h) for the walk this is one step
+// of.  \p Vp's TagType was resolved by walkVariantFields when the record
+// itself was resolved (once, before any statement -- new/dispose among
+// them -- is checked), so its ResolvedType is read here rather than
+// resolved again, the same reason walkVariantFields itself resolves an
+// inline enumeration only once: a second resolution would declare its
+// values a second time.
+const VariantPart* Sema::checkVariantTagArg(const std::string& Which,
+                                            const ExprNode& Arg, const Type& At,
+                                            const VariantPart& Vp) {
+    const Type* TagTy = Vp.TagType ? Vp.TagType->ResolvedType.get() : nullptr;
+    if (TagTy && !TagTy->isError() && !At.isError()
+            && !isAssignCompatible(*TagTy, At))
+        error(Arg.Loc, diag::err_variant_tag_arg_type, {Which, At.Name, TagTy->Name});
+    // Which of Vp's arms this argument names, so the caller knows whether a
+    // FURTHER argument has a nested level to be checked against.  Only a
+    // constant can answer that; a non-constant argument (already reported by
+    // checkExpr's own walk, since new/dispose's arguments are ordinary
+    // expressions to it) simply ends the walk here, the same as an argument
+    // that named none of Vp's arms.
+    if (auto V = constBound(Arg))
+        for (const auto& Vc : Vp.Cases)
+            for (const auto& Lbl : Vc.Labels)
+                if (Lbl)
+                    if (auto LV = constBound(*Lbl); LV && *LV == *V)
+                        return Vc.NestedVariant.get();
+    return nullptr;
 }
 
 std::shared_ptr<Type> Sema::resolveTypeImpl(const TypeNode& Node) {
@@ -293,6 +390,7 @@ std::shared_ptr<Type> Sema::resolveTypeImpl(const TypeNode& Node) {
         // Determine the ordinal base type of the index from the declared bounds.
         auto Lo = checkExpr(*N->Low);
         auto Hi = checkExpr(*N->High);
+        if (!boundsShareOrdinalType(*Lo, *N->High, *Hi)) return TyErr;
         auto BaseOrd = (Lo->isOrdinal() ? Lo : (Hi->isOrdinal() ? Hi : TyInt));
         // As for a string capacity above: whether THESE bounds read a
         // discriminant, not whether anything in the enclosing body did.
@@ -326,6 +424,7 @@ std::shared_ptr<Type> Sema::resolveTypeImpl(const TypeNode& Node) {
     if (auto* N = llvm::dyn_cast<SubrangeTypeNode>(&Node)) {
         auto Lo = checkExpr(*N->Low);
         auto Hi = checkExpr(*N->High);
+        if (!boundsShareOrdinalType(*Lo, *N->High, *Hi)) return TyErr;
         auto Base = (Lo->isOrdinal() ? Lo : (Hi->isOrdinal() ? Hi : TyInt));
         const bool SavedUsed = SchemaBindingUsed_;
         SchemaBindingUsed_   = false;
@@ -430,15 +529,27 @@ std::shared_ptr<Type> Sema::resolveTypeImpl(const TypeNode& Node) {
             else if (Elem->isRestricted())
                 error(N->Loc, diag::err_restricted_file_component,
                       {Elem->Name});
-            else {
-                // Check for records that contain a file field
-                for (const auto& F : Elem->RecordFields) {
-                    if (F.Ty && F.Ty->Kind == TypeKind::File) {
-                        error(N->Loc, diag::err_file_field_has_file, {F.Name});
-                        break;
-                    }
-                }
-            }
+            // Issue #241: a zero-size component (an empty record, or one
+            // whose fields are all themselves zero-size) gives every runtime
+            // file operation a zero stride, and get/read/put don't agree on
+            // what to do with that -- see the diagnostic's own definition.
+            // byteSizeOf returns nullopt rather than 0 for a conformant
+            // array or an undiscriminated schema, so this does not fire for
+            // a component whose size is merely unknown here.
+            else if (const auto Sz = byteSizeOf(*Elem); Sz && *Sz == 0)
+                error(N->Loc, diag::err_file_component_zero_size,
+                      {Elem->Name});
+            // Issue #167: a file need not be the component's own immediate
+            // field to violate §6.4.3.5 -- it is just as much "contained"
+            // when it sits inside an array, or inside a record (or schema
+            // body) nested arbitrarily deep inside this one.  typeContainsFile
+            // already does that full walk for the assignment, value-parameter
+            // and function-result checks, so reuse it here instead of the
+            // one-record-level-deep field loop that used to run in its place
+            // (which caught `record f: text end` but missed an array of
+            // files, or a record nested inside another record).
+            else if (typeContainsFile(*Elem))
+                error(N->Loc, diag::err_file_component_has_file, {Elem->Name});
         }
         return Ctx_.getFile(std::move(Elem), std::move(Index));
     }
@@ -839,8 +950,20 @@ std::shared_ptr<Type> Sema::resolveNamedUnrestricted(const NamedTypeNode& N) {
     // forward references in declarations is retained" -- so this is refused
     // here, the same as any other undefined type, rather than silently
     // handed to whatever resolves the reference.
+    //
+    // `Sym->Ty != TyErr` tells that legitimate case apart from a type whose
+    // OWN definition already failed to resolve (`type q = nosuchtype;`):
+    // Phase 3b (Sema.cpp) stores the TyErr singleton -- Kind=Error like a
+    // stub, but with the fixed, non-empty Name "<error>" -- over the stub
+    // once resolution comes back empty-handed, and every use of "q" landed
+    // here and looked exactly like a still-pending stub, so the one real
+    // "undefined type 'nosuchtype'" fanned out into a bogus "'q' is used
+    // here before its declaration" at every use (issue #269).  TyErr is a
+    // singleton, so identity alone distinguishes it from the per-type stub
+    // Phase 3a allocates fresh for each type name; a real error was already
+    // reported when TyErr was produced, so nothing further is said here.
     if (InPointerDomain_ <= 0 && Sym->Ty && Sym->Ty->Kind == TypeKind::Error
-            && !Sym->Ty->Name.empty()) {
+            && !Sym->Ty->Name.empty() && Sym->Ty != TyErr) {
         error(N.Loc, diag::err_forward_type_reference, {N.Name});
         return TyErr;
     }
@@ -1110,6 +1233,21 @@ std::optional<Type::ExtentForm> Sema::buildExtentForm(
         const ExprNode& E, const std::vector<std::string>& Discs) const {
     using EF = Type::ExtentForm;
 
+    // Issue #204: this recurses into itself below for every '+'/'-'/'*'/...
+    // node the same way checkExpr recurses into itself, so a schema array
+    // body written as a flat chain -- `array[1..1+1+...+1]` -- walks just as
+    // deep here as it would in checkExpr, with nothing bounding it.  Sharing
+    // checkExpr's own counter and ceiling (ExprDepth/MaxExprDepth, Sema.h)
+    // means this and checkExpr count against the same budget instead of each
+    // getting its own, and needs no diagnostic of its own: whatever reached
+    // this expression already ran it through checkExpr first (array-bound
+    // resolution does, and this is only ever reached from there), so
+    // checkExpr's own "nested too deeply" has already fired by the time this
+    // could ever hit the ceiling.  Declining quietly here is what stops the
+    // second, unguarded walk from being the one that exhausts the stack.
+    if (ExprDepth >= MaxExprDepth) return std::nullopt;
+    ExprDepthScope DepthGuard(ExprDepth, ExprDepthLimitHit);
+
     // A discriminant becomes its INDEX.  Checked before folding, because the
     // body is resolved with the discriminants bound to a probe value and
     // folding would quietly turn `n` into 1.
@@ -1157,6 +1295,19 @@ std::optional<Type::ExtentForm> Sema::buildExtentForm(
 }
 
 std::optional<int64_t> Sema::constBound(const ExprNode& E) const {
+    // Issue #204: constBound and constBoundImpl call each other below (an
+    // operand of a BinaryExpr/UnaryExpr/call argument re-enters here) the
+    // same way checkExpr recurses into itself, over the same flat-chain
+    // shape a bound can be written in, e.g. `array[1..1+1+...+1]`.  Sharing
+    // checkExpr's own counter and ceiling (Sema.h) rather than giving this
+    // an independent one means the two count against a single budget; see
+    // buildExtentForm just above for why declining quietly, with no
+    // diagnostic of its own, is enough -- every caller of constBound on an
+    // expression this deep has already run it through checkExpr first,
+    // which is where "nested too deeply" is reported.
+    if (ExprDepth >= MaxExprDepth) return std::nullopt;
+    ExprDepthScope DepthGuard(ExprDepth, ExprDepthLimitHit);
+
     // Whether THIS fold read a schema discriminant, not whether anything
     // earlier did.
     const bool SavedUsed = SchemaBindingUsed_;
@@ -1198,8 +1349,11 @@ std::optional<int64_t> Sema::constBoundImpl(const ExprNode& E) const {
         }
     }
     if (auto* N = llvm::dyn_cast<UnaryExpr>(&E)) {
+        // Issue #202: -minint overflows (its magnitude, 2^63, is one past
+        // maxint); checkedNeg (Arith.h) declines the fold instead of
+        // computing the UB, wrapped result.
         if (N->Op == TokenKind::Minus)
-            if (auto Inner = constBound(*N->Operand)) return -*Inner;
+            if (auto Inner = constBound(*N->Operand)) return checkedNeg(*Inner);
         if (N->Op == TokenKind::Plus)
             return constBound(*N->Operand);
     }
@@ -1210,16 +1364,32 @@ std::optional<int64_t> Sema::constBoundImpl(const ExprNode& E) const {
         const auto R = constBound(*N->Right);
         if (L && R) {
             switch (N->Op) {
-            case TokenKind::Plus:  return *L + *R;
-            case TokenKind::Minus: return *L - *R;
-            case TokenKind::Times: return *L * *R;
+            // Issue #202: +, -, * are checked -- nullopt (decline the fold)
+            // on signed overflow, rather than the UB plain `+`/`-`/`*` would
+            // be here: in a release build, the wrapped value folded in as
+            // though it were the constant the source actually named (and
+            // from there into whatever array bound, case label or
+            // initializer read this constant).
+            case TokenKind::Plus:  return checkedAdd(*L, *R);
+            case TokenKind::Minus: return checkedSub(*L, *R);
+            case TokenKind::Times: return checkedMul(*L, *R);
+            // Issue #201: divOverflows (Arith.h) is minint div/mod -1, the
+            // one pair with a nonzero divisor and still no representable
+            // result -- signed-overflow UB that SIGFPE-traps this hardware's
+            // `idiv` the same way a zero divisor already does, which is why
+            // it needs the same guard as the zero check right below it.
             // Division by zero in a constant bound is diagnosed where the
-            // expression is checked; folding it here would trap.
-            case TokenKind::Div:   if (*R) return *L / *R; break;
-            case TokenKind::Mod:   if (*R) return isoMod(*L, *R); break;
+            // expression is checked; folding either case here would trap.
+            case TokenKind::Div:
+                if (*R && !divOverflows(*L, *R)) return *L / *R;
+                break;
+            case TokenKind::Mod:
+                if (*R && !divOverflows(*L, *R)) return isoMod(*L, *R);
+                break;
             // EP §6.8.3.2: an integer base keeps an integer result, so this is
             // a bound.  A negative exponent is not, and is left to the check on
-            // the expression itself to report.
+            // the expression itself to report.  isoPow itself now declines on
+            // overflow (Arith.h), the same as checkedMul just above.
             case TokenKind::Pow:   if (*R >= 0) return isoPow(*L, *R); break;
             default: break;
             }
@@ -1236,11 +1406,15 @@ std::optional<int64_t> Sema::constBoundImpl(const ExprNode& E) const {
     // fails to fold, same as it did before this call existed.
     if (auto* N = llvm::dyn_cast<CallExpr>(&E)) {
         switch (N->ResolvedBuiltin) {
+        // Issue #202: abs(minint) has no representable result -- the same
+        // overflow as unary minus above, and checkedNeg for the same reason.
+        // sqr is `*V * *V`, checked the same way Times is above.
         case BuiltinID::Abs:
-            if (auto V = constBound(*N->Args[0])) return *V < 0 ? -*V : *V;
+            if (auto V = constBound(*N->Args[0]))
+                return *V < 0 ? checkedNeg(*V) : V;
             break;
         case BuiltinID::Sqr:
-            if (auto V = constBound(*N->Args[0])) return *V * *V;
+            if (auto V = constBound(*N->Args[0])) return checkedMul(*V, *V);
             break;
         // ord and chr both represent their value as its plain ordinal here,
         // the same as the single-character StringLitExpr case above.
@@ -1257,8 +1431,12 @@ std::optional<int64_t> Sema::constBoundImpl(const ExprNode& E) const {
             const auto V = constBound(*N->Args[0]);
             const auto K = N->Args.size() > 1 ? constBound(*N->Args[1])
                                                : std::optional<int64_t>(1);
+            // Issue #202: the same unchecked overflow as +/- above --
+            // succ(maxint) and pred(minint) are maxint+1 and minint-1 by
+            // another name.
             if (V && K)
-                return N->ResolvedBuiltin == BuiltinID::Succ ? *V + *K : *V - *K;
+                return N->ResolvedBuiltin == BuiltinID::Succ
+                     ? checkedAdd(*V, *K) : checkedSub(*V, *K);
             break;
         }
         default: break;
@@ -1410,9 +1588,14 @@ uint64_t Sema::byteAlignOf(const Type& T) {
     case TypeKind::Real:        return 8;
     case TypeKind::Complex:     return 8;
     case TypeKind::Set:         return intAlign(PlangMaxSetElements);
+    // The target's pointer width (issue #243's follow-up): Type::Width is
+    // repurposed for these three kinds -- see its comment -- and stamped by
+    // TypeContext from --target=, defaulting to 8 bytes where it was not
+    // given.  Alignment equals size for a bare pointer on every ABI plang
+    // targets.
     case TypeKind::String:
     case TypeKind::Pointer:
-    case TypeKind::Nil:         return 8;
+    case TypeKind::Nil:         return T.Width / 8;
     case TypeKind::VarString:   return 8;   // the length field leads it
     case TypeKind::File:        return 8;   // a pointer leads PascalFile
     case TypeKind::Array:       return T.ElemType ? byteAlignOf(*T.ElemType) : 1;
@@ -1442,9 +1625,10 @@ std::optional<uint64_t> Sema::byteSizeOf(const Type& T, FieldOffsets* Offsets) {
     case TypeKind::Real:        return 8;
     case TypeKind::Complex:     return 16;  // { double, double }
     case TypeKind::Set:         return intBytes(PlangMaxSetElements);
+    // The target's pointer width; see the identical case in byteAlignOf.
     case TypeKind::String:
     case TypeKind::Pointer:
-    case TypeKind::Nil:         return 8;
+    case TypeKind::Nil:         return T.Width / 8;
     // EP §6.4.3.3: { i64 length, [capacity x i8] }.
     case TypeKind::VarString:
         return roundUp(8 + static_cast<uint64_t>(T.StrCapacity > 0 ? T.StrCapacity
@@ -1455,11 +1639,28 @@ std::optional<uint64_t> Sema::byteSizeOf(const Type& T, FieldOffsets* Offsets) {
         return roundUp(8 + 8 + 8 + 4 + 1 + 1 + 1, 8);
     case TypeKind::Array: {
         if (!T.IndexType || !T.ElemType) return std::nullopt;
-        const int64_t Count = T.IndexType->SubHi - T.IndexType->SubLo + 1;
-        if (Count <= 0) return std::nullopt;
+        // ordinalRangeCount, not "SubHi - SubLo + 1" directly: that plain
+        // int64_t subtraction is signed-overflow UB once the bounds are far
+        // enough apart (array[0..maxint], array[-maxint-1..maxint], ...),
+        // and used to silently wrap into a plausible-looking small or
+        // negative count instead of the astronomically large one the
+        // declaration actually asks for -- which let it slip past the
+        // "Count <= 0" rejection below and past the 1 GiB global-variable
+        // gate this function feeds (issue #214).
+        const auto Count = ordinalRangeCount(T.IndexType->SubLo, T.IndexType->SubHi);
+        // A count that does not even fit a uint64_t is not "unknown" the way
+        // a missing IndexType/ElemType is -- it is known to be enormous,
+        // just not exactly.  Reporting it as the largest size this function
+        // can return keeps every caller's size comparison (the global
+        // variable gate, codegen's cross-check against what it actually laid
+        // out) a rejection instead of a silently skipped one, without either
+        // of them having to know this function's own arithmetic.
+        if (!Count) return UINT64_MAX;
+        if (*Count == 0) return std::nullopt; // empty range: no storage to size
         const auto Elem = byteSizeOf(*T.ElemType);
         if (!Elem) return std::nullopt;
-        return static_cast<uint64_t>(Count) * *Elem;
+        const auto Size = checkedMul64(*Count, *Elem);
+        return Size ? *Size : UINT64_MAX;
     }
     // A schema instance is deliberately absent.  One declaration serves every
     // instantiation and its field denoters carry the annotation of whichever

@@ -223,29 +223,43 @@ exit status of 70:
 
 - an array index outside the index type (§6.5.3.2)
 - a value outside the subrange it is assigned to (§6.6.3.2, §6.8.2.2)
+- `succ` or `pred` off the end of a bounded ordinal type — `boolean`, `char`,
+  an enumeration, or a subrange (§6.6.6.4). Plain `integer` has no bounded
+  range to walk off; see the integer-overflow entry below for what happens
+  there instead.
 - a `case` statement whose selector matches no case-constant and which has no
   `otherwise` part (§6.8.3.5)
 - division by zero, whether by `/`, `div` or `mod` (§6.7.2.2)
+- `minint div -1`, the one division with a nonzero divisor whose result still
+  does not fit (§6.7.2.2)
+- EP's `pow` (§6.8.3.2) with an integer base, when the result does not fit.
+  `**` cannot land here: §6.8.3.2 gives it a `real` result regardless of its
+  operand types, so it never has an integer result to overflow.
 - dereferencing a pointer whose value is `nil` (§6.5.4)
 
-The index and subrange checks are the ones `-fno-range-checks` turns off, and
-the nil check is what `-fno-nil-checks` turns off; the two were one flag until
-0.1.2. A program compiled with either is not one whose errors are reported, and
-the flag is a statement by whoever compiles it that the program is known not to
-commit them.
+The index, subrange, and succ/pred-range checks are the ones `-fno-range-checks`
+turns off, and the nil check is what `-fno-nil-checks` turns off; the two were
+one flag until 0.1.2. A program compiled with either is not one whose errors are
+reported, and the flag is a statement by whoever compiles it that the program is
+known not to commit them. With range checks off, `succ`/`pred` off the end of a
+bounded ordinal type wraps instead, reduced to the width the type is held in —
+`succ(true)` comes back `false`, `succ(chr(255))` comes back `chr(0)`, and
+`succ` of an enumeration's last value comes back its ordinal count. `minint div
+-1` and an out-of-range `pow` are unaffected by either flag: both are reported
+regardless.
 
 **Not reported.** Clause 5.1 f) 1) requires these be listed:
 
 - a variable that is read before it has been given a value (§6.5.1). Its value
   is whatever the storage held.
 - an integer operation whose result is outside the integer-type (§6.7.2.2).
-  It wraps, two's-complement.
+  It wraps, two's-complement — except `div` (`minint div -1`) and EP's `pow`
+  (§6.8.3.2, an integer base with an out-of-range result), which are reported
+  instead of wrapping (see above). `**` is not an exception so much as exempt:
+  §6.8.3.2 gives it a `real` result regardless of its operand types, so it
+  never computes an integer result to overflow.
 - a real operation whose result is outside the real-type. It gives an IEEE
   infinity or a NaN.
-- `succ` or `pred` off the end of an ordinal type (§6.6.6.4). The result is the
-  ordinal one past the end, reduced to the width the type is held in — so
-  `succ(true)` is `false` and `succ(chr(255))` is `chr(0)`, while `succ` of the
-  last value of an enumeration gives its ordinal count.
 - reading a file that is at its end, or reading one opened for writing
   (§6.6.5.2).
 - `dispose` of a pointer whose value was not obtained from `new`, or a

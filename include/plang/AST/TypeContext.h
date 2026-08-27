@@ -38,20 +38,31 @@ public:
     /// \p DefaultIntWidth is what an unqualified `integer` is.  It is 64 for
     /// ISO 7185 and Extended Pascal, which have one integer type; Turbo has
     /// six at four widths and its `Integer` is 16 bits.
-    explicit TypeContext(unsigned DefaultIntWidth = 64) {
+    ///
+    /// \p PointerWidthBits is what --target= (LangOptions::PointerWidthBits)
+    /// resolved to, or 64 when none was given.  Stamped onto every Pointer,
+    /// Nil and String Type this context mints (Type::Width, repurposed for
+    /// those three kinds -- see its comment) the same way DefaultIntWidth is
+    /// stamped onto Integer, so that Sema::byteSizeOf/byteAlignOf read a
+    /// target-correct answer for `^T` without themselves depending on LLVM.
+    explicit TypeContext(unsigned DefaultIntWidth = 64,
+                         unsigned PointerWidthBits = 64) {
         // Through the cache, not beside it.  Sema binds TyInt as a *reference*
         // to the member this returns, and `identical` is a pointer comparison,
         // so an `integer` minted here and an `integer` handed out by getInt
         // would be two objects that fail every identity check against each
         // other -- silently, since neither is wrong on its own.
-        DefaultIntWidth_ = DefaultIntWidth;
+        DefaultIntWidth_   = DefaultIntWidth;
+        PointerWidthBits_  = PointerWidthBits;
         TyInt_  = getInt(DefaultIntWidth, /*Signed=*/true);
         TyReal_ = Type::makeReal();
         TyCplx_ = Type::makeComplex();
         TyBool_ = Type::makeBoolean();
         TyChar_ = Type::makeChar();
         TyStr_  = Type::makeString();
+        TyStr_->Width = PointerWidthBits_;
         TyNil_  = Type::makeNil();
+        TyNil_->Width = PointerWidthBits_;
         TyErr_  = Type::makeError();
         // ISO §6.4.3.5: text is one predefined type, not a fresh type per
         // mention, so `var f: text` and `procedure p(var g: text)` agree.
@@ -212,6 +223,7 @@ public:
             T->Kind         = TypeKind::Pointer;
             T->Name         = "^" + base->Name;
             T->PointeeType  = std::move(base);
+            T->Width        = PointerWidthBits_;
             slot = std::move(T);
         }
         return slot;
@@ -224,8 +236,26 @@ public:
     /// so it is interned under the placeholder's address.  Without re-filing,
     /// a later `^node` would look up the real type, miss, and mint a second
     /// pointer type that is not identical to the first.
+    ///
+    /// The placeholder's OLD entry is erased, not just overwritten with a new
+    /// one: every key here is an address (see the class comment), and this is
+    /// the one place a key's address can go on to name something else.  The
+    /// placeholder is a Sema-owned stub (Kind=Error) whose only remaining
+    /// owner, after the line below replaces PointeeType, is whatever pinned
+    /// it before this call; today that is the AST, since Sema::resolveType
+    /// (SemaType.cpp) stamps every TypeNode's resolved type onto the node for
+    /// the whole compilation, so the stub outlives this TypeContext and its
+    /// address is never freed, let alone reused, while this cache can still
+    /// be read.  Leaving the stale entry behind is therefore inert *today*,
+    /// but it is load-bearing on that pinning: the moment anything frees a
+    /// stub while its TypeContext lives on, a later, unrelated Type placed at
+    /// the freed address would collide with the stale "ptr:<addr>" key and
+    /// getPointer would hand back this pointer's identity instead of minting
+    /// (or finding) its own -- two structurally unrelated types made
+    /// pointer-equal, which is exactly what `identical` exists to not do.
     void rebindPointer(const std::shared_ptr<Type>& ptr,
                        std::shared_ptr<Type> pointee) {
+        PointerCache_.erase("ptr:" + addrKey(ptr->PointeeType));
         ptr->Name        = "^" + pointee->Name;
         ptr->PointeeType = pointee;
         PointerCache_["ptr:" + addrKey(pointee)] = ptr;
@@ -332,6 +362,8 @@ private:
     /// What an unqualified `integer` is, and what an ordinal that is not
     /// narrowed by its host is stored as.
     unsigned DefaultIntWidth_{64};
+    /// What --target= resolves a pointer to, in bits; see the constructor.
+    unsigned PointerWidthBits_{64};
 
     // Integer types, by width and signedness.
     std::map<std::pair<unsigned, bool>, std::shared_ptr<Type>> IntCache_;

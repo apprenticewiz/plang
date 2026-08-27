@@ -330,46 +330,58 @@ and the two cannot disagree.
 
 ## The test suite
 
-2025 tests, split across two harnesses (issue #34, issue #43) — GoogleTest
+2282 tests, split across two harnesses (issue #34, issue #43) — GoogleTest
 for in-process, C++-API-level tests, and LLVM's `lit`+`FileCheck` for
 CLI-driven, black-box tests that spawn the real `plang` binary — mirroring
 how Clang splits `clang/unittests/` from `clang/test/`. `test/README.md`
 covers the lit side's own conventions in full; this section covers both.
+This project adds tests continually, so treat the counts below as a
+snapshot rather than a promise: `ctest --test-dir build -N` lists every
+GoogleTest case and every `lit-<Category>` suite entry by name, and
+`lit -q build/test` reports the live lit total — the figure `ctest -N`
+alone cannot give, since it counts each lit suite as one entry regardless
+of how many `.pas` files are inside it.
 
-### GoogleTest (`test/unittests/`) — 51 tests, in five binaries
+### GoogleTest (`test/unittests/`) — 61 tests, in six binaries
 
 | Binary                                         | Tests | What it covers                                          |
 |--------------------------------------------------|-------|-----------------------------------------------------------|
 | `test/unittests/Basic/catalog_test`               | 16    | `.po`-reader/locale-selection internals the CLI can't observe |
-| `test/unittests/Basic/source_manager_test`        | 4     | Source-buffer coordinate overflow                        |
+| `test/unittests/Basic/source_manager_test`        | 5     | Source-buffer coordinate overflow                        |
 | `test/unittests/Sema/sema_test`                   | 2     | The `Builtins` X-macro loop, driven over every entry in one in-process pass |
-| `test/unittests/CodeGen/codegen_storage_test`     | 14    | `byteSizeOf`/`byteAlignOf` unit cases with no CLI-observable proxy |
+| `test/unittests/CodeGen/codegen_storage_test`     | 15    | `byteSizeOf`/`byteAlignOf` unit cases with no CLI-observable proxy |
 | `test/unittests/CodeGen/codegen_switches_test`    | 15    | Positional `LangOptions` state no command-line flag re-derives |
+| `test/unittests/Driver/driver_test`               | 8     | `versionDirLess`, the toolchain-directory version comparator (issue #250) |
 
 Each is a permanent exception, not a migration backlog: every case
-constructs a `Scanner`/`Parser`/`Sema`/`Codegen`/`MessageCatalog` object
-directly and asserts on internal state the CLI has no way to observe, or
-drives a loop over compile-time data too fine-grained to spawn a process
-per entry. Everything else that once lived under GoogleTest —
-`scanner_test`, `parser_test`, the bulk of the five binaries above, plus
-`driver_test`, `codegen_test`, `ep_test`, `module_test`, and the 377-file
-`Conformance/cases/` suite — has migrated to `test/`, below.
+constructs a `Scanner`/`Parser`/`Sema`/`Codegen`/`Driver`/`MessageCatalog`
+object directly and asserts on internal state the CLI has no way to
+observe, or drives a loop over compile-time data too fine-grained to spawn
+a process per entry. Everything else that once lived under GoogleTest —
+`scanner_test`, `parser_test`, the bulk of the six binaries above, plus the
+pre-issue-#34 `driver_test.cpp`, `codegen_test`, `ep_test`, `module_test`,
+and the 377-file `Conformance/cases/` suite — has migrated to `test/`,
+below. `test/unittests/Driver/driver_test` in the table above is unrelated
+to that migrated file despite the shared name: it is a new, narrowly-scoped
+exception added afterward for `versionDirLess` (issue #250), on the same
+no-CLI-observable-proxy grounds as the rest of this table, not a returning
+remnant of the binary issue #34 moved out of this directory.
 
-### lit + FileCheck (`test/`) — 1974 tests, in eleven suites
+### lit + FileCheck (`test/`) — 2221 tests, in eleven suites
 
 | Suite              | Tests | What it covers                                        |
 |---------------------|-------|----------------------------------------------------------|
 | `test/Smoke`        | 1     | The toolchain itself is wired up correctly              |
-| `test/Lex`          | 145   | Tokens, literals, keywords, EP gating                    |
-| `test/Parse`        | 133   | Declarations, statements, expressions                    |
-| `test/Sema`         | 178   | Name resolution and type checking                        |
-| `test/Basic`        | 30    | Message-catalog selection and locale-chain fallback, via the CLI paths that surface them |
+| `test/Lex`          | 153   | Tokens, literals, keywords, EP gating                    |
+| `test/Parse`        | 146   | Declarations, statements, expressions                    |
+| `test/Sema`         | 218   | Name resolution and type checking                        |
+| `test/Basic`        | 32    | Message-catalog selection and locale-chain fallback, via the CLI paths that surface them |
 | `test/Conformance`  | 377   | The Pascal-P5 ISO 7185 suite                             |
 | `test/Acceptance`   | 1     | The Pascal Acceptance Test                               |
-| `test/CodeGen`      | 372   | What the generated code does when run                    |
-| `test/EP`           | 331   | Extended Pascal, end to end                              |
-| `test/Module`       | 246   | Modules and separate compilation                          |
-| `test/Driver`       | 160   | The driver and the command line, including DWARF debug-info scope-graph assertions |
+| `test/CodeGen`      | 440   | What the generated code does when run                    |
+| `test/EP`           | 394   | Extended Pascal, end to end                              |
+| `test/Module`       | 258   | Modules and separate compilation                          |
+| `test/Driver`       | 201   | The driver and the command line, including DWARF debug-info scope-graph assertions |
 
 #### The Pascal-P5 conformance suite
 
@@ -407,10 +419,21 @@ ctest --test-dir build -j$(getconf _NPROCESSORS_ONLN)
 ```
 
 `ctest` works in a build configured without the tests as well, and reports that
-it found none. It also works without `lit`/`FileCheck` on `PATH` — the
-`check-lit-*` targets and their `lit-*` CTest entries are simply unavailable,
-with a CMake-configure-time warning saying so (`pip install lit` and
-reconfigure to pick them up).
+it found none. By default it also works without `lit`/`FileCheck` on `PATH` —
+the `check-lit-*` targets and their `lit-*` CTest entries are simply
+unavailable, with a CMake-configure-time warning saying so (`pip install lit`
+and reconfigure to pick them up). `-DPLANG_TESTS_REQUIRE_LIT=ON` turns that
+warning into a configure-time error instead, for anyone who needs "lit/
+FileCheck missing" to fail loudly rather than silently shrink the suite down
+to the GoogleTest tier alone — CI builds this way (issue #184), since there a
+missing tool is a packaging regression, not a matter of developer taste.
+CI also runs `test/tools/assert-test-discovery.sh` right after Configure,
+which independently re-derives the `lit-*` suite list from `ctest -N` and the
+individual test count each suite discovers from `lit --show-tests`, and fails
+if either looks too small — catching, for example, a single suite's
+`add_plang_lit_suite()` call being deleted, which touches neither
+`LIT_EXECUTABLE` nor `FILECHECK_EXECUTABLE` and so is invisible to
+`PLANG_TESTS_REQUIRE_LIT` above.
 
 To run one GoogleTest binary directly, with the usual GoogleTest filters:
 
@@ -434,6 +457,14 @@ lit --filter='SemaTypeIdentity' build/test/CodeGen
 cmake -S . -B build-asan -DCMAKE_BUILD_TYPE=Debug \
   -DPLANG_ENABLE_TESTS=ON -DPLANG_SANITIZE=address,undefined
 ```
+
+It is a `CACHE STRING`, not a `CACHE BOOL` -- `cmake-gui`/`ccmake` show it as
+a free-form field (with `address`, `undefined`, `thread`, `leak`, `memory`,
+and the combination above offered for discovery), not a checkbox. Configure
+fails immediately with `message(FATAL_ERROR ...)` on any name outside that
+list, so a typo (`-DPLANG_SANITIZE=adress`) is caught before the build
+starts rather than producing an unsanitized binary or a late, easy-to-miss
+compiler error.
 
 UBSan's `vptr` check is switched off with it, because the libraries are built
 `-fno-rtti` by LLVM convention and that check needs RTTI; left on, it reports

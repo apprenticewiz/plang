@@ -925,10 +925,14 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
                     // caller's own storage rather than copying into one of
                     // its own, so it is not an assignment and nothing new is
                     // checked here for that path.
+                    // Lo == Hi (e.g. `5..5`) is a legal singleton subrange,
+                    // not a sentinel for "no real bounds" -- Kind ==
+                    // Subrange already guarantees these are real, so
+                    // excluding Lo == Hi here would just let a value actual
+                    // arrive in a singleton-subrange formal uncaught.
                     llvm::Value* argVal = &*it;
                     if (const auto& rt = tn ? tn->ResolvedType : nullptr;
                             rt && rt->Kind == TypeKind::Subrange
-                            && rt->SubLo != rt->SubHi
                             && argVal->getType()->isIntegerTy())
                         emitRangeCheck(argVal, rt->SubLo, rt->SubHi,
                                        /*isIndex=*/false, tn->Loc);
@@ -1100,8 +1104,22 @@ void Codegen::Impl::emitBlockAllocas(const BlockNode& block) {
 // The capacity of a string-typed declaration, or 0 when it is not a string.
 int64_t Codegen::Impl::declaredStrCapacity(const TypeNode* tn) {
     if (!tn) return 0;
-    if (auto* sn = llvm::dyn_cast<StringTypeNode>(tn))
-        return evalConstInt(*sn->Capacity, 255, &consts);
+    if (auto* sn = llvm::dyn_cast<StringTypeNode>(tn)) {
+        if (auto v = tryEvalConstInt(*sn->Capacity, &consts)) return *v;
+        // A capacity that does not fold here is not fabricated as
+        // PlangMaxStringCapacity (255): that fallback is the same fabrication
+        // R2 deleted at the sibling sites below and in SchemaLayoutEngine.
+        // Sema resolves every StringTypeNode -- including one reached through
+        // a foreign denoter whose capacity is a discriminant -- and records
+        // ITS OWN answer on ResolvedType even where the AST expression itself
+        // has no ConstVal (a discriminant read is deliberately never folded
+        // onto the shared node, see Sema::constBound).  Falling back to that
+        // answer instead is exactly what the "written through a name" arm
+        // below already does for the same reason.
+        if (tn->ResolvedType && tn->ResolvedType->Kind == TypeKind::VarString)
+            return tn->ResolvedType->StrCapacity;
+        return 0;
+    }
     // Written through a name, so the syntax says nothing; Sema resolved it.
     if (tn->ResolvedType && tn->ResolvedType->Kind == TypeKind::VarString)
         return tn->ResolvedType->StrCapacity;
@@ -1271,7 +1289,8 @@ bool Codegen::Impl::hasInitialState(const TypeNode* tn, int depth) const {
 }
 
 void Codegen::Impl::emitInitialState(llvm::Value* ptr, llvm::Type* ty,
-                                     const TypeNode* tn, int depth) {
+                                     const TypeNode* tn, int depth,
+                                     const Type* semaRec) {
     if (!ptr || !tn || depth > 16) return;
 
     const TypeNode* carrier = nullptr;
@@ -1290,12 +1309,26 @@ void Codegen::Impl::emitInitialState(llvm::Value* ptr, llvm::Type* ty,
         if (!body) return;
         if (stn->ResolvedBody && stn->ResolvedBody->SchemaBody) {
             SchemaBindingScope bind(*cgTypes_, *stn->ResolvedBody->SchemaBody);
-            emitInitialState(ptr, ty, body, depth + 1);
+            // #197: stn->ResolvedBody is THIS denoter's own cached
+            // resolution, good here because it was just re-established by
+            // the SchemaBindingScope above -- carry it down as semaRec so
+            // the record branch below can hand it to layoutOf instead of
+            // laying the body out from its declaration node alone.
+            emitInitialState(ptr, ty, body, depth + 1,
+                              stn->ResolvedBody->SchemaBody.get());
         }
         return;
     }
     if (auto* rtn = llvm::dyn_cast_or_null<RecordTypeNode>(shape)) {
-        const auto& L  = layoutOf(*rtn);
+        // #197: semaRec (this instance's own Sema record, when the recursion
+        // has one) makes layoutOf prefer Sema's per-field types over each
+        // field's own denoter.  Without it, a field that is itself a schema
+        // instantiation -- `x: inner(n)` -- is sized from whichever
+        // instantiation of `inner` Sema resolved last across the WHOLE
+        // program, not this one, shifting every GEP into the fields that
+        // follow it (issue #197; see CGTypes.cpp's R4 comment on layoutOf
+        // for the sibling bug this matches).
+        const auto& L  = layoutOf(*rtn, semaRec);
         auto*       st = L.Ty;
         for (const auto& fd : rtn->Fields) {
             if (!hasInitialState(fd.Type.get(), depth + 1)) continue;
@@ -1358,6 +1391,132 @@ void Codegen::Impl::emitInitialState(llvm::Value* ptr, llvm::Type* ty,
             builder.CreateAdd(i, llvm::ConstantInt::get(i64Ty, 1)), iv);
         builder.CreateBr(head);
         builder.SetInsertPoint(done);
+    }
+}
+
+// EP §6.6 with §6.4.7: emitInitialState's counterpart for a schema instance
+// new() just allocated.  See this function's declaration (CodeGenImpl.h) and
+// emitSchemaInitialStateAt below for why it cannot simply call emitInitialState.
+void Codegen::Impl::emitSchemaInitialState(llvm::Value* bodyAddr,
+                                           const plang::Type& schema,
+                                           const std::vector<llvm::Value*>& discs) {
+    const TypeNode* body = schemaBodyNodeOf(schema);
+    if (!body || !hasInitialState(body)) return;
+    emitSchemaInitialStateAt(bodyAddr, discs, body, 0);
+}
+
+// The run-time-layout sibling of emitInitialState, above: that walk answers
+// for a schema bound to compile-time-constant discriminants (a declared
+// `var v: t(20)`, by way of a SchemaBindingScope over the static llvm::Type*
+// / GEP-by-index machinery in this file) but new()'s discriminants need not
+// be constants (EP §6.7.5.3), so this one asks SchemaLayoutEngine's run-time
+// offsets instead -- the same ones a read of the object (schemaPathOf) asks
+// for -- and stores through a byte address rather than indexing a static
+// struct.  hasInitialState/writtenInitialState/storeInitialValue are shared
+// with the static walk unchanged: none of the three looks at layout, only at
+// a TypeNode's shape and the value to put there.
+void Codegen::Impl::emitSchemaInitialStateAt(llvm::Value* addr,
+                                             const std::vector<llvm::Value*>& discs,
+                                             const TypeNode* tn, int depth) {
+    if (!addr || !tn || depth > 16) return;
+
+    const TypeNode* carrier = nullptr;
+    if (const ExprNode* init = writtenInitialState(tn, &carrier)) {
+        // A schema-body string's capacity is a run-time value even where
+        // nothing else about this particular field varies -- R3 (SemaType.cpp)
+        // records every extent written inside a schema body as a closed form,
+        // whether or not it happens to read a discriminant -- so the static
+        // declaredStrCapacity() storeInitialValue relies on (whichever
+        // instantiation Sema resolved last) is not safe to reuse here; see
+        // SchemaLayoutEngine::rtSizeOfTypeNode's own comment on that exact
+        // class of bug.
+        if (auto* st = llvm::dyn_cast<StringTypeNode>(carrier);
+                st && st->ExtentLow) {
+            if (auto* cap = emitExtentForm(*st->ExtentLow, discs)) {
+                emitStrStore(addr, cap, *init);
+                return;
+            }
+        }
+        storeInitialValue(addr, llvmTypeOfNode(*tn), carrier, *init);
+        return;
+    }
+
+    // A nested schema instantiation -- `outer(n) = record x: inner(n) end`
+    // -- is descended exactly as a read of it is (SchemaAccess::schemaPathOf):
+    // its own extents are forms over ITS discriminants, arithmetic over the
+    // enclosing ones, and have to be evaluated against those and not against
+    // the ones this call was entered with.
+    const TypeNode* shape = initialStateShapeOf(tn);
+    auto [ref, decl] = descendIntoInstantiation(
+        SchemaRef{nullptr, addr, discs}, addr, shape);
+    if (decl != shape) {
+        // writtenInitialState follows a NAMED alias (NamedTypeNode::Denotes)
+        // but not a schema-instantiation reference, so a `value` clause on
+        // the far side of one -- `inner(n) = string(n) value 'hi'` used as
+        // `x: inner(n)` -- is not yet seen; re-enter now that decl is past
+        // the hop, this time as an ordinary leaf/shape under its own discs.
+        emitSchemaInitialStateAt(ref.data, ref.discs, decl, depth + 1);
+        return;
+    }
+
+    if (auto* rtn = llvm::dyn_cast_or_null<RecordTypeNode>(decl)) {
+        // Not walkVariant's territory: a variant field is exactly what the
+        // static emitInitialState above does not reach either (it iterates
+        // rtn->Fields alone), so hasInitialState never asks for one and this
+        // never needs to compute one's offset.
+        for (const auto& fd : rtn->Fields) {
+            if (!hasInitialState(fd.Type.get(), depth + 1)) continue;
+            for (const auto& nm : fd.Names) {
+                llvm::Value* off;
+                {
+                    RtDiscScope disc(*this, ref.discs);
+                    off = rtFieldOffset(*rtn, nm);
+                }
+                auto* fldAddr = builder.CreateGEP(i8Ty, ref.data, {off}, "sch.init.f");
+                emitSchemaInitialStateAt(fldAddr, ref.discs, fd.Type.get(), depth + 1);
+            }
+        }
+        return;
+    }
+
+    if (auto* atn = llvm::dyn_cast_or_null<ArrayTypeNode>(decl)) {
+        if (!hasInitialState(atn->Element.get(), depth + 1)) return;
+        llvm::Value* lo;
+        llvm::Value* hi;
+        llvm::Value* stride;
+        {
+            RtDiscScope disc(*this, ref.discs);
+            auto bounds = rtIndexBounds(*atn);
+            if (!bounds) return;
+            lo     = bounds->first;
+            hi     = bounds->second;
+            stride = alignUpV(rtSizeOfTypeNode(atn->Element.get()),
+                              rtAlignOfTypeNode(atn->Element.get()));
+        }
+        // count may come out <= 0 for an empty range -- unlike the static
+        // walk's compile-time `if (hi < lo) return;`, lo/hi are run-time
+        // values here, so the loop below is entered and simply runs zero
+        // times, which is the answer an empty range needs.
+        auto* count = builder.CreateAdd(builder.CreateSub(hi, lo),
+                                        i64c(1), "sch.init.count");
+        auto* fn   = builder.GetInsertBlock()->getParent();
+        auto* head = llvm::BasicBlock::Create(ctx, "sch.init.head", fn);
+        auto* loop = llvm::BasicBlock::Create(ctx, "sch.init.body", fn);
+        auto* done = llvm::BasicBlock::Create(ctx, "sch.init.done", fn);
+        auto* iv   = createEntryAlloca(i64Ty, "sch.init.i");
+        builder.CreateStore(i64c(0), iv);
+        builder.CreateBr(head);
+        builder.SetInsertPoint(head);
+        auto* i = builder.CreateLoad(i64Ty, iv, "sch.init.i.cur");
+        builder.CreateCondBr(builder.CreateICmpSLT(i, count), loop, done);
+        builder.SetInsertPoint(loop);
+        auto* off      = builder.CreateMul(i, stride, "sch.init.off");
+        auto* elemAddr = builder.CreateGEP(i8Ty, ref.data, {off}, "sch.init.e");
+        emitSchemaInitialStateAt(elemAddr, ref.discs, atn->Element.get(), depth + 1);
+        builder.CreateStore(builder.CreateAdd(i, i64c(1)), iv);
+        builder.CreateBr(head);
+        builder.SetInsertPoint(done);
+        return;
     }
 }
 

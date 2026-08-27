@@ -10,6 +10,23 @@
 
 namespace plang {
 
+/// Whether \p C is a UTF-8 continuation byte (10xxxxxx): one that is not the
+/// first byte of its character and so does not start a display cell of its
+/// own.  A diagnostic's column needs to skip these to land under the right
+/// glyph instead of counting raw bytes -- three bytes for one accented
+/// letter is still one cell on the screen, and #285 was exactly that: a
+/// caret landing cells to the right of its token whenever multi-byte UTF-8
+/// text preceded it on the line.  This is a byte-classification, not a
+/// decoder -- it does not validate the UTF-8 it walks, so malformed input
+/// degrades to counting lead bytes rather than rejecting anything, matching
+/// how the rest of the scanner treats source text it does not otherwise
+/// police.  Shared between SourceManager (which turns a byte offset into a
+/// column number) and DiagnosticPrinter (which draws the caret under that
+/// same column), so the two can never disagree about which bytes count.
+[[nodiscard]] inline bool isUtf8ContinuationByte(char C) {
+    return (static_cast<unsigned char>(C) & 0xC0) == 0x80;
+}
+
 /// Owns the text of every source buffer and answers questions about positions
 /// in it.
 ///
@@ -30,14 +47,19 @@ public:
     std::optional<FileID> addBuffer(std::string Name, std::string Text);
 
     /// Read a file and take its contents as a buffer, or return nullopt if it
-    /// cannot be opened, or for the same reason addBuffer can fail.
+    /// cannot be opened, or for the same reason addBuffer can fail.  The
+    /// file's size is stat'd and checked against wouldOverflow before
+    /// anything is read, so a file too large to ever fit is rejected without
+    /// the read (and the allocation it would take) that addBuffer's own
+    /// check alone cannot prevent.
     std::optional<FileID> addFile(const std::string& Path);
 
     /// Whether a buffer of \p TextSize bytes would run the coordinate space
     /// past what a 32-bit SourceLocation can address.  Exposed so a caller
     /// that can tell "not found" from "too large" apart some other way --
-    /// Scanner's file-path constructor, which knows addFile only reaches
-    /// this once the file has already opened -- can report the right one.
+    /// Scanner's file-path constructor, which knows addFile fails either
+    /// before opening the file (too large) or because it could not be
+    /// opened at all (not found), but not which -- can report the right one.
     [[nodiscard]] bool wouldOverflow(size_t TextSize) const;
 
     /// The location of byte \p Offset within \p FID.  An offset at or past the

@@ -30,6 +30,22 @@ extern "C" {
 [[noreturn]] void plang_err_substr(int64_t I, int64_t N, int64_t Len);
 [[noreturn]] void plang_err_substr_assign(int64_t Len, int64_t N);
 [[noreturn]] void plang_err_str_capacity(int64_t Len, int64_t Cap);
+[[noreturn]] void plang_err_field_width(int64_t W);
+
+// plang_io.cpp's and plang_file.cpp's own checkedWidth guard the width they
+// hand to printf's `%*d`/`%*c` -- an int, easily overflowed by an int64_t
+// TotalWidth (issue #15). plang_str_write_w below paces its own padding
+// loop by hand instead of using printf, so it has no int to overflow, but an
+// unchecked w still means an unbounded number of one-character writes for a
+// width nothing could ever usefully be that large (issue #247). Only the
+// upper bound is needed here: w < 0 already has its own meaning at the one
+// call site below (write the string in full, unpadded) before this would
+// ever run, unlike the two writers this mirrors, which fold a negative width
+// into 0 for the types where 0 truly does mean "no padding".
+static int checkedWidth(int64_t w) {
+    if (w > INT32_MAX) plang_err_field_width(w);
+    return static_cast<int>(w);
+}
 
 // ---- initialization --------------------------------------------------------
 
@@ -196,7 +212,19 @@ void plang_str_substr_assign(void* dst, int64_t /*cap_dst*/,
                               int64_t i, int64_t n,
                               const void* src, int64_t /*cap_src*/) {
     const int64_t ld = strLen(dst);
-    if (n <= 0 || i < 1 || i + n - 1 > ld) plang_err_substr(i, n, ld);
+    // i+n-1>ld, done directly, can signed-overflow the same way
+    // plang_str_substr's own past-the-end check used to (see the comment
+    // there, and issue #11): n arrives as high-low+1, computed by CGAssign's
+    // plain wrapping add/sub, so it can come out huge -- or, by wrapping,
+    // even small and "plausible" -- while i (low) is independently huge too;
+    // either way the addition below can overflow and wrap around to a value
+    // that passes the check, sending an out-of-range i on to the memcpy
+    // below. n<=0 and i<1 are already rejected by the two disjuncts before
+    // this one, so by the time it runs i>=1 and n>=1: checking i>ld first
+    // (cheap, and itself overflow-free) short-circuits before ld-i is ever
+    // computed, and once i<=ld is established, ld-i can't go negative or
+    // overflow either, since ld is a real string length, never huge.
+    if (n <= 0 || i < 1 || i > ld || n > ld - i + 1) plang_err_substr(i, n, ld);
     const int64_t ls = strLen(src);
     if (ls != n) plang_err_substr_assign(ls, n);
     std::memcpy(strData(dst) + (i - 1), strData(src), static_cast<size_t>(n));
@@ -236,6 +264,7 @@ void plang_str_write_w(const void* s, int64_t /*cap*/, int64_t w) {
     if (w == 0) return;
     int64_t len = strLen(s);
     if (w < 0) { if (len > 0) plangOutN(strData(s), static_cast<size_t>(len)); return; }
+    checkedWidth(w);
     for (int64_t i = 0, pad = w - len; i < pad; ++i) plangOutCh(' ');
     if (len > w) len = w;
     if (len > 0) plangOutN(strData(s), static_cast<size_t>(len));

@@ -123,6 +123,19 @@ struct Symbol {
     /// when it is at that outermost level, so the goto has somewhere to land
     /// that no half-finished for- or with-statement is holding open.
     bool LabelNested{false};
+    /// Set when this label is declared in a module's block (EP §6.11), as
+    /// opposed to a program's or a procedure's.  A non-local goto reaching for
+    /// one is rejected regardless of LabelNested: the non-local mechanism
+    /// lands by resuming the activation that opened the label's scope, which
+    /// for a program block or an enclosing procedure is guaranteed to still be
+    /// on the stack -- a nested procedure can only be called from within it.
+    /// A module's 'to begin do'/'to end do' has no such guarantee: it runs
+    /// once and returns, while the procedures the module declares stay
+    /// callable for the rest of the program's life (including from another
+    /// compilation unit that only imports the module), so a goto reached from
+    /// a later, unrelated call would resume an activation that no longer
+    /// exists.
+    bool LabelInModuleBlock{false};
 
     /// Set by pushWithScope when this field was introduced via 'with r do' where
     /// r is a packed record — packed components cannot be passed as var params.
@@ -131,6 +144,16 @@ struct Symbol {
     /// EP §6.7.3.1: set for protected value parameters — assignment inside the
     /// function body is a compile-time error.
     bool IsProtected{false};
+
+    /// EP §6.7.3.7.1 NOTE 2: set for a conformant-array bound identifier (the
+    /// lo/hi pseudo-variable an index-type-specification introduces).  Such an
+    /// identifier "is neither constant nor a variable" — it denotes the actual
+    /// argument's bound and is readable but never an assignment target, so it
+    /// is kept as an ordinary Var (codegen still gives it a per-call storage
+    /// slot) and refused the same way a protected parameter is: see
+    /// checkNotProtected / protectedBaseOf, which treat this the same as
+    /// IsProtected but report the more specific diagnostic.
+    bool IsConformantBound{false};
 
     /// EP §6.7.2: set for a named result variable, registered as an ordinary
     /// Var so it can be assigned and read by name (Sema.cpp).  Lets

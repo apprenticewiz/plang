@@ -14,6 +14,7 @@
 #include "plang/Basic/DiagnosticPrinter.h"
 #include "plang/Basic/LangOptions.h"
 #include "plang/Basic/MessageCatalog.h"
+#include "plang/Basic/StringUtil.h"
 #include "plang/Basic/Version.h"
 
 #include <algorithm>
@@ -24,13 +25,16 @@
 #include <unistd.h>
 #include <vector>
 
+#include "llvm/ADT/ScopeExit.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/JSON.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/Path.h"
 #include "llvm/Support/Process.h"
 #include "llvm/Support/Program.h"
+#include "llvm/Support/Signals.h"
 #include "llvm/Support/VersionTuple.h"
+#include "llvm/Support/raw_ostream.h"
 #include "llvm/TargetParser/Host.h"
 #include "llvm/TargetParser/Triple.h"
 
@@ -67,6 +71,22 @@ static bool isRegFile(const llvm::Twine &Path) {
 
 static bool isDir(const llvm::Twine &Path) {
     return llvm::sys::fs::is_directory(Path);
+}
+
+/// Deletes a temp file this process created for its own internal use (an
+/// intermediate .ll/.o/probe-output file, never a user-requested -o target)
+/// and un-registers it from RemoveFileOnSignal.
+///
+/// Every such temp file is registered with RemoveFileOnSignal right after
+/// creation (issue #278: a driver killed by SIGINT/SIGTERM mid-compile used
+/// to leave it behind -- there was no signal handling at all, only these
+/// same explicit removes on the normal-return paths, which a signal does
+/// not take).  Un-registering here, rather than leaving the registration
+/// until process exit, keeps a signal arriving later in the same run (e.g.
+/// while linking) from trying to remove a path already gone.
+static void removeOwnTemp(llvm::StringRef Path) {
+    llvm::sys::DontRemoveFileOnSignal(Path);
+    llvm::sys::fs::remove(Path);
 }
 
 /// Resolves \p Path to a canonical, absolute form for same-file comparison
@@ -126,6 +146,7 @@ static std::string captureOutput(const std::string &Prog,
     if (llvm::sys::fs::createTemporaryFile("plang-probe", "txt", Fd, OutPath))
         return "";
     close(Fd);
+    llvm::sys::RemoveFileOnSignal(OutPath);
 
     llvm::SmallVector<llvm::StringRef, 8> Argv;
     Argv.push_back(*ResolvedOrErr);
@@ -142,7 +163,7 @@ static std::string captureOutput(const std::string &Prog,
         if (auto Buf = llvm::MemoryBuffer::getFile(OutPath))
             Out = (*Buf)->getBuffer().rtrim().str();
     }
-    llvm::sys::fs::remove(OutPath);
+    removeOwnTemp(OutPath);
     return Out;
 }
 
@@ -249,6 +270,22 @@ static std::string findRuntimeLib(const std::string &ExePath) {
 }
 
 // ---------------------------------------------------------------------------
+// Version-numbered directory sorting (shared by the GCC and Darwin toolchain
+// probes below, both of which pick the newest of several installed versions)
+// ---------------------------------------------------------------------------
+
+bool plang::versionDirLess(std::string_view A, std::string_view B) {
+    llvm::VersionTuple VA, VB;
+    // tryParse() returns true on FAILURE (llvm::VersionTuple convention).
+    const bool AOk = !VA.tryParse(A);
+    const bool BOk = !VB.tryParse(B);
+    if (AOk && BOk) return VA < VB;
+    if (AOk) return false; // A is a real version, B is not: A sorts after B.
+    if (BOk) return true;  // B is a real version, A is not: A sorts before B.
+    return A < B;          // Neither parses: fall back to a stable order.
+}
+
+// ---------------------------------------------------------------------------
 // GCC installation detection (for ld.lld CRT/library paths)
 // ---------------------------------------------------------------------------
 
@@ -257,6 +294,9 @@ struct GCCInstall {
     std::string LibDir; ///< system lib dir containing Scrt1.o
 };
 
+/// Direct children of \p Parent, sorted ascending by versionDirLess so that
+/// callers who want the newest installed version can walk the result
+/// back-to-front (see detectGCC and builtinsUnder below).
 static std::vector<std::string> subdirs(const std::string &Parent) {
     std::vector<std::string> Out;
     std::error_code EC;
@@ -266,7 +306,7 @@ static std::vector<std::string> subdirs(const std::string &Parent) {
         if (!Name.empty() && Name[0] != '.')
             Out.push_back(std::string(Name));
     }
-    std::sort(Out.begin(), Out.end());
+    std::sort(Out.begin(), Out.end(), versionDirLess);
     return Out;
 }
 
@@ -541,9 +581,28 @@ int Driver::runTool(const std::string &Prog,
                     const std::vector<std::string> &Args,
                     bool Verbose, bool DryRun) {
     if (Verbose || DryRun) {
-        std::cerr << Prog;
-        for (const auto &A : Args) std::cerr << ' ' << A;
-        std::cerr << '\n';
+        // Args carries the input file straight from argv (see makeFEArgs and
+        // the Opts.inputFile push below): -v/-### echo it unsanitized
+        // otherwise, the same terminal-escape/log-injection hole a raw
+        // filename opens in a diagnostic's "file:line:col:" prefix -- see
+        // DiagnosticPrinter::printHeadline.  Each argument is control-char-
+        // escaped first (issue #281) and *then* quoted the same way clang's
+        // own -### output is (llvm::sys::printArg, which always wraps its
+        // argument in quotes and backslash-escapes any embedded '"' or '\\')
+        // -- issue #286.  The plain space-joined line this replaces could
+        // not tell a two-word argument from two arguments once printed, so
+        // it could be neither read correctly nor pasted back into a shell;
+        // escaping control bytes first means printArg's own backslash-
+        // escaping of the '\' that introduces each \xHH sequence keeps the
+        // pasted-back form round-tripping safely too.
+        std::string Line;
+        llvm::raw_string_ostream LineOS(Line);
+        llvm::sys::printArg(LineOS, escapeControlChars(Prog), /*Quote=*/true);
+        for (const auto &A : Args) {
+            LineOS << ' ';
+            llvm::sys::printArg(LineOS, escapeControlChars(A), /*Quote=*/true);
+        }
+        std::cerr << Line << '\n';
     }
     if (DryRun) return 0;
 
@@ -589,28 +648,29 @@ int Driver::runTool(const std::string &Prog,
 // Argument parsing
 // ---------------------------------------------------------------------------
 
-Options Driver::parseArgs(int Argc, char *Argv[]) {
-    Options Opts;
+Driver::ParseResult Driver::parseArgs(int Argc, char *Argv[]) {
+    ParseResult PR;
+    Options &Opts = PR.Opts;
     bool HasInput = false;
 
     for (int I = 1; I < Argc; ++I) {
         std::string Arg = Argv[I];
 
         if (Arg == "--version") {
-            printVersion(); std::exit(0);
+            printVersion(); PR.EarlyExitCode = 0; return PR;
         } else if (Arg == "-dumpversion") {
-            std::cout << PLANG_VERSION_STRING << "\n"; std::exit(0);
+            std::cout << PLANG_VERSION_STRING << "\n"; PR.EarlyExitCode = 0; return PR;
         } else if (Arg == "-dumpmachine") {
-            std::cout << hostTriple() << "\n"; std::exit(0);
+            std::cout << hostTriple() << "\n"; PR.EarlyExitCode = 0; return PR;
         } else if (Arg == "-h" || Arg == "--help") {
-            usage(); std::exit(0);
+            usage(); PR.EarlyExitCode = 0; return PR;
         } else if (Arg == "--help-warnings") {
             std::println("Warnings, all enabled by default.  Turn one off with");
             std::println("-Wno-<name>, or all of them with -w.\n");
             forEachWarningName([](const std::string &N) {
                 std::println("  -Wno-{}", N);
             });
-            std::exit(0);
+            PR.EarlyExitCode = 0; return PR;
 
         } else if (Arg == "-###") {
             Opts.dryRun = true;
@@ -631,9 +691,32 @@ Options Driver::parseArgs(int Argc, char *Argv[]) {
             Opts.mode = OutputMode::DumpTokens;
         } else if (Arg == "-dump-parse-tree") {
             Opts.mode = OutputMode::DumpParseTree;
+        } else if (Arg.size() > 2 && Arg[0] == '-' && Arg[1] == 'o') {
+            // Joined form (issue #244): "-ojoined.o".  Options.def has always
+            // declared -o JoinedOrSeparate, but this hardcoded fast path used
+            // to implement only the separate half of that, so a joined -o
+            // fell through to the generic Options.def-driven fallback further
+            // down, which (since -o is a "Both" option) forwarded the whole,
+            // still-prefixed string to the front end as an opaque argument
+            // rather than recognizing it as -o's own value -- and the front
+            // end's own parser had the identical gap, so it rejected the
+            // forwarded string too.  Nothing glued on can be empty (that is
+            // the separate form, handled below), so there is no empty-value
+            // case to reject here.
+            Opts.outputFile = Arg.substr(2);
         } else if (Arg == "-o") {
             if (I + 1 >= Argc) { diag(diag::err_arg_requires_value, {"-o"}); continue; }
-            Opts.outputFile = Argv[++I];
+            // Issue #286: an explicitly empty value ("-o ''", as a shell
+            // passes one through from an empty or unset variable) used to be
+            // accepted -- Opts.outputFile uses "" as its own sentinel for "no
+            // -o was given at all" (see its doc comment in Driver.h), so an
+            // empty -o was indistinguishable from no -o by the time anything
+            // downstream looked at it, and silently fell back to the default
+            // output name instead of reporting the mistake.  This is the only
+            // point that can still tell the two cases apart.
+            const std::string Val = Argv[++I];
+            if (Val.empty()) { diag(diag::err_empty_output_filename); continue; }
+            Opts.outputFile = Val;
 
         } else if (Arg == "-O0") { Opts.optLevel = 0;
         } else if (Arg == "-O1") { Opts.optLevel = 1;
@@ -699,8 +782,28 @@ Options Driver::parseArgs(int Argc, char *Argv[]) {
             Opts.modulePaths.push_back(Argv[++I]);
         } else if (Arg.size() > 2 && Arg[0] == '-' && Arg[1] == 'L') {
             Opts.linkerArgs.push_back(Arg);
+        } else if (Arg == "-L") {
+            // Separate form (issue #245): "-L dir".  Options.def used to
+            // declare -L Joined-only, matching the gap here -- a standalone
+            // "-L" matched no case in this chain (the generic Options.def
+            // fallback below does not apply either: -L is Driver-only, so it
+            // is never forwarded to the front end, the only thing that
+            // fallback does) and fell all the way to the unrecognized-
+            // argument catch-all, leaving its value to be picked up next as
+            // if it were an ordinary input file.  Reassembled into the same
+            // joined spelling linkerArgs already holds the glued form in,
+            // rather than as two separate argv entries, since nothing else
+            // in this file has needed the two-entries shape ld.lld also
+            // accepts.
+            if (I + 1 >= Argc) { diag(diag::err_arg_requires_value, {"-L"}); continue; }
+            Opts.linkerArgs.push_back("-L" + std::string(Argv[++I]));
         } else if (Arg.size() > 2 && Arg[0] == '-' && Arg[1] == 'l') {
             Opts.linkerArgs.push_back(Arg);
+        } else if (Arg == "-l") {
+            // Separate form (issue #245): "-l lib" -- see the -L arm just
+            // above, which has the same shape for the same reason.
+            if (I + 1 >= Argc) { diag(diag::err_arg_requires_value, {"-l"}); continue; }
+            Opts.linkerArgs.push_back("-l" + std::string(Argv[++I]));
 
         } else if (const opts::Option *O = opts::lookup(Arg);
                    O && opts::goesToFrontend(*O)) {
@@ -736,7 +839,7 @@ Options Driver::parseArgs(int Argc, char *Argv[]) {
     }
 
     if (!HasInput) Opts.inputFile.clear();
-    return Opts;
+    return PR;
 }
 
 // ---------------------------------------------------------------------------
@@ -774,6 +877,7 @@ static std::vector<std::string> makeFEArgs(const Options &Opts,
     if (DumpFlag)                Args.push_back(DumpFlag);
     Args.push_back(Opts.inputFile);
     if (!Opts.std.empty())     { Args.push_back("-std=" + Opts.std); }
+    if (!Opts.target.empty())  { Args.push_back("--target=" + Opts.target); }
     if (Opts.suppressWarnings)   Args.push_back("-w");
     if (Opts.warningsAsErrors)   Args.push_back("-Werror");
     if (!Opts.rangeChecks)       Args.push_back("-fno-range-checks");
@@ -957,6 +1061,21 @@ int Driver::compile(const Options &Opts, bool IsExtraFile) {
     // module search path, so PMI files written alongside any of them,
     // including siblings, are automatically found.
     std::vector<std::string> ExtraObjs;
+    // The subset of ExtraObjs that are ours to delete once the link step
+    // below (the only thing that reads them) is done with them: an extra
+    // file's object is always just an intermediate, never a user-requested
+    // artifact, so leaving it in the cwd is litter (issue #279) exactly like
+    // the main file's own OwnObj temp is guarded against further down --
+    // this is the same fix, just for N files instead of one.  Populated
+    // at creation, not after a successful compile, so a *failed* extra
+    // compile's already-created temp is cleaned up too; deleted through a
+    // scope_exit rather than only after a successful link so that an early
+    // return above the link step (a dump mode, or the main file's own
+    // front end failing) does not skip the cleanup either.
+    std::vector<std::string> ExtraObjTemps;
+    llvm::scope_exit CleanupExtraObjTemps([&] {
+        for (const auto &F : ExtraObjTemps) removeOwnTemp(F);
+    });
     for (const auto &ExtraFile : Opts.extraInputFiles) {
         if (!llvm::sys::fs::exists(ExtraFile)) {
             diag(diag::err_file_not_found, {ExtraFile});
@@ -969,10 +1088,42 @@ int Driver::compile(const Options &Opts, bool IsExtraFile) {
         Options ExtraOpts = Opts;
         ExtraOpts.inputFile       = ExtraFile;
         ExtraOpts.mode            = OutputMode::Object;
-        // flattenedStem, not stem: two extra files that share a basename in
-        // different directories (issue #20) must not default to the same
-        // "foo.o" in the cwd, silently clobbering one with the other's.
-        ExtraOpts.outputFile      = flattenedStem(ExtraFile) + ".o";
+
+        if (Opts.saveTemps) {
+            // A visible intermediate the user asked to keep: flattenedStem,
+            // not stem, so two extra files sharing a basename in different
+            // directories (issue #20) do not both default to the same
+            // "foo.o" in the cwd.  flattenedStem's '/'->'_' folding is
+            // itself not injective, though -- "unitA/b_c.pas" and
+            // "unitA_b/c.pas" both flatten to "unitA_b_c" -- so a second
+            // file landing on a name an earlier one already claimed
+            // (checked against ExtraObjs, which holds every prior extra
+            // file's own final name) gets a numeric suffix instead of
+            // silently overwriting the first file's object (issue #170).
+            const std::string Base = flattenedStem(ExtraFile);
+            std::string Name = Base + ".o";
+            for (int N = 2; std::find(ExtraObjs.begin(), ExtraObjs.end(), Name) != ExtraObjs.end(); ++N)
+                Name = Base + "~" + std::to_string(N) + ".o";
+            ExtraOpts.outputFile = Name;
+        } else {
+            // Just an intermediate needed for the final link, not a
+            // human-facing artifact: a real, OS-named unique temp file,
+            // exactly like the main file's own OwnObj below.  This sidesteps
+            // the flattenedStem collision above entirely -- the name comes
+            // from the OS, not from folding the input path -- and keeps it
+            // out of the cwd (issue #279).
+            llvm::SmallString<128> TmpPath;
+            int Fd;
+            if (auto EC = llvm::sys::fs::createTemporaryFile("plang", "o", Fd, TmpPath)) {
+                diag(diag::err_cannot_create_temp_file, {EC.message()});
+                return 1;
+            }
+            close(Fd);
+            llvm::sys::RemoveFileOnSignal(TmpPath);
+            ExtraOpts.outputFile = std::string(TmpPath);
+            ExtraObjTemps.push_back(ExtraOpts.outputFile);
+        }
+
         ExtraOpts.extraInputFiles.clear(); // avoid recursion
         // Add every extra file's directory, not just this one's, so that this
         // file may import a module a sibling extra file defines (issue #21).
@@ -1003,13 +1154,25 @@ int Driver::compile(const Options &Opts, bool IsExtraFile) {
     bool OwnIr = false;
 
     if (Opts.saveTemps) {
-        // flattenedStem for an extra file, for the same reason as its .o
-        // above: two extra files sharing a basename in different directories
-        // would otherwise both save to the same "foo.ll", the second
-        // silently overwriting the first's kept-for-inspection IR.  The main
-        // file's own naming is untouched -- stem(), as always -- since it has
-        // no sibling to collide with.
-        IrFile = (IsExtraFile ? flattenedStem(Opts.inputFile) : stem(Opts.inputFile)) + ".ll";
+        if (IsExtraFile) {
+            // Derived from Opts.outputFile -- the .o name the calling loop
+            // above already assigned this same extra file, disambiguated
+            // against every sibling extra file it had already planned a
+            // name for (issue #170) -- rather than recomputing
+            // flattenedStem(Opts.inputFile) independently here. Two extra
+            // files whose flattenedStem collides (e.g. "unitA/b_c.pas" and
+            // "unitA_b/c.pas", both "unitA_b_c") would otherwise still
+            // collide on their *.ll* even after that .o fix: this function
+            // has no visibility into its siblings to detect the collision
+            // itself, only the base name the caller already resolved it to.
+            std::string Base = Opts.outputFile;
+            if (llvm::StringRef(Base).ends_with(".o")) Base.resize(Base.size() - 2);
+            IrFile = Base + ".ll";
+        } else {
+            // The main file's own naming is untouched -- stem(), as always
+            // -- since it has no sibling to collide with.
+            IrFile = stem(Opts.inputFile) + ".ll";
+        }
     } else {
         llvm::SmallString<128> TmpPath;
         int Fd;
@@ -1018,6 +1181,7 @@ int Driver::compile(const Options &Opts, bool IsExtraFile) {
             return 1;
         }
         close(Fd);
+        llvm::sys::RemoveFileOnSignal(TmpPath);
         IrFile = std::string(TmpPath);
         OwnIr  = true;
     }
@@ -1035,7 +1199,7 @@ int Driver::compile(const Options &Opts, bool IsExtraFile) {
     }
     int Rc = runTool(Self, makeFEArgs(MainOpts, IrFile), V, DR);
     if (Rc != 0) {
-        if (OwnIr) llvm::sys::fs::remove(IrFile);
+        if (OwnIr) removeOwnTemp(IrFile);
         return Rc;
     }
 
@@ -1052,7 +1216,7 @@ int Driver::compile(const Options &Opts, bool IsExtraFile) {
         LLCArgs.push_back("-o"); LLCArgs.push_back(OutFile);
         LLCArgs.push_back(IrFile);
         Rc = runTool("llc", LLCArgs, V, DR);
-        if (OwnIr) llvm::sys::fs::remove(IrFile);
+        if (OwnIr) removeOwnTemp(IrFile);
         return Rc;
     }
 
@@ -1069,10 +1233,11 @@ int Driver::compile(const Options &Opts, bool IsExtraFile) {
         int Fd;
         if (auto EC = llvm::sys::fs::createTemporaryFile("plang", "o", Fd, TmpPath)) {
             diag(diag::err_cannot_create_temp_file, {EC.message()});
-            if (OwnIr) llvm::sys::fs::remove(IrFile);
+            if (OwnIr) removeOwnTemp(IrFile);
             return 1;
         }
         close(Fd);
+        llvm::sys::RemoveFileOnSignal(TmpPath);
         ObjFile = std::string(TmpPath);
         OwnObj  = true;
     }
@@ -1086,8 +1251,8 @@ int Driver::compile(const Options &Opts, bool IsExtraFile) {
         LLCArgs.push_back(IrFile);
         Rc = runTool("llc", LLCArgs, V, DR);
     }
-    if (OwnIr) llvm::sys::fs::remove(IrFile);
-    if (Rc != 0) { if (OwnObj) llvm::sys::fs::remove(ObjFile); return Rc; }
+    if (OwnIr) removeOwnTemp(IrFile);
+    if (Rc != 0) { if (OwnObj) removeOwnTemp(ObjFile); return Rc; }
 
     if (Opts.mode == OutputMode::Object) return 0;
 
@@ -1095,7 +1260,7 @@ int Driver::compile(const Options &Opts, bool IsExtraFile) {
     Options LinkOpts = Opts;
     for (const auto &EO : ExtraObjs) LinkOpts.linkerArgs.push_back(EO);
     Rc = link(*this, LinkOpts, ObjFile, OutFile, findRuntimeLib(ExePath_), V, DR);
-    if (OwnObj) llvm::sys::fs::remove(ObjFile);
+    if (OwnObj) removeOwnTemp(ObjFile);
     return Rc;
 }
 
@@ -1106,7 +1271,20 @@ int Driver::compile(const Options &Opts, bool IsExtraFile) {
 int Driver::run(int Argc, char *Argv[]) {
     configureDiagnostics(Argc, Argv);
 
-    Options Opts = parseArgs(Argc, Argv);
+    ParseResult PR = parseArgs(Argc, Argv);
+    // --version, --help, -dumpversion, -dumpmachine, --help-warnings: already
+    // printed everything they have to print from inside parseArgs itself:
+    // nothing left to do but hand the exit code it settled on back to our own
+    // caller (issue #174 -- this used to be a direct std::exit() call instead,
+    // which reported the same code but never returned control, to us or to
+    // anyone who might be calling Driver::run() as a library rather than
+    // running the plang binary as a subprocess). Checked before hasErrors()
+    // below, matching the std::exit() this replaced: an informational action
+    // still wins over an error already reported for an earlier argument, e.g.
+    // "plang -Werror -fbogus-option --version" still prints the version
+    // banner and exits 0, exactly as it did before.
+    if (PR.EarlyExitCode) return *PR.EarlyExitCode;
+    Options Opts = std::move(PR.Opts);
     // A malformed option has already been reported, and there may be more than
     // one of them; parsing carries on so that they all are.
     if (Diags_.hasErrors()) return 1;
@@ -1170,5 +1348,32 @@ int Driver::run(int Argc, char *Argv[]) {
             return 1;
         }
     }
+
+    // -c/-S/-emit-llvm/-dump-* alongside a precompiled .o/.a (issue #277):
+    // none of those modes ever reaches the link step where linkerArgs would
+    // otherwise be consumed, so name what is about to be silently ignored.
+    // Skipped for a linker-only invocation (no .pas input at all): compile()
+    // sends that straight to link() regardless of Opts.mode, so the file is
+    // not actually unused there. Only bare .o/.a filenames are named -- the
+    // same subset the input/output-collision check above already isolates --
+    // since -l/-L/-Wl,/-Xlinker are recognized linker flags in their own
+    // right, not files that look like this one was meant to be consumed and
+    // was not; neither gcc nor clang warns about those in -c mode either
+    // (verified empirically against both).
+    if (!Opts.inputFile.empty() && Opts.mode != OutputMode::Executable) {
+        for (const auto &A : Opts.linkerArgs) {
+            if (A.empty() || A[0] == '-' || A.size() < 2) continue;
+            const std::string_view Ext(A.data() + A.size() - 2, 2);
+            if (Ext == ".o" || Ext == ".a") diag(diag::warn_linker_input_unused, {A});
+        }
+        // -Werror turns the diagnostic just above into "error:", the same
+        // way it does for warn_unrecognized_argument -- but unlike that one,
+        // reported from inside parseArgs with a hasErrors() check right
+        // after it returns, this one is reported well after that check
+        // already ran, so it needs its own or -Werror would print "error:"
+        // and then compile anyway.
+        if (Diags_.hasErrors()) return 1;
+    }
+
     return compile(Opts);
 }

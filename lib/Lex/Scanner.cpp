@@ -85,9 +85,9 @@ Token Scanner::next() {
         const char   C          = Text[Pos];
 
         Token Tok;
-        if (std::isalpha(C) || C == '_')
+        if (std::isalpha(static_cast<unsigned char>(C)) || C == '_')
             Tok = scanIdentifierOrKeyword(TokenStart);
-        else if (std::isdigit(C))
+        else if (std::isdigit(static_cast<unsigned char>(C)))
             Tok = scanNumber(TokenStart);
         else if (C == '\'')
             Tok = scanString(TokenStart);
@@ -146,7 +146,7 @@ void Scanner::skipParenthesisComment() { skipComment(/*Braced=*/false); }
 Token Scanner::scanIdentifierOrKeyword(size_t TokenStart) {
     size_t Start = Pos;
     bool Underscore = false;
-    while (Pos < Text.size() && (std::isalnum(Text[Pos]) || Text[Pos] == '_')) {
+    while (Pos < Text.size() && (std::isalnum(static_cast<unsigned char>(Text[Pos])) || Text[Pos] == '_')) {
         if (Text[Pos] == '_') Underscore = true;
         ++Pos;
     }
@@ -182,21 +182,38 @@ Token Scanner::scanIdentifierOrKeyword(size_t TokenStart) {
 
 Token Scanner::scanNumber(size_t TokenStart) {
     size_t Start = Pos;
-    while (Pos < Text.size() && std::isdigit(Text[Pos])) { ++Pos; }
+    while (Pos < Text.size() && std::isdigit(static_cast<unsigned char>(Text[Pos]))) { ++Pos; }
 
     // EP §6.1.7: nondecimal integer literal  base '#' digits
     if (Opts.extendedPascal() && Pos < Text.size() && Text[Pos] == '#') {
         std::string BaseStr = std::string(Text.substr(Start, Pos - Start));
-        int Base = 0;
-        for (char C : BaseStr) Base = Base * 10 + (C - '0');
-        if (Base < 2 || Base > 36) {
+        // Checked before the multiply, exactly like the digit-value loop
+        // below: a plain `int` accumulator here let a base string like
+        // `4294967312` wrap mod 2^32 down to 16 and sail past the range
+        // check as valid hex (issue #213). Widening to int64_t alone isn't
+        // enough either -- a long enough digit string (e.g. 20 nines)
+        // overflows a 64-bit accumulator too -- so overflow is detected
+        // incrementally and folded into the same range-error diagnostic,
+        // which is correct: any base whose digits overflow is certainly
+        // not in [2, 36].
+        int64_t Base = 0;
+        bool BaseOverflowed = false;
+        for (char C : BaseStr) {
+            int D = C - '0';
+            if (Base > (INT64_MAX - D) / 10) {
+                BaseOverflowed = true;
+                break;
+            }
+            Base = Base * 10 + D;
+        }
+        if (BaseOverflowed || Base < 2 || Base > 36) {
             emitError(locAt(TokenStart),
                       diag::err_nondecimal_base_range);
             return make(TokenKind::Error, BaseStr, TokenStart);
         }
         ++Pos; // consume '#'
         size_t DigStart = Pos;
-        while (Pos < Text.size() && std::isalnum(Text[Pos])) { ++Pos; }
+        while (Pos < Text.size() && std::isalnum(static_cast<unsigned char>(Text[Pos]))) { ++Pos; }
         if (Pos == DigStart) {
             emitError(locAt(TokenStart), diag::err_nondecimal_no_digits);
             return make(TokenKind::Error, "#", TokenStart);
@@ -204,8 +221,8 @@ Token Scanner::scanNumber(size_t TokenStart) {
         int64_t Value = 0;
         for (size_t I = DigStart; I < Pos; ++I) {
             char C  = Text[I];
-            int  D  = std::isdigit(C) ? C - '0'
-                                      : std::tolower(C) - 'a' + 10;
+            int  D  = std::isdigit(static_cast<unsigned char>(C)) ? C - '0'
+                                      : std::tolower(static_cast<unsigned char>(C)) - 'a' + 10;
             if (D >= Base) {
                 std::string cs(1, C);
                 std::string bs = std::to_string(Base);
@@ -244,7 +261,7 @@ Token Scanner::scanNumber(size_t TokenStart) {
     if (Pos < Text.size() && Text[Pos] == '.'
             && std::isdigit(static_cast<unsigned char>(peek()))) {
         ++Pos;
-        while (Pos < Text.size() && std::isdigit(Text[Pos])) { ++Pos; }
+        while (Pos < Text.size() && std::isdigit(static_cast<unsigned char>(Text[Pos]))) { ++Pos; }
         IsReal = true;
     }
 
@@ -256,9 +273,9 @@ Token Scanner::scanNumber(size_t TokenStart) {
     if (Pos < Text.size() && (Text[Pos] == 'e' || Text[Pos] == 'E')) {
         size_t Look = Pos + 1;
         if (Look < Text.size() && (Text[Look] == '+' || Text[Look] == '-')) ++Look;
-        if (Look < Text.size() && std::isdigit(Text[Look])) {
+        if (Look < Text.size() && std::isdigit(static_cast<unsigned char>(Text[Look]))) {
             Pos = Look;
-            while (Pos < Text.size() && std::isdigit(Text[Pos])) { ++Pos; }
+            while (Pos < Text.size() && std::isdigit(static_cast<unsigned char>(Text[Pos]))) { ++Pos; }
             IsReal = true;
         }
     }

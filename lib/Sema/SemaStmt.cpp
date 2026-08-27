@@ -69,34 +69,46 @@ void Sema::checkStmt(const StmtNode* Stmt) {
 
 namespace {
 
-bool sequenceTransfers(const std::vector<std::unique_ptr<StmtNode>>& Stmts);
+bool sequenceTransfers(const std::vector<std::unique_ptr<StmtNode>>& Stmts,
+                        const SymbolTable& Symtab);
 
-bool alwaysTransfers(const StmtNode* S) {
+// Whether S calls the real halt builtin -- resolved to the symbol it names,
+// not matched on how that name is spelled.  A program is free to declare its
+// own procedure called `halt`, which shadows the builtin (ISO §6.2.2.10) and
+// returns like any other call; only the builtin itself never does.  `exit`
+// gets no such check at all: Builtins.def has no entry for it, so a call
+// spelled `exit` can only ever resolve to a declaration the program wrote,
+// never to a required procedure that leaves for good.
+bool callsHaltBuiltin(const CallStmt& C, const SymbolTable& Symtab) {
+    const Symbol* Callee = Symtab.lookup(C.Name);
+    return Callee && Callee->Kind == SymbolKind::Builtin
+                   && Callee->BuiltinKind == BuiltinID::Halt;
+}
+
+bool alwaysTransfers(const StmtNode* S, const SymbolTable& Symtab) {
     if (!S) return false;
     if (llvm::isa<GotoStmt>(S)) return true;
-    if (auto* C = llvm::dyn_cast<CallStmt>(S)) {
-        const std::string Lo = toLower(C->Name);
-        return Lo == "halt" || Lo == "exit";
-    }
-    if (auto* C = llvm::dyn_cast<CompoundStmt>(S)) return sequenceTransfers(C->Stmts);
-    if (auto* W = llvm::dyn_cast<WithStmt>(S))     return alwaysTransfers(W->Body.get());
+    if (auto* C = llvm::dyn_cast<CallStmt>(S)) return callsHaltBuiltin(*C, Symtab);
+    if (auto* C = llvm::dyn_cast<CompoundStmt>(S)) return sequenceTransfers(C->Stmts, Symtab);
+    if (auto* W = llvm::dyn_cast<WithStmt>(S))     return alwaysTransfers(W->Body.get(), Symtab);
     // An if reaches past itself unless neither arm does, which needs both arms
     // to exist.  A case is left alone: whether it can be fallen out of depends
     // on whether the arms cover the selector, and that is a separate question.
     if (auto* I = llvm::dyn_cast<IfStmt>(S))
-        return I->Else && alwaysTransfers(I->Then.get())
-                       && alwaysTransfers(I->Else.get());
+        return I->Else && alwaysTransfers(I->Then.get(), Symtab)
+                       && alwaysTransfers(I->Else.get(), Symtab);
     // A loop may run no times, a labeled statement may be jumped into, and
     // everything else simply finishes.
     return false;
 }
 
-bool sequenceTransfers(const std::vector<std::unique_ptr<StmtNode>>& Stmts) {
+bool sequenceTransfers(const std::vector<std::unique_ptr<StmtNode>>& Stmts,
+                        const SymbolTable& Symtab) {
     bool Gone = false;
     for (const auto& St : Stmts) {
         if (!St) continue;                                  // the empty statement
         if (llvm::isa<LabeledStmt>(St.get())) Gone = false; // a goto can land here
-        if (!Gone && alwaysTransfers(St.get())) Gone = true;
+        if (!Gone && alwaysTransfers(St.get(), Symtab)) Gone = true;
     }
     return Gone;
 }
@@ -115,7 +127,7 @@ void Sema::warnUnreachable(const std::vector<std::unique_ptr<StmtNode>>& Stmts) 
             warning(St->Loc, diag::warn_unreachable_code, {});
             Reported = true;
         }
-        if (!Gone && alwaysTransfers(St.get())) Gone = true;
+        if (!Gone && alwaysTransfers(St.get(), Symtab)) Gone = true;
     }
 }
 
@@ -367,22 +379,70 @@ void Sema::checkFor(const ForStmt& S) {
         // Driving a loop is a use: the control variable is named here, not in
         // an expression the identifier check would see.
         Sym->Referenced = true;
-        if (!Sym->Ty->isOrdinal())
-            error(S.Loc, diag::err_for_var_not_ordinal, {S.Var, Sym->Ty->Name});
 
-        // ISO §6.8.3.9: the control variable must be local to the block
-        // containing the for-statement.  A with-statement and a `for ... in`
-        // open a scope that is not a block, so asking only the innermost one
-        // rejected `with r do for i := 1 to 3 do ...` about an `i` that is
-        // declared exactly where the standard requires.
-        if (!Symtab.lookupInEnclosingBlock(S.Var))
-            error(S.Loc, diag::err_for_var_not_local, {S.Var});
+        // ISO §6.8.3.9: the control variable must be an entire variable. A
+        // bare identifier can just as well resolve to a procedure, a builtin,
+        // a constant, a type name, or a schema -- Ty is null for Proc/
+        // Builtin/Schema (registerBuiltins and friends never set it), so
+        // isOrdinal() below would null-deref, and for Const/TypeAlias/
+        // EnumValue it is set but describes the wrong thing (the constant's
+        // or alias's type, not any storage this loop could drive), which let
+        // a const or type-alias control variable sail through Sema only to
+        // hit "no storage" in codegen. VarParam is a variable too (isLValue
+        // treats it the same as Var); it is excluded from a for-statement
+        // only by not being LOCAL to this block, which the check below
+        // already catches.
+        const bool IsVar = Sym->Kind == SymbolKind::Var
+                         || Sym->Kind == SymbolKind::VarParam;
+        if (!IsVar) {
+            error(S.Loc, diag::err_for_var_not_variable, {S.Var});
+        } else {
+            if (!Sym->Ty->isOrdinal())
+                error(S.Loc, diag::err_for_var_not_ordinal, {S.Var, Sym->Ty->Name});
+
+            // ISO §6.8.3.9: the control variable must be local to the block
+            // containing the for-statement.  A with-statement and a `for ... in`
+            // open a scope that is not a block, so asking only the innermost one
+            // rejected `with r do for i := 1 to 3 do ...` about an `i` that is
+            // declared exactly where the standard requires.
+            if (!Symtab.lookupInEnclosingBlock(S.Var))
+                error(S.Loc, diag::err_for_var_not_local, {S.Var});
+        }
     }
     auto From  = checkExpr(*S.From);
     auto Limit = checkExpr(*S.Limit);
     if (!From->isError() && !Limit->isError() && From->Kind != Limit->Kind
         && !(From->isNumeric() && Limit->isNumeric()))
         error(S.Loc, diag::err_for_bounds_incompatible, {From->Name, Limit->Name});
+
+    // ISO §6.8.3.9: a bound's value is assigned to the control variable on
+    // entry (and each iteration), so each one must be assignment-compatible
+    // with ITS type too -- checking them only against each other above waived
+    // through `for c := 1 to 10 do` for a char c (the ordinals print, not
+    // 'a'..'j') and `for i := 1 to 10.5 do` (the real bound silently
+    // truncates): two numeric types can agree with each other without either
+    // agreeing with the variable both are being assigned into.  Skipped once
+    // the variable itself is not ordinal (or unresolved): that is already
+    // err_for_var_not_ordinal's diagnostic to give, not a second one here.
+    // Sym->Ty is only meaningful (and only non-null) for a Var/VarParam
+    // symbol -- see the comment above IsVar's declaration.  A Builtin/Proc
+    // control variable already got err_for_var_not_variable above and has
+    // a null Ty (isOrdinal() would null-deref); a Const/TypeAlias/EnumValue
+    // one already got the same diagnostic and has a non-null Ty describing
+    // the wrong thing.  Both are excluded here the same way IsVar excludes
+    // them above, so this block never dereferences a null Ty and never
+    // piles a second diagnostic onto err_for_var_not_variable.
+    const bool BoundsCheckApplies = Sym
+        && (Sym->Kind == SymbolKind::Var || Sym->Kind == SymbolKind::VarParam)
+        && Sym->Ty->isOrdinal();
+    if (BoundsCheckApplies) {
+        if (!From->isError() && !isAssignCompatible(*Sym->Ty, *From))
+            error(S.From->Loc, diag::err_for_bound_wrong_type,
+                  {From->Name, S.Var, Sym->Ty->Name});
+        if (!Limit->isError() && !isAssignCompatible(*Sym->Ty, *Limit))
+            error(S.Limit->Loc, diag::err_for_bound_wrong_type,
+                  {Limit->Name, S.Var, Sym->Ty->Name});
+    }
 
     // ISO §6.8.3.9: the body must not threaten the control variable (assign to it).
     checkForBody(S.Body.get(), S.Var, S.Loc);
@@ -425,16 +485,114 @@ void Sema::checkProcForThreats(
         checkProcForThreats(*Q, VarName, ForLoc, P.Body->Procs);
 }
 
+/// Static type of a `with`-clause record expression; see the Sema.h doc
+/// comment for why this does not simply call checkExpr.  Handles the forms
+/// ISO §6.8.3.1's variable-access production allows in a with-record: a plain
+/// name, a field selection, a pointer dereference, and an indexed component.
+/// Anything else (a call, say) is out of that grammar and returns null.
+std::shared_ptr<Type> Sema::quietWithRecordType(const ExprNode* E) {
+    if (auto* Id = llvm::dyn_cast<IdentExpr>(E)) {
+        Symbol* Sym = Symtab.lookup(Id->Name);
+        return Sym ? Sym->Ty : nullptr;
+    }
+    if (auto* F = llvm::dyn_cast<FieldExpr>(E)) {
+        auto RecTy = quietWithRecordType(F->Record.get());
+        if (!RecTy) return nullptr;
+        // EP §6.4.7: `v.d` on a schematic value is the discriminant when d
+        // names one -- checkField's own precedence, mirrored here.
+        if (RecTy->Kind == TypeKind::Schema || RecTy->Kind == TypeKind::SchemaInstance)
+            for (const auto& D : RecTy->SchemaDiscs)
+                if (eqCI(D.Name, F->Field)) return D.Ty;
+        const Type* Body = schemaUnderlying(RecTy.get());
+        const Type::Field* Fld = Body && Body->Kind == TypeKind::Record
+                                ? Body->fieldByName(F->Field) : nullptr;
+        return Fld ? Fld->Ty : nullptr;
+    }
+    if (auto* D = llvm::dyn_cast<DerefExpr>(E)) {
+        auto PtrTy = quietWithRecordType(D->Pointer.get());
+        return (PtrTy && PtrTy->Kind == TypeKind::Pointer) ? PtrTy->PointeeType : nullptr;
+    }
+    if (auto* Ix = llvm::dyn_cast<IndexExpr>(E)) {
+        auto ArrTy = quietWithRecordType(Ix->Array.get());
+        return (ArrTy && ArrTy->Kind == TypeKind::Array) ? ArrTy->ElemType : nullptr;
+    }
+    return nullptr;
+}
+
+bool Sema::withExposesName(const WithStmt& S, const std::string& Name) {
+    for (const auto& Rec : S.Records) {
+        auto T = quietWithRecordType(Rec.get());
+        if (!T) continue;
+        // EP §6.4.7: an undiscriminated or instantiated schema exposes its
+        // discriminants alongside its body's fields (see pushWithScope).
+        if (T->Kind == TypeKind::Schema || T->Kind == TypeKind::SchemaInstance)
+            for (const auto& Dc : T->SchemaDiscs)
+                if (eqCI(Dc.Name, Name)) return true;
+        const Type* Body = schemaUnderlying(T.get());
+        if (Body && Body->Kind == TypeKind::Record && Body->fieldByName(Name))
+            return true;
+    }
+    return false;
+}
+
 // Unified for-loop threat scanner (ISO §6.8.3.9).
 // When `Callables` is null the symbol table resolves var-param flags (intra-procedural).
 // When `Callables` is non-null the symbol table scope is already closed; the supplied
 // AST proc list is used instead (inter-procedural mode).
+// `Shadowed` says whether an enclosing `with`, somewhere between the
+// for-statement and `Stmt`, already exposes a field or discriminant spelled
+// like `VarName` -- see withExposesName and the Sema.h doc comment.
 void Sema::checkForBody(const StmtNode* Stmt, const std::string& VarName,
                          SourceLocation ForLoc,
-                         const std::vector<const ProcDecl*>* Callables) {
+                         const std::vector<const ProcDecl*>* Callables,
+                         bool Shadowed) {
+    if (!Stmt) return;
     const bool InterProc = Callables != nullptr;
-    walkStmts(Stmt, [&](const StmtNode* S) {
-        if (auto* A = llvm::dyn_cast<AssignStmt>(S)) {
+
+    // A var-parameter actual threatens the control variable whether the call
+    // stands alone as a statement (CallStmt) or sits inside an expression
+    // (CallExpr) -- `y := f(i)` threatens exactly as a bare `f(i)` would.
+    // Shared so both call forms resolve a callee's var-parameters identically,
+    // in both intra- and inter-procedural mode.
+    auto checkVarParamArgs = [&](const std::string& Name,
+                                  const std::vector<std::unique_ptr<ExprNode>>& Args,
+                                  SourceLocation Loc) {
+        if (InterProc) {
+            // Resolve var-param flags from AST proc list (symbol table scope is closed).
+            for (const ProcDecl* Pd : *Callables) {
+                if (!eqCI(Pd->Name, Name)) continue;
+                size_t ArgIdx = 0;
+                for (const auto& Pg : Pd->Params) {
+                    for (size_t K = 0; K < Pg.Names.size(); ++K, ++ArgIdx) {
+                        if (ArgIdx >= Args.size()) break;
+                        if (!Pg.IsVar) continue;
+                        if (auto* Id = llvm::dyn_cast<IdentExpr>(Args[ArgIdx].get()))
+                            if (eqCI(Id->Name, VarName))
+                                error(Loc, diag::err_for_inter_var_param, {VarName});
+                    }
+                }
+                break;
+            }
+        } else {
+            // Resolve var-param flags from the symbol table (intra-procedural).
+            Symbol* Callee = Symtab.lookup(Name);
+            if (Callee && (Callee->Kind == SymbolKind::Proc || Callee->Kind == SymbolKind::Builtin)) {
+                for (size_t I = 0; I < Callee->Params.size() && I < Args.size(); ++I) {
+                    if (!Callee->Params[I].IsVar) continue;
+                    if (auto* Id = llvm::dyn_cast<IdentExpr>(Args[I].get()))
+                        if (eqCI(Id->Name, VarName))
+                            error(Loc, diag::err_for_body_var_param, {VarName});
+                }
+            }
+        }
+    };
+
+    // A with-exposed field or discriminant spelled like VarName shadows it:
+    // every check below is about the CONTROL VARIABLE specifically, and none
+    // of them apply to a bare mention that with-scope resolution would send
+    // somewhere else entirely (issue #291).
+    if (!Shadowed) {
+        if (auto* A = llvm::dyn_cast<AssignStmt>(Stmt)) {
             if (auto* Id = llvm::dyn_cast<IdentExpr>(A->Target.get()))
                 if (eqCI(Id->Name, VarName))
                     error(A->Loc,
@@ -443,52 +601,75 @@ void Sema::checkForBody(const StmtNode* Stmt, const std::string& VarName,
                           {VarName});
         } else if (!InterProc) {
             // Inner for-loop reuse: only checked in the direct (intra-procedural) scan.
-            if (auto* Fs = llvm::dyn_cast<ForStmt>(S))
+            if (auto* Fs = llvm::dyn_cast<ForStmt>(Stmt))
                 if (eqCI(Fs->Var, VarName))
                     error(Fs->Loc, diag::err_for_body_reuses, {VarName});
         }
-        if (auto* Cs = llvm::dyn_cast<CallStmt>(S)) {
+        if (auto* Cs = llvm::dyn_cast<CallStmt>(Stmt)) {
             std::string Lo = toLower(Cs->Name);
-            if ((Lo == "read" || Lo == "readln") && !Cs->Args.empty()) {
-                for (const auto& Arg : Cs->Args) {
-                    if (auto* Id = llvm::dyn_cast<IdentExpr>(Arg.get()))
-                        if (eqCI(Id->Name, VarName))
-                            error(Cs->Loc,
-                                  InterProc ? diag::err_for_inter_reads
-                                            : diag::err_for_body_reads,
-                                  {VarName});
-                }
+            // EP §6.7.5.5: readstr(e, v1,...,vn) reads e and assigns every v --
+            // the mirror of read/readln, except its first argument is the
+            // SOURCE rather than the first destination.  writestr(e, ...) is
+            // the other mirror, assigning only e.  Neither was recognized
+            // here, so `for i := 1 to 3 do readstr(s, i)` passed unchallenged.
+            auto isWriteArg = [&](size_t I) {
+                if (Lo == "read" || Lo == "readln") return true;
+                if (Lo == "readstr")                return I >= 1;
+                if (Lo == "writestr")               return I == 0;
+                return false;
+            };
+            for (size_t I = 0; I < Cs->Args.size(); ++I) {
+                if (!isWriteArg(I)) continue;
+                if (auto* Id = llvm::dyn_cast<IdentExpr>(Cs->Args[I].get()))
+                    if (eqCI(Id->Name, VarName))
+                        error(Cs->Loc,
+                              InterProc ? diag::err_for_inter_reads
+                                        : diag::err_for_body_reads,
+                              {VarName});
             }
-            if (InterProc) {
-                // Resolve var-param flags from AST proc list (symbol table scope is closed).
-                for (const ProcDecl* Pd : *Callables) {
-                    if (!eqCI(Pd->Name, Cs->Name)) continue;
-                    size_t ArgIdx = 0;
-                    for (const auto& Pg : Pd->Params) {
-                        for (size_t K = 0; K < Pg.Names.size(); ++K, ++ArgIdx) {
-                            if (ArgIdx >= Cs->Args.size()) break;
-                            if (!Pg.IsVar) continue;
-                            if (auto* Id = llvm::dyn_cast<IdentExpr>(Cs->Args[ArgIdx].get()))
-                                if (eqCI(Id->Name, VarName))
-                                    error(Cs->Loc, diag::err_for_inter_var_param, {VarName});
-                        }
-                    }
-                    break;
-                }
-            } else {
-                // Resolve var-param flags from the symbol table (intra-procedural).
-                Symbol* Callee = Symtab.lookup(Cs->Name);
-                if (Callee && (Callee->Kind == SymbolKind::Proc || Callee->Kind == SymbolKind::Builtin)) {
-                    for (size_t I = 0; I < Callee->Params.size() && I < Cs->Args.size(); ++I) {
-                        if (!Callee->Params[I].IsVar) continue;
-                        if (auto* Id = llvm::dyn_cast<IdentExpr>(Cs->Args[I].get()))
-                            if (eqCI(Id->Name, VarName))
-                                error(Cs->Loc, diag::err_for_body_var_param, {VarName});
-                    }
-                }
-            }
+            checkVarParamArgs(Cs->Name, Cs->Args, Cs->Loc);
         }
-    });
+        // A var-parameter call need not be a statement of its own: `y := f(i)`
+        // threatens exactly as `f(i)` alone would, through an expression the
+        // statement walk never used to look inside (issue #265).  Every
+        // CallExpr hanging off this one statement, at any depth, is checked
+        // the same way a top-level CallStmt already is above.
+        forEachStmtExpr(Stmt, [&](const ExprNode* E) {
+            walkExprs(E, [&](const ExprNode* Ex) {
+                if (auto* Ce = llvm::dyn_cast<CallExpr>(Ex))
+                    checkVarParamArgs(Ce->Name, Ce->Args, Ce->Loc);
+            });
+        });
+    }
+
+    // Recurse exactly where walkStmts (SemaUtil.h) would; unlike that shared
+    // walk, a with-body's Shadowed state may differ from what it was on the
+    // way in, which is why this is not simply `walkStmts(Stmt, ...)` above.
+    if (auto* Cs = llvm::dyn_cast<CompoundStmt>(Stmt)) {
+        for (const auto& St : Cs->Stmts)
+            checkForBody(St.get(), VarName, ForLoc, Callables, Shadowed);
+    } else if (auto* Is = llvm::dyn_cast<IfStmt>(Stmt)) {
+        checkForBody(Is->Then.get(), VarName, ForLoc, Callables, Shadowed);
+        checkForBody(Is->Else.get(), VarName, ForLoc, Callables, Shadowed);
+    } else if (auto* Fs = llvm::dyn_cast<ForStmt>(Stmt)) {
+        checkForBody(Fs->Body.get(), VarName, ForLoc, Callables, Shadowed);
+    } else if (auto* Fi = llvm::dyn_cast<ForInStmt>(Stmt)) {
+        checkForBody(Fi->Body.get(), VarName, ForLoc, Callables, Shadowed);
+    } else if (auto* Ws = llvm::dyn_cast<WhileStmt>(Stmt)) {
+        checkForBody(Ws->Body.get(), VarName, ForLoc, Callables, Shadowed);
+    } else if (auto* Rs = llvm::dyn_cast<RepeatStmt>(Stmt)) {
+        for (const auto& St : Rs->Stmts)
+            checkForBody(St.get(), VarName, ForLoc, Callables, Shadowed);
+    } else if (auto* Cas = llvm::dyn_cast<CaseStmt>(Stmt)) {
+        for (const auto& Arm : Cas->Arms)
+            checkForBody(Arm.Body.get(), VarName, ForLoc, Callables, Shadowed);
+        checkForBody(Cas->Else.get(), VarName, ForLoc, Callables, Shadowed);
+    } else if (auto* Wts = llvm::dyn_cast<WithStmt>(Stmt)) {
+        checkForBody(Wts->Body.get(), VarName, ForLoc, Callables,
+                     Shadowed || withExposesName(*Wts, VarName));
+    } else if (auto* Ls = llvm::dyn_cast<LabeledStmt>(Stmt)) {
+        checkForBody(Ls->Stmt.get(), VarName, ForLoc, Callables, Shadowed);
+    }
 }
 
 void Sema::checkRepeat(const RepeatStmt& S) {
@@ -529,12 +710,19 @@ Symbol* Sema::protectedBaseOf(const ExprNode& Target) {
     auto* Id = llvm::dyn_cast<IdentExpr>(Base);
     if (!Id) return nullptr;
     Symbol* Sym = Symtab.lookup(Id->Name);
-    return (Sym && Sym->IsProtected) ? Sym : nullptr;
+    // EP §6.7.3.7.1 NOTE 2: a conformant-array bound identifier is refused an
+    // assignment the same way a protected parameter is -- see
+    // checkNotProtected, which tells the two apart for the diagnostic.
+    return (Sym && (Sym->IsProtected || Sym->IsConformantBound)) ? Sym : nullptr;
 }
 
 void Sema::checkNotProtected(const ExprNode& Target, SourceLocation Loc) {
     Symbol* Sym = protectedBaseOf(Target);
     if (!Sym) return;
+    if (Sym->IsConformantBound) {
+        error(Loc, diag::err_conformant_bound_assigned, {Sym->Name});
+        return;
+    }
     // EP §6.11.2: a variable exported 'protected' is protected in the same way,
     // but for a different reason, and saying "parameter" about a module's
     // variable would only mislead.
@@ -592,6 +780,20 @@ void Sema::checkCallStmt(const CallStmt& S) {
         }
 
         if (!checkEPOnly(*Sym, S.Loc)) {
+            for (const auto& Arg : S.Args) (void)checkExpr(*Arg);
+            return;
+        }
+
+        // checkCallExpr (SemaExpr.cpp) asks this before dispatching on the
+        // builtin's spelling; this arm did not, so a call that is not one of
+        // the special cases below -- reset, close, dispose, ... -- reached
+        // codegen with whatever argument count was written.  `reset(f, 1, 2)`
+        // let its extra argument through to a runtime call already typed for
+        // two, which the IR verifier rejected as a compiler crash rather than
+        // a diagnostic; `reset()` reached emitUserProcCall and failed to link
+        // against an external symbol nothing defines.  Builtins.def's arity is
+        // the same source checkBuiltinArity already reads for expressions.
+        if (!checkBuiltinArity(Sym->BuiltinKind, Lo, S.Loc, S.Args.size())) {
             for (const auto& Arg : S.Args) (void)checkExpr(*Arg);
             return;
         }
@@ -719,6 +921,22 @@ void Sema::checkCallStmt(const CallStmt& S) {
                     error(S.Args[I]->Loc, diag::err_restricted_used, {T.Name});
                 else if (!(HasFile && I == 0) && FromText && !T.isError())
                     checkReadParamType(T, S.Args[I]->Loc);
+                // ISO §6.9.1: read(v) is defined as v := f^, so a read target
+                // must be a variable-access, the same requirement checkAssign
+                // enforces on an ordinary assignment's left-hand side via
+                // isLValue.  This was never asked here, so `read(5)`,
+                // `read(someConst)` and `read(someFunc())` all reached
+                // emitReadArg (CodeGen/BuiltinIO.cpp) with no address to
+                // store into: some aborted the compiler outright
+                // (codegenICE("read/readln target is not an assignable
+                // variable")), others silently read into a throwaway
+                // temporary nothing could ever see.  Gated the same way as
+                // checkReadParamType and checkNotProtected: I == 0 is the
+                // file itself when HasFile, not something read INTO, and a
+                // T that is already an error type has been diagnosed once
+                // and should not be piled onto here.
+                if (!(HasFile && I == 0) && !T.isError() && !isLValue(*S.Args[I]))
+                    error(S.Args[I]->Loc, diag::err_read_not_variable, {T.Name});
                 // read(v) assigns to v -- §6.9.1 makes it `v := f^` -- so a
                 // protected variable may no more be read into than assigned
                 // to.  Gated the same way as checkReadParamType above: I == 0
@@ -752,18 +970,22 @@ void Sema::checkCallStmt(const CallStmt& S) {
         }
 
         // read: if first arg is a typed file, remaining args must match element type.
+        // Every argument was already checked once by the loop above, which set
+        // each S.Args[I]->ResolvedType as a side effect (checkExpr, SemaExpr.cpp):
+        // calling checkExpr on them again here reported anything wrong with an
+        // argument -- e.g. an undefined identifier -- a second time (issue #272).
+        // Read the cached type instead, the same way the readln arm just above
+        // already does for S.Args[0].
         if (Lo == "read" && !S.Args.empty()) {
-            auto T = checkExpr(*S.Args[0]);
-            if (T->Kind == TypeKind::File && T->ElemType && S.Args.size() >= 2) {
+            const auto& T = S.Args[0]->ResolvedType;
+            if (T && T->Kind == TypeKind::File && T->ElemType && S.Args.size() >= 2) {
                 for (size_t I = 1; I < S.Args.size(); ++I) {
-                    auto At = checkExpr(*S.Args[I]);
-                    if (!At->isError() && !T->ElemType->isError()
+                    const auto& At = S.Args[I]->ResolvedType;
+                    if (At && !At->isError() && !T->ElemType->isError()
                         && !isAssignCompatible(*At, *T->ElemType))
                         error(S.Args[I]->Loc, diag::err_read_type_mismatch,
                               {T->ElemType->Name, At->Name});
                 }
-            } else {
-                for (size_t I = 1; I < S.Args.size(); ++I) (void)checkExpr(*S.Args[I]);
             }
             return;
         }
@@ -792,9 +1014,39 @@ void Sema::checkCallStmt(const CallStmt& S) {
             if (!ArrTy->isError() && !ArrOk)
                 error(ArrArg.Loc, diag::err_pack_operand_not_array_unpacked,
                       {Lo, ArrTy->Name});
-            if (!PkdTy->isError() && PkdTy->Kind != TypeKind::Array)
+            const bool PkdOk = PkdTy->Kind == TypeKind::Array;
+            if (!PkdTy->isError() && !PkdOk)
                 error(PkdArg.Loc, diag::err_pack_operand_not_array_packed,
                       {Lo, PkdTy->Name});
+
+            // ISO §6.6.5.4: pack/unpack is the one place an array crosses
+            // between packed and unpacked, and the direction is fixed -- `a`
+            // unpacked, `z` packed.  Neither Packed flag was looked at, so a
+            // packed `a` or an unpacked `z` was accepted and copied exactly
+            // as if the direction had been the one actually declared.
+            if (ArrOk && ArrTy->Packed)
+                error(ArrArg.Loc, diag::err_pack_operand_not_unpacked,
+                      {Lo, ArrTy->Name});
+            if (PkdOk && !PkdTy->Packed)
+                error(PkdArg.Loc, diag::err_pack_operand_not_packed,
+                      {Lo, PkdTy->Name});
+
+            // ISO §6.6.5.4: the component types of a and z shall be
+            // identical.  CGPackUnpack lowers the whole transfer as a single
+            // memcpy sized and aligned from `a`'s element type alone, so a
+            // mismatch here is not a value that fails to convert -- it is
+            // bytes moved under the wrong element's size, e.g. an
+            // `array of integer` packed into a `packed array of char`
+            // copying 4 bytes per character instead of 1.  isAssignCompatible
+            // permits integer -> real widening that a raw copy cannot
+            // perform, so it is the wrong tool here; isIdenticalType is what
+            // congruousConformant uses for the same "no conversion happens"
+            // reason.
+            if (ArrOk && PkdOk && ArrTy->ElemType && PkdTy->ElemType
+                && !isIdenticalType(ArrTy->ElemType, PkdTy->ElemType))
+                error(ArrArg.Loc, diag::err_pack_element_type_mismatch,
+                      {Lo, ArrTy->ElemType->Name, PkdTy->ElemType->Name});
+
             // The index type of a conformant array is the ordinal its bounds
             // were declared with, which is as much a type as a written range.
             if (ArrOk && ArrTy->IndexType && !IdxTy->isError()
@@ -810,9 +1062,31 @@ void Sema::checkCallStmt(const CallStmt& S) {
         // formal discriminant and each must be ordinal.
         if (Lo == "new" && !S.Args.empty()) {
             auto PtrTy = checkExpr(*S.Args[0]);
+            // Every check below -- schema discriminants, variant/schema extra
+            // arguments -- is keyed off Pointee, which only a genuine Pointer
+            // arg0 computes; anything else left it null and every one of
+            // those checks silently no-opped rather than rejecting the call,
+            // so `new(i)` for a non-pointer i sailed through Sema and reached
+            // CodeGen with no pointee to size an allocation from.
+            if (!PtrTy->isError() && PtrTy->Kind != TypeKind::Pointer)
+                error(S.Args[0]->Loc, diag::err_new_arg_not_pointer, {PtrTy->Name});
             const Type* Pointee = PtrTy->Kind == TypeKind::Pointer
                                       ? PtrTy->PointeeType.get() : nullptr;
             const bool ToSchema = Pointee && Pointee->Kind == TypeKind::Schema;
+            // ISO §6.6.5.3: for a record with a variant part, new's extra
+            // arguments are its case-constants -- one per nested variant
+            // level actually reached, each a value of that level's own tag
+            // type -- not schema discriminants.  Vp is walked one level
+            // deeper per argument by checkVariantTagArg; once it runs out
+            // (the reached level's case-constants nest no further, or an
+            // argument did not name any of them), ExtraReported flags that
+            // every argument from there on is one too many.  This used to be
+            // entirely unchecked: neither the count nor the type of these
+            // arguments was validated for a variant record.
+            const bool ToVariant = !ToSchema && Pointee && Pointee->Kind == TypeKind::Record
+                                    && Pointee->RecordDecl && Pointee->RecordDecl->Variant;
+            const VariantPart* Vp = ToVariant ? Pointee->RecordDecl->Variant.get() : nullptr;
+            bool ExtraReported = false;
             for (size_t I = 1; I < S.Args.size(); ++I) {
                 auto At = checkExpr(*S.Args[I]);
                 if (ToSchema && !At->isError() && I - 1 < Pointee->SchemaDiscs.size()) {
@@ -832,6 +1106,14 @@ void Sema::checkCallStmt(const CallStmt& S) {
                                  && !isAssignCompatible(*Disc.Ty, *At))
                         error(S.Args[I]->Loc, diag::err_assign_mismatch,
                               {At->Name, Disc.Ty->Name});
+                } else if (ToVariant) {
+                    if (Vp) {
+                        Vp = checkVariantTagArg(Lo, *S.Args[I], *At, *Vp);
+                    } else if (!ExtraReported) {
+                        error(S.Args[I]->Loc, diag::err_variant_tag_arg_extra,
+                              {Lo, Pointee->Name});
+                        ExtraReported = true;
+                    }
                 }
             }
             if (ToSchema && S.Args.size() - 1 != Pointee->SchemaDiscs.size())
@@ -845,9 +1127,7 @@ void Sema::checkCallStmt(const CallStmt& S) {
             // evaluated and then dropped, so `new(p, 20)` for a `^string` --
             // where `string` is the unbounded string and not the schema --
             // allocated the default and silently lost the 20.
-            if (!ToSchema && S.Args.size() > 1 && Pointee && !Pointee->isError()
-                    && !(Pointee->Kind == TypeKind::Record && Pointee->RecordDecl
-                         && Pointee->RecordDecl->Variant))
+            if (!ToSchema && !ToVariant && S.Args.size() > 1 && Pointee && !Pointee->isError())
                 // EP §6.4.3.3 does make `string` a schema with a capacity
                 // discriminant, so `new(p, 20)` for a `^string` is legal there
                 // and only plang's modelling of the bare name as the unbounded
@@ -861,6 +1141,38 @@ void Sema::checkCallStmt(const CallStmt& S) {
             return;
         }
 
+        // ISO §6.6.5.3: dispose's extra arguments are new's, read the same
+        // way -- case-constants selecting a path through a variant record's
+        // nesting, each checked against that level's own tag type.  dispose
+        // had no argument checking of any kind before this, schema or
+        // variant: arity aside, `dispose(p, 42)` was accepted whatever
+        // `p`'s domain type was and whatever 42 was supposed to select.
+        // Schema discriminants are deliberately not re-checked here: unlike
+        // a variant's case-constants, they are not re-supplied to dispose at
+        // all (the instance already carries them from new), so there is
+        // nothing here for them to be checked against.
+        if (Lo == "dispose" && !S.Args.empty()) {
+            auto PtrTy = checkExpr(*S.Args[0]);
+            const Type* Pointee = PtrTy->Kind == TypeKind::Pointer
+                                      ? PtrTy->PointeeType.get() : nullptr;
+            const bool ToVariant = Pointee && Pointee->Kind == TypeKind::Record
+                                    && Pointee->RecordDecl && Pointee->RecordDecl->Variant;
+            const VariantPart* Vp = ToVariant ? Pointee->RecordDecl->Variant.get() : nullptr;
+            bool ExtraReported = false;
+            for (size_t I = 1; I < S.Args.size(); ++I) {
+                auto At = checkExpr(*S.Args[I]);
+                if (!ToVariant) continue;
+                if (Vp) {
+                    Vp = checkVariantTagArg(Lo, *S.Args[I], *At, *Vp);
+                } else if (!ExtraReported) {
+                    error(S.Args[I]->Loc, diag::err_variant_tag_arg_extra,
+                          {Lo, Pointee->Name});
+                    ExtraReported = true;
+                }
+            }
+            return;
+        }
+
         // EP §6.7.5.6: bind and unbind reach past the value of their first
         // argument to the variable itself, so what it may be is fixed.
         if (Lo == "bind" || Lo == "unbind") {
@@ -868,7 +1180,9 @@ void Sema::checkCallStmt(const CallStmt& S) {
             return;
         }
 
-        // Generic: evaluate arguments for side-effects / type errors, skip arity.
+        // Generic: arity was already checked against Builtins.def above.
+        // Evaluate arguments for side-effects / type errors and leave the
+        // rest -- which argument means what -- to codegen.
         for (const auto& Arg : S.Args) (void)checkExpr(*Arg);
         return;
     }
@@ -890,6 +1204,24 @@ int Sema::pushWithScope(const WithStmt& S) {
     for (const auto& Rec : S.Records) {
         auto T = checkExpr(*Rec);
         if (T->isError()) continue;
+
+        // ISO §6.8.3.10 / EP §6.8.3.10: a with-statement's record-variable is
+        // a variable-access, not any record-valued expression -- without this,
+        // `with mk() do x := 5` for a function `mk` returning a record was
+        // accepted, and the assignment to `x` landed in a temporary nothing
+        // could ever read back.
+        if (!isLValue(*Rec)) {
+            error(Rec->Loc, diag::err_with_not_variable, {T->Name});
+            continue;
+        }
+
+        // EP §6.4.2.5: a restricted type's components are not reachable by
+        // any spelling of a component-access, and `with` opens exactly the
+        // same access `.field` does -- rejectRestrictedComponent is the same
+        // check checkField already applies there, so `with x do f := 1` on a
+        // `restricted` record is refused exactly where `x.f := 1` already is,
+        // rather than exposing every field a plain `.field` cannot reach.
+        if (rejectRestrictedComponent(*Rec, *T)) continue;
 
         // EP §6.7.3.1: `with` opens a new spelling for the SAME storage a
         // protected parameter denotes, and checkNotProtected only ever asks
@@ -1008,6 +1340,16 @@ void Sema::checkGoto(const GotoStmt& S) {
     // block's statement part: landing anywhere else would resume in the middle
     // of a structured statement whose activation was just thrown away.
     if (!CurrentBlockLabels.contains(S.Label)) {
+        // EP §6.11.2: unlike a program's block or an enclosing procedure's,
+        // a module's 'to begin do'/'to end do' does not stay on the call
+        // stack for as long as the module's procedures stay callable -- see
+        // Symbol::LabelInModuleBlock.  Checked ahead of LabelNested: a label
+        // at the outermost level of a module's statement part is exactly as
+        // unreachable this way as one that is not.
+        if (Sym->LabelInModuleBlock) {
+            error(S.Loc, diag::err_goto_module_block, {S.Label});
+            return;
+        }
         if (Sym->LabelNested) {
             error(S.Loc, diag::err_goto_outer_block, {S.Label});
             return;

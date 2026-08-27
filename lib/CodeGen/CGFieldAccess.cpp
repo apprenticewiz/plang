@@ -230,14 +230,38 @@ llvm::Value* CGFieldAccess::emitFieldGEP(const FieldExpr& e) {
 /// that nothing has made true.  The blob was fixed by making the promise true;
 /// here the promise must simply not be made, because `packed` means the field
 /// really is at an odd offset.
+///
+/// Issue #192: the checks below answer from the ADDRESS an expression
+/// reaches, not from whether that expression happens to spell "r.field".
+/// `with r do f := ...` binds a packed record's field to a bare name
+/// (IdentExpr) with no FieldExpr left to ask, and `r.a[i] := ...` reaches the
+/// same packed field through an IndexExpr wrapped around the FieldExpr --
+/// both used to fall straight through the dyn_cast below and keep the value
+/// type's default ABI alignment, so the exact -O1/-O2 crash already fixed for
+/// `r.field` still happened through either of those two other shapes.
 std::optional<llvm::Align> CGFieldAccess::packedAccessAlign(const ExprNode& e) {
-    auto* fe = llvm::dyn_cast<FieldExpr>(&e);
-    if (!fe) return std::nullopt;
-    const Type* RecTy = recordTypeOf(*fe->Record);
-    if (!RecTy) return std::nullopt;
-    const bool packed = RecTy->Packed
-                     || (RecTy->RecordDecl && RecTy->RecordDecl->Packed);
-    return packed ? std::optional{llvm::Align(1)} : std::nullopt;
+    if (auto* fe = llvm::dyn_cast<FieldExpr>(&e)) {
+        const Type* RecTy = recordTypeOf(*fe->Record);
+        if (!RecTy) return std::nullopt;
+        const bool packed = RecTy->Packed
+                         || (RecTy->RecordDecl && RecTy->RecordDecl->Packed);
+        return packed ? std::optional{llvm::Align(1)} : std::nullopt;
+    }
+    // A with-bound name: CGWith records the same fact on the binding itself
+    // (VarEntry::packedWithField) when it creates it, since by the time an
+    // IdentExpr reads or writes it there is no FieldExpr left to inspect.
+    if (auto* ie = llvm::dyn_cast<IdentExpr>(&e)) {
+        const VarEntry* ve = SymTab.findVar(ie->Name);
+        return (ve && ve->packedWithField) ? std::optional{llvm::Align(1)}
+                                            : std::nullopt;
+    }
+    // a[i] can claim no more than `a` itself can: an array field of a packed
+    // record sits at a byte offset its element type's alignment does not
+    // fix, and indexing into it does not change that, so every element
+    // inherits the same ceiling as the access that reached the array.
+    if (auto* xe = llvm::dyn_cast<IndexExpr>(&e))
+        return packedAccessAlign(*xe->Array);
+    return std::nullopt;
 }
 
 llvm::Value* CGFieldAccess::emitFieldLoad(const FieldExpr& e) {
@@ -246,9 +270,24 @@ llvm::Value* CGFieldAccess::emitFieldLoad(const FieldExpr& e) {
     if (e.Record->ResolvedType
             && e.Record->ResolvedType->Kind == TypeKind::SchemaInstance) {
         for (const auto& D : e.Record->ResolvedType->SchemaDiscs) {
-            if (eqCI(D.Name, e.Field))
-                return llvm::ConstantInt::get(I64Ty,
-                           static_cast<uint64_t>(D.Value), /*isSigned=*/true);
+            if (eqCI(D.Name, e.Field)) {
+                // D.Value is stored as int64_t; narrow to the declared ordinal
+                // type the same way the Schema arm below narrows its
+                // runtime-carried i64, so that a char or enum discriminant
+                // hands back an i8/i1/... rather than a bare i64.  Without
+                // this, `x.c` for `t(c: char) = ...` produced an i64 97 where
+                // callers that key off the raw LLVM value (e.g. string
+                // concatenation) need an i8 -- an LLVM IR verifier failure,
+                // not caught by callers that key off the Sema type instead
+                // (writeln, comparisons).
+                llvm::Value* full = llvm::ConstantInt::get(I64Ty,
+                                         static_cast<uint64_t>(D.Value), /*isSigned=*/true);
+                llvm::Type* want = D.Ty && !D.Ty->isError()
+                                       ? Types.llvmTypeOfSemaType(*D.Ty) : I64Ty;
+                return want->isIntegerTy() && want != I64Ty
+                           ? B.CreateTrunc(full, want, "sch.disc.n")
+                           : full;
+            }
         }
         // Not a discriminant — fall through to normal field access on the body.
     }

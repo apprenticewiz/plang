@@ -24,9 +24,11 @@ extern "C" {
 [[noreturn]] void plang_err_ipow_zero_zero(void);
 [[noreturn]] void plang_err_ipow_overflow(int64_t Base, int64_t Exp);
 [[noreturn]] void plang_err_abs_overflow(void);
+[[noreturn]] void plang_err_sqr_overflow(int64_t X);
 [[noreturn]] void plang_err_real_to_int_range(const char *Op, double X);
 [[noreturn]] void plang_err_sqrt_domain(double X);
 [[noreturn]] void plang_err_ln_domain(double X);
+[[noreturn]] void plang_err_arg_domain(void);
 
 // ---- Floating-point math (double → double) ----
 
@@ -101,7 +103,19 @@ int64_t plang_ipow(int64_t Base, int64_t Exp) {
 
 // ---- sqr ----
 
-int64_t plang_sqr_int (int64_t X) { return X * X; }
+/// ISO §6.6.6.2: sqr(x) = x*x, still an integer result for an integer
+/// argument -- but not every such result fits int64_t, the same
+/// signed-overflow-UB gap plang_ipow's multiplications are guarded against
+/// above (and plang_abs_int's negation, just below the multiplications, guards
+/// its own one fixed case).  Unlike ipow's loop this is exactly one
+/// multiplication, so exactly one overflow check covers it, unguarded here it
+/// is signed-overflow UB that in practice silently wraps to a negative value
+/// -- issue #219.
+int64_t plang_sqr_int (int64_t X) {
+    int64_t Result;
+    if (__builtin_mul_overflow(X, X, &Result)) plang_err_sqr_overflow(X);
+    return Result;
+}
 double  plang_sqr_real(double  X) { return X * X; }
 
 // ---- Conversion (double → i64) ----
@@ -146,8 +160,16 @@ static inline std::complex<double> plang_mk(double re, double im) {
     return std::complex<double>(re, im);
 }
 
-// EP §6.7.6.2: arg(z) = atan2(im, re)
+/// EP §6.7.6.2: arg(z) = atan2(im, re), the phase angle of z -- undefined at
+/// the origin, where every angle is equally valid; std::atan2(0, 0) answers a
+/// silent 0 by convention instead of the error the runtime's other domain
+/// checks (plang_sqrt, plang_ln, plang_err_cpow_domain's zero complex base)
+/// give a program instead of an ordinary in-range result -- issue #249.
+/// CGFuncCall.cpp routes a real/integer argument through this same function
+/// as (x, 0.0), so a plain real/integer 0 -- the origin under the same
+/// definition -- traps here too, not just cmplx(0, 0).
 double plang_arg(double re, double im) {
+    if (re == 0.0 && im == 0.0) plang_err_arg_domain();
     return std::atan2(im, re);
 }
 

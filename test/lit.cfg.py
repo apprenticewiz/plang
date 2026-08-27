@@ -102,6 +102,18 @@ config.substitutions.insert(0,
     ("%hold_stdin_open",
      "bash " + os.path.join(config.plang_source_dir, "test", "tools", "run-with-stdin-held-open.sh")))
 
+# %kill_during_compile: issue #278's own regression coverage -- interrupting
+# a real compile with SIGTERM partway through and checking the driver's
+# scratch TMPDIR for what got left behind. Needs real job control (&, $!,
+# wait) to signal the driver's whole process group, not just the driver
+# itself (its re-invoked-as-"-pc1" front end and llc are separate child
+# processes that a single-pid signal would otherwise orphan), so this is a
+# real, external bash script rather than an in-line RUN: sequence, same as
+# %hold_stdin_open just above.
+config.substitutions.insert(0,
+    ("%kill_during_compile",
+     "bash " + os.path.join(config.plang_source_dir, "test", "tools", "kill-during-compile.sh")))
+
 # Issue #130's gdb pretty-printer -- referenced straight from the source
 # tree (share/plang/gdb/), not the installed copy, same as every other
 # %substitution here points at the just-built binary rather than anything
@@ -138,6 +150,19 @@ if shutil.which("gdb") is not None:
 
 if os.name != "nt":
     config.available_features.add("posix")
+
+# dev-full: /dev/full is a Linux (and some other Unix) character device that
+# accepts any open but fails every write with ENOSPC -- the only portable way
+# to make a write fail *after* a successful open, which is exactly the gap
+# issue #246 found (a failed OPEN was already diagnosed; a failed WRITE was
+# not). Not present on macOS, so this is probed directly rather than assumed
+# from the platform name, the same way fpc-binary/gdb-binary above are.
+try:
+    import stat
+    if stat.S_ISCHR(os.stat("/dev/full").st_mode):
+        config.available_features.add("dev-full")
+except OSError:
+    pass
 
 # asan-build: issue #146's CodeGen expression-depth guard (CGExprCore.h)
 # uses a much lower MaxExprDepth under a sanitizer build, where its real

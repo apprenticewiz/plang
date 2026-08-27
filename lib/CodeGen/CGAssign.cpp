@@ -80,6 +80,25 @@ void CGAssign::emitAssign(const AssignStmt& s) {
         if (ExprIsVarStr(*s.Value)) {
             auto [addr, cap] = Schema.strAddrAndCap(*s.Value);
             dataPtr = addr ? Strings.strDataPtr(addr) : nullptr;
+            // EP §6.4.6(f): a string value is assignment-compatible with a
+            // char VARIABLE only when its length is exactly 1 -- char's own
+            // capacity, per §6.4.3.3.1.  Sema's isAssignCompatible allows the
+            // assignment on the strength of the TYPE alone (see
+            // SemaExpr.cpp), because unlike a char-array source, whose
+            // length the declared array size already answers at compile
+            // time, a string(n)'s length is a mutable run-time field of the
+            // value -- `s := 'xy'` on a string(5) leaves it at 2, not 1 --
+            // so this is the one check no earlier phase could make.
+            if (addr) {
+                auto* len = Strings.strLoadLen(addr);
+                auto* bad = B.CreateICmpNE(len, i64c(1), "charofstr.len.bad");
+                RangeGuards.emitGuard(bad, "charofstr", [&] {
+                    B.CreateCall(
+                        Strings.getStrFn("plang_err_str_length",
+                                         llvm::Type::getVoidTy(Ctx), {I64Ty, I64Ty}),
+                        {len, i64c(1)});
+                });
+            }
         } else if (ExprIsCharStr(*s.Value)) {
             dataPtr = EmitLValue(*s.Value);
         } else {
@@ -243,7 +262,12 @@ void CGAssign::emitAssign(const AssignStmt& s) {
                     }
                 }
             }
-        if (!checked && tt->SubLo != tt->SubHi)
+        // Lo == Hi is a legal singleton subrange (ISO §6.4.7 puts no floor on
+        // the interval's width), not a sentinel for "no real bounds" -- Kind
+        // == Subrange above already guarantees these bounds are real, so a
+        // `SubLo != SubHi` guard here would just exempt `5..5` from the very
+        // check this block exists to perform.
+        if (!checked)
             RangeGuards.emitRangeCheck(rhs, tt->SubLo, tt->SubHi, /*isIndex=*/false, s.Loc);
     }
 
@@ -268,10 +292,22 @@ void CGAssign::emitAssign(const AssignStmt& s) {
     // Implicit integer-to-real widening.
     if (dstTy->isDoubleTy() && rhs->getType()->isIntegerTy())
         rhs = B.CreateSIToFP(rhs, DblTy, "widen");
-    // Integer narrowing (e.g. i64 → i8 for char assignment).
+    // Integer width mismatch, either direction: i64 -> i8 (e.g. an integer
+    // expression stored into a char variable) narrows, but i8/i1 -> i64 (a
+    // char or boolean value stored into a subrange slot -- every subrange is
+    // i64 regardless of its host type; see llvmTypeOfSemaTypeImpl) needs to
+    // widen just as much.  This used to only trunc, so a narrower rhs was
+    // stored with a store narrower than the destination slot, leaving
+    // whatever was already in the slot's upper bytes untouched -- silently
+    // for a freshly zero-initialized variable, wrong for a variant-record
+    // field whose shared storage was last written through a wider
+    // alternative (issue #229). Zero-extension is the correct widening: the
+    // narrow ordinals plang has (char, boolean) are all non-negative, the
+    // same reasoning coerceToType's identical int/int branch uses for every
+    // other value-consuming path (call arguments, constructors, ...).
     if (dstTy->isIntegerTy() && rhs->getType()->isIntegerTy()
-            && rhs->getType()->getIntegerBitWidth() > dstTy->getIntegerBitWidth())
-        rhs = B.CreateTrunc(rhs, dstTy, "narrow");
+            && rhs->getType() != dstTy)
+        rhs = B.CreateZExtOrTrunc(rhs, dstTy, "conv");
 
     auto* st = B.CreateStore(rhs, addr);
     // A field of a packed record is at a byte offset that need not satisfy its

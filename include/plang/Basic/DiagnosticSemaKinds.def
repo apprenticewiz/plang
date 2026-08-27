@@ -27,6 +27,14 @@ DIAG(err_restricted_component, Error, "'%0' is a restricted type, so its compone
 DIAG(err_restricted_file_component, Error,
      "'%0' is a restricted type and cannot be the component type of a file")
 DIAG(err_undefined_identifier, Error, "undefined identifier '%0'")
+// ISO §6.10: every program-parameter besides the required 'input' and
+// 'output' -- which the language understands without one -- must be given a
+// defining declaration somewhere in the program block.  The heading only
+// says which of the block's own declarations are external files (or, under
+// Extended Pascal, other bindable entities); it is not a declaration itself.
+DIAG(err_program_param_not_declared, Error,
+     "program parameter '%0' is never declared in the program block; only "
+     "'input' and 'output' need no declaration")
 DIAG(err_function_requires_args, Error, "function '%0' requires an argument list")
 DIAG(err_proc_as_value, Error, "procedure '%0' cannot be used as a value")
 DIAG(err_builtin_proc_as_value, Error, "built-in procedure '%0' cannot be used as a value")
@@ -47,6 +55,19 @@ DIAG(err_index_type_mismatch, Error, "array index type mismatch: index type is '
 // same image.
 DIAG(err_global_var_too_large, Error,
      "'%0' is too large to be a global variable (%1 bytes; the limit is %2 "
+     "bytes) -- declare it on the heap (New/GetMem) instead")
+// A local (procedure/function-body) variable this large has no relocation to
+// overflow -- it is a stack allocation, not a linked object -- but it is no
+// safer: it never fits any real stack, and what actually breaks first is the
+// LLVM backend lowering the resulting `alloca`.  A single `string(maxint)`
+// local was observed driving `llc` to tens of gigabytes of RSS with no
+// termination in sight (issue #223), long before the process would ever hit
+// a stack-overflow signal.  Gated at the same threshold as
+// err_global_var_too_large and for the same "comfortably under any real
+// limit" reasoning -- only the wording differs, so the diagnostic names the
+// variable's actual scope instead of claiming it is a global.
+DIAG(err_local_var_too_large, Error,
+     "'%0' is too large to be a local variable (%1 bytes; the limit is %2 "
      "bytes) -- declare it on the heap (New/GetMem) instead")
 DIAG(err_field_on_non_record, Error, "field access '.%0' on non-record type '%1'")
 DIAG(err_no_such_field, Error, "record type '%0' has no field '%1'")
@@ -70,7 +91,27 @@ DIAG(err_not_requires_boolean, Error, "'not' requires a boolean operand, got '%0
 DIAG(err_unknown_unop, Error, "unknown unary operator")
 DIAG(err_undefined_function, Error, "undefined function '%0'")
 DIAG(err_ordinal_argument, Error, "'%0' requires an ordinal argument, got '%1'")
+// issue #261: a required function whose argument is not ordinal-shaped --
+// abs, sqr, sqrt, sin, cos, exp, ln, arctan, trunc, round -- is required to
+// be numeric instead.  Kept apart from err_ordinal_argument rather than
+// folding the two into one "ordinal or numeric" message: a translator
+// reading either in isolation can tell what the call actually needed.
+DIAG(err_numeric_argument, Error, "'%0' requires a numeric argument, got '%1'")
+// issue #261: eof/eoln read a file's status, so their (optional) argument
+// names the file to test.
+DIAG(err_file_argument, Error, "'%0' requires a file argument, got '%1'")
+// issue #261: EP §6.7.6.3's card is the cardinality of a set.
+DIAG(err_set_argument, Error, "'%0' requires a set argument, got '%1'")
+// EP §6.7.6.5: succ/pred's optional second argument is a step count, always
+// of type integer regardless of what the first argument's type is.
+DIAG(err_step_argument_not_integer, Error,
+     "the second argument of '%0' must be an integer, got '%1'")
 DIAG(err_write_param_type, Error, "'%0' cannot be written; a write-parameter is an integer, real, boolean, char or string value")
+// ISO §6.9.3.1 / EP §6.10.3.1: a write-parameter's field-width and its
+// fraction-digits (the expressions after the colons in `e:w:d`) are
+// themselves integer-expressions -- not the value being written, which
+// err_write_param_type above already covers.
+DIAG(err_write_field_not_integer, Error, "write field-%0 must be an integer expression, got '%1'")
 // EP §6.9.2.2: the value assigned shall not be longer than the capacity.
 DIAG(err_string_too_long, Error, "string of length %0 does not fit a string(%1)")
 // ISO §6.4.3.2: a packed array[1..n] of char holds exactly n characters.
@@ -136,9 +177,14 @@ DIAG(err_assign_mismatch_homonym, Error,
 DIAG(err_if_not_boolean, Error, "condition of 'if' must be boolean, got '%0'")
 DIAG(err_while_not_boolean, Error, "condition of 'while' must be boolean, got '%0'")
 DIAG(err_for_var_undefined, Error, "undefined variable '%0' in for statement")
+DIAG(err_for_var_not_variable, Error, "for-loop control variable '%0' is not a variable")
 DIAG(err_for_var_not_ordinal, Error, "for-loop variable '%0' must be an ordinal type; got '%1'")
 DIAG(err_for_var_not_local, Error, "for-loop control variable '%0' must be declared in the immediately enclosing block")
 DIAG(err_for_bounds_incompatible, Error, "for-loop bounds have incompatible types ('%0' and '%1')")
+// ISO §6.8.3.9: a bound's value is assigned to the control variable each
+// iteration, so it must be assignment-compatible with the variable's type --
+// not merely with the OTHER bound, which err_for_bounds_incompatible checks.
+DIAG(err_for_bound_wrong_type, Error, "for-loop bound has type '%0', incompatible with control variable '%1' of type '%2'")
 // ISO 7185 §6.8.3.9: The for-loop control variable must not be modified, read into,
 // or passed as a var parameter within the loop body or any called procedure.
 // ISO 7185 §6.8.3.9: The for-loop control variable must not be modified, read into,
@@ -155,9 +201,6 @@ DIAG(err_undefined_procedure, Error, "undefined procedure '%0'")
 // ISO 7185 §6.9.3: write/writeln require at least one value argument.
 // ISO 7185 §6.9.3: write/writeln require at least one value argument.
 DIAG(err_write_requires_args, Error, "write requires at least one argument")
-// ISO 7185 §6.9.2: readln is only valid for text files.
-// ISO 7185 §6.9.2: readln is only valid for text files.
-DIAG(err_readln_not_text, Error, "readln is only valid for text files, got 'file of %0'")
 // ISO 7185 §6.6.5.2: The type read from a file must match the variable type.
 // ISO 7185 §6.6.5.2: The type read from a file must match the variable type.
 DIAG(err_read_type_mismatch, Error, "type mismatch in read: file element type is '%0', but variable has type '%1'")
@@ -169,6 +212,13 @@ DIAG(err_read_type_mismatch, Error, "type mismatch in read: file element type is
 DIAG(err_read_param_type, Error,
      "'%0' cannot be read into; a read-parameter is an integer, real or char "
      "variable")
+// ISO §6.9.1 / §6.9.2: read(v) and readln(v) are defined as v := f^, so a
+// read target must be a variable-access exactly as an assignment's
+// left-hand side is (err_lhs_not_lvalue).  Nothing enforced that, so
+// `read(5)` or `read(someFunc())` reached codegen with no storage to read
+// into and either aborted the compiler outright or silently read into a
+// throwaway temporary that nothing could ever see.
+DIAG(err_read_not_variable, Error, "read/readln target must be a variable, got '%0'")
 // EP §6.7.6.7: EQ/LT/GT/NE/LE/GE's arguments "shall each be of char-type or
 // the canonical-string-type" — the same requirement §6.8.3.6 gives '+'.
 DIAG(err_string_fn_arg_type, Error,
@@ -188,7 +238,26 @@ DIAG(err_pack_operand_not_array_unpacked, Error,
      "%0 expects an array as its unpacked argument, got '%1'")
 DIAG(err_pack_operand_not_array_packed, Error,
      "%0 expects an array as its packed argument, got '%1'")
+// ISO 7185 §6.6.5.4: the unpacked operand's type shall not be packed, and
+// the packed operand's shall be -- that direction is the entire meaning of
+// "pack" and "unpack".  Two diagnostics for the same reason as the pair
+// above: %0 is 'pack' or 'unpack' and stays a call, not a description.
+DIAG(err_pack_operand_not_unpacked, Error,
+     "%0's unpacked argument must not be packed, got '%1'")
+DIAG(err_pack_operand_not_packed, Error,
+     "%0's packed argument must be packed, got '%1'")
+// ISO 7185 §6.6.5.4: a and z shall have identical component types.  CodeGen
+// lowers the transfer as one memcpy sized from the unpacked side's element
+// type alone, so this has to be identity and not mere assignment
+// compatibility -- an integer->real widening is a value conversion a raw
+// copy cannot perform, and would silently move the wrong bytes.
+DIAG(err_pack_element_type_mismatch, Error,
+     "%0: unpacked array has component type '%1', packed array has component type '%2'")
 DIAG(err_with_non_record, Error, "'with' expects a record variable, got '%0'")
+// ISO §6.8.3.10 / EP §6.8.3.10: a with-statement's record-variable is a
+// variable-access, not any record-valued expression -- a function call's
+// result has no storage for a with-bound field write to land in.
+DIAG(err_with_not_variable, Error, "'with' requires a variable, not an expression of type '%0'")
 DIAG(err_goto_undefined, Error, "undefined label '%0'")
 // ISO 7185 §6.8.1: A goto may not leave the immediately enclosing block
 // or transfer control into a structured statement.
@@ -196,6 +265,13 @@ DIAG(err_goto_undefined, Error, "undefined label '%0'")
 // or transfer control into a structured statement.
 DIAG(err_goto_outer_block, Error, "goto '%0' leaves this block for a label that is not at the outermost level of the block declaring it")
 DIAG(err_goto_into_structured, Error, "goto '%0' jumps into a structured statement")
+// EP §6.11.2: a module's 'to begin do'/'to end do' runs once and returns,
+// unlike a program's block or an enclosing procedure, which stay on the call
+// stack for as long as anything nested in them could still run.  A procedure
+// the module declares stays callable for the rest of the program's life, so a
+// non-local goto from one back into the module's own block could resume an
+// activation that has already ended.
+DIAG(err_goto_module_block, Error, "goto '%0' cannot reach a label of a module's block from one of the module's procedures")
 DIAG(err_label_not_declared, Error, "label '%0' used as a statement but not declared in label section")
 DIAG(err_label_wrong_block, Error, "label '%0' is declared in an enclosing block, so the statement it labels must be in that block too")
 DIAG(err_case_selector_not_ordinal, Error, "case selector must be an ordinal type, got '%0'")
@@ -209,6 +285,15 @@ DIAG(err_case_label_duplicate, Error, "case label %0 is used by more than one ar
 // compiled into a plausible-looking one.
 DIAG(err_case_label_not_const, Error, "case label is not a constant")
 DIAG(err_variant_label_duplicate, Error, "case label %0 is used by more than one variant")
+// ISO §6.4.3.3: tag-type is an ordinal-type, whether or not a tag-field name
+// was written before it ('case b: boolean of' vs. anonymous 'case boolean of').
+DIAG(err_variant_tag_not_ordinal, Error, "variant tag type must be an ordinal type, got '%0'")
+// ISO §6.4.3.3: a variant's case-constants are values of the tag field's own
+// type, the same rule a case-statement's labels are held to against its
+// selector (err_case_label_mismatch) -- worded separately because this one
+// names a declared tag type rather than a selector expression's type.
+DIAG(err_variant_label_type, Error,
+     "variant case-constant has type '%0', which is not compatible with tag type '%1'")
 DIAG(err_line_proc_not_text, Error, "'%0' applies to a text file only, not to 'file of %1'")
 DIAG(err_assign_file, Error, "a variable of a file type, or with a file component, cannot be assigned")
 DIAG(err_function_result_type, Error, "a function result must be a simple or pointer type, not '%0'")
@@ -227,7 +312,24 @@ DIAG(err_set_base_too_wide, Error,
 DIAG(err_set_lit_too_wide, Error,
      "set constructor spans %0..%1, which exceeds the %2-element limit on sets")
 DIAG(err_file_component_is_file, Error, "file component type must not itself be a file type")
-DIAG(err_file_field_has_file, Error, "file component type must not contain a file field (field '%0' is a file type)")
+// Issue #167: this used to only look one record level deep -- a field
+// directly on the component record -- so a file nested inside an array, or
+// inside a record nested inside another record (etc.), was silently
+// accepted.  typeContainsFile already walks arrays, records, conformant
+// arrays and schema bodies recursively for the assignment/parameter/
+// result-type checks below; this reuses it here too, so this one
+// diagnostic now also covers the direct-field case that the old,
+// since-removed err_file_field_has_file used to report on its own.
+DIAG(err_file_component_has_file, Error,
+     "'%0' contains a file type inside a record or array, and cannot be a file's component type")
+// Issue #241: get/read/put/position all derive the file's component stride
+// from this type's byte size, and disagree about what a zero-size component
+// means -- fread and an fseek(0) are no-ops, so read never moves the file
+// position (eof can never become true: an infinite loop), while get's
+// single-character lookahead fallback moves it by one byte regardless, as
+// though the component were a char. No stride reconciles both, so the type
+// is rejected instead.
+DIAG(err_file_component_zero_size, Error, "'%0' has zero size and cannot be a file's component type")
 DIAG(err_string_cap_not_int, Error, "string capacity must be an integer constant expression")
 DIAG(err_string_cap_not_positive, Error, "string capacity must be positive; got %0")
 // ISO §6.4.3.2, §6.4.2.4: an index type and a subrange are written with
@@ -252,6 +354,16 @@ DIAG(err_array_index_not_ordinal, Error,
      "an index type is an ordinal type with a bounded range")
 DIAG(err_bound_range_inverted, Error,
      "lower bound %0 exceeds upper bound %1, so the type has no values")
+// ISO §6.4.2.2: a subrange-type's two bounds are constants of the SAME
+// ordinal type, which becomes the subrange's host type; ISO §6.4.3.2 makes
+// an index type written as a range the same rule.  Each bound used to be
+// checked only for being ordinal on its own, never against the OTHER
+// bound, so `1..b` (integer, enum) and `'a'..100` (char, integer) were
+// both silently accepted with whichever bound came first deciding the
+// host type and the other's disagreement going unheard (issue #251).
+DIAG(err_bound_types_differ, Error,
+     "lower bound has type '%0' but upper bound has type '%1'; "
+     "both bounds of a range must be of the same ordinal type")
 // ISO §6.6.3.1: procedural and functional parameters
 DIAG(err_proc_param_needs_proc_name, Error,
      "parameter '%0' is a procedural parameter, so the argument must be the name "
@@ -284,21 +396,41 @@ DIAG(err_forward_return_type, Error, "return type of '%0' does not match forward
 DIAG(err_function_no_result_type, Error,
      "function '%0' has no result type; only the defining occurrence of a "
      "function declared 'forward' may leave it out")
+// ISO §6.6.1: the forward directive promises a defining occurrence of the
+// same procedure- or function-identifier "later in the same block".
+// Nothing audited that promise, so a forward declaration with no matching
+// definition compiled clean and only failed at link time, against the
+// mangled name rather than the source identifier that is actually missing.
+DIAG(err_forward_never_defined, Error,
+     "'%0' is declared 'forward' but is never given a defining declaration "
+     "in this block")
 
 // EP Tier 5 — Function/Procedure Enhancements
 DIAG(err_protected_param_assigned, Error, "assignment to protected parameter '%0' (EP §6.7.3.1)")
+// EP §6.7.3.7.1 NOTE 2: a conformant-array bound identifier denotes the
+// actual argument's bound and is neither constant nor a variable -- it may
+// be read but not assigned.
+DIAG(err_conformant_bound_assigned, Error,
+     "assignment to conformant-array bound '%0' (EP §6.7.3.7.1)")
 DIAG(err_type_of_undefined, Error, "'type of %0': '%0' is not defined")
 DIAG(err_for_in_not_set, Error, "'for ... in' requires a set-type expression, got '%0'")
 DIAG(err_for_in_var_scope, Error, "loop variable '%0' in 'for ... in' must be a new name in this scope")
 DIAG(err_conformant_actual_not_array, Error, "conformant array parameter '%0' requires an array argument, got '%1'")
 DIAG(err_conformant_elem_mismatch, Error, "element type mismatch for conformant array parameter '%0': expected '%1', got '%2'")
+// ISO §6.7.3.8 a) and d): the other two ways an array argument can fail to
+// be conformable with a conformant-array-schema, checked before the element
+// type so a mismatch there is not misreported as an element-type mismatch
+// when the element types actually agree (see isConformable).
+DIAG(err_conformant_index_type_mismatch, Error,
+     "index type mismatch for conformant array parameter '%0': schema expects '%1', argument has '%2'")
+DIAG(err_conformant_packed_mismatch, Error,
+     "conformant array parameter '%0' is %1 but the argument is %2")
 
 // EP §6.4.7: Schema types
 DIAG(err_schema_not_defined, Error, "'%0' is not a schema type")
 // TRANSLATORS: "discriminant(s)" is an English plural dodge.
 DIAG(err_schema_wrong_arg_count, Error, "schema '%0' expects %1 discriminant(s), got %2")
 DIAG(err_schema_disc_not_const, Error, "schema discriminant '%0' must be a constant expression")
-DIAG(err_schema_disc_type_mismatch, Error, "schema discriminant '%0' has wrong type")
 DIAG(err_schema_undiscriminated, Error,
      "schema '%0' needs its discriminants here, as in '%0(...)'; a schema name "
      "stands alone only as a parameter type or as the domain of a pointer")
@@ -311,6 +443,15 @@ DIAG(err_schema_body_not_representable, Error,
      "array body recomputes its extent from them at run time, and any other "
      "body needs their values to lay itself out and to range-check; Extended "
      "Pascal allows this, so write them out, as in '%0(...)'")
+// ISO 7185 §6.6.5.3: new's first parameter is a pointer variable -- the
+// procedure creates a fresh variable and makes the pointer refer to it.
+// Only the Pointer-Kind case computed a Pointee; every other kind left it
+// null and fell through every check below untouched, so `new(i)` for a
+// plain `integer` i reached CodeGen with nothing to size an allocation from
+// and hit a codegenICE -- an implementation crash where the standard calls
+// for the program to be rejected here.
+DIAG(err_new_arg_not_pointer, Error,
+     "'new' expects a pointer as its first argument, got '%0'")
 // TRANSLATORS: "discriminant(s)" is an English plural dodge.
 DIAG(err_schema_new_needs_discs, Error,
      "'new' for a pointer to schema '%0' needs %1 discriminant(s), got %2")
@@ -327,6 +468,16 @@ DIAG(err_new_string_capacity, Error,
 DIAG(err_schema_not_a_discriminant, Error, "schema '%0' has no discriminant '%1'")
 DIAG(err_schema_arg_not_schematic, Error,
      "argument for parameter '%0' must be a '%1', got '%2'")
+// ISO §6.6.5.3: new/dispose's extra arguments for a record with a variant
+// part are its case-constants, one per nested variant level actually
+// selected, each a value of that level's own tag type -- the same rule
+// err_variant_label_type enforces at the declaration itself.  %0 is 'new'
+// or 'dispose', so the two share one message instead of near-duplicates.
+DIAG(err_variant_tag_arg_type, Error,
+     "'%0' case-constant has type '%1', which is not compatible with "
+     "variant tag type '%2'")
+DIAG(err_variant_tag_arg_extra, Error,
+     "'%0' was given more case-constants than '%1' has variant levels to select")
 
 // EP §6.8.7: Structured value constructors
 DIAG(err_constructor_type_not_found, Error, "type '%0' not found for value constructor")

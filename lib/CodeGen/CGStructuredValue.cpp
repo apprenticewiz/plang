@@ -6,6 +6,7 @@
 #include "llvm/Support/Casting.h"
 
 #include "plang/AST/Ast.h"
+#include "plang/Basic/Arith.h"
 #include "plang/Basic/StringUtil.h"
 
 #include "CodegenICE.h"
@@ -96,12 +97,22 @@ llvm::Value* CGStructuredValue::emitStructuredValue(const StructuredValueExpr& e
         if (!range)
             codegenICE("array constructor has bounds that neither folded nor "
                        "Sema can give");
-        const int64_t lo    = range->first;
-        const int64_t hi    = range->second;
-        const int64_t count = (hi >= lo) ? (hi - lo + 1) : 0;
+        const int64_t lo = range->first;
+        const int64_t hi = range->second;
+        // See ordinalRangeCount: "hi - lo + 1" done directly in int64_t is
+        // signed-overflow UB once the bounds are far enough apart, and this
+        // constructor's bounds come straight from the array's declaration --
+        // the same denoter llvmTypeOfSemaTypeImpl guards for exactly this
+        // reason -- so an `(otherwise 0)` default-fill literal for a
+        // declaration like array[low(int64)..high(int64)] reached this
+        // unguarded (issue #215).
+        const auto count = ordinalRangeCount(lo, hi);
+        if (!count)
+            codegenICE("array constructor has more elements than plang can "
+                       "represent");
 
         auto* arrTy = llvm::ArrayType::get(Types.llvmTypeOfNode(*atn->Element),
-                                            static_cast<uint64_t>(count));
+                                            *count);
         auto* elemTy = arrTy->getElementType();
         auto* alloca = CreateEntryAlloca(arrTy, "arr.ctor");
         B.CreateStore(llvm::Constant::getNullValue(arrTy), alloca);
@@ -178,7 +189,14 @@ llvm::Value* CGStructuredValue::emitStructuredValue(const StructuredValueExpr& e
 
         // The layout, rather than a map built here from the fixed fields: it
         // covers the tag and the variants too, which were silently dropped.
-        const auto& L      = Types.layoutOf(*rtn);
+        // #197: e.ResolvedType is THIS constructor's own resolved type, not
+        // a shared declaration node re-read for every instantiation, so it
+        // is exactly the semaRec layoutOf wants -- passing it makes a field
+        // that is itself a schema instantiation size from this record's own
+        // instance instead of from whichever instantiation was resolved
+        // last elsewhere in the program (see CGTypes.cpp's R4 comment on
+        // layoutOf).
+        const auto& L      = Types.layoutOf(*rtn, e.ResolvedType.get());
         auto*       st     = L.Ty;
         auto*       alloca = CreateEntryAlloca(st, "rec.ctor");
         B.CreateStore(llvm::Constant::getNullValue(st), alloca);

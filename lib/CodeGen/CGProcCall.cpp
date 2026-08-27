@@ -98,9 +98,15 @@ void CGProcCall::emitCallStmt(const CallStmt& s) {
     }
     if (lo == "close" && !s.Args.empty()) {
         auto* fp = FileVars.fileVarPtr(*s.Args[0]);
+        // §6.4.3.5, same as reset/rewrite just above: closing a file being
+        // written has to finish whatever line write left open, and whether
+        // there is a line to finish is a question only about a text file
+        // (issue #234).
         auto* fn = RtFns.getExternFnN("plang_close",
-            llvm::Type::getVoidTy(Ctx), {PtrTy});
-        B.CreateCall(fn, {fp});
+            llvm::Type::getVoidTy(Ctx), {PtrTy, I8Ty});
+        B.CreateCall(fn, {fp,
+            llvm::ConstantInt::get(I8Ty,
+                FileVars.isTypedBinaryFileVar(*s.Args[0]) ? 0 : 1)});
         return;
     }
     // EP §6.7.5.2: extend / update
@@ -112,9 +118,15 @@ void CGProcCall::emitCallStmt(const CallStmt& s) {
         auto* nm = s.Args.size() > 1
             ? StrCall.emitCStrArg(*s.Args[1])
             : llvm::ConstantPointerNull::get(PtrTy);
+        // Same text-file line-finishing question as close, just above
+        // (issue #234): extend in particular reopens (or reuses) F's stream
+        // for appending, and an unfinished line left there would otherwise
+        // glue straight onto whatever gets appended next.
         auto* fn = RtFns.getExternFnN("plang_" + lo,
-            llvm::Type::getVoidTy(Ctx), {PtrTy, PtrTy});
-        B.CreateCall(fn, {fp, nm});
+            llvm::Type::getVoidTy(Ctx), {PtrTy, PtrTy, I8Ty});
+        B.CreateCall(fn, {fp, nm,
+            llvm::ConstantInt::get(I8Ty,
+                FileVars.isTypedBinaryFileVar(*s.Args[0]) ? 0 : 1)});
         return;
     }
     // EP §6.7.5.2: SeekRead / SeekWrite / SeekUpdate.  n is a value of the
@@ -180,8 +192,13 @@ void CGProcCall::emitCallStmt(const CallStmt& s) {
         if (const auto& pt = s.Args[0]->ResolvedType;
                 pt && pt->Kind == TypeKind::Pointer && pt->PointeeType
                 && pt->PointeeType->Kind == TypeKind::Schema) {
-            Schema.emitNewSchema(*s.Args[0], *pt->PointeeType,
+            auto ref = Schema.emitNewSchema(*s.Args[0], *pt->PointeeType,
                           std::span(s.Args).subspan(1));
+            // EP §6.6 with §6.7.5.3: the instance new() creates begins in the
+            // same initial state a declared one would (see the plain-pointer
+            // case below) -- plang_new's calloc zeroed it instead, which is
+            // not the same thing wherever the body has a `value` clause.
+            EmitSchemaInitialState(ref.data, *pt->PointeeType, ref.discs);
             return;
         }
         auto* addr = EmitLValue(*s.Args[0]);

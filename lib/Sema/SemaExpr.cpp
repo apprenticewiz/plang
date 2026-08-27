@@ -100,23 +100,20 @@ void Sema::warnIfComparisonIsSettled(const BinaryExpr& E, const Type& Lt,
 // Expression checking
 // ---------------------------------------------------------------------------
 
-// Ceiling on live checkExpr activations (Sema::ExprDepth).  1000 levels of
-// recursion through checkExpr -> checkBinary/checkUnary/... -> checkExpr is
-// well under the crash threshold observed empirically on this build's
-// default 8MB stack (a flat chain starts crashing a few thousand terms in),
-// while no legitimate Pascal expression -- handwritten or reasonably
-// generated -- nests anywhere close to this deep. Unlike deeply NESTED
-// parenthesized input, which Parser::ExprDepth (see ParseExpr.cpp) already
-// bounds, a flat operator chain like `1+1+1+...+1` is parsed ITERATIVELY by
-// precedence climbing, so its AST can be arbitrarily deep with no parser-side
-// ceiling on it; checkExpr's own recursive walk of that AST is the first
-// place this needs a guard.
-static constexpr unsigned MaxExprDepth = 1000;
+// Ceiling on live checkExpr activations (Sema::ExprDepth).  Unlike deeply
+// NESTED parenthesized input, which Parser::ExprDepth (see ParseExpr.cpp)
+// already bounds, a flat operator chain like `1+1+1+...+1` is parsed
+// ITERATIVELY by precedence climbing, so its AST can be arbitrarily deep with
+// no parser-side ceiling on it; checkExpr's own recursive walk of that AST is
+// the first place this needs a guard.  MaxExprDepth/ExprDepth/
+// ExprDepthLimitHit/ExprDepthScope are declared on Sema (Sema.h) rather than
+// here, now that constBound/buildExtentForm (SemaType.cpp) share them too --
+// see the comment there.
 
 std::shared_ptr<Type> Sema::checkExpr(const ExprNode& E) {
-    // See MaxExprDepth above. Checked before the RAII bump: a caller already
-    // sitting at the ceiling must return without recursing again, not recurse
-    // once more and only then stop.
+    // See MaxExprDepth (Sema.h). Checked before the RAII bump: a caller
+    // already sitting at the ceiling must return without recursing again,
+    // not recurse once more and only then stop.
     if (ExprDepth >= MaxExprDepth) {
         if (!ExprDepthLimitHit) {
             ExprDepthLimitHit = true;
@@ -164,8 +161,23 @@ std::shared_ptr<Type> Sema::checkExpr(const ExprNode& E) {
     else if (auto* N = llvm::dyn_cast<StructuredValueExpr>(&E)) T = checkStructuredValue(*N);
     else if (auto* N = llvm::dyn_cast<WriteParam>(&E)) {
         T = checkExpr(*N->Value);
-        if (N->Width)    (void)checkExpr(*N->Width);
-        if (N->Decimals) (void)checkExpr(*N->Decimals);
+        // ISO §6.9.3.1 / EP §6.10.3.1: TotalWidth and FracDigits are
+        // integer-expressions.  Left unchecked, a char or real here reached
+        // CodeGen's toI64, which has no diagnostic of its own: a char widens
+        // by its ordinal value (write(x:'a') asks for a field 97 wide) and a
+        // real truncates silently (write(x:2.5) asks for a field 2 wide).
+        if (N->Width) {
+            auto WidthTy = checkExpr(*N->Width);
+            if (!WidthTy->isError() && !WidthTy->isIntegral())
+                error(N->Width->Loc, diag::err_write_field_not_integer,
+                      {"width", WidthTy->Name});
+        }
+        if (N->Decimals) {
+            auto DecimalsTy = checkExpr(*N->Decimals);
+            if (!DecimalsTy->isError() && !DecimalsTy->isIntegral())
+                error(N->Decimals->Loc, diag::err_write_field_not_integer,
+                      {"decimals", DecimalsTy->Name});
+        }
     }
     else if (auto* N = llvm::dyn_cast<SetRangeExpr>(&E)) {
         (void)checkExpr(*N->Low);
@@ -321,8 +333,18 @@ std::shared_ptr<Type> Sema::checkIndex(const IndexExpr& E) {
     }
     // EP §6.7.3.7: conformant arrays are indexed like regular arrays.
     if (ArrTy->Kind == TypeKind::ConformantArray) {
-        if (!IdxTy->isError() && !IdxTy->isOrdinal())
+        const bool IdxNotOrdinal = !IdxTy->isError() && !IdxTy->isOrdinal();
+        if (IdxNotOrdinal)
             error(E.Loc, diag::err_index_not_ordinal, {IdxTy->Name});
+        // ISO §6.5.3.2: same assignment-compatibility check the plain-Array
+        // branch below makes against IndexType, but against the ordinal type
+        // named in this dimension's index-type-specification -- a conformant
+        // array leaves the BOUNDS unknown until the call, not the index type.
+        const std::shared_ptr<Type> IdxSpecTy = !ArrTy->ConformantBounds.empty()
+            ? ArrTy->ConformantBounds[0].OrdType : nullptr;
+        if (!IdxNotOrdinal && !IdxTy->isError() && IdxSpecTy
+            && !IdxSpecTy->isError() && !isAssignCompatible(*IdxSpecTy, *IdxTy))
+            error(E.Loc, diag::err_index_type_mismatch, {IdxTy->Name, IdxSpecTy->Name});
         return ArrTy->ElemType ? ArrTy->ElemType : TyErr;
     }
     if (ArrTy->Kind != TypeKind::Array) {
@@ -686,6 +708,15 @@ std::shared_ptr<Type> Sema::checkBinary(const BinaryExpr& E) {
                 // a base-0 mask.  Plain integer is skipped deliberately: it
                 // spans too much to be a window, so the constructor keeps the
                 // one it derived from its own elements.
+                //
+                // Ctx_.getSet is a bare interning factory with no width
+                // opinion of its own -- the OTHER caller (SemaType.cpp, for a
+                // named `set of Base`) checks the base type before ever
+                // calling it, and synthesizing a set type here has to be held
+                // to the same limit or a >256-value ordinal (an enum, most
+                // plausibly) silently truncates in the bitmask instead of
+                // being reported: `e in [v256]` read as false for e = v256.
+                checkSetBaseRange(*Lt, E.Loc);
                 adoptSetType(*E.Right, Ctx_.getSet(Lt, false));
             } else if (!Lt->isError() && Rt->ElemType && !Rt->ElemType->isError()) {
                 // Check base type compatibility.
@@ -775,6 +806,24 @@ std::shared_ptr<Type> Sema::checkCallExpr(const CallExpr& E) {
     if (Sym->Kind == SymbolKind::Builtin) {
         E.ResolvedBuiltin = Sym->BuiltinKind;
         std::string Lo = toLower(E.Name);
+
+        // Mirror of checkCallStmt's err_func_as_statement check, in the
+        // other direction: a builtin PROCEDURE has no result, so calling one
+        // where an expression is expected is exactly what
+        // checkUserDefinedCall already refuses for a user-defined procedure
+        // via err_proc_cannot_return_value.  Builtins skipped that check —
+        // Sym->ReturnType is null for a procedure, so this fell through
+        // every special-cased builtin below to the generic `return
+        // Sym->ReturnType ? ... : TyErr` at the end of this arm, handing
+        // back TyErr with no diagnostic at all.  Sema recorded no error, so
+        // the driver went on to CodeGen, which had a call to a void builtin
+        // where a value was expected and trapped (issue #222).
+        if (!Sym->IsFunction) {
+            error(E.Loc, diag::err_proc_cannot_return_value, {E.Name});
+            for (const auto& Arg : E.Args) (void)checkExpr(*Arg);
+            return TyErr;
+        }
+
         if (!checkEPOnly(*Sym, E.Loc)) {
             for (const auto& Arg : E.Args) (void)checkExpr(*Arg);
             return TyErr;
@@ -783,12 +832,26 @@ std::shared_ptr<Type> Sema::checkCallExpr(const CallExpr& E) {
             for (const auto& Arg : E.Args) (void)checkExpr(*Arg);
             return TyErr;
         }
-        // §6.6.6.5: eoln asks whether the position is at a line marker, and
-        // only a text file has those.  eof applies to any file and is not
-        // restricted here.
-        if (Lo == "eoln" && !E.Args.empty()) {
+        // §6.6.6.5: eof and eoln read a file's status, so an argument, when
+        // given, names the file being tested.  An ordinary variable was
+        // accepted here with no check at all -- the diagnostic just below
+        // this one fires only once the argument is already known to be a
+        // file, so an integer or any other non-file type sailed past both.
+        // CodeGen's lowering only recognizes a genuine file variable
+        // (FileVars.isFileVar) and falls back to testing the standard input
+        // file for anything else, so `eof(i)` for a plain integer i compiled
+        // to testing INPUT's own eof status and silently discarded 'i'
+        // (issue #261).
+        if ((Lo == "eof" || Lo == "eoln") && !E.Args.empty()) {
             auto ArgTy = checkExpr(*E.Args[0]);
-            if (ArgTy->Kind == TypeKind::File && ArgTy->ElemType
+            if (!ArgTy->isError() && ArgTy->Kind != TypeKind::File) {
+                error(E.Args[0]->Loc, diag::err_file_argument, {Lo, ArgTy->Name});
+                return TyErr;
+            }
+            // eoln asks whether the position is at a line marker, and only a
+            // text file has those.  eof applies to any file and is not
+            // restricted here.
+            if (Lo == "eoln" && ArgTy->Kind == TypeKind::File && ArgTy->ElemType
                 && ArgTy->ElemType->Kind != TypeKind::Char)
                 error(E.Args[0]->Loc, diag::err_line_proc_not_text,
                       {Lo, ArgTy->ElemType->Name});
@@ -801,14 +864,32 @@ std::shared_ptr<Type> Sema::checkCallExpr(const CallExpr& E) {
             // EP §6.7.6.2: abs(complex) → real; sqr(complex) → complex.
             if (ArgTy->Kind == TypeKind::Complex)
                 return (Lo == "abs") ? TyReal : TyComplex;
-            return (ArgTy->isNumeric() || ArgTy->isOrdinal()) ? ArgTy : TyErr;
+            // ISO §6.6.6.2: abs and sqr take an integer-type or real-type
+            // argument.  isOrdinal() also admits boolean, char and
+            // enumerations -- ordinal but not numeric -- so this accepted
+            // `abs(true)` and typed it as boolean (abs of an ordinal
+            // returned the argument's own type unexamined) instead of
+            // rejecting it.  The rejecting branch also reported nothing at
+            // all: an argument that failed both checks (a string, record,
+            // or set) produced TyErr with no diagnostic, so Sema recorded no
+            // error and the driver went on to CodeGen with a call it cannot
+            // lower (issue #261).
+            if (!ArgTy->isError() && !ArgTy->isNumeric()) {
+                error(E.Args[0]->Loc, diag::err_numeric_argument, {Lo, ArgTy->Name});
+                return TyErr;
+            }
+            return ArgTy;
         }
         // ISO §6.6.6.4: succ and pred stay in the argument's type, so
         // succ('a') is a char and succ(red) is the enumeration's next value.
         // EP §6.7.6.5 adds the two-argument form, which does not change this.
         if ((Lo == "succ" || Lo == "pred") && !E.Args.empty()) {
             auto ArgTy = checkExpr(*E.Args[0]);
-            for (size_t I = 1; I < E.Args.size(); ++I) (void)checkExpr(*E.Args[I]);
+            std::shared_ptr<Type> StepTy;
+            for (size_t I = 1; I < E.Args.size(); ++I) {
+                auto T = checkExpr(*E.Args[I]);
+                if (I == 1) StepTy = T;
+            }
             if (E.Args.size() > 1 && !Opts.extendedPascal()) {
                 error(E.Loc, diag::err_ep_two_arg_form, {Lo});
                 return TyErr;
@@ -818,7 +899,57 @@ std::shared_ptr<Type> Sema::checkCallExpr(const CallExpr& E) {
                 error(E.Loc, diag::err_ordinal_argument, {Lo, ArgTy->Name});
                 return TyErr;
             }
+            // EP §6.7.6.5: the step count k is a separate value from x and is
+            // always of type integer, whatever x's type is -- succ(x, k)
+            // does not walk k steps through x's own type the way succ(x)
+            // walks one, so a char or boolean k has no more meaning than a
+            // real one does.  This was never checked, so `succ(5, 'a')`
+            // silently walked ord('a') steps (issue #261).
+            if (StepTy && !StepTy->isError() && !StepTy->isIntegral()) {
+                error(E.Args[1]->Loc, diag::err_step_argument_not_integer,
+                      {Lo, StepTy->Name});
+                return TyErr;
+            }
             return ArgTy;
+        }
+        // ISO §6.6.6.4 (ord, chr) / §6.6.6.5 (odd): all three transfer between
+        // an ordinal value and its ordinal position -- ord(x) is x's position,
+        // chr(x) is the value at position x, odd(x) reads position x's low
+        // bit -- so, like succ/pred just above, the argument has to be
+        // ordinal. Unlike succ/pred none of the three were special-cased
+        // here, so they fell through to the generic "check each argument,
+        // trust the declared return type" path below with nothing stopping a
+        // non-ordinal argument. CodeGen has nothing valid to lower one to
+        // either: ord's case zext's its operand unconditionally, so
+        // ord(1.5) reached the LLVM verifier as `zext double ... to i64`
+        // and aborted the compiler instead of Sema reporting it (issue #212).
+        if ((Lo == "ord" || Lo == "chr" || Lo == "odd") && !E.Args.empty()) {
+            auto ArgTy = checkExpr(*E.Args[0]);
+            if (ArgTy->isError()) return TyErr;
+            if (!ArgTy->isOrdinal()) {
+                error(E.Loc, diag::err_ordinal_argument, {Lo, ArgTy->Name});
+                return TyErr;
+            }
+            return Sym->ReturnType ? Sym->ReturnType : TyErr;
+        }
+        // ISO §6.6.6.3: trunc and round convert a real value to an integer,
+        // so the argument has to be numeric the same way sqrt/sin/... below
+        // require -- and, unlike those, there is no complex extension for
+        // either (EP does not give trunc/round a complex form).  Neither was
+        // special-cased here, so they fell through with nothing to stop a
+        // non-numeric argument: CodeGen's lowering (ToDouble, an
+        // unconditional signed-int-to-double conversion) has no case for a
+        // non-scalar type such as a string or record, and turns a char or
+        // boolean's raw ordinal value into a number nobody asked for instead
+        // of being rejected (issue #261).
+        if ((Lo == "trunc" || Lo == "round") && !E.Args.empty()) {
+            auto ArgTy = checkExpr(*E.Args[0]);
+            if (ArgTy->isError()) return TyErr;
+            if (!ArgTy->isNumeric() || ArgTy->Kind == TypeKind::Complex) {
+                error(E.Args[0]->Loc, diag::err_numeric_argument, {Lo, ArgTy->Name});
+                return TyErr;
+            }
+            return Sym->ReturnType ? Sym->ReturnType : TyErr;
         }
         // EP §6.7.6.7: substr/trim return the same string capacity as their
         // input.  ISO §6.4.3.2's other string shape -- a packed array[1..n] of
@@ -832,7 +963,54 @@ std::shared_ptr<Type> Sema::checkCallExpr(const CallExpr& E) {
             if (isVarStringLike(ArgTy.get())) return ArgTy;
             if (!ArgTy->isError() && isCharStringType(*ArgTy))
                 return Ctx_.getVarString(charStringLength(*ArgTy));
+            // A bare char and the generic (unsized) string kind are
+            // string-like too -- neither isVarStringLike nor isCharStringType
+            // covers them, the same widening the eq/ne/lt/gt/le/ge case below
+            // already makes -- and this fell through to `return TyStr` for
+            // those the same as it did for a genuinely wrong argument: every
+            // shape that reached here type-checked with no diagnostic at
+            // all, so `substr(i, 1, 2)` for a plain integer i compiled
+            // silently and reached a CodeGen path with no call to lower it
+            // to (issue #261).
+            if (!ArgTy->isError() && ArgTy->Kind != TypeKind::Char
+                    && ArgTy->Kind != TypeKind::String)
+                error(E.Args[0]->Loc, diag::err_string_fn_arg_type, {Lo, ArgTy->Name});
             return TyStr;
+        }
+        // EP §6.7.6.7: length and index are the same string-function family
+        // as substr/trim just above and eq/ne/... below, and had no argument
+        // check of their own: every argument type-checked regardless, so
+        // `length(i)` or `index(i, c)` for a plain integer i compiled with
+        // nothing to reject them.  CodeGen's fallback for anything it does
+        // not recognize as string-shaped is worse for length than the link
+        // failure substr's got: it calls libc strlen on the raw integer
+        // value reinterpreted as a pointer (issue #261).
+        if ((Lo == "length" || Lo == "index") && !E.Args.empty()) {
+            for (const auto& Arg : E.Args) {
+                auto T = checkExpr(*Arg);
+                if (T->isError()) continue;
+                const bool StringLike = isVarStringLike(T.get())
+                    || isCharStringType(*T)
+                    || T->Kind == TypeKind::Char || T->Kind == TypeKind::String;
+                if (!StringLike)
+                    error(Arg->Loc, diag::err_string_fn_arg_type, {Lo, T->Name});
+            }
+            return Sym->ReturnType ? Sym->ReturnType : TyErr;
+        }
+        // EP §6.7.6.3: card is the cardinality of a set, so its argument must
+        // be one.  This had no check at all, so `card(i)` for a plain
+        // integer i type-checked with nothing to reject it: CodeGen's
+        // lowering (population-count on the set's own bit-vector
+        // representation) reads whatever value is there regardless, so it
+        // silently population-counted i's bit pattern instead (issue #261).
+        if (Lo == "card" && !E.Args.empty()) {
+            auto ArgTy = checkExpr(*E.Args[0]);
+            if (ArgTy->isError()) return TyErr;
+            if (ArgTy->Kind != TypeKind::Set) {
+                error(E.Args[0]->Loc, diag::err_set_argument, {Lo, ArgTy->Name});
+                return TyErr;
+            }
+            return Sym->ReturnType ? Sym->ReturnType : TyErr;
         }
         // EP §6.7.6.2: math functions extended to complex — return complex when
         // the argument is complex, real otherwise.
@@ -841,6 +1019,14 @@ std::shared_ptr<Type> Sema::checkCallExpr(const CallExpr& E) {
             auto ArgTy = checkExpr(*E.Args[0]);
             for (size_t I = 1; I < E.Args.size(); ++I) (void)checkExpr(*E.Args[I]);
             if (ArgTy->Kind == TypeKind::Complex) return TyComplex;
+            // ISO §6.6.6.2: these take an integer-type or real-type argument
+            // (isNumeric() covers both, plus a subrange of either) -- this
+            // was never checked, so `sqrt('a')` compiled with no diagnostic
+            // at all and was always typed real (issue #261).
+            if (!ArgTy->isError() && !ArgTy->isNumeric()) {
+                error(E.Args[0]->Loc, diag::err_numeric_argument, {Lo, ArgTy->Name});
+                return TyErr;
+            }
             return Sym->ReturnType ? Sym->ReturnType : TyErr; // TyReal
         }
         // EP §6.7.6.3: complex constructors.
@@ -1231,10 +1417,18 @@ bool Sema::typeContainsFile(const Type& T) {
             if (F.Ty && typeContainsFile(*F.Ty)) return true;
         return false;
     // An array of files holds files as surely as a record of them does, and
-    // was the way round the rule.
+    // was the way round the rule.  A conformant array (EP §6.7.3.7) is the
+    // same rule with its element type carried in the same field.
     case TypeKind::Array:
     case TypeKind::Set:
+    case TypeKind::ConformantArray:
         return T.ElemType && typeContainsFile(*T.ElemType);
+    // EP §6.4.7: a schema's body is itself a record or array assembled from
+    // these same building blocks (see SchemaBody), so a file anywhere in it
+    // is exactly as forbidden as one in an ordinary field or element.
+    case TypeKind::SchemaInstance:
+    case TypeKind::Schema:
+        return T.SchemaBody && typeContainsFile(*T.SchemaBody);
     default:               return false;
     }
 }
@@ -1242,11 +1436,31 @@ bool Sema::typeContainsFile(const Type& T) {
 namespace {
 
 // EP §6.4.7: Returns true if two SchemaInstance types represent the same
-// instantiation (same schema name and identical discriminant values).
+// instantiation of the same schema DECLARATION.
+//
+// A schema is identified by its declaration, not by its spelling -- see
+// isAssignCompatible's SchemaInstance arm (c03cd04) for the story: two
+// `vec(3)` from unconnected declarations are two different types even though
+// they print alike and share every discriminant value.  That fix taught
+// assignment compatibility the rule but left this function, which backs
+// var-parameter identity (ISO §6.6.3.3) and forward-declaration congruity
+// (ISO §6.6.3.6), still comparing spellings -- so a `var` formal happily
+// aliased an unrelated same-named schema instance across a scope boundary.
+//
+// Unlike isAssignCompatible there is no falling back to comparing bodies
+// when both declarations are known and differ: identity, not mere structural
+// resemblance, is what a var parameter and a re-declared heading require.
 bool schemaInstMatch(const Type& A, const Type& B) {
     if (A.Kind != TypeKind::SchemaInstance || B.Kind != TypeKind::SchemaInstance)
         return false;
-    if (A.SchemaName != B.SchemaName) return false;
+    // Where a declaration is unknown on either side -- separate compilation
+    // gives the same schema a different node in each unit -- the name and
+    // discriminants are all that is left to compare.
+    if (A.SchemaBodyNode && B.SchemaBodyNode && A.SchemaBodyNode != B.SchemaBodyNode)
+        return false;
+    // Pascal identifiers are case-insensitive; see e.g. sameParamType's
+    // undiscriminated-Schema arm and isLValue's discriminant check below.
+    if (!eqCI(A.SchemaName, B.SchemaName)) return false;
     if (A.SchemaDiscs.size() != B.SchemaDiscs.size()) return false;
     for (size_t I = 0; I < A.SchemaDiscs.size(); ++I)
         if (A.SchemaDiscs[I].Value != B.SchemaDiscs[I].Value) return false;
@@ -1392,6 +1606,20 @@ void Sema::checkProcedureActual(const Type& Formal, const std::string& ParamName
     }
 }
 
+/// The ordinal index type of \p T's outermost dimension, for an actual that
+/// may conform to a conformant-array schema: a plain Array's IndexType, or
+/// (when relaying an already-conformant parameter to another one) a
+/// ConformantArray's own first bound's declared type.  Null for anything
+/// else, or when that dimension's type never resolved.  Shared by
+/// isConformable and its caller's diagnostic, so the two cannot disagree on
+/// what "the actual's index type" means.
+static std::shared_ptr<Type> outerIndexTypeOf(const Type& T) {
+    if (T.Kind == TypeKind::Array) return T.IndexType;
+    if (T.Kind == TypeKind::ConformantArray && !T.ConformantBounds.empty())
+        return T.ConformantBounds[0].OrdType;
+    return nullptr;
+}
+
 void Sema::checkCallArgs(const Symbol& Sym, SourceLocation CallLoc,
                          std::span<const std::unique_ptr<ExprNode>> Args) {
     if (Args.size() != Sym.Params.size()) {
@@ -1455,10 +1683,30 @@ void Sema::checkCallArgs(const Symbol& Sym, SourceLocation CallLoc,
                     Actual = Underlying;
             }
             if (!isConformable(*Param.Ty, *Actual)) {
+                // ISO §6.7.3.8: report whichever of a)/d)/the element type
+                // actually failed, in the same order isConformable checks
+                // them -- otherwise a packedness or index-type mismatch was
+                // reported as an element-type mismatch with the SAME type
+                // named on both sides ("expected 'integer', got 'integer'"),
+                // which only isConformable's old element-only check could
+                // never produce and this one now can.
+                const std::shared_ptr<Type> FormalOrdTy =
+                    !Param.Ty->ConformantBounds.empty()
+                        ? Param.Ty->ConformantBounds[0].OrdType : nullptr;
+                const std::shared_ptr<Type> ActualIdxTy = outerIndexTypeOf(*Actual);
                 if (Actual->Kind != TypeKind::Array
                         && Actual->Kind != TypeKind::ConformantArray) {
                     error(ArgNode.Loc, diag::err_conformant_actual_not_array,
                           {Param.Name, At->Name});
+                } else if (Param.Ty->Packed != Actual->Packed) {
+                    error(ArgNode.Loc, diag::err_conformant_packed_mismatch,
+                          {Param.Name, Param.Ty->Packed ? "packed" : "unpacked",
+                           Actual->Packed ? "packed" : "unpacked"});
+                } else if (FormalOrdTy && !FormalOrdTy->isError()
+                               && ActualIdxTy && !ActualIdxTy->isError()
+                               && !isAssignCompatible(*FormalOrdTy, *ActualIdxTy)) {
+                    error(ArgNode.Loc, diag::err_conformant_index_type_mismatch,
+                          {Param.Name, FormalOrdTy->Name, ActualIdxTy->Name});
                 } else {
                     error(ArgNode.Loc, diag::err_conformant_elem_mismatch,
                           {Param.Name,
@@ -1586,6 +1834,26 @@ bool Sema::isConformable(const Type& Formal, const Type& Actual) const {
     if (Actual.Kind != TypeKind::Array
             && Actual.Kind != TypeKind::ConformantArray)
         return false;
+    // ISO §6.7.3.8 d): a packed conformant-array-form requires a packed
+    // actual, and an unpacked one requires an unpacked actual -- checked at
+    // every nesting level this function recurses into, same as a) below.
+    if (Formal.Packed != Actual.Packed) return false;
+    // ISO §6.7.3.8 a): the index-type of the actual has to be *compatible*
+    // with the ordinal-type-name of this dimension's index-type-specification
+    // -- e.g. a `char` schema does not conform to an `integer`-indexed actual
+    // even when the element types agree.  isAssignCompatible, asked with the
+    // schema's ordinal type as Dst, is this codebase's stand-in for §6.4.5
+    // "compatible types" between two ordinal types (same type, or subranges
+    // sharing a host type) -- the plain-Array index check above relies on the
+    // same equivalence.
+    if (!Formal.ConformantBounds.empty()) {
+        const auto& FormalOrdTy = Formal.ConformantBounds[0].OrdType;
+        auto ActualIdxTy = outerIndexTypeOf(Actual);
+        if (FormalOrdTy && !FormalOrdTy->isError()
+                && ActualIdxTy && !ActualIdxTy->isError()
+                && !isAssignCompatible(*FormalOrdTy, *ActualIdxTy))
+            return false;
+    }
     if (!Formal.ElemType || !Actual.ElemType) return true;
     // ISO §6.6.3.8: the element type of the actual conforms in its turn when
     // the formal's is another schema, which is how a parameter of more than
@@ -1639,7 +1907,12 @@ bool Sema::isAssignCompatible(const Type& Dst, const Type& Src,
         // which accepts an identical shape and rejects a different one.
         const bool SameDecl = !Dst.SchemaBodyNode || !Src.SchemaBodyNode
                            || Dst.SchemaBodyNode == Src.SchemaBodyNode;
-        if (Dst.SchemaName == Src.SchemaName && SameDecl
+        // Pascal identifiers are case-insensitive (eqCI, as the Schema arm
+        // just below already uses); a bare `==` here was academic while
+        // SameDecl gated it, but it stopped mattering only by accident of the
+        // body-comparison fallback below silently correcting a mismatch,
+        // rather than the comparison being right.
+        if (eqCI(Dst.SchemaName, Src.SchemaName) && SameDecl
                 && Dst.SchemaDiscs.size() == Src.SchemaDiscs.size()) {
             bool same = true;
             for (size_t I = 0; I < Dst.SchemaDiscs.size(); ++I)
@@ -1758,7 +2031,18 @@ bool Sema::isAssignCompatible(const Type& Dst, const Type& Src,
                             && Dst.RecordDecl == Src.RecordDecl)
                         return true;
                 }
-                if (Depth > 16) return true;   // give up rather than misjudge
+                // The cap exists so a record reachable from itself only
+                // through a chain of distinct anonymous record types (no
+                // RecordDecl to short-circuit on) cannot recurse without end;
+                // it is not license to call two types compatible once the
+                // structure below it goes unexamined.  Two records that were
+                // never shown equal are not equal, so this refuses rather
+                // than misjudges -- the same conservative default the
+                // restricted-type check above makes when it cannot say yes.
+                // A false negative here is a diagnostic to rename or
+                // restructure a type; a false positive is a value of one
+                // layout copied over another's.
+                if (Depth > 16) return false;
                 // ISO §6.4.3.1: `packed` is part of what the type IS, and two
                 // records that differ in it have different layouts.  Ignoring
                 // it let a padded record be stored into a packed one --
@@ -1782,11 +2066,29 @@ bool Sema::isAssignCompatible(const Type& Dst, const Type& Src,
                 if (!Dst.ElemType || !Src.ElemType) return Dst.Name == Src.Name;
                 return isAssignCompatible(*Dst.ElemType, *Src.ElemType);
 
-            // Pointer: compatible when pointee types are compatible.
+            // Pointer: ISO §6.4.4 requires the two pointer-types' domain
+            // types to be the SAME type, not merely assignment-compatible
+            // with one another -- there is no covariance or contravariance
+            // through a pointer.  Recursing into isAssignCompatible on the
+            // pointees let a subrange's own compatibility with its base type
+            // leak through a pointer: `^integer` and `^(1..10)` were
+            // accepted either way round, though a range check the subrange
+            // requires never runs on a value read back through the integer
+            // pointer.
+            //
+            // Pointer types are interned by pointee identity (see
+            // TypeContext::getPointer) and Enum/Record types carry their own
+            // declaration as their identity (ISO §6.4.2.3, §6.4.3.3), so two
+            // pointers to the same domain type are already the same Type
+            // object and were caught by the `&Dst == &Src` shortcut above.
+            // Reaching here with Dst.Kind == Src.Kind == Pointer means the
+            // domain types are genuinely different, so isIdenticalType --
+            // the same canonical-identity test ISO §6.6.3.3 uses for a var
+            // parameter -- is what settles it, not the general assignability
+            // relation.
             case TypeKind::Pointer:
                 if (!Dst.PointeeType || !Src.PointeeType) return false;
-                return isAssignCompatible(*Dst.PointeeType, *Src.PointeeType,
-                                          /*ExactBounds=*/true);
+                return isIdenticalType(Dst.PointeeType, Src.PointeeType);
 
             default:
                 return Dst.Name == Src.Name;

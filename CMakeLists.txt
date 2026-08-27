@@ -59,6 +59,18 @@ cmake_minimum_required(VERSION 3.16)
 #   4. move the changelog's [Unreleased] section under the new version
 #   5. tag from that branch once ready; `main` is untouched throughout
 #
+# All five steps are manual, and step 5's tag name has no structural link to
+# steps 2 and 4's own edits -- nothing previously caught a tag cut against a
+# stale VERSION (or a changelog heading never moved out of [Unreleased]),
+# so a compiler reporting one version and a shared library carrying another
+# could ship undetected (issue #185). tools/check_release_version.py is the
+# gate for that: run it by hand with the intended tag right after step 4 and
+# before step 5 (`check_release_version.py --tag vX.Y.Z`), and CI's
+# `release-metadata-check` job runs it again automatically once the tag is
+# actually pushed, plus a build-job step that also checks a real built
+# `plang -dumpversion` and the installed libplang-frontend.so.X.Y.Z agree --
+# any disagreement fails that tag's CI outright rather than shipping quietly.
+#
 file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/VERSION" PLANG_BASE_VERSION LIMIT_COUNT 1)
 string(STRIP "${PLANG_BASE_VERSION}" PLANG_BASE_VERSION)
 
@@ -163,8 +175,42 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
 endif()
 
 # ---- Sanitizer preset (-DPLANG_SANITIZE=address,undefined or similar) ----
-option(PLANG_SANITIZE "Comma-separated sanitizer list, e.g. 'address,undefined'" "")
+#
+# This used to be `option(PLANG_SANITIZE ...)`, but option() is specifically
+# for BOOL cache entries: it relabels whatever cache value is already
+# present as type BOOL without touching the stored string, so
+# `-DPLANG_SANITIZE=adress` (issue #186) configured clean --
+# `PLANG_SANITIZE:BOOL=adress` in CMakeCache.txt, "-- Sanitizers: adress" on
+# stdout, exit 0 -- and only failed minutes later, once real compilation
+# reached the first translation unit, with a compiler error easy to miss in
+# a wall of build output. Worse, cmake-gui/ccmake render a BOOL entry as a
+# plain checkbox; ticking it to "enable sanitizers" sets the literal string
+# "ON", which reaches `-fsanitize=${PLANG_SANITIZE}` unchanged and fails the
+# same way. CACHE STRING plus explicit validation below turns both cases
+# into an immediate, readable configure-time error instead.
+set(PLANG_SANITIZE "" CACHE STRING
+    "Comma-separated sanitizers to enable, e.g. 'address,undefined' (empty disables all)")
+# Curated for cmake-gui/ccmake discoverability: the individual sanitizers
+# this project validates below, plus the one combination CI and
+# docs/technical_info.md actually exercise. This list only shapes the GUI
+# drop-down -- it is not itself the validation, so any other combination of
+# the known keywords below is still accepted from the command line.
+set_property(CACHE PLANG_SANITIZE PROPERTY STRINGS
+    "" "address" "undefined" "address,undefined" "thread" "leak" "memory")
 if(PLANG_SANITIZE)
+    set(PLANG_SANITIZE_KNOWN_VALUES address undefined thread leak memory)
+    string(REPLACE "," ";" PLANG_SANITIZE_LIST "${PLANG_SANITIZE}")
+    foreach(_plang_sanitizer_name ${PLANG_SANITIZE_LIST})
+        string(STRIP "${_plang_sanitizer_name}" _plang_sanitizer_name)
+        if(NOT _plang_sanitizer_name IN_LIST PLANG_SANITIZE_KNOWN_VALUES)
+            message(FATAL_ERROR
+                "PLANG_SANITIZE: unrecognized sanitizer '${_plang_sanitizer_name}' "
+                "(from '${PLANG_SANITIZE}'). Valid values are: "
+                "${PLANG_SANITIZE_KNOWN_VALUES} (comma-separated, e.g. "
+                "'address,undefined').")
+        endif()
+    endforeach()
+
     message(STATUS "Sanitizers: ${PLANG_SANITIZE}")
     # -fno-sanitize=vptr: the libraries are built -fno-rtti (LLVM convention) and
     # UBSan's vptr check needs RTTI, so leaving it on reports every shared_ptr
@@ -285,13 +331,37 @@ install(TARGETS plang_runtime plang_runtime_shared
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )
-# Public headers for embedders (exclude internal AST detail headers).
-# Version.h.in is not matched, being a template rather than a header; the
-# header it generates is installed from the build directory below.
+# Public headers for embedders.  This used to exclude AST/Ast*.h as an
+# "internal detail", but it is not one: Parser.h's parse() hands back a
+# ProgramNode, CodeGen.h's emit() takes one, and Sema.h/SemaUtil.h both
+# include AST/Ast.h directly, so those headers -- and therefore every
+# embedder that follows Frontend.h's own advertised pipeline -- need the
+# whole AST/ subtree (Ast.h is only the umbrella that pulls in AstBase.h,
+# AstDecl.h, AstExpr.h, AstStmt.h, and AstType.h). Excluding it left the
+# transitive closure of the public API uninstallable (issue #169) while
+# leaving TypeContext.h, the one AST/ header the old pattern happened not to
+# match, in place.
+#
+# *.def is matched for the same reason, not out of caution: Token.h textually
+# includes TokenKinds.def, LangOptions.h includes Dialects.def/
+# LangFeatures.def and (via SwitchTable.h) CompilerSwitches.def, Diagnostic.h
+# includes DiagnosticMessages.def (which itself pulls in the four
+# Diagnostic*Kinds.def files), BuiltinIDs.h includes Builtins.def, and
+# Driver/Options.h includes Options.def -- every one of those headers sits on
+# the path from Parser.h/Sema.h/CodeGen.h out, same as AST/Ast.h did, so an
+# install fixed only for *.h would still fail two headers later.
+#
+# With both gaps closed there is nothing left under include/plang/ to
+# sub-select: the whole tree is the public API, so there is no pattern here
+# to fall out of sync with it again the way the AST/Ast*.h EXCLUDE did.
+# Version.h.in is the one file this deliberately does not match, being a
+# template rather than a header; the header it generates is installed from
+# the build directory below.
 install(DIRECTORY include/plang/
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/plang
-    FILES_MATCHING PATTERN "*.h"
-    PATTERN "AST/Ast*.h" EXCLUDE
+    FILES_MATCHING
+        PATTERN "*.h"
+        PATTERN "*.def"
 )
 install(FILES ${CMAKE_BINARY_DIR}/include/plang/Basic/Version.h
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/plang/Basic
@@ -323,6 +393,17 @@ install(DIRECTORY share/plang/gdb/
 # compiler to use it has no other reason to install, and the conformance and
 # acceptance cases are the bulk of the build.
 option(PLANG_ENABLE_TESTS "Build the test suite" OFF)
+
+# Off by default, same reasoning as test/CMakeLists.txt's own WARNING (not
+# FATAL_ERROR) when lit/FileCheck can't be found: a developer who enabled
+# PLANG_ENABLE_TESTS for the GoogleTest tier alone shouldn't be blocked by
+# one lit tool's absence on their machine. CI turns this on (issue #184) --
+# there, "lit/FileCheck missing" must fail the build loudly, not quietly
+# fall back to running only the ~51 GoogleTest cases while ctest still
+# exits 0 and the ~2,000+ black-box tests never ran.
+option(PLANG_TESTS_REQUIRE_LIT
+    "Fail configure (instead of warning and skipping) if PLANG_ENABLE_TESTS \
+is on but lit/FileCheck cannot be found" OFF)
 
 # enable_testing() unconditionally, so that ctest in a build without the tests
 # says "No tests were found" rather than failing to find CTestTestfile.cmake.

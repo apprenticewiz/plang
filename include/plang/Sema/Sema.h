@@ -102,7 +102,7 @@ private:
     // Live activations of checkExpr.  Every recursive re-entry into expression
     // checking -- a binary/unary operand, a call argument, an index/field/
     // deref base -- funnels through checkExpr, so bounding activations there
-    // (see ExprDepthScope and MaxExprDepth in SemaExpr.cpp) bounds the whole
+    // (see ExprDepthScope and MaxExprDepth below) bounds the whole
     // AST-walking recursion against a flat operator chain built specifically
     // to be deep, e.g. `1+1+1+...+1` with tens of thousands of terms.  Unlike
     // deeply NESTED parenthesized input, which the parser's own ExprDepth
@@ -112,8 +112,31 @@ private:
     // recursively, and without a ceiling here that walk used to exhaust the
     // real C++ stack instead of failing with a diagnostic. Same shape as
     // Parser::ExprDepth; see its comment for the rationale.
-    unsigned                 ExprDepth{};
-    bool                     ExprDepthLimitHit{};
+    //
+    // constBound and buildExtentForm (SemaType.cpp) recurse over the same
+    // kind of AST -- a bound written as a flat chain, e.g. an array's
+    // `array[1..1+1+...+1]` -- by a different route (constBound/
+    // constBoundImpl call each other; buildExtentForm calls itself) that
+    // checkExpr's own guard does not cover: checkExpr is run on a bound
+    // first and stops safely at MaxExprDepth, but foldBounds then walks the
+    // SAME chain again through constBound with nothing stopping it.  Sharing
+    // this counter and ceiling, rather than each giving itself an
+    // independent one, is what "share the same depth budget as checkExpr"
+    // (issue #204) means: whichever of the two is active, recursing through
+    // either one now counts against the one ceiling.  const because
+    // constBound/constBoundImpl/buildExtentForm are; SchemaBindingUsed_
+    // below is the existing precedent for a mutable scratch counter in an
+    // otherwise-const fold.
+    mutable unsigned          ExprDepth{};
+    mutable bool              ExprDepthLimitHit{};
+    // 1000 levels of recursion through checkExpr -> checkBinary/checkUnary/
+    // ... -> checkExpr, or through constBound -> constBoundImpl ->
+    // constBound -> ..., is well under the crash threshold observed
+    // empirically on this build's default 8MB stack (a flat chain starts
+    // crashing a few thousand terms in), while no legitimate Pascal
+    // expression -- handwritten or reasonably generated -- nests anywhere
+    // close to this deep.
+    static constexpr unsigned MaxExprDepth = 1000;
     struct ExprDepthScope {
         unsigned& N;
         bool&     LimitHit;
@@ -124,8 +147,10 @@ private:
 
     /// Canonical type store — owns built-in singletons and interns structural
     /// types.  Built from Opts, which is why Opts is declared above it: what an
-    /// unqualified `integer` is depends on the dialect.
-    TypeContext Ctx_{Opts.defaultIntWidth()};
+    /// unqualified `integer` is depends on the dialect, and what a pointer is
+    /// (Type::Width, for Pointer/Nil/String -- see TypeContext's constructor)
+    /// depends on --target.
+    TypeContext Ctx_{Opts.defaultIntWidth(), Opts.PointerWidthBits};
 
     // Convenience aliases that forward to TypeContext singletons.
     // Kept for backward compat with existing Sema implementation code.
@@ -222,6 +247,24 @@ private:
     const ProcDecl*       CurrentProc{nullptr};
     // Resolved return type of CurrentProc (null when not inside a function).
     std::shared_ptr<Type> CurrentRetType;
+
+    /// Lowercased names checkProcBody just defined into CurrentProc's own
+    /// parameter scope -- its formal parameters, EP named result variable, and
+    /// any conformant-array bound names -- while that scope is the immediately
+    /// enclosing one for the checkBlock call about to check its body.
+    ///
+    /// ISO §6.2.2 treats a procedure or function's formal-parameter-list and
+    /// its block as ONE region, so redeclaring a parameter's name as a local
+    /// constant, type, variable or nested procedure must be a duplicate-
+    /// declaration error. checkProcBody and checkBlock push two separate
+    /// SymbolTable scopes for the two halves of that one region (see their
+    /// comments), so Symtab.define's own per-scope duplicate check cannot see
+    /// the collision -- it looks only at the block's own (innermost) scope,
+    /// one level in from where the parameters live. checkBlock cross-checks
+    /// its declared names against this set instead. Empty outside a
+    /// procedure/function body: a program or module block has no enclosing
+    /// parameter scope of its own to collide with.
+    std::set<std::string> EnclosingParamNames_;
 
     /// Every function whose block contains the statement being checked,
     /// outermost first.
@@ -360,13 +403,26 @@ private:
     // block's scope is still current.  A module body needs that: its exports
     // and its 'to begin do' / 'to end do' statements are written in terms of
     // names the scope is about to discard.
-    // IsGlobalScope: true for a program block or a module body, where every
-    // variable becomes a single linked object subject to the relocation-range
-    // check in Phase 4 below; false for a procedure/function body, whose
-    // locals are stack storage and never hit that limit.
+    // locals are stack storage instead.  Phase 4 runs the same byte-size gate
+    // either way (#223) -- an oversized local has no relocation to overflow,
+    // but hangs the LLVM backend lowering its `alloca` well before it would
+    // fit any real stack -- and uses this flag only to choose which of
+    // err_global_var_too_large / err_local_var_too_large names the variable's
+    // scope accurately.
+    // IsModuleBlock: true only for a module's own body (Sema::processModuleBody).
+    // Stamped onto each label this block declares (Symbol::LabelInModuleBlock)
+    // so checkGoto can refuse a non-local goto from one of the module's own
+    // procedures back into it -- see that field's comment for why.
+    // IsInterfaceBlock: true for a module INTERFACE's own block.  Every
+    // heading there is recorded IsForward regardless of the 'forward'
+    // keyword (EP §6.11.2: the heading alone is the whole declaration, its
+    // body given later in a separate implementation block) so the
+    // forward-declaration completion audit below does not apply to it.
     void checkBlock(const BlockNode& Block,
                     llvm::function_ref<void()> BeforePop = {},
-                    bool IsGlobalScope = false);
+                    bool IsGlobalScope = false,
+                    bool IsModuleBlock = false,
+                    bool IsInterfaceBlock = false);
     void checkProcSignature(const ProcDecl& Proc);
     void checkProcBody     (const ProcDecl& Proc);
     /// Records which value parameters a body modifies; see ProcDecl::ModifiedParams.
@@ -388,6 +444,18 @@ private:
     /// Adds the fields of a variant part, and of the variants nested in it, to
     /// the record type T, so that field access can find them (§6.4.3.3).
     void walkVariantFields(const VariantPart& Vp, Type& T);
+    /// ISO §6.6.5.3: checks one of new/dispose's extra arguments -- \p Which
+    /// is "new" or "dispose", for the diagnostic -- against \p Vp, the
+    /// variant level it selects: the argument must be a value of \p Vp's own
+    /// tag type.  Returns the NestedVariant of whichever of \p Vp's arms the
+    /// argument names (or null if it named none, or was not itself a
+    /// constant), i.e. the level the *next* argument, if any, must answer
+    /// for -- so the caller can walk as many levels as arguments were given
+    /// and tell a valid path from one with more arguments than the record
+    /// has nesting to check them against.
+    const VariantPart* checkVariantTagArg(const std::string& Which,
+                                          const ExprNode& Arg, const Type& At,
+                                          const VariantPart& Vp);
     [[nodiscard]] std::shared_ptr<Type> resolveNamed(const NamedTypeNode& N);
     /// EP §6.6: checks a denoter's 'value' clause against the type it denotes.
     void checkInitialState(const TypeNode& Node, const Type& T);
@@ -556,6 +624,15 @@ private:
     foldBounds(const ExprNode& Low, const ExprNode& High,
                const Type& Base, DiagID LowID, DiagID HighID);
 
+    // ISO §6.4.2.2/§6.4.3.2: reports err_bound_types_differ (against High's
+    // location) and returns false when LoTy and HiTy are both ordinal but
+    // not of the same ordinal type.  True (nothing to report here) when
+    // either side is already an error, or is not ordinal at all -- that half
+    // of the question belongs to the caller, which already has its own
+    // not-ordinal diagnostic in scope.
+    [[nodiscard]] bool boundsShareOrdinalType(const Type& LoTy, const ExprNode& High,
+                                              const Type& HiTy);
+
     // ---- statement checking ----
     void checkStmt      (const StmtNode*   Stmt);
     void checkCompound  (const CompoundStmt& S);
@@ -574,9 +651,29 @@ private:
     // When `Callables` is null the symbol table is used to resolve var-param flags.
     // When `Callables` is non-null (inter-procedural mode) the symbol table scope
     // for the for-loop's block is already closed; use the supplied AST proc list.
+    // `Shadowed` is true once a `with` between the for-statement and `Stmt`
+    // exposes a field or discriminant spelled like `VarName`: a bare reference
+    // to that spelling from there down denotes the field, not the control
+    // variable (see withExposesName), so none of the checks apply until the
+    // shadowing `with` is left.
     void checkForBody(const StmtNode* Stmt, const std::string& VarName,
                       SourceLocation ForLoc,
-                      const std::vector<const ProcDecl*>* Callables = nullptr);
+                      const std::vector<const ProcDecl*>* Callables = nullptr,
+                      bool Shadowed = false);
+
+    /// Static type of a `with`-clause record expression, resolved without
+    /// checkExpr's diagnostics.  checkForBody runs before the body is
+    /// type-checked for real, so calling checkExpr here would re-evaluate an
+    /// expression checkWith is about to and double-report anything wrong with
+    /// it.  Returns null wherever the answer is not immediately at hand; that
+    /// is always a safe answer, since the caller only uses this to rule a name
+    /// safely OUT of being the control variable.
+    std::shared_ptr<Type> quietWithRecordType(const ExprNode* E);
+
+    /// Does a `with` over \p S's record(s) expose \p Name as a field or a
+    /// schema discriminant, so that a bare reference to it inside the with
+    /// body denotes THAT rather than any same-spelled outer variable?
+    bool withExposesName(const WithStmt& S, const std::string& Name);
 
     /// Does \p P declare \p Name of its own, so that the name denotes something
     /// other than the outer variable everywhere inside it?  ISO §6.8.3.9 forbids

@@ -15,9 +15,17 @@ namespace {
 /// process reasons about offsets, at which point it silently reads the wrong
 /// field — so the optimizer refuses to run without this; see optimize.
 std::optional<llvm::DataLayout> layoutFor(const llvm::Triple& triple) {
+    // Every target, not just the host's: --target= (LangOptions::TargetTriple)
+    // asks by name for a triple that is routinely not the native one, and
+    // TargetRegistry::lookupTarget only ever finds a target that has been
+    // initialized.  plang links the combined libLLVM, which already carries
+    // every backend's code, so this costs nothing but the registration calls
+    // themselves -- unlike LLVM_TARGETS_TO_BUILD, it is not a link-time or
+    // binary-size choice.
     static const bool Init = [] {
-        llvm::InitializeNativeTarget();
-        llvm::InitializeNativeTargetAsmPrinter();
+        llvm::InitializeAllTargetInfos();
+        llvm::InitializeAllTargets();
+        llvm::InitializeAllTargetMCs();
         return true;
     }();
     (void)Init;
@@ -39,7 +47,12 @@ std::optional<llvm::DataLayout> layoutFor(const llvm::Triple& triple) {
 
 void Codegen::Impl::init(const std::string& progName) {
     mod = std::make_unique<llvm::Module>(progName, ctx);
-    llvm::Triple triple(llvm::sys::getDefaultTargetTriple());
+    // --target=, threaded down from the driver through LangOptions; the host
+    // triple when it was not given, same as every version before -target
+    // reached this far.
+    llvm::Triple triple(langOpts.TargetTriple.empty()
+                             ? llvm::sys::getDefaultTargetTriple()
+                             : llvm::Triple::normalize(langOpts.TargetTriple));
     mod->setTargetTriple(triple);
     if (auto dl = layoutFor(triple)) mod->setDataLayout(*dl);
 
@@ -155,8 +168,8 @@ void Codegen::Impl::init(const std::string& progName) {
             return it->second[astArgIdx].schemaDiscCount;
         });
     // Call-argument marshalling + the EP string-store/address operations.
-    // EmitExpr/EmitLValue/CreateEntryAlloca/CoerceToType are narrow
-    // closures into methods not yet extracted (CodeGenExprs.cpp/
+    // EmitExpr/EmitLValue/CreateEntryAlloca/CreateDynAlloca/CoerceToType are
+    // narrow closures into methods not yet extracted (CodeGenExprs.cpp/
     // CodeGenTypes.cpp); the three string-shape predicates stay on Impl
     // (stateless, used far outside this unit too), same treatment
     // SchemaAccess already gives these same three.
@@ -166,6 +179,7 @@ void Codegen::Impl::init(const std::string& progName) {
         [this](const ExprNode& e){ return emitExpr(e); },
         [this](const ExprNode& e){ return emitLValue(e); },
         [this](llvm::Type* t, const std::string& n){ return createEntryAlloca(t, n); },
+        [this](llvm::Value* bytes, const std::string& n){ return createDynAlloca(bytes, n); },
         [this](llvm::Value* v, llvm::Type* t){ return coerceToType(v, t); },
         [](const ExprNode& e){ return exprIsCharStr(e); },
         [](const ExprNode& e){ return exprIsVarStr(e); },
@@ -180,6 +194,7 @@ void Codegen::Impl::init(const std::string& progName) {
     // CodeGenTypes.cpp).
     closureAbi_ = std::make_unique<ClosureAndCallABI>(ctx, *mod, builder,
         *schemaAccess_, *schemaLayout_, *cgTypes_, *symTab_, *linkage_, *dbgInfo_,
+        *setOps_,
         i32Ty, i64Ty, ptrTy,
         [this](const ExprNode& e){ return emitLValue(e); },
         [this](const ExprNode& e, llvm::Type* t, bool byRef){
@@ -304,6 +319,9 @@ void Codegen::Impl::init(const std::string& progName) {
         [this](const TypeNode* tn){ return hasInitialState(tn); },
         [this](llvm::Value* ptr, llvm::Type* ty, const TypeNode* tn){
             emitInitialState(ptr, ty, tn); },
+        [this](llvm::Value* bodyAddr, const plang::Type& schema,
+               const std::vector<llvm::Value*>& discs){
+            emitSchemaInitialState(bodyAddr, schema, discs); },
         [this](const std::string& mangledName){ return buildStaticLinkFrame(mangledName); },
         [this](const std::string& mangledName, size_t astArgIdx){
             return procParamArg(mangledName, astArgIdx); },
@@ -332,6 +350,10 @@ void Codegen::Impl::init(const std::string& progName) {
     // closures into methods not yet extracted (all still in
     // CodeGenExprs.cpp); ExprIsVarStr stays on Impl (stateless, used far
     // outside this unit too), same treatment every prior wave gives it.
+    // PackedAccessAlign is CGFieldAccess's, reached the same indirect way
+    // CGAssign already reaches it (fieldAccess_ is built just above, but the
+    // closure -- not a direct reference -- is what the sibling caller uses,
+    // so this matches rather than mixes the two conventions).
     indexAccess_ = std::make_unique<CGIndexAccess>(ctx, builder,
         *schemaAccess_, *strCallMarshal_, *rangeGuards_, *strings_,
         *runtimeFns_, *symTab_, *cgTypes_,
@@ -340,7 +362,8 @@ void Codegen::Impl::init(const std::string& progName) {
         [this](const ExprNode& e){ return emitLValue(e); },
         [this](llvm::Value* v){ return toI64(v); },
         [this](const TypeNode* tn){ return denoterOf(tn); },
-        [](const ExprNode& e){ return exprIsVarStr(e); });
+        [](const ExprNode& e){ return exprIsVarStr(e); },
+        [this](const ExprNode& e){ return packedAccessAlign(e); });
     // EP §6.8.7 typed value constructors.  EmitExpr/CoerceToType/
     // InitialStateShapeOf/CreateEntryAlloca are narrow closures into
     // methods not yet extracted (CodeGenExprs.cpp/CodeGenProcs.cpp/
@@ -561,12 +584,18 @@ llvm::Value* Codegen::Impl::createDynStrAlloca(llvm::Value* capV,
     // builds, just measured rather than declared.
     auto* bytes = alignUpV(builder.CreateAdd(llvm::ConstantInt::get(i64Ty, 8),
                                              capV, "str.tmp.size"), 8);
-    dynAllocaUsed_ = true;
-    auto* mem = builder.CreateAlloca(i8Ty, bytes, name);
-    mem->setAlignment(llvm::Align(8));
+    auto* mem = createDynAlloca(bytes, name);
     // A fresh temporary has no characters in it yet, and every runtime entry
     // point reads the length before it writes one.
     builder.CreateStore(llvm::ConstantInt::get(i64Ty, 0), mem);
+    return mem;
+}
+
+llvm::Value* Codegen::Impl::createDynAlloca(llvm::Value* bytes,
+                                            const std::string& name) {
+    dynAllocaUsed_ = true;
+    auto* mem = builder.CreateAlloca(i8Ty, bytes, name);
+    mem->setAlignment(llvm::Align(8));
     return mem;
 }
 

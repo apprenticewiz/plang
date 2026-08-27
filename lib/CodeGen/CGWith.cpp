@@ -221,6 +221,16 @@ void CGWith::emitWith(const WithStmt& s) {
         // failed at link time.
         auto* zero = llvm::ConstantInt::get(I32Ty, 0);
         const CGTypes::RecordLayout* L = Types.layoutOfRecord(*rec->ResolvedType);
+        // Issue #192: a with-bound field of a PACKED record sits at a byte
+        // offset its own type's ABI alignment does not fix -- the same
+        // reason Sema's pushWithScope sets FromPackedWith here (refusing to
+        // pass the name as a var parameter, SemaStmt.cpp).  Once bound to a
+        // bare name below, the field is an ordinary IdentExpr with no
+        // FieldExpr for packedAccessAlign to inspect, so the fact travels on
+        // the binding itself instead.
+        const bool packed = rec->ResolvedType->Packed
+                         || (rec->ResolvedType->RecordDecl
+                             && rec->ResolvedType->RecordDecl->Packed);
         for (const auto& F : rec->ResolvedType->RecordFields) {
             llvm::Value* fldPtr = nullptr;
             llvm::Type*  fldTy  = nullptr;
@@ -248,6 +258,7 @@ void CGWith::emitWith(const WithStmt& s) {
                 fldTy = st->getElementType(Idx);
             }
             SymTab.defVar(F.Name, fldPtr, fldTy);
+            if (packed) SymTab.markPackedWithField(F.Name);
         }
     }
     EmitStmt(s.Body.get());

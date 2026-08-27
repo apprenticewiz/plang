@@ -46,8 +46,17 @@ llvm::Value* SchemaLayoutEngine::emitExtentForm(const ExtentForm& F,
         // ever reaches this far.
         auto* Safe = B.CreateSelect(
             B.CreateICmpEQ(R, llvm::ConstantInt::get(i64Ty(), 0)), llvm::ConstantInt::get(i64Ty(), 1), R, "ext.div.safe");
-        return F.Kind == Op::Div ? B.CreateSDiv(L, Safe, "ext.div")
-                                 : B.CreateSRem(L, Safe, "ext.mod");
+        if (F.Kind == Op::Div) return B.CreateSDiv(L, Safe, "ext.div");
+        // ISO §6.7.2.2 wants 0 <= i mod j < j, but srem takes its sign from
+        // the dividend, so (-4) mod 3 comes back as -1 instead of 2 (issue
+        // #228) -- the same gap between C's `%` and Pascal's `mod` that
+        // Arith.h's isoMod exists for, and that the language-level `mod` in
+        // CGBinaryOps.cpp already closes for an ordinary (non-schema)
+        // expression. Same fixup here: add the divisor back once, exactly
+        // when srem lands negative.
+        auto* Rem = B.CreateSRem(L, Safe, "ext.mod.srem");
+        auto* Neg = B.CreateICmpSLT(Rem, llvm::ConstantInt::get(i64Ty(), 0), "ext.mod.neg");
+        return B.CreateSelect(Neg, B.CreateAdd(Rem, Safe, "ext.mod.adj"), Rem, "ext.mod");
     }
     case Op::Pow: {
         // EP §6.8.3.2 with an integer base: a small loop rather than a call,

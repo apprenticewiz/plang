@@ -4,6 +4,7 @@
 #include "plang/Basic/SourceManager.h"
 
 #include <initializer_list>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -42,6 +43,15 @@ struct Options {
     std::vector<std::string> modulePaths;  ///< -I<dir> module search paths
     std::vector<std::string> extraInputFiles; ///< additional .pas files for multi-file builds
 };
+
+/// Orders two GCC/Clang install-directory names (e.g. "9", "12.2.0") the way
+/// their version numbers actually compare, not lexicographically: "9" sorts
+/// before "10", and "9.5.0" sorts before "10.1.0" — plain string comparison
+/// gets both backwards, since '1' < '9'.  A name that does not parse as a
+/// version (the regex [0-9]+(\.[0-9]+){0,3}) sorts before every name that
+/// does, so a stray non-version directory is never mistaken for the newest
+/// toolchain by a caller that sorts ascending and takes the last entry.
+bool versionDirLess(std::string_view A, std::string_view B);
 
 /// Compiler driver.  Parses arguments and orchestrates the compilation
 /// pipeline: plang -pc1 (Pascal front end), llc (code generation), and the
@@ -88,7 +98,34 @@ private:
     /// clang settles the same question first, in CreateAndPopulateDiagOpts.
     void        configureDiagnostics(int argc, char *argv[]);
 
-    Options     parseArgs(int argc, char *argv[]);
+    /// What parseArgs found: either a set of options to compile with, or a
+    /// request to stop right there -- --version, --help, -dumpversion,
+    /// -dumpmachine, --help-warnings all print what they have to print
+    /// during parsing itself and have no more work for run() to do
+    /// afterward.  EarlyExitCode is a separate field rather than folding
+    /// into Options, which describes a compilation and has no business
+    /// carrying a short-circuit-and-exit signal of its own.
+    ///
+    /// parseArgs used to call std::exit() directly for these (issue #174):
+    /// Driver::run's own doc comment says it "returns a Unix exit code" to
+    /// its caller, which a call to std::exit() half honors and half does
+    /// not -- the code is right, but it never reaches run()'s return, or
+    /// main()'s.  That is invisible running plang as a subprocess the way
+    /// the CLI and this project's own lit suite always do (the process
+    /// exits with the same code either way), but not to a host that links
+    /// PlangDriver and calls Driver::run() in-process: std::exit() there
+    /// tears down that host's whole process mid-call, skipping any cleanup
+    /// its own stack frames above run() were relying on, rather than
+    /// returning control the way the header promises. Process exit is now
+    /// reserved for the executable entry point (tools/driver/driver.cpp's
+    /// main, via the exit code run() returns), same as every other outcome
+    /// parseArgs can report.
+    struct ParseResult {
+        Options Opts;
+        std::optional<int> EarlyExitCode;
+    };
+
+    ParseResult parseArgs(int argc, char *argv[]);
     /// \p isExtraFile is true only for the recursive call this function makes
     /// on itself to compile one of Opts.extraInputFiles to a .o (see the
     /// -save-temps .ll naming in the .cpp file for why that distinction

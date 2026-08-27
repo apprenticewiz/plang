@@ -30,11 +30,15 @@
 #include "plang/Basic/PascalFileLayout.h"
 #include "plang/Basic/RequiredRecordLayouts.h"
 
+#include <cctype>
+#include <cerrno>
 #include <cinttypes>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+
+#include <sys/stat.h>
 
 namespace plang {
 
@@ -52,12 +56,37 @@ extern "C" {
 /// honor a name established by an earlier bind (EP §6.7.5.6).
 static const char* findBinding(PascalFile *F);
 
+/// Defined with the write-path table further down (see closeFinalLine): the
+/// path a file currently open for writing by name was opened with, so a
+/// later reset/rewrite/close/extend/update on the same file variable can
+/// finish its last line before the write-only stream that produced it is
+/// abandoned or reused for something else.
+static const char* findWritePath(PascalFile *F);
+static void setWritePath(PascalFile *F, const char *Name);
+static void clearWritePath(PascalFile *F);
+
+/// Defined with the other field-width writers further down (ISO §6.9.3.1);
+/// plang_str_write_file_w's string(N) writer sits earlier in the file and
+/// needs it to bound its own hand-rolled padding loop the same way the
+/// writers below it already do (issue #247).
+static int checkedWidth(int64_t W);
+
+/// Defined with the binding table further down; reset and rewrite call this
+/// too now (issue #239): a name given directly to either -- not just one
+/// given through bind -- is retained the same way, so a later call with no
+/// name reopens that same external entity instead of diverting to fresh,
+/// unnamed internal storage.
+static void setBinding(PascalFile *F, const char *Name);
+
 /// Defined with the other runtime error reporters in plang_sys.cpp.
 [[noreturn]] void plang_err_bind_already_bound(void);
 [[noreturn]] void plang_err_binding_table_full(void);
 [[noreturn]] void plang_err_cannot_open(const char *Msg);
 [[noreturn]] void plang_err_field_width(int64_t W);
 [[noreturn]] void plang_err_file_wrong_mode(const char *Op);
+[[noreturn]] void plang_err_seek_failed(const char *Op, int64_t N);
+[[noreturn]] void plang_err_read_format(const char *Op);
+[[noreturn]] void plang_err_read_int_range(const char *Op, const char *Tok);
 
 /// Look at the next character without consuming it.
 static void prime(PascalFile *F) {
@@ -93,45 +122,47 @@ static int advance(PascalFile *F) {
 /// there.  The next access to f^ reads the new one.
 static void unloadComponent(PascalFile *F) { F->CompLoaded = 0; }
 
+/// Every operation below calls this first, which makes it the one place to
+/// clear the C stream's error indicator before the operation does anything.
+/// ferror() is sticky -- it stays set until clearerr() runs, not just for
+/// the one call that tripped it -- so without this, a call that trips it
+/// without checking (get/prime's own lookahead read on a write-only stream,
+/// itself not a checked operation) leaves it set for trapOnStreamError to
+/// find on some later, unrelated, and genuinely successful operation and
+/// misattribute to that instead (issue #238). Clearing here rather than
+/// after keeps every check that follows -- trapOnStreamError's ferror,
+/// trapOnScanError's feof -- answering for this call alone: whatever an
+/// earlier one left behind cannot survive to be misread as this one's own.
 static void abortIfClosed(PascalFile *F, const char *Op) {
     if (!F || !F->Fp) {
         std::fprintf(stderr, "plang runtime: file not open in '%s'\n", Op);
         std::abort();
     }
+    std::clearerr(F->Fp);
 }
 
 /// ISO §6.7.5.6: a write/read against a file positioned or opened for the
 /// other direction fails at the C stream level -- fread/fwrite return short,
 /// fprintf/fputc/fputs return a negative/EOF sentinel, and in every one of
 /// those cases the stream's own error indicator is set.  A stdio call that
-/// merely hit real end-of-file, or an fscanf that merely failed to match its
-/// format, sets neither -- so checking ferror here (rather than treating any
-/// short return as this violation) traps exactly the wrong-mode case and
-/// leaves the eof and malformed-input cases exactly as they behaved before.
-/// F->Readable is not a substitute for this: seekread/seekupdate set it
-/// without reopening F->Fp, so it does not reflect the mode the stream was
-/// actually opened in (the gap issue #124 was filed against).
+/// merely hit real end-of-file sets neither -- so checking ferror here
+/// (rather than treating any short return as this violation) traps exactly
+/// the wrong-mode case and leaves the eof and malformed-input cases exactly
+/// as they behaved before.  F->Readable is not a substitute for this:
+/// seekread/seekupdate set it without reopening F->Fp, so it does not
+/// reflect the mode the stream was actually opened in (the gap issue #124
+/// was filed against).
 static void trapOnStreamError(PascalFile *F, const char *Op) {
     if (std::ferror(F->Fp)) plang_err_file_wrong_mode(Op);
-}
-
-/// fscanf does not go through trapOnStreamError: on glibc, scanning a stream
-/// opened in the wrong direction returns EOF (as a genuine end-of-file read
-/// also does) but -- unlike fread/fwrite/fgetc/fputc above -- leaves the
-/// stream's own ferror() indicator clear, so ferror cannot tell the two
-/// apart here. feof() can: a real end-of-file sets it, a wrong-mode failure
-/// does not, so only the latter is this violation.
-static void trapOnScanError(PascalFile *F, int MatchCount, const char *Op) {
-    if (MatchCount == EOF && !std::feof(F->Fp)) plang_err_file_wrong_mode(Op);
 }
 
 /// Issue #152: extends the #124 mode trap to an internal (unbound) file.
 /// Such a file is backed by tmpfile(), which glibc always opens "w+b" --
 /// genuinely bidirectional at the C level -- regardless of which way the
 /// Pascal file is currently facing, so a wrong-direction stdio call there
-/// succeeds outright: ferror/feof never fires, and trapOnStreamError /
-/// trapOnScanError have nothing to see.  F->Readable is the only place the
-/// intended direction is recorded for such a file (set by reset/rewrite and
+/// succeeds outright: ferror/feof never fires, and trapOnStreamError has
+/// nothing to see.  F->Readable is the only place the intended direction is
+/// recorded for such a file (set by reset/rewrite and
 /// their seek* counterparts, same as for a named file), so this checks it
 /// directly and traps through the same plang_err_file_wrong_mode a named
 /// file's ferror/feof check reaches.
@@ -149,6 +180,61 @@ static void trapOnWrongDirection(PascalFile *F, const char *Op, int8_t WantWrite
 }
 
 // ---- open / close ----
+
+// Shared by the binding table (further down) and the write-path table right
+// below: a bound name and a currently-open write path are the same shape of
+// entry, one small fixed array apiece, and Pascal programs rarely have more
+// than a handful of files open at once.
+#define PLANG_MAX_BINDINGS 64
+#define PLANG_MAX_NAME_LEN 512
+
+/// Remembers, for a file currently open for writing by name, the path it was
+/// opened with.  closeFinalLine (below) needs this: such a file is opened
+/// "w" -- write-only, so that a stray Pascal-level read against it is caught
+/// at the C level rather than silently succeeding (issue #124) -- and a
+/// write-only stream cannot be read back through itself to see what its last
+/// byte was.  An internal (tmpfile()-backed) file gets no entry here: it is
+/// always opened "w+b" and can check its own tail directly, no second stream
+/// required.
+static struct {
+    PascalFile *File;
+    char        Path[PLANG_MAX_NAME_LEN];
+    int         Active;
+} WritePathTable[PLANG_MAX_BINDINGS];
+
+static const char* findWritePath(PascalFile *F) {
+    for (int i = 0; i < PLANG_MAX_BINDINGS; ++i)
+        if (WritePathTable[i].Active && WritePathTable[i].File == F)
+            return WritePathTable[i].Path;
+    return nullptr;
+}
+
+static void clearWritePath(PascalFile *F) {
+    for (int i = 0; i < PLANG_MAX_BINDINGS; ++i)
+        if (WritePathTable[i].Active && WritePathTable[i].File == F)
+            WritePathTable[i].Active = 0;
+}
+
+/// Replaces whatever entry F had (if any) with Name.  A null or empty Name
+/// just clears the entry: plang_extend/plang_update fall back to it when
+/// their own Name argument is empty, and an internal file needs none.
+static void setWritePath(PascalFile *F, const char *Name) {
+    clearWritePath(F);
+    if (!Name || Name[0] == '\0') return;
+    for (int i = 0; i < PLANG_MAX_BINDINGS; ++i) {
+        if (!WritePathTable[i].Active) {
+            WritePathTable[i].Active = 1;
+            WritePathTable[i].File   = F;
+            std::strncpy(WritePathTable[i].Path, Name, PLANG_MAX_NAME_LEN - 1);
+            WritePathTable[i].Path[PLANG_MAX_NAME_LEN - 1] = '\0';
+            return;
+        }
+    }
+    // Table full: closeFinalLine's caller-facing behavior degrades to what
+    // it was before this table existed (a missed finalization on a
+    // write-only stream, not a crash) rather than aborting the program over
+    // a bookkeeping shortage.
+}
 
 static void closeStream(PascalFile *F) {
     if (F->Fp && F->Fp != stdin && F->Fp != stdout) std::fclose(F->Fp);
@@ -170,11 +256,34 @@ static std::FILE *openTemp(const char *Op) {
 /// marker ends it.  A file put together with write and no closing writeln has
 /// a part of one left over, and reading it back has to see the line the writer
 /// meant rather than stop short of its end.
+///
+/// A named file is opened "w" (see WritePathTable's comment above), and
+/// fgetc on a write-only stream fails outright -- glibc and friends refuse
+/// even to try, returning EOF -- which this function used to read exactly
+/// like "the file already ends in a marker" and so silently do nothing:
+/// dead code for every named file, only ever exercised by an internal
+/// (tmpfile()-backed) file's always-bidirectional "w+b" stream.  Where
+/// WritePathTable has a path for F, this checks the last byte through a
+/// second, independent read-only stream on that same path instead -- a
+/// different FILE* entirely, so there is no read immediately followed by a
+/// write on one stream to worry about -- and still writes the fix, if any,
+/// out through the original F->Fp exactly as before.
 static void closeFinalLine(PascalFile *F) {
     if (!F->Fp || F->Readable) return;
     std::fflush(F->Fp);
     const long End = std::ftell(F->Fp);
     if (End <= 0) return;                 // nothing written: no line to close
+
+    if (const char *Path = findWritePath(F)) {
+        std::FILE *Peek = std::fopen(Path, "rb");
+        if (!Peek) return;
+        int Last = EOF;
+        if (std::fseek(Peek, -1, SEEK_END) == 0) Last = std::fgetc(Peek);
+        std::fclose(Peek);
+        if (Last != '\n' && Last != EOF) std::fputc('\n', F->Fp);
+        return;
+    }
+
     if (std::fseek(F->Fp, -1, SEEK_CUR) != 0) return;
     const int Last = std::fgetc(F->Fp);
     if (Last != '\n' && Last != EOF) std::fputc('\n', F->Fp);
@@ -183,9 +292,13 @@ static void closeFinalLine(PascalFile *F) {
 
 void plang_reset(PascalFile *F, const char *Name, int8_t IsText) {
     if (IsText) closeFinalLine(F);
+    // Issue #239: it is Name as the caller actually passed it -- not
+    // whatever the bind() fallback below may replace it with -- that gets
+    // retained further down, so which case this is has to be captured now.
+    const bool HasExplicitName = Name && Name[0] != '\0';
     // EP §6.7.5.6: a file bound to an external entity opens that entity even
     // when reset is called without an explicit name.
-    if (!Name || Name[0] == '\0') Name = findBinding(F);
+    if (!HasExplicitName) Name = findBinding(F);
     if (!Name || Name[0] == '\0') {
         if (F->Binding == PlangBindStd) {
             // stdin is not rewindable; just re-prime the lookahead window.
@@ -207,14 +320,45 @@ void plang_reset(PascalFile *F, const char *Name, int8_t IsText) {
             std::snprintf(Msg, sizeof(Msg), "cannot open '%s' for reading", Name);
             plang_err_cannot_open(Msg);
         }
+        // Issue #287: opening a directory read-only succeeds at the C level
+        // on POSIX -- the open() syscall underneath allows O_RDONLY on one,
+        // even though no byte of it can ever be read back -- so left
+        // unchecked, eof(f) would come up true immediately and every read
+        // would silently see what looks like an ordinary, unremarkable
+        // end-of-file instead of the real problem. Checked once, here,
+        // rather than in each of this file's several different read paths.
+        // rewrite/extend/update need no equivalent check: opening a
+        // directory for writing (or read+write) already fails at fopen
+        // itself, reaching the plang_err_cannot_open call just above instead.
+        struct stat St;
+        if (fstat(fileno(F->Fp), &St) == 0 && S_ISDIR(St.st_mode)) {
+            std::fclose(F->Fp);
+            F->Fp = nullptr;
+            char Msg[512];
+            std::snprintf(Msg, sizeof(Msg), "'%s' is a directory, not a file", Name);
+            plang_err_cannot_open(Msg);
+        }
+        // Issue #239: retain an explicit name the same way bind() does, so a
+        // later reset/rewrite with no name reopens this same external entity
+        // instead of silently diverting to fresh, unnamed internal storage.
+        if (HasExplicitName) setBinding(F, Name);
     }
     F->Readable = 1;
     unloadComponent(F);
     prime(F);
 }
 
-void plang_rewrite(PascalFile *F, const char *Name, int8_t /*IsText*/) {
-    if (!Name || Name[0] == '\0') Name = findBinding(F);
+void plang_rewrite(PascalFile *F, const char *Name, int8_t IsText) {
+    // §6.4.3.5 makes a text file a sequence of lines, each ended by a line
+    // marker: starting a fresh rewrite abandons whatever F was writing
+    // before, and that has to be finished first, the same as turning it
+    // around to read (plang_reset) already does.
+    if (IsText) closeFinalLine(F);
+    // Issue #239: see the identical note in plang_reset -- Name is about to
+    // be overwritten by the bind() fallback on the next line, so whether it
+    // was the caller's own explicit argument has to be captured first.
+    const bool HasExplicitName = Name && Name[0] != '\0';
+    if (!HasExplicitName) Name = findBinding(F);
     if ((!Name || Name[0] == '\0') && F->Binding == PlangBindStd) {
         F->Buf      = PlangFileUninit; // rewrite(output) keeps writing to stdout
         F->Readable = 0;
@@ -225,6 +369,7 @@ void plang_rewrite(PascalFile *F, const char *Name, int8_t /*IsText*/) {
     if (!Name || Name[0] == '\0') {
         F->Fp      = openTemp("rewrite");
         F->Binding = PlangBindTemp;
+        clearWritePath(F);
     } else {
         F->Fp = std::fopen(Name, "w");
         if (!F->Fp) {
@@ -232,6 +377,11 @@ void plang_rewrite(PascalFile *F, const char *Name, int8_t /*IsText*/) {
             std::snprintf(Msg, sizeof(Msg), "cannot open '%s' for writing", Name);
             plang_err_cannot_open(Msg);
         }
+        setWritePath(F, Name);
+        // Issue #239: retain an explicit name the same way bind() does, so a
+        // later reset/rewrite with no name reopens this same external entity
+        // instead of silently diverting to fresh, unnamed internal storage.
+        if (HasExplicitName) setBinding(F, Name);
     }
     F->Buf      = PlangFileUninit;
     F->Readable = 0;
@@ -256,7 +406,12 @@ void plang_bind_std(PascalFile *F, int8_t IsInput) {
     }
 }
 
-void plang_close(PascalFile *F) {
+void plang_close(PascalFile *F, int8_t IsText) {
+    // §6.4.3.5: closing a file being written has to finish its last line
+    // first (issue #234) -- this was the one caller closeFinalLine never
+    // had, so a program that wrote a partial line and just called close,
+    // with no intervening reset, got no finalization at all.
+    if (IsText) closeFinalLine(F);
     closeStream(F);
     F->Buf      = PlangFileUninit;
     F->Readable = 0;
@@ -264,6 +419,7 @@ void plang_close(PascalFile *F) {
     F->Comp     = nullptr;
     F->CompSize = 0;
     unloadComponent(F);
+    clearWritePath(F);
 }
 
 // ---- status ----
@@ -289,6 +445,23 @@ int8_t plang_eoln_file(PascalFile *F) {
 
 // ---- ISO §6.5.5: the buffer variable f^ ----
 
+/// Issue #199: codegen loads and stores f^ at the component type's ABI
+/// alignment whenever nothing tells IRBuilder otherwise -- the same default
+/// that made a `packed record` field's store an empty promise (see
+/// packedAccessAlign in lib/CodeGen/CGFieldAccess.cpp).  There the promise
+/// could not be kept, because a packed field genuinely sits at an offset its
+/// own type does not require, and the fix was to stop making it.  Here it CAN
+/// be kept -- f^ is a fresh heap allocation, not a byte offset into something
+/// else -- so this makes it true instead: `set of char` is `i256`, which this
+/// project's data layout aligns to 16 (confirmed empirically fixing the
+/// packed-field case: a `movaps` of an under-aligned i256 there SIGSEGVs from
+/// -O1), and no wider scalar exists for a Pascal component to lower to. A
+/// plain malloc does not documented-ly guarantee even that much -- glibc's
+/// x86-64 allocator happens to hand back 16-aligned memory for any request
+/// today, but nothing in the C or C++ standard requires it to, and other
+/// allocators / targets are not obliged to follow suit.
+inline constexpr std::size_t PlangFileBufferAlign = 16;
+
 /// The address of f^, holding the component at the current position.
 ///
 /// A component is read by peeking: it is read and the position put back, so
@@ -300,7 +473,13 @@ void *plang_file_buffer(PascalFile *F, int64_t ElemSize, int8_t IsText) {
     if (ElemSize < 1) ElemSize = 1;
     if (F->CompSize != ElemSize) {
         std::free(F->Comp);
-        F->Comp = std::malloc(static_cast<std::size_t>(ElemSize));
+        // aligned_alloc requires the size to be a whole multiple of the
+        // alignment; ElemSize need not be (a `file of char` asks for one
+        // byte), so round up rather than passing ElemSize through directly.
+        const std::size_t AllocSize =
+            (static_cast<std::size_t>(ElemSize) + PlangFileBufferAlign - 1)
+            / PlangFileBufferAlign * PlangFileBufferAlign;
+        F->Comp = std::aligned_alloc(PlangFileBufferAlign, AllocSize);
         if (!F->Comp) {
             std::fprintf(stderr, "plang runtime: out of memory for a file buffer\n");
             std::abort();
@@ -379,20 +558,126 @@ void plang_page_file(PascalFile *F) {
 
 // ---- typed read (text file) ----
 
+/// ISO §6.9.1: reading a number skips preceding spaces and line terminators.
+/// The text-file counterpart of plang_io.cpp's skipBlanks, against the
+/// file's own lookahead window instead of plangInCh/plangInUnget -- text-file
+/// reads and stdin/readstr reads are two independent implementations (issue
+/// #237 is exactly that: they used to disagree), so each keeps its own copy
+/// of this grammar rather than share one through an abstraction wide enough
+/// to cover a FILE* and a memory buffer alike.
+///
+/// Primes unconditionally rather than through ensurePrimed, and checks
+/// trapOnStreamError even when nothing turns out to be blank, not only
+/// inside the loop: ensurePrimed leaves F->Buf at PlangFileUninit -- neither
+/// EOF nor any real character -- for a file not currently readable, which is
+/// exactly right for eof/eoln (see ensurePrimed's own comment: a program
+/// that never reads must not block priming input it never asked for) but
+/// wrong here, where the caller is already inside read(f, v) and genuinely
+/// needs to know what is there. A file opened in the wrong direction fails
+/// on its very first real character, and that failure has to be forced and
+/// caught here, or scanNumberFile would read the untouched PlangFileUninit
+/// sentinel as neither blank nor EOF and mistake the file for one that
+/// starts with a malformed token instead of one open the wrong way.
+static void skipBlanksFile(PascalFile *F) {
+    if (F->Buf == PlangFileUninit) prime(F);
+    trapOnStreamError(F, "read");
+    while (F->Buf == ' ' || F->Buf == '\t' || F->Buf == '\n' || F->Buf == '\r') {
+        advance(F);
+        trapOnStreamError(F, "read");
+    }
+}
+
+/// scanNumberFile's token buffer -- grown on demand rather than fixed
+/// (issue #237), and file-scope so repeated reads reuse one allocation, the
+/// same reason plang_io.cpp's TokBuf is.
+static char*       NumTokBuf = nullptr;
+static std::size_t NumTokCap = 0;
+
+/// Collects the longest prefix of F that can form a number into NumTokBuf.
+/// Digits only when \p Real is false; otherwise also a fractional part and
+/// an exponent -- the same grammar plang_io.cpp's scanNumber recognizes,
+/// against the file's own lookahead window instead of plangInCh/plangInUnget.
+///
+/// \p SawAny reports whether a non-blank character was available at all
+/// before end-of-file, which is how the caller tells a malformed token
+/// (issue #236: something was there and it didn't parse) apart from a
+/// legitimate read past the end of the file (issue #284: nothing was there
+/// to read).
+static char *scanNumberFile(PascalFile *F, bool Real, bool &SawAny) {
+    std::size_t N = 0;
+    auto reserve = [&](std::size_t Need) {
+        if (Need <= NumTokCap) return;
+        std::size_t NewCap = NumTokCap ? NumTokCap : 64;
+        while (NewCap < Need) NewCap *= 2;
+        if (char *P = static_cast<char *>(std::realloc(NumTokBuf, NewCap))) {
+            NumTokBuf = P;
+            NumTokCap = NewCap;
+        }
+    };
+    auto put = [&](int C) {
+        reserve(N + 2);
+        if (N + 1 < NumTokCap) NumTokBuf[N++] = static_cast<char>(C);
+    };
+    // Consumes the current lookahead character, checks the stream is still
+    // healthy, and captures the character just consumed -- advance(F)
+    // returns exactly what F->Buf held before the call.
+    auto take = [&] {
+        const int C = advance(F);
+        trapOnStreamError(F, "read");
+        put(C);
+    };
+    auto digits = [&] {
+        while (F->Buf != EOF && std::isdigit(static_cast<unsigned char>(F->Buf)))
+            take();
+    };
+
+    reserve(1);
+    skipBlanksFile(F);
+    SawAny = (F->Buf != EOF);
+    if (F->Buf == '+' || F->Buf == '-') take();
+    digits();
+    if (Real) {
+        if (F->Buf == '.') { take(); digits(); }
+        if (F->Buf == 'e' || F->Buf == 'E') {
+            advance(F);                    // consume 'e'/'E' itself...
+            trapOnStreamError(F, "read");
+            put('e');                      // ...store a normalized 'e'
+            if (F->Buf == '+' || F->Buf == '-') take();
+            digits();
+        }
+    }
+    if (NumTokBuf) NumTokBuf[N] = '\0';
+    return NumTokBuf;
+}
+
 void plang_read_file_i64(PascalFile *F, int64_t *P) {
     abortIfClosed(F, "read");
     trapOnWrongDirection(F, "read", 0);
-    trapOnScanError(F, std::fscanf(F->Fp, "%" SCNd64, P), "read");
-    prime(F);
+    bool SawAny = false;
+    char *Tok = scanNumberFile(F, /*Real=*/false, SawAny);
     unloadComponent(F);
+    if (!SawAny) { *P = 0; return; }                              // issue #284
+    char *End = Tok;
+    errno = 0;
+    const long long V = Tok ? std::strtoll(Tok, &End, 10) : 0;
+    if (!Tok || End == Tok) plang_err_read_format("read");         // issue #236
+    if (errno == ERANGE) plang_err_read_int_range("read", Tok);    // issue #240
+    *P = static_cast<int64_t>(V);
 }
 
 void plang_read_file_f64(PascalFile *F, double *P) {
     abortIfClosed(F, "read");
     trapOnWrongDirection(F, "read", 0);
-    trapOnScanError(F, std::fscanf(F->Fp, "%lf", P), "read");
-    prime(F);
+    bool SawAny = false;
+    char *Tok = scanNumberFile(F, /*Real=*/true, SawAny);
     unloadComponent(F);
+    if (!SawAny) { *P = 0.0; return; }                             // issue #284
+    char *End = Tok;
+    const double V = Tok ? std::strtod(Tok, &End) : 0.0;
+    if (!Tok || End == Tok) plang_err_read_format("read");         // issue #236
+    // A real that overflows to +/-HUGE_VAL is left alone -- see the matching
+    // note in plang_io.cpp's plang_read_f64.
+    *P = V;
 }
 
 void plang_read_file_char(PascalFile *F, int8_t *P) {
@@ -477,6 +762,10 @@ void plang_str_write_file_w(PascalFile *F, const void *S, int64_t /*Cap*/,
         trapOnStreamError(F, "write");
         return;
     }
+    // W > 0 here: bound it before pacing the padding loop below one
+    // character at a time, or an oversized W (write(f, s:maxint)) just
+    // keeps calling fputc until it gets there (issue #247).
+    checkedWidth(W);
     for (int64_t I = Len; I < W; ++I) std::fputc(' ', F->Fp);
     if (Len > W) Len = W;
     if (Len > 0)
@@ -561,7 +850,11 @@ static void writePadded(PascalFile *F, const char *S, int64_t W) {
         trapOnStreamError(F, "write");
         return;
     }
-    const auto Width = static_cast<std::size_t>(W);
+    // W > 0 here: same reasoning as plang_io.cpp's plangOutPadded -- this
+    // paces its own padding loop rather than handing W to printf's `%*d`/
+    // `%*c`, so without checkedWidth's INT32_MAX trap an oversized W just
+    // pads one character at a time until it gets there (issue #247).
+    const auto Width = static_cast<std::size_t>(checkedWidth(W));
     for (std::size_t I = Len; I < Width; ++I) std::fputc(' ', F->Fp);
     if (Len) std::fwrite(S, 1, Len < Width ? Len : Width, F->Fp);
     trapOnStreamError(F, "write");
@@ -641,7 +934,13 @@ void plang_write_binary(PascalFile *F, const void *Buf, int64_t ElemSize) {
 
 // ---- EP §6.7.5.2: extend / update ----
 
-void plang_extend(PascalFile *F, const char *Name) {
+void plang_extend(PascalFile *F, const char *Name, int8_t IsText) {
+    // §6.4.3.5: extending reuses or reopens F's stream out from under
+    // whatever it was writing before -- finish that line first (issue #234),
+    // same as plang_reset/plang_rewrite/plang_close.  This is also what
+    // keeps a subsequent writeln from gluing onto an unterminated line left
+    // by an earlier rewrite+write+extend with no close in between.
+    if (IsText) closeFinalLine(F);
     if (!Name || Name[0] == '\0') {
         // Internal file: seek to end of existing temp storage.
         if (F->Fp) {
@@ -651,6 +950,7 @@ void plang_extend(PascalFile *F, const char *Name) {
             F->Fp      = openTemp("extend");
             F->Binding = PlangBindTemp;
         }
+        clearWritePath(F);
     } else {
         closeStream(F);
         // Open for read+append; create if absent.
@@ -664,6 +964,7 @@ void plang_extend(PascalFile *F, const char *Name) {
             }
         }
         std::fseek(F->Fp, 0, SEEK_END);
+        setWritePath(F, Name);
     }
     F->Buf      = PlangFileUninit;
     // 2, not 1: extend opens both directions (named files get "r+b" above,
@@ -673,7 +974,9 @@ void plang_extend(PascalFile *F, const char *Name) {
     unloadComponent(F);
 }
 
-void plang_update(PascalFile *F, const char *Name) {
+void plang_update(PascalFile *F, const char *Name, int8_t IsText) {
+    // §6.4.3.5 / issue #234: see the same call in plang_extend just above.
+    if (IsText) closeFinalLine(F);
     if (!Name || Name[0] == '\0') {
         // Internal file: reposition to start without truncating.
         if (F->Fp) {
@@ -683,6 +986,7 @@ void plang_update(PascalFile *F, const char *Name) {
             F->Fp      = openTemp("update");
             F->Binding = PlangBindTemp;
         }
+        clearWritePath(F);
     } else {
         closeStream(F);
         // Open for read+write; create if absent.
@@ -696,6 +1000,7 @@ void plang_update(PascalFile *F, const char *Name) {
             }
         }
         std::rewind(F->Fp);
+        setWritePath(F, Name);
     }
     F->Buf      = PlangFileUninit;
     F->Readable = 2; // both directions -- see the same note in plang_extend
@@ -709,10 +1014,19 @@ void plang_update(PascalFile *F, const char *Name) {
 // "ord(n)-ord(a)", a of type T being the index type's smallest value.  Only
 // the difference is a component count; n itself never was one except for
 // the common case where a happens to be 0.
+//
+// That computed offset is never range-checked before it reaches fseek, so a
+// value the C library cannot honor (behind the index type's origin, most
+// directly, which computes a negative byte offset) must have fseek's own
+// failure checked: on failure it leaves the stream positioned exactly where
+// it already was, so ignoring the return does not just skip the seek, it
+// silently redirects whatever read or write comes next onto that unrelated,
+// previously-current component instead (issue #233).
 
 void plang_seekread(PascalFile *F, int64_t N, int64_t ElemSize, int64_t IndexLow) {
     abortIfClosed(F, "SeekRead");
-    std::fseek(F->Fp, (N - IndexLow) * ElemSize, SEEK_SET);
+    if (std::fseek(F->Fp, (N - IndexLow) * ElemSize, SEEK_SET) != 0)
+        plang_err_seek_failed("SeekRead", N);
     F->Readable = 1;
     unloadComponent(F);
     prime(F);
@@ -720,7 +1034,8 @@ void plang_seekread(PascalFile *F, int64_t N, int64_t ElemSize, int64_t IndexLow
 
 void plang_seekwrite(PascalFile *F, int64_t N, int64_t ElemSize, int64_t IndexLow) {
     abortIfClosed(F, "SeekWrite");
-    std::fseek(F->Fp, (N - IndexLow) * ElemSize, SEEK_SET);
+    if (std::fseek(F->Fp, (N - IndexLow) * ElemSize, SEEK_SET) != 0)
+        plang_err_seek_failed("SeekWrite", N);
     F->Buf      = PlangFileUninit;
     F->Readable = 0;
     unloadComponent(F);
@@ -728,7 +1043,8 @@ void plang_seekwrite(PascalFile *F, int64_t N, int64_t ElemSize, int64_t IndexLo
 
 void plang_seekupdate(PascalFile *F, int64_t N, int64_t ElemSize, int64_t IndexLow) {
     abortIfClosed(F, "SeekUpdate");
-    std::fseek(F->Fp, (N - IndexLow) * ElemSize, SEEK_SET);
+    if (std::fseek(F->Fp, (N - IndexLow) * ElemSize, SEEK_SET) != 0)
+        plang_err_seek_failed("SeekUpdate", N);
     F->Buf      = PlangFileUninit;
     F->Readable = 2; // both directions -- see the note in plang_extend
     unloadComponent(F);
@@ -778,9 +1094,9 @@ int8_t plang_empty(PascalFile *F, int64_t ElemSize) {
 // PlangMaxBindingName's own -- now the one capacity both sides read.
 
 // Binding name table — a small fixed array avoids C++ stdlib dependency.
-// Pascal programs rarely open more than a handful of files.
-#define PLANG_MAX_BINDINGS 64
-#define PLANG_MAX_NAME_LEN 512
+// Pascal programs rarely open more than a handful of files.  PLANG_MAX_BINDINGS
+// and PLANG_MAX_NAME_LEN are defined with WritePathTable, above, which needs
+// the same two constants for the same reason.
 
 static struct {
     PascalFile* file;
@@ -860,13 +1176,18 @@ void plang_binding(PascalFile *F, PlangBindingType *Out) {
     Out->name.len = 0;
     if (!F) return;
     // The name survives even before the file is opened, so a program can read
-    // back what it bound.
+    // back what it bound.  EP §6.7.5.6: the binding itself survives a close,
+    // too -- it is removed only by an explicit unbind (or replaced by another
+    // bind), so `bound` must answer from the binding table rather than from
+    // whether the file happens to be open right now.  Gating on F->Fp used to
+    // report a just-bound-but-not-yet-opened file as unbound, and a bound
+    // file as unbound again the moment it was closed (issue #248).
     if (const char* Name = findBinding(F)) {
         auto N = static_cast<int64_t>(std::strlen(Name));
         if (N > PlangMaxBindingName) N = PlangMaxBindingName;
         std::memcpy(Out->name.data, Name, static_cast<size_t>(N));
         Out->name.len = N;
-        if (F->Fp) Out->bound = 1;
+        Out->bound = 1;
     }
     // Standard streams (input/output program parameters) are always bound.
     if (F->Fp && F->Binding == PlangBindStd) Out->bound = 1;

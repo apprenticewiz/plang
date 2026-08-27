@@ -276,13 +276,21 @@ bool Sema::check(const ProgramNode& Prog) {
     Symtab.pushScope(); // global scope
     registerBuiltins();
 
-    // Register program file-parameters as text file variables (ISO §6.10)
+    // Register program file-parameters as text file variables (ISO §6.10).
+    // This lets 'input' and 'output' -- the two the language understands
+    // without any declaration at all -- and every other name in the list
+    // resolve to something for the rest of this function, whether or not the
+    // program block goes on to give it a real declaration of its own; see the
+    // BeforePop hook below for the check that it did.  A name repeated in the
+    // list collides right here, in this same scope, so report the failure
+    // Symtab.define already detects instead of discarding it as before.
     for (const auto& Name : Prog.FileParams) {
         Symbol S;
         S.Kind = SymbolKind::Var;
         S.Name = Name;
         S.Ty   = Ctx_.getText();
-        (void)Symtab.define(std::move(S));
+        if (!Symtab.define(std::move(S)))
+            error(Prog.Loc, diag::err_duplicate_param, {Name});
     }
 
     // EP §6.11.2: an interface settles what its implementation module exports,
@@ -331,7 +339,29 @@ bool Sema::check(const ProgramNode& Prog) {
     if (!Prog.Imports.empty())
         processImports(Prog.Imports);
 
-    checkBlock(*Prog.Block, /*BeforePop=*/{}, /*IsGlobalScope=*/true);
+    // ISO §6.10: every program-parameter but 'input' and 'output' must be
+    // given a defining declaration in the program block itself -- the heading
+    // only says which of the block's own declarations are external files (or,
+    // under Extended Pascal, other bindable entities); it is not itself one.
+    // Checked from checkBlock's BeforePop hook, while the block's own scope
+    // -- where such a declaration would live -- is still the current one; by
+    // the time checkBlock returns below, that scope has already been popped.
+    // lookupCurrent (this scope only) is deliberate: the implicit text-file
+    // Var the loop above defined for every name lives in the OUTER scope
+    // pushed at the top of this function, so it never stands in for a
+    // declaration the block itself never wrote -- it exists only so the rest
+    // of the program can still refer to the name, not to satisfy this check.
+    std::set<std::string> CheckedProgramParams;
+    checkBlock(*Prog.Block, /*BeforePop=*/[&] {
+        for (const auto& Name : Prog.FileParams) {
+            const std::string Lower = toLower(Name);
+            if (Lower == "input" || Lower == "output") continue;
+            if (!CheckedProgramParams.insert(Lower).second)
+                continue; // one diagnostic per distinct name, not per repeat
+            if (!Symtab.lookupCurrent(Name))
+                error(Prog.Loc, diag::err_program_param_not_declared, {Name});
+        }
+    }, /*IsGlobalScope=*/true);
     Symtab.popScope();
     return !hasErrors();
 }
@@ -508,7 +538,8 @@ void Sema::processModuleBody(const ModuleNode& Mod) {
         if (Mod.InitStmt)  checkStmt(Mod.InitStmt.get());
         if (Mod.FinalStmt) checkStmt(Mod.FinalStmt.get());
         harvestModuleExports(Mod);
-    }, /*IsGlobalScope=*/true);
+    }, /*IsGlobalScope=*/true, /*IsModuleBlock=*/true,
+       /*IsInterfaceBlock=*/Mod.IsInterface);
 
     InModuleImplementation_ = SavedInImpl;
     CurrentUnit_ = SavedUnit;
@@ -553,13 +584,19 @@ void Sema::processImports(const std::vector<ImportClause>& Imports) {
             };
 
             // Search in ModuleSearchPaths first, then the current directory.
+            // The filename uses Key (already lowercased), matching how
+            // writePMIFiles names the file it publishes -- Pascal module
+            // names are case-insensitive, so the file has to be found
+            // whichever case the import clause spells it in, even on a
+            // case-sensitive filesystem. The module's true identity still
+            // travels inside the file and is checked below (WrongModule).
             bool Found = false;
             for (const auto& Dir : Opts.ModuleSearchPaths)
-                if (tryCandidate(Dir + "/" + Clause.ModuleName + ".pmi")) {
+                if (tryCandidate(Dir + "/" + Key + ".pmi")) {
                     Found = true;
                     break;
                 }
-            if (!Found) Found = tryCandidate("./" + Clause.ModuleName + ".pmi");
+            if (!Found) Found = tryCandidate("./" + Key + ".pmi");
 
             if (!Found) {
                 switch (LastFailure.St) {
@@ -662,9 +699,17 @@ Sema::PMILoadResult Sema::loadPMI(const std::string& Key, const std::string& Pat
 
     // A .pmi holds the interface of one module, written as an EP module
     // heading.  The parser reads a file of modules followed by a program, so
-    // an empty program is appended to make one.
+    // an empty program is appended to make one.  The wrapper's own name has
+    // to be a valid EP identifier -- "__pmi__" used to be used here, but its
+    // leading, trailing, AND doubled underscore each trip ISO 10206 §6.1.3's
+    // own placement rule (see Scanner::scanIdentifierOrKeyword), so every
+    // load used to carry at least one guaranteed, unrelated error that had
+    // nothing to do with whatever the real .pmi content said.  "pmiwrapper"
+    // has no underscore at all, so it trips neither that rule nor the
+    // EP-extension-underscore warning, and the diagnostic stream below can
+    // now be trusted to reflect only the content that was actually read.
     std::string Wrapped = SS.str();
-    Wrapped += "\nprogram __pmi__;\nbegin end.\n";
+    Wrapped += "\nprogram pmiwrapper;\nbegin end.\n";
 
     // Parse the wrapped content using an in-memory scanner.  PMIDiags and
     // PMISrcMgr are both local to this call -- a Diagnostic's own SourceLoc
@@ -680,17 +725,20 @@ Sema::PMILoadResult Sema::loadPMI(const std::string& Key, const std::string& Pat
     Scanner PSc(PMISrcMgr, "<" + Path + ">", Wrapped, PMIDiags, PMIOpts);
     Parser  PP(std::move(PSc), PMIDiags, PMIOpts);
     auto Prog = PP.parse();
-    // !Prog, not PMIDiags.hasErrors(): confirmed empirically, not just by
-    // reasoning about the two conditions in the abstract.  The synthetic
-    // "program __pmi__;" wrapper above trips this compiler's own
-    // leading/trailing-underscore identifier rule -- a real, pre-existing
-    // scanner defect in the wrapper name, unrelated to whatever a real .pmi
-    // actually says -- and the parser's error recovery still returns a
-    // valid Prog despite it, so hasErrors() is true on every load, including
-    // ones that have always worked. Using hasErrors() as the gate broke
-    // importing a real, freshly-compiler-generated .pmi outright; !Prog
-    // matches the original, working behavior.
-    if (!Prog) {
+    // Both !Prog and PMIDiags.hasErrors() matter now that the wrapper itself
+    // is clean.  Parser::parse() already returns null once its own
+    // ErrorCount is nonzero, but ErrorCount only counts errors the Parser
+    // itself raised through Parser::emitError -- a Scanner-level error (an
+    // invalid character, an unterminated string, a misplaced underscore
+    // inside the .pmi's OWN content) reports straight to PMIDiags via
+    // Scanner::emitError without ever touching the Parser's counter, so
+    // Parser::parse() can still hand back a non-null (if partial) tree.
+    // Checking only !Prog, as this code used to before the wrapper was
+    // fixed, would silently accept such a file: a hand-edited or
+    // wrongly-generated .pmi that a Scanner error flags as malformed must
+    // not be trusted just because parsing recovered enough to produce a
+    // tree.
+    if (!Prog || PMIDiags.hasErrors()) {
         std::string Detail;
         for (const auto& D : PMIDiags.diagnostics())
             if (D.Severity == DiagSeverity::Error) { Detail = D.Message; break; }
@@ -832,8 +880,35 @@ void Sema::scanLabelNesting(const StmtNode* S,
 
 void Sema::checkBlock(const BlockNode& Block,
                       llvm::function_ref<void()> BeforePop,
-                      bool IsGlobalScope) {
+                      bool IsGlobalScope,
+                      bool IsModuleBlock,
+                      bool IsInterfaceBlock) {
     Symtab.pushScope();
+
+    // ISO §6.2.2: a procedure or function's formal-parameter-list and its
+    // block are one region, so a name this block is about to declare must not
+    // repeat one of CurrentProc's parameters -- see EnclosingParamNames_'s
+    // comment for why Symtab.define's own per-scope duplicate check cannot
+    // see that collision by itself.  Checked once, up front, against the raw
+    // declarations rather than at each phase's own Symtab.define call below,
+    // so every kind of declaration this block can introduce is covered by
+    // one check instead of by several that could drift out of sync with each
+    // other.  Empty (so this is skipped outright) for a program or module
+    // block, which has no enclosing parameter scope to collide with.
+    if (!EnclosingParamNames_.empty()) {
+        auto checkNotParam = [&](const std::string& Name, SourceLocation Loc) {
+            if (EnclosingParamNames_.count(toLower(Name)))
+                error(Loc, diag::err_duplicate_declaration, {Name});
+        };
+        for (const auto& Cd : Block.Consts) checkNotParam(Cd.Name, Cd.Value->Loc);
+        for (const auto& Td : Block.Types)  checkNotParam(Td.Name, Td.Type->Loc);
+        for (const auto& Vg : Block.Vars)
+            for (size_t Idx = 0; Idx < Vg.Names.size(); ++Idx)
+                checkNotParam(Vg.Names[Idx],
+                              Idx < Vg.NameLocs.size() ? Vg.NameLocs[Idx]
+                                                        : Vg.Type->Loc);
+        for (const auto& Proc : Block.Procs) checkNotParam(Proc->Name, Proc->Loc);
+    }
 
     // A block nested in this one checks its own body before this one does, and
     // must not be left holding this block's answers.  Restored at the bottom.
@@ -858,6 +933,7 @@ void Sema::checkBlock(const BlockNode& Block,
         S.Kind    = SymbolKind::Label;
         S.Name    = Lbl;
         S.DeclLoc = Block.Loc;
+        S.LabelInModuleBlock = IsModuleBlock;
         if (!Symtab.define(S))
             error(T, diag::err_duplicate_label, {Lbl});
     }
@@ -925,6 +1001,14 @@ void Sema::checkBlock(const BlockNode& Block,
     // (We can't use the TyErr singleton because singletons have no identifying name.)
     // EP §6.4.7: Schema definitions are registered immediately as Schema symbols
     // (no forward-pointer stub needed since schema bodies are not resolved eagerly).
+    //
+    // Each stub's address is also the key TypeContext::getPointer interns
+    // `^<stub>` under, until Phase 3c's rebindPointer re-files it -- see that
+    // function's comment for why the stub must stay alive at least that
+    // long.  It then stays alive well past that, for free: resolveType
+    // (SemaType.cpp) stamps every TypeNode's resolved type onto the node
+    // itself, and a stub is exactly what a not-yet-declared name resolves to,
+    // so the AST holds a shared_ptr to it for the rest of the compilation.
     for (const auto& Td : Block.Types) {
         if (!Td.SchemaParams.empty()) {
             // Schema definition — register directly as Schema kind.
@@ -1026,6 +1110,7 @@ void Sema::checkBlock(const BlockNode& Block,
     // such dangling pointers.  This handles both:
     //   PNode = ^Node;  Node = record … end   (top-level forward reference)
     //   Node  = record … next: ^Node end       (self-referential type)
+    //   PList = array[1..N] of ^Node           (element-type forward reference)
     // EP §6.4.7: Schema symbols are skipped (their bodies are resolved lazily).
     std::function<void(std::shared_ptr<Type>&)> fixForwardPtrs =
         [&](std::shared_ptr<Type>& T) {
@@ -1045,6 +1130,11 @@ void Sema::checkBlock(const BlockNode& Block,
             if (T->Kind == TypeKind::Record)
                 for (auto& F : T->RecordFields)
                     fixForwardPtrs(F.Ty);
+            // Array and File share the ElemType field (Set does too, but a
+            // set's base type is required to be ordinal, so a pointer can
+            // never legally sit there and there is no stub to patch).
+            if (T->Kind == TypeKind::Array || T->Kind == TypeKind::File)
+                fixForwardPtrs(T->ElemType);
         };
     for (const auto& Td : Block.Types) {
         Symbol* Sym = Symtab.lookupCurrent(Td.Name);
@@ -1069,13 +1159,21 @@ void Sema::checkBlock(const BlockNode& Block,
         // confusing ld.lld error pointing at some unrelated runtime function
         // rather than at this declaration.  Caught here instead, well under
         // that ceiling: see err_global_var_too_large's comment for why 1 GiB.
-        if (IsGlobalScope && !T->isError()) {
-            constexpr uint64_t GlobalVarByteLimit = 1ull << 30; // 1 GiB
-            if (auto Sz = byteSizeOf(*T); Sz && *Sz > GlobalVarByteLimit) {
+        //
+        // A local (procedure/function-body) variable hits no relocation, but
+        // gets no pass on size either (#223): it is a stack `alloca`, and one
+        // this large hangs the LLVM backend lowering it long before it would
+        // ever fit a real stack. Same threshold, same reasoning -- only the
+        // diagnostic differs, so it names the variable's actual scope.
+        if (!T->isError()) {
+            constexpr uint64_t VarByteLimit = 1ull << 30; // 1 GiB
+            if (auto Sz = byteSizeOf(*T); Sz && *Sz > VarByteLimit) {
+                const DiagID Id = IsGlobalScope ? diag::err_global_var_too_large
+                                                 : diag::err_local_var_too_large;
                 for (const auto& Nm : Vg.Names)
-                    error(Vg.Type->Loc, diag::err_global_var_too_large,
+                    error(Vg.Type->Loc, Id,
                           {Nm, std::to_string(*Sz),
-                           std::to_string(GlobalVarByteLimit)});
+                           std::to_string(VarByteLimit)});
             }
         }
 
@@ -1108,6 +1206,11 @@ void Sema::checkBlock(const BlockNode& Block,
                 error(Vg.Type->Loc, diag::err_value_init_type_mismatch,
                       {InitT->Name, T->Name});
             checkStringCapacity(*T, *Vg.InitExpr);
+            // isAssignCompatible above accepts any integer literal for a
+            // subrange destination, same gap checkInitialState had for a
+            // type-denoter's own 'value' clause (#254): `var x: 1..10 value
+            // 500;` compiled clean and x started life outside its subrange.
+            warnIfConstantOutOfRange(*T, *Vg.InitExpr);
             adoptSetType(*Vg.InitExpr, T);
         }
     }
@@ -1202,6 +1305,29 @@ void Sema::checkBlock(const BlockNode& Block,
         else if (!Sym.LabelReferenced)
             warning(T, diag::warn_label_unreachable, {Sym.Name});
     });
+
+    // Phase 7.6 — Forward-declaration completion audit (ISO §6.6.1).
+    //
+    // The forward directive promises a defining occurrence of the same
+    // procedure- or function-identifier "later in the same block".  Phase 5a
+    // clears IsForward the moment a matching heading is found, but nothing
+    // audited the remainder: a forward declaration with no matching
+    // definition anywhere in the block compiled clean and failed only at
+    // link time, against the mangled name (e.g. "undefined symbol
+    // pas_never_defined") rather than being caught here against the source
+    // identifier (#266).
+    //
+    // Skipped for a module interface's own block: EP §6.11.2 records every
+    // heading there as IsForward regardless of the 'forward' keyword, since
+    // the heading alone is the whole declaration and its body is given in a
+    // separate implementation block -- a different scope this audit, being
+    // per-scope, never sees.
+    if (!IsInterfaceBlock) {
+        Symtab.forEachInCurrentScope([&](Symbol& Sym) {
+            if (Sym.Kind != SymbolKind::Proc || !Sym.IsForward) return;
+            error(Sym.DeclLoc, diag::err_forward_never_defined, {Sym.Name});
+        });
+    }
 
     CurrentBlockLabels = std::move(SavedBlockLabels);
     Symtab.popScope();
@@ -1418,8 +1544,9 @@ void Sema::checkProcBody(const ProcDecl& Proc) {
                 error(Pg.Type->Loc, diag::err_duplicate_param, {Nm});
 
             // EP §6.7.3.7: for conformant array params, register each lo/hi bound
-            // variable as an integer Var in the function scope.  Walk nested
-            // ConformantArray types to register all dimensions.
+            // variable as a Var, typed with the dimension's declared ordinal
+            // type (index-type-specification), in the function scope.  Walk
+            // nested ConformantArray types to register all dimensions.
             if (T && T->Kind == TypeKind::ConformantArray) {
                 auto* Ct = T.get();
                 while (Ct && Ct->Kind == TypeKind::ConformantArray) {
@@ -1429,8 +1556,18 @@ void Sema::checkProcBody(const ProcDecl& Proc) {
                             Symbol Bs;
                             Bs.Kind    = SymbolKind::Var;
                             Bs.Name    = BoundName;
-                            Bs.Ty      = TyInt;
+                            // EP §6.7.3.7: "applied occurrences ... shall
+                            // denote the smallest [largest] value specified
+                            // by the corresponding index-type" -- the type
+                            // written in the schema, not always integer.
+                            Bs.Ty      = Cb.OrdType ? Cb.OrdType : TyInt;
                             Bs.DeclLoc = Pg.Type->Loc;
+                            // EP §6.7.3.7.1 NOTE 2: "The object denoted by a
+                            // bound-identifier is neither constant nor a
+                            // variable" -- it may be used but never assigned.
+                            // Reuse the protected-parameter enforcement path
+                            // (checkNotProtected) rather than a parallel one.
+                            Bs.IsConformantBound = true;
                             if (!Symtab.define(Bs))
                                 error(Pg.Type->Loc, diag::err_duplicate_param, {BoundName});
                         };
@@ -1470,7 +1607,23 @@ void Sema::checkProcBody(const ProcDecl& Proc) {
         CurrentRetType = nullptr;
     }
 
+    // ISO §6.2.2: the parameters just defined above and Proc.Body's own
+    // declarations are one region.  checkBlock (about to run) pushes its own
+    // scope for the latter, so it cannot see this scope's names through
+    // Symtab.define alone -- snapshot them here and let checkBlock
+    // cross-check its declarations against the snapshot instead.  Saved and
+    // restored around the call so a nested procedure's own checkProcBody
+    // invocation (reached from inside checkBlock, via Phase 5b) sees only
+    // ITS OWN parameters while its body is checked, not this one's.
+    auto SavedEnclosingParamNames = std::move(EnclosingParamNames_);
+    EnclosingParamNames_.clear();
+    Symtab.forEachInCurrentScope([&](Symbol& S) {
+        EnclosingParamNames_.insert(toLower(S.Name));
+    });
+
     if (Proc.Body) checkBlock(*Proc.Body);
+
+    EnclosingParamNames_ = std::move(SavedEnclosingParamNames);
 
     // ISO §6.7.3: a function must assign to its result variable at least once.
     // The assignment that does so may be written in a function nested inside
