@@ -78,6 +78,23 @@ llvm::Value* StringCallMarshalling::emitStrAddr(const ExprNode& e) {
 }
 
 llvm::Value* StringCallMarshalling::emitCStrArg(const ExprNode& e) {
+    // A char value converts too, and needs its own case: EmitExpr returns it
+    // as a bare i8, not a pointer, so it is not among the "everything else"
+    // the comment below is about.  EP §6.1.7 makes a single-character string
+    // literal -- the 'x' in `update(f, 'x')` -- type char rather than
+    // string(1), which is exactly the shape reset/rewrite/extend/update's
+    // optional file-name argument takes when the name is one character long.
+    // Before this, that i8 reached plang_update (etc.) unconverted, against
+    // a `const char *` parameter LLVM's verifier rejects a scalar for.
+    // Issue #296.
+    if (e.ResolvedType && e.ResolvedType->Kind == TypeKind::Char) {
+        auto* i8Ty = llvm::Type::getInt8Ty(Ctx);
+        auto* buf  = CreateEntryAlloca(llvm::ArrayType::get(i8Ty, 2), "str.cstr.ch");
+        B.CreateStore(EmitExpr(e), buf);
+        auto* nulAt = B.CreateInBoundsGEP(i8Ty, buf, i64c(1), "str.cstr.ch.nul");
+        B.CreateStore(llvm::ConstantInt::get(i8Ty, 0), nulAt);
+        return buf;
+    }
     // Only a string(n) value needs converting -- everything else EmitExpr
     // returns for a string-shaped argument (a plain string literal outside
     // Extended Pascal, an already-null-terminated `String`) is already a

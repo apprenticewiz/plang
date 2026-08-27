@@ -11,6 +11,7 @@
 #include "llvm/Support/Casting.h"
 
 #include "plang/AST/Ast.h"
+#include "plang/Basic/Arith.h"
 #include "plang/Basic/LangOptions.h"
 #include "plang/Basic/PascalFileLayout.h"
 #include "plang/Basic/RequiredRecordLayouts.h"
@@ -342,12 +343,22 @@ llvm::Type* CGTypes::llvmTypeOfNode(const TypeNode& node) {
         // extent came out zero or negative became a [0 x T] that every index
         // then ran off the end of.  Sema resolved the same type and rejects a
         // bound that is not constant, so defer to it rather than guess.
+        //
+        // The same "defer to Sema" answer also covers a bound pair that DID
+        // fold but whose count does not fit a uint64_t (array[low(int64)..
+        // high(int64)] and its kin, issue #215): ordinalRangeCount reports
+        // that as nullopt rather than silently wrapping "hi - lo + 1" into a
+        // plausible-looking small count, the same way "did not fold" is
+        // handled just below -- Sema's own byteSizeOf makes the identical
+        // check, and for anything reaching this from a global variable's
+        // declared type has already turned it into a proper diagnostic
+        // before codegen ever runs (issue #214).
         auto range = arrayIndexRange(*n);
-        const int64_t cnt = range ? range->second - range->first + 1 : 0;
-        if (cnt <= 0)
+        const auto cnt = range ? ordinalRangeCount(range->first, range->second)
+                               : std::optional<uint64_t>{0};
+        if (!cnt || *cnt == 0)
             return llvmTypeOfNodeViaSema(node, "array bounds did not fold");
-        return llvm::ArrayType::get(llvmTypeOfNode(*n->Element),
-                                    static_cast<uint64_t>(cnt));
+        return llvm::ArrayType::get(llvmTypeOfNode(*n->Element), *cnt);
     }
     if (auto* n = llvm::dyn_cast<RecordTypeNode>(&node))
         return structTypeFor(*n);
@@ -752,11 +763,24 @@ llvm::Type* CGTypes::llvmTypeOfSemaTypeImpl(const Type& T) {
             return fileStructType();
         case TypeKind::Array: {
             if (!T.IndexType || !T.ElemType) return ptrTy;
-            int64_t lo  = T.IndexType->SubLo;
-            int64_t hi  = T.IndexType->SubHi;
-            int64_t cnt = (hi - lo + 1 > 0) ? (hi - lo + 1) : 0;
-            return llvm::ArrayType::get(llvmTypeOfSemaType(*T.ElemType),
-                                        static_cast<uint64_t>(cnt));
+            // See the identical guard in llvmTypeOfNode's ArrayTypeNode arm
+            // and Sema::byteSizeOf's Array case: "hi - lo + 1" done directly
+            // in int64_t is signed-overflow UB once the bounds are far
+            // enough apart, and used to silently become a plausible-looking
+            // small (or zero) count instead of the astronomically large one
+            // the declaration actually asks for (issue #215).  Unlike that
+            // sibling there is no TypeNode here to defer to Sema through --
+            // T already IS Sema's own answer -- so an extent that does not
+            // fit a uint64_t is a codegen internal error: reaching here with
+            // one means it came from somewhere Sema's byteSizeOf gate does
+            // not cover (a local variable, say -- that gate is global-scope
+            // only), and building the array type anyway would silently emit
+            // a wrong, crash-prone program instead of failing to compile it.
+            const auto cnt = ordinalRangeCount(T.IndexType->SubLo, T.IndexType->SubHi);
+            if (!cnt)
+                codegenICE("an array type has more elements than plang can "
+                           "represent");
+            return llvm::ArrayType::get(llvmTypeOfSemaType(*T.ElemType), *cnt);
         }
         case TypeKind::Record: {
             // The declaration is the only place the variant tree survives, and

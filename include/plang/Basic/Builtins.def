@@ -51,8 +51,13 @@ BUILTIN(Readln,    "readln",    Proc, ALL, 0, -1, R_None)
 BUILTIN(New,       "new",       Proc, ALL, 1, -1, R_None)
 BUILTIN(Dispose,   "dispose",   Proc, ALL, 1, -1, R_None)
 BUILTIN(Page,      "page",      Proc, ISO, 0, -1, R_None)
-BUILTIN(Reset,     "reset",     Proc, ALL, 1, -1, R_None)
-BUILTIN(Rewrite,   "rewrite",   Proc, ALL, 1, -1, R_None)
+// reset/rewrite take the file and, at most, an external filename (EP
+// §6.7.5.2 / Turbo's record-size overload) -- CodeGen's lowering (CGProcCall,
+// the reset/rewrite arm) only ever reads args[0] and args[1], so -1 here
+// let a third argument through unexamined into a runtime call already typed
+// for two.
+BUILTIN(Reset,     "reset",     Proc, ALL, 1,  2, R_None)
+BUILTIN(Rewrite,   "rewrite",   Proc, ALL, 1,  2, R_None)
 BUILTIN(Get,       "get",       Proc, ISO, 1, -1, R_None)
 BUILTIN(Put,       "put",       Proc, ISO, 1, -1, R_None)
 BUILTIN(Close,     "close",     Proc, ALL, 1, -1, R_None)
@@ -107,9 +112,10 @@ BUILTIN(Polar,     "polar",     Func, EP,  2,  2, R_Complex)
 BUILTIN(Re,        "re",        Func, EP,  1,  1, R_Real)
 BUILTIN(Im,        "im",        Func, EP,  1,  1, R_Real)
 BUILTIN(Arg,       "arg",       Func, EP,  1,  1, R_Real)
-// EP §6.7.5.2: direct-access files
-BUILTIN(Extend,    "extend",    Proc, EP,  1, -1, R_None)
-BUILTIN(Update,    "update",    Proc, EP,  1, -1, R_None)
+// EP §6.7.5.2: direct-access files.  Same two-argument shape as reset/rewrite
+// above, and the same reason it is 2 rather than -1.
+BUILTIN(Extend,    "extend",    Proc, EP,  1,  2, R_None)
+BUILTIN(Update,    "update",    Proc, EP,  1,  2, R_None)
 BUILTIN(SeekRead,  "seekread",  Proc, EP,  2,  2, R_None)
 BUILTIN(SeekWrite, "seekwrite", Proc, EP,  2,  2, R_None)
 BUILTIN(SeekUpdate,"seekupdate",Proc, EP,  2,  2, R_None)

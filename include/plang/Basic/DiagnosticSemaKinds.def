@@ -48,6 +48,19 @@ DIAG(err_index_type_mismatch, Error, "array index type mismatch: index type is '
 DIAG(err_global_var_too_large, Error,
      "'%0' is too large to be a global variable (%1 bytes; the limit is %2 "
      "bytes) -- declare it on the heap (New/GetMem) instead")
+// A local (procedure/function-body) variable this large has no relocation to
+// overflow -- it is a stack allocation, not a linked object -- but it is no
+// safer: it never fits any real stack, and what actually breaks first is the
+// LLVM backend lowering the resulting `alloca`.  A single `string(maxint)`
+// local was observed driving `llc` to tens of gigabytes of RSS with no
+// termination in sight (issue #223), long before the process would ever hit
+// a stack-overflow signal.  Gated at the same threshold as
+// err_global_var_too_large and for the same "comfortably under any real
+// limit" reasoning -- only the wording differs, so the diagnostic names the
+// variable's actual scope instead of claiming it is a global.
+DIAG(err_local_var_too_large, Error,
+     "'%0' is too large to be a local variable (%1 bytes; the limit is %2 "
+     "bytes) -- declare it on the heap (New/GetMem) instead")
 DIAG(err_field_on_non_record, Error, "field access '.%0' on non-record type '%1'")
 DIAG(err_no_such_field, Error, "record type '%0' has no field '%1'")
 DIAG(err_deref_non_pointer, Error, "dereference operator '^' applied to non-pointer type '%0'")
@@ -136,6 +149,7 @@ DIAG(err_assign_mismatch_homonym, Error,
 DIAG(err_if_not_boolean, Error, "condition of 'if' must be boolean, got '%0'")
 DIAG(err_while_not_boolean, Error, "condition of 'while' must be boolean, got '%0'")
 DIAG(err_for_var_undefined, Error, "undefined variable '%0' in for statement")
+DIAG(err_for_var_not_variable, Error, "for-loop control variable '%0' is not a variable")
 DIAG(err_for_var_not_ordinal, Error, "for-loop variable '%0' must be an ordinal type; got '%1'")
 DIAG(err_for_var_not_local, Error, "for-loop control variable '%0' must be declared in the immediately enclosing block")
 DIAG(err_for_bounds_incompatible, Error, "for-loop bounds have incompatible types ('%0' and '%1')")
@@ -318,6 +332,15 @@ DIAG(err_schema_body_not_representable, Error,
      "array body recomputes its extent from them at run time, and any other "
      "body needs their values to lay itself out and to range-check; Extended "
      "Pascal allows this, so write them out, as in '%0(...)'")
+// ISO 7185 §6.6.5.3: new's first parameter is a pointer variable -- the
+// procedure creates a fresh variable and makes the pointer refer to it.
+// Only the Pointer-Kind case computed a Pointee; every other kind left it
+// null and fell through every check below untouched, so `new(i)` for a
+// plain `integer` i reached CodeGen with nothing to size an allocation from
+// and hit a codegenICE -- an implementation crash where the standard calls
+// for the program to be rejected here.
+DIAG(err_new_arg_not_pointer, Error,
+     "'new' expects a pointer as its first argument, got '%0'")
 // TRANSLATORS: "discriminant(s)" is an English plural dodge.
 DIAG(err_schema_new_needs_discs, Error,
      "'new' for a pointer to schema '%0' needs %1 discriminant(s), got %2")

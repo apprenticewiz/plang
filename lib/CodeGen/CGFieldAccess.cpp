@@ -246,9 +246,24 @@ llvm::Value* CGFieldAccess::emitFieldLoad(const FieldExpr& e) {
     if (e.Record->ResolvedType
             && e.Record->ResolvedType->Kind == TypeKind::SchemaInstance) {
         for (const auto& D : e.Record->ResolvedType->SchemaDiscs) {
-            if (eqCI(D.Name, e.Field))
-                return llvm::ConstantInt::get(I64Ty,
-                           static_cast<uint64_t>(D.Value), /*isSigned=*/true);
+            if (eqCI(D.Name, e.Field)) {
+                // D.Value is stored as int64_t; narrow to the declared ordinal
+                // type the same way the Schema arm below narrows its
+                // runtime-carried i64, so that a char or enum discriminant
+                // hands back an i8/i1/... rather than a bare i64.  Without
+                // this, `x.c` for `t(c: char) = ...` produced an i64 97 where
+                // callers that key off the raw LLVM value (e.g. string
+                // concatenation) need an i8 -- an LLVM IR verifier failure,
+                // not caught by callers that key off the Sema type instead
+                // (writeln, comparisons).
+                llvm::Value* full = llvm::ConstantInt::get(I64Ty,
+                                         static_cast<uint64_t>(D.Value), /*isSigned=*/true);
+                llvm::Type* want = D.Ty && !D.Ty->isError()
+                                       ? Types.llvmTypeOfSemaType(*D.Ty) : I64Ty;
+                return want->isIntegerTy() && want != I64Ty
+                           ? B.CreateTrunc(full, want, "sch.disc.n")
+                           : full;
+            }
         }
         // Not a discriminant — fall through to normal field access on the body.
     }
