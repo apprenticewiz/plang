@@ -435,6 +435,14 @@ cmake -S . -B build-asan -DCMAKE_BUILD_TYPE=Debug \
   -DPLANG_ENABLE_TESTS=ON -DPLANG_SANITIZE=address,undefined
 ```
 
+It is a `CACHE STRING`, not a `CACHE BOOL` -- `cmake-gui`/`ccmake` show it as
+a free-form field (with `address`, `undefined`, `thread`, `leak`, `memory`,
+and the combination above offered for discovery), not a checkbox. Configure
+fails immediately with `message(FATAL_ERROR ...)` on any name outside that
+list, so a typo (`-DPLANG_SANITIZE=adress`) is caught before the build
+starts rather than producing an unsanitized binary or a late, easy-to-miss
+compiler error.
+
 UBSan's `vptr` check is switched off with it, because the libraries are built
 `-fno-rtti` by LLVM convention and that check needs RTTI; left on, it reports
 every `shared_ptr` control block as having an invalid vptr.
