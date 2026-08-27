@@ -45,10 +45,30 @@ std::size_t  ConfArrCap   = 0;
 
 extern "C" {
 
-/// Flush stdout then terminate (EP §6.7.5.7 \c halt).  The standard's halt takes
-/// no argument; \p Status carries the common extension halt(n), and is zero for
-/// a bare halt.
+/// EP §6.11.2: run every registered module finaliser, most recently
+/// initialized module first (defined below, once module registration has
+/// been introduced) -- forward-declared here because plang_halt, just
+/// below, is the other way a program can terminate and has to reach the
+/// same finalisers that falling off the end of the program block already
+/// does (CodeGenProcs.cpp's emitMain).
+void plang_module_finals_run(void);
+
+/// Run every registered module finaliser, flush stdout, then terminate
+/// (EP §6.7.5.7 \c halt).  The standard's halt takes no argument; \p Status
+/// carries the common extension halt(n), and is zero for a bare halt.
+///
+/// A module's 'to end do' (EP §6.11.2) is specified to run as the program
+/// terminates, not only when execution falls off the end of the program
+/// block -- halt is the other way a Pascal program ends.  Before this called
+/// in here too, halt reached std::exit directly, which no generated code
+/// stands between, so every module's finalisation side effects (a closing
+/// log line, a flushed handle) were silently lost whenever the program
+/// halted instead of ending normally (issue #242).  plang_module_finals_run
+/// pops each finaliser off its list before calling it, so one that itself
+/// calls halt -- reentering this function -- still cannot run anything a
+/// second time; it just drains whatever the outer call had not reached yet.
 void plang_halt(int64_t Status) {
+    plang_module_finals_run();
     std::fflush(stdout);
     std::exit(static_cast<int>(Status));
 }
