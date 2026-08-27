@@ -508,7 +508,7 @@ void Sema::processModuleBody(const ModuleNode& Mod) {
         if (Mod.InitStmt)  checkStmt(Mod.InitStmt.get());
         if (Mod.FinalStmt) checkStmt(Mod.FinalStmt.get());
         harvestModuleExports(Mod);
-    }, /*IsGlobalScope=*/true);
+    }, /*IsGlobalScope=*/true, /*IsInterfaceBlock=*/Mod.IsInterface);
 
     InModuleImplementation_ = SavedInImpl;
     CurrentUnit_ = SavedUnit;
@@ -832,7 +832,8 @@ void Sema::scanLabelNesting(const StmtNode* S,
 
 void Sema::checkBlock(const BlockNode& Block,
                       llvm::function_ref<void()> BeforePop,
-                      bool IsGlobalScope) {
+                      bool IsGlobalScope,
+                      bool IsInterfaceBlock) {
     Symtab.pushScope();
 
     // A block nested in this one checks its own body before this one does, and
@@ -1202,6 +1203,29 @@ void Sema::checkBlock(const BlockNode& Block,
         else if (!Sym.LabelReferenced)
             warning(T, diag::warn_label_unreachable, {Sym.Name});
     });
+
+    // Phase 7.6 — Forward-declaration completion audit (ISO §6.6.1).
+    //
+    // The forward directive promises a defining occurrence of the same
+    // procedure- or function-identifier "later in the same block".  Phase 5a
+    // clears IsForward the moment a matching heading is found, but nothing
+    // audited the remainder: a forward declaration with no matching
+    // definition anywhere in the block compiled clean and failed only at
+    // link time, against the mangled name (e.g. "undefined symbol
+    // pas_never_defined") rather than being caught here against the source
+    // identifier (#266).
+    //
+    // Skipped for a module interface's own block: EP §6.11.2 records every
+    // heading there as IsForward regardless of the 'forward' keyword, since
+    // the heading alone is the whole declaration and its body is given in a
+    // separate implementation block -- a different scope this audit, being
+    // per-scope, never sees.
+    if (!IsInterfaceBlock) {
+        Symtab.forEachInCurrentScope([&](Symbol& Sym) {
+            if (Sym.Kind != SymbolKind::Proc || !Sym.IsForward) return;
+            error(Sym.DeclLoc, diag::err_forward_never_defined, {Sym.Name});
+        });
+    }
 
     CurrentBlockLabels = std::move(SavedBlockLabels);
     Symtab.popScope();

@@ -284,6 +284,14 @@ DIAG(err_forward_return_type, Error, "return type of '%0' does not match forward
 DIAG(err_function_no_result_type, Error,
      "function '%0' has no result type; only the defining occurrence of a "
      "function declared 'forward' may leave it out")
+// ISO §6.6.1: the forward directive promises a defining occurrence of the
+// same procedure- or function-identifier "later in the same block".
+// Nothing audited that promise, so a forward declaration with no matching
+// definition compiled clean and only failed at link time, against the
+// mangled name rather than the source identifier that is actually missing.
+DIAG(err_forward_never_defined, Error,
+     "'%0' is declared 'forward' but is never given a defining declaration "
+     "in this block")
 
 // EP Tier 5 — Function/Procedure Enhancements
 DIAG(err_protected_param_assigned, Error, "assignment to protected parameter '%0' (EP §6.7.3.1)")

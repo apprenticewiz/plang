@@ -364,9 +364,15 @@ private:
     // variable becomes a single linked object subject to the relocation-range
     // check in Phase 4 below; false for a procedure/function body, whose
     // locals are stack storage and never hit that limit.
+    // IsInterfaceBlock: true for a module INTERFACE's own block.  Every
+    // heading there is recorded IsForward regardless of the 'forward'
+    // keyword (EP §6.11.2: the heading alone is the whole declaration, its
+    // body given later in a separate implementation block) so the
+    // forward-declaration completion audit below does not apply to it.
     void checkBlock(const BlockNode& Block,
                     llvm::function_ref<void()> BeforePop = {},
-                    bool IsGlobalScope = false);
+                    bool IsGlobalScope = false,
+                    bool IsInterfaceBlock = false);
     void checkProcSignature(const ProcDecl& Proc);
     void checkProcBody     (const ProcDecl& Proc);
     /// Records which value parameters a body modifies; see ProcDecl::ModifiedParams.
