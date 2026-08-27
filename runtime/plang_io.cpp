@@ -14,6 +14,7 @@
 #include "plang_real.h"
 
 #include <cctype>
+#include <cerrno>
 #include <cinttypes>
 #include <cstdarg>
 #include <cstdint>
@@ -127,20 +128,47 @@ int skipBlanks() {
     return C;
 }
 
-/// Collects the longest prefix that can form a number into \p Tok, which must
-/// hold TokMax characters.  Digits only when \p Real is false; otherwise also
-/// a fractional part and an exponent.
-constexpr std::size_t TokMax = 64;
+/// scanNumber's token buffer.  Issue #237: this used to be a fixed 64
+/// characters, silently truncating any longer literal -- most visibly, a
+/// long real's exponent digits fell off the end along with everything else
+/// past the limit, so "1" followed by 71 more digits read back as 1e+62
+/// instead of 1e71.  Grown on demand like writestr's CapBuf just above, and
+/// kept between calls for the same reason: the common case allocates once.
+char*       TokBuf = nullptr;
+std::size_t TokCap = 0;
 
-void scanNumber(char* Tok, bool Real) {
+void tokReserve(std::size_t Need) {
+    if (Need <= TokCap) return;
+    std::size_t NewCap = TokCap ? TokCap : 64;
+    while (NewCap < Need) NewCap *= 2;
+    if (char* P = static_cast<char*>(std::realloc(TokBuf, NewCap))) {
+        TokBuf = P;
+        TokCap = NewCap;
+    }
+}
+
+/// Collects the longest prefix that can form a number into TokBuf, growing
+/// it rather than truncating (issue #237).  Digits only when \p Real is
+/// false; otherwise also a fractional part and an exponent.
+///
+/// \p SawAny reports whether a non-blank character was available at all
+/// before end-of-file -- how the caller tells a malformed token (issue
+/// #236: something was there and it didn't parse) apart from a legitimate
+/// read past the end of the input (issue #284: nothing was left to read).
+void scanNumber(bool Real, bool &SawAny) {
     std::size_t N = 0;
-    auto put = [&](int C) { if (N + 1 < TokMax) Tok[N++] = static_cast<char>(C); };
+    auto put = [&](int C) {
+        tokReserve(N + 2);
+        if (N + 1 < TokCap) TokBuf[N++] = static_cast<char>(C);
+    };
     auto digits = [&](int& C) {
         while (C != EOF && std::isdigit(static_cast<unsigned char>(C)))
             { put(C); C = plangInCh(); }
     };
 
+    tokReserve(1);
     int C = skipBlanks();
+    SawAny = (C != EOF);
     if (C == '+' || C == '-') { put(C); C = plangInCh(); }
     digits(C);
     if (Real) {
@@ -153,7 +181,7 @@ void scanNumber(char* Tok, bool Real) {
         }
     }
     plangInUnget(C);
-    Tok[N] = '\0';
+    if (TokBuf) TokBuf[N] = '\0';
 }
 
 void consumeLine() {
@@ -172,6 +200,8 @@ void plang_write_f64_f(double V, int64_t W, int64_t D);
 
 /// Defined with the other runtime error reporters in plang_sys.cpp.
 [[noreturn]] void plang_err_field_width(int64_t W);
+[[noreturn]] void plang_err_read_format(const char *Op);
+[[noreturn]] void plang_err_read_int_range(const char *Op, const char *Tok);
 
 // ISO §6.10.3.1 calls a negative TotalWidth or FracDigits "an error" (§3.2's
 // weaker class, which a processor may leave undetected) rather than saying
@@ -242,14 +272,28 @@ void plang_writeln_cplx_w(double Re, double Im, int64_t W, int64_t D)
 // ---- read ----
 
 void plang_read_i64 (int64_t *P) {
-    char Tok[TokMax];
-    scanNumber(Tok, /*Real=*/false);
-    if (Tok[0]) *P = std::strtoll(Tok, nullptr, 10);
+    bool SawAny = false;
+    scanNumber(/*Real=*/false, SawAny);
+    if (!SawAny) { *P = 0; return; }             // issue #284: past EOF is a defined, consistent zero
+    char* End = TokBuf;
+    errno = 0;
+    const long long V = TokBuf ? std::strtoll(TokBuf, &End, 10) : 0;
+    if (!TokBuf || End == TokBuf) plang_err_read_format("read");        // issue #236
+    if (errno == ERANGE) plang_err_read_int_range("read", TokBuf);      // issue #240
+    *P = static_cast<int64_t>(V);
 }
 void plang_read_f64 (double  *P) {
-    char Tok[TokMax];
-    scanNumber(Tok, /*Real=*/true);
-    if (Tok[0]) *P = std::strtod(Tok, nullptr);
+    bool SawAny = false;
+    scanNumber(/*Real=*/true, SawAny);
+    if (!SawAny) { *P = 0.0; return; }            // issue #284
+    char* End = TokBuf;
+    const double V = TokBuf ? std::strtod(TokBuf, &End) : 0.0;
+    if (!TokBuf || End == TokBuf) plang_err_read_format("read");        // issue #236
+    // A real that overflows to +/-HUGE_VAL is left alone, matching the
+    // runtime's existing policy for real arithmetic generally (an IEEE
+    // infinity or NaN, not a trap) -- issue #240 is scoped to integers,
+    // whose type has no infinity to fall back on.
+    *P = V;
 }
 void plang_read_char(int8_t  *P) {
     const int C = plangInCh();

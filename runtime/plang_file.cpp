@@ -30,6 +30,8 @@
 #include "plang/Basic/PascalFileLayout.h"
 #include "plang/Basic/RequiredRecordLayouts.h"
 
+#include <cctype>
+#include <cerrno>
 #include <cinttypes>
 #include <cstdint>
 #include <cstdio>
@@ -74,6 +76,8 @@ static void setBinding(PascalFile *F, const char *Name);
 [[noreturn]] void plang_err_field_width(int64_t W);
 [[noreturn]] void plang_err_file_wrong_mode(const char *Op);
 [[noreturn]] void plang_err_seek_failed(const char *Op, int64_t N);
+[[noreturn]] void plang_err_read_format(const char *Op);
+[[noreturn]] void plang_err_read_int_range(const char *Op, const char *Tok);
 
 /// Look at the next character without consuming it.
 static void prime(PascalFile *F) {
@@ -132,34 +136,24 @@ static void abortIfClosed(PascalFile *F, const char *Op) {
 /// other direction fails at the C stream level -- fread/fwrite return short,
 /// fprintf/fputc/fputs return a negative/EOF sentinel, and in every one of
 /// those cases the stream's own error indicator is set.  A stdio call that
-/// merely hit real end-of-file, or an fscanf that merely failed to match its
-/// format, sets neither -- so checking ferror here (rather than treating any
-/// short return as this violation) traps exactly the wrong-mode case and
-/// leaves the eof and malformed-input cases exactly as they behaved before.
-/// F->Readable is not a substitute for this: seekread/seekupdate set it
-/// without reopening F->Fp, so it does not reflect the mode the stream was
-/// actually opened in (the gap issue #124 was filed against).
+/// merely hit real end-of-file sets neither -- so checking ferror here
+/// (rather than treating any short return as this violation) traps exactly
+/// the wrong-mode case and leaves the eof and malformed-input cases exactly
+/// as they behaved before.  F->Readable is not a substitute for this:
+/// seekread/seekupdate set it without reopening F->Fp, so it does not
+/// reflect the mode the stream was actually opened in (the gap issue #124
+/// was filed against).
 static void trapOnStreamError(PascalFile *F, const char *Op) {
     if (std::ferror(F->Fp)) plang_err_file_wrong_mode(Op);
-}
-
-/// fscanf does not go through trapOnStreamError: on glibc, scanning a stream
-/// opened in the wrong direction returns EOF (as a genuine end-of-file read
-/// also does) but -- unlike fread/fwrite/fgetc/fputc above -- leaves the
-/// stream's own ferror() indicator clear, so ferror cannot tell the two
-/// apart here. feof() can: a real end-of-file sets it, a wrong-mode failure
-/// does not, so only the latter is this violation.
-static void trapOnScanError(PascalFile *F, int MatchCount, const char *Op) {
-    if (MatchCount == EOF && !std::feof(F->Fp)) plang_err_file_wrong_mode(Op);
 }
 
 /// Issue #152: extends the #124 mode trap to an internal (unbound) file.
 /// Such a file is backed by tmpfile(), which glibc always opens "w+b" --
 /// genuinely bidirectional at the C level -- regardless of which way the
 /// Pascal file is currently facing, so a wrong-direction stdio call there
-/// succeeds outright: ferror/feof never fires, and trapOnStreamError /
-/// trapOnScanError have nothing to see.  F->Readable is the only place the
-/// intended direction is recorded for such a file (set by reset/rewrite and
+/// succeeds outright: ferror/feof never fires, and trapOnStreamError has
+/// nothing to see.  F->Readable is the only place the intended direction is
+/// recorded for such a file (set by reset/rewrite and
 /// their seek* counterparts, same as for a named file), so this checks it
 /// directly and traps through the same plang_err_file_wrong_mode a named
 /// file's ferror/feof check reaches.
@@ -464,20 +458,126 @@ void plang_page_file(PascalFile *F) {
 
 // ---- typed read (text file) ----
 
+/// ISO §6.9.1: reading a number skips preceding spaces and line terminators.
+/// The text-file counterpart of plang_io.cpp's skipBlanks, against the
+/// file's own lookahead window instead of plangInCh/plangInUnget -- text-file
+/// reads and stdin/readstr reads are two independent implementations (issue
+/// #237 is exactly that: they used to disagree), so each keeps its own copy
+/// of this grammar rather than share one through an abstraction wide enough
+/// to cover a FILE* and a memory buffer alike.
+///
+/// Primes unconditionally rather than through ensurePrimed, and checks
+/// trapOnStreamError even when nothing turns out to be blank, not only
+/// inside the loop: ensurePrimed leaves F->Buf at PlangFileUninit -- neither
+/// EOF nor any real character -- for a file not currently readable, which is
+/// exactly right for eof/eoln (see ensurePrimed's own comment: a program
+/// that never reads must not block priming input it never asked for) but
+/// wrong here, where the caller is already inside read(f, v) and genuinely
+/// needs to know what is there. A file opened in the wrong direction fails
+/// on its very first real character, and that failure has to be forced and
+/// caught here, or scanNumberFile would read the untouched PlangFileUninit
+/// sentinel as neither blank nor EOF and mistake the file for one that
+/// starts with a malformed token instead of one open the wrong way.
+static void skipBlanksFile(PascalFile *F) {
+    if (F->Buf == PlangFileUninit) prime(F);
+    trapOnStreamError(F, "read");
+    while (F->Buf == ' ' || F->Buf == '\t' || F->Buf == '\n' || F->Buf == '\r') {
+        advance(F);
+        trapOnStreamError(F, "read");
+    }
+}
+
+/// scanNumberFile's token buffer -- grown on demand rather than fixed
+/// (issue #237), and file-scope so repeated reads reuse one allocation, the
+/// same reason plang_io.cpp's TokBuf is.
+static char*       NumTokBuf = nullptr;
+static std::size_t NumTokCap = 0;
+
+/// Collects the longest prefix of F that can form a number into NumTokBuf.
+/// Digits only when \p Real is false; otherwise also a fractional part and
+/// an exponent -- the same grammar plang_io.cpp's scanNumber recognizes,
+/// against the file's own lookahead window instead of plangInCh/plangInUnget.
+///
+/// \p SawAny reports whether a non-blank character was available at all
+/// before end-of-file, which is how the caller tells a malformed token
+/// (issue #236: something was there and it didn't parse) apart from a
+/// legitimate read past the end of the file (issue #284: nothing was there
+/// to read).
+static char *scanNumberFile(PascalFile *F, bool Real, bool &SawAny) {
+    std::size_t N = 0;
+    auto reserve = [&](std::size_t Need) {
+        if (Need <= NumTokCap) return;
+        std::size_t NewCap = NumTokCap ? NumTokCap : 64;
+        while (NewCap < Need) NewCap *= 2;
+        if (char *P = static_cast<char *>(std::realloc(NumTokBuf, NewCap))) {
+            NumTokBuf = P;
+            NumTokCap = NewCap;
+        }
+    };
+    auto put = [&](int C) {
+        reserve(N + 2);
+        if (N + 1 < NumTokCap) NumTokBuf[N++] = static_cast<char>(C);
+    };
+    // Consumes the current lookahead character, checks the stream is still
+    // healthy, and captures the character just consumed -- advance(F)
+    // returns exactly what F->Buf held before the call.
+    auto take = [&] {
+        const int C = advance(F);
+        trapOnStreamError(F, "read");
+        put(C);
+    };
+    auto digits = [&] {
+        while (F->Buf != EOF && std::isdigit(static_cast<unsigned char>(F->Buf)))
+            take();
+    };
+
+    reserve(1);
+    skipBlanksFile(F);
+    SawAny = (F->Buf != EOF);
+    if (F->Buf == '+' || F->Buf == '-') take();
+    digits();
+    if (Real) {
+        if (F->Buf == '.') { take(); digits(); }
+        if (F->Buf == 'e' || F->Buf == 'E') {
+            advance(F);                    // consume 'e'/'E' itself...
+            trapOnStreamError(F, "read");
+            put('e');                      // ...store a normalized 'e'
+            if (F->Buf == '+' || F->Buf == '-') take();
+            digits();
+        }
+    }
+    if (NumTokBuf) NumTokBuf[N] = '\0';
+    return NumTokBuf;
+}
+
 void plang_read_file_i64(PascalFile *F, int64_t *P) {
     abortIfClosed(F, "read");
     trapOnWrongDirection(F, "read", 0);
-    trapOnScanError(F, std::fscanf(F->Fp, "%" SCNd64, P), "read");
-    prime(F);
+    bool SawAny = false;
+    char *Tok = scanNumberFile(F, /*Real=*/false, SawAny);
     unloadComponent(F);
+    if (!SawAny) { *P = 0; return; }                              // issue #284
+    char *End = Tok;
+    errno = 0;
+    const long long V = Tok ? std::strtoll(Tok, &End, 10) : 0;
+    if (!Tok || End == Tok) plang_err_read_format("read");         // issue #236
+    if (errno == ERANGE) plang_err_read_int_range("read", Tok);    // issue #240
+    *P = static_cast<int64_t>(V);
 }
 
 void plang_read_file_f64(PascalFile *F, double *P) {
     abortIfClosed(F, "read");
     trapOnWrongDirection(F, "read", 0);
-    trapOnScanError(F, std::fscanf(F->Fp, "%lf", P), "read");
-    prime(F);
+    bool SawAny = false;
+    char *Tok = scanNumberFile(F, /*Real=*/true, SawAny);
     unloadComponent(F);
+    if (!SawAny) { *P = 0.0; return; }                             // issue #284
+    char *End = Tok;
+    const double V = Tok ? std::strtod(Tok, &End) : 0.0;
+    if (!Tok || End == Tok) plang_err_read_format("read");         // issue #236
+    // A real that overflows to +/-HUGE_VAL is left alone -- see the matching
+    // note in plang_io.cpp's plang_read_f64.
+    *P = V;
 }
 
 void plang_read_file_char(PascalFile *F, int8_t *P) {
