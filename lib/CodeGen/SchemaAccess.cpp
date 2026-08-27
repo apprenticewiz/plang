@@ -405,10 +405,34 @@ llvm::Value* SchemaAccess::exprStrCapV(const ExprNode& e) {
 /// only the varying case ever had two to collapse.
 std::pair<llvm::Value*, llvm::Value*>
 SchemaAccess::strAddrAndCap(const ExprNode& e) {
+    // R6: a substr/trim call primed below, answered instead of re-walked --
+    // see pendingArgExpr_'s own comment for why this exists and why a bare
+    // pointer compare is enough to key it.
+    if (pendingArgExpr_ == &e) return pendingArgVal_;
     if (ExprIsVarStr(e) && e.ResolvedType && e.ResolvedType->ExtentVaries)
         if (auto path = schemaPathOf(e))
             if (auto* cap = strCapFromPath(*path))
                 return {path->addr, cap};
+    // R6: substr and trim's result carries its ARGUMENT's capacity (the
+    // CallExpr branch of exprStrCapV, below), not one of its own -- so
+    // asking this function for the call's (address, capacity) is really two
+    // questions about Args[0]: what the call's own evaluation marshals it
+    // as, and what its capacity is.  Walking Args[0] for the second after
+    // EmitStrAddr already walked it once for the first, inside the call's
+    // argument marshalling, repeated whatever side effect sits in that
+    // path.  Args[0] is walked here, ONCE, and handed to that nested
+    // marshalling through pendingArgExpr_ instead.
+    if (auto* call = llvm::dyn_cast<CallExpr>(&e)) {
+        const std::string fn = toLower(call->Name);
+        if ((fn == "substr" || fn == "trim") && !call->Args.empty()) {
+            auto argAddrCap = strAddrAndCap(*call->Args[0]);
+            pendingArgExpr_ = call->Args[0].get();
+            pendingArgVal_  = argAddrCap;
+            auto* addr = EmitStrAddr(e);
+            pendingArgExpr_ = nullptr;
+            return {addr, argAddrCap.second};
+        }
+    }
     auto* addr = EmitStrAddr(e);
     return {addr, exprStrCapV(e)};
 }

@@ -166,5 +166,21 @@ private:
     /// extraction.
     std::function<unsigned(const std::string&, size_t)> SchemaArgDiscCountOf;
 
+    /// R6: substr/trim's result is typed as its ARGUMENT's Type object (see
+    /// the CallExpr branch of exprStrCapV), so strAddrAndCap on a substr/trim
+    /// call is a second question about that same argument on top of the one
+    /// call-evaluation already answers while marshalling it -- and asking it
+    /// by walking the argument fresh repeated whatever side effect an index
+    /// in its path has: `substr(q^.a[next].s, 1, 2)` called `next` once for
+    /// the call's own argument and once more for the result's capacity.
+    /// strAddrAndCap primes these across that one call-evaluation, so the
+    /// lookup its own argument marshalling makes of the very same node (by
+    /// pointer identity -- a node is only ever this call's own argument)
+    /// answers from here instead of walking again.  Set only for the
+    /// duration of that one nested call and cleared unconditionally after,
+    /// whether or not it was read.
+    const plang::ExprNode* pendingArgExpr_{nullptr};
+    std::pair<llvm::Value*, llvm::Value*> pendingArgVal_{};
+
     llvm::Constant* i64c(int64_t v) const;
 };
