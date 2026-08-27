@@ -1068,10 +1068,23 @@ void Sema::checkCase(const CaseStmt& S) {
     // twice.
     auto spell = [&](int64_t V) { return spellOrdinal(*SelType, V); };
 
-    std::set<int64_t> Seen;
-    auto noteValue = [&](int64_t V, const ExprNode& E) {
-        if (!Seen.insert(V).second)
-            error(E.Loc, diag::err_case_label_duplicate, {spell(V)});
+    // Duplicate/overlap detection is done on [Lo, Hi] intervals rather than
+    // by enumerating every value a range-shaped label denotes: a label like
+    // `1..100000000` is a single interval to compare, not a hundred million
+    // values to insert into a set.  Singleton labels are just the interval
+    // [V, V].  This keeps the check O(labels^2), not O(sum of range spans),
+    // regardless of how wide any individual range is.
+    struct LabelInterval { int64_t Lo, Hi; };
+    std::vector<LabelInterval> Seen;
+    auto overlapsSeen = [&](int64_t Lo, int64_t Hi) {
+        return std::ranges::any_of(Seen, [&](const LabelInterval& R) {
+            return Lo <= R.Hi && R.Lo <= Hi;
+        });
+    };
+    auto noteInterval = [&](int64_t Lo, int64_t Hi, const ExprNode& E) {
+        if (overlapsSeen(Lo, Hi))
+            error(E.Loc, diag::err_case_label_duplicate, {spell(Lo)});
+        Seen.push_back({Lo, Hi});
     };
 
     for (const auto& Arm : S.Arms) {
@@ -1107,10 +1120,7 @@ void Sema::checkCase(const CaseStmt& S) {
             const auto Hi = Lbl.High ? constBound(*Lbl.High) : Lo;
             if (Lbl.High) mustBeConst(*Lbl.High, Hi);
             if (!Lo || !Hi || *Hi < *Lo) continue;
-            for (int64_t V = *Lo; V <= *Hi; ++V) {
-                noteValue(V, Lbl.High ? *Lbl.Low : *Lbl.Low);
-                if (V == *Hi) break;   // *Hi may be the largest int64_t
-            }
+            noteInterval(*Lo, *Hi, *Lbl.Low);
         }
         checkStmt(Arm.Body.get());
     }
@@ -1145,7 +1155,7 @@ void Sema::checkCase(const CaseStmt& S) {
     std::vector<int64_t> Missing;
     int64_t MissingCount = 0;
     for (int64_t V = Lo; V <= Hi; ++V) {
-        if (!Seen.contains(V)) {
+        if (!overlapsSeen(V, V)) {
             ++MissingCount;
             if (Missing.size() < 3) Missing.push_back(V);
         }
