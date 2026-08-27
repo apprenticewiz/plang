@@ -94,11 +94,23 @@ static int advance(PascalFile *F) {
 /// there.  The next access to f^ reads the new one.
 static void unloadComponent(PascalFile *F) { F->CompLoaded = 0; }
 
+/// Every operation below calls this first, which makes it the one place to
+/// clear the C stream's error indicator before the operation does anything.
+/// ferror() is sticky -- it stays set until clearerr() runs, not just for
+/// the one call that tripped it -- so without this, a call that trips it
+/// without checking (get/prime's own lookahead read on a write-only stream,
+/// itself not a checked operation) leaves it set for trapOnStreamError to
+/// find on some later, unrelated, and genuinely successful operation and
+/// misattribute to that instead (issue #238). Clearing here rather than
+/// after keeps every check that follows -- trapOnStreamError's ferror,
+/// trapOnScanError's feof -- answering for this call alone: whatever an
+/// earlier one left behind cannot survive to be misread as this one's own.
 static void abortIfClosed(PascalFile *F, const char *Op) {
     if (!F || !F->Fp) {
         std::fprintf(stderr, "plang runtime: file not open in '%s'\n", Op);
         std::abort();
     }
+    std::clearerr(F->Fp);
 }
 
 /// ISO §6.7.5.6: a write/read against a file positioned or opened for the
