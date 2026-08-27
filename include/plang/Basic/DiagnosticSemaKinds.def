@@ -92,6 +92,11 @@ DIAG(err_unknown_unop, Error, "unknown unary operator")
 DIAG(err_undefined_function, Error, "undefined function '%0'")
 DIAG(err_ordinal_argument, Error, "'%0' requires an ordinal argument, got '%1'")
 DIAG(err_write_param_type, Error, "'%0' cannot be written; a write-parameter is an integer, real, boolean, char or string value")
+// ISO §6.9.3.1 / EP §6.10.3.1: a write-parameter's field-width and its
+// fraction-digits (the expressions after the colons in `e:w:d`) are
+// themselves integer-expressions -- not the value being written, which
+// err_write_param_type above already covers.
+DIAG(err_write_field_not_integer, Error, "write field-%0 must be an integer expression, got '%1'")
 // EP §6.9.2.2: the value assigned shall not be longer than the capacity.
 DIAG(err_string_too_long, Error, "string of length %0 does not fit a string(%1)")
 // ISO §6.4.3.2: a packed array[1..n] of char holds exactly n characters.
