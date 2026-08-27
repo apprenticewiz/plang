@@ -629,28 +629,29 @@ int Driver::runTool(const std::string &Prog,
 // Argument parsing
 // ---------------------------------------------------------------------------
 
-Options Driver::parseArgs(int Argc, char *Argv[]) {
-    Options Opts;
+Driver::ParseResult Driver::parseArgs(int Argc, char *Argv[]) {
+    ParseResult PR;
+    Options &Opts = PR.Opts;
     bool HasInput = false;
 
     for (int I = 1; I < Argc; ++I) {
         std::string Arg = Argv[I];
 
         if (Arg == "--version") {
-            printVersion(); std::exit(0);
+            printVersion(); PR.EarlyExitCode = 0; return PR;
         } else if (Arg == "-dumpversion") {
-            std::cout << PLANG_VERSION_STRING << "\n"; std::exit(0);
+            std::cout << PLANG_VERSION_STRING << "\n"; PR.EarlyExitCode = 0; return PR;
         } else if (Arg == "-dumpmachine") {
-            std::cout << hostTriple() << "\n"; std::exit(0);
+            std::cout << hostTriple() << "\n"; PR.EarlyExitCode = 0; return PR;
         } else if (Arg == "-h" || Arg == "--help") {
-            usage(); std::exit(0);
+            usage(); PR.EarlyExitCode = 0; return PR;
         } else if (Arg == "--help-warnings") {
             std::println("Warnings, all enabled by default.  Turn one off with");
             std::println("-Wno-<name>, or all of them with -w.\n");
             forEachWarningName([](const std::string &N) {
                 std::println("  -Wno-{}", N);
             });
-            std::exit(0);
+            PR.EarlyExitCode = 0; return PR;
 
         } else if (Arg == "-###") {
             Opts.dryRun = true;
@@ -819,7 +820,7 @@ Options Driver::parseArgs(int Argc, char *Argv[]) {
     }
 
     if (!HasInput) Opts.inputFile.clear();
-    return Opts;
+    return PR;
 }
 
 // ---------------------------------------------------------------------------
@@ -1190,7 +1191,20 @@ int Driver::compile(const Options &Opts, bool IsExtraFile) {
 int Driver::run(int Argc, char *Argv[]) {
     configureDiagnostics(Argc, Argv);
 
-    Options Opts = parseArgs(Argc, Argv);
+    ParseResult PR = parseArgs(Argc, Argv);
+    // --version, --help, -dumpversion, -dumpmachine, --help-warnings: already
+    // printed everything they have to print from inside parseArgs itself:
+    // nothing left to do but hand the exit code it settled on back to our own
+    // caller (issue #174 -- this used to be a direct std::exit() call instead,
+    // which reported the same code but never returned control, to us or to
+    // anyone who might be calling Driver::run() as a library rather than
+    // running the plang binary as a subprocess). Checked before hasErrors()
+    // below, matching the std::exit() this replaced: an informational action
+    // still wins over an error already reported for an earlier argument, e.g.
+    // "plang -Werror -fbogus-option --version" still prints the version
+    // banner and exits 0, exactly as it did before.
+    if (PR.EarlyExitCode) return *PR.EarlyExitCode;
+    Options Opts = std::move(PR.Opts);
     // A malformed option has already been reported, and there may be more than
     // one of them; parsing carries on so that they all are.
     if (Diags_.hasErrors()) return 1;
@@ -1254,5 +1268,32 @@ int Driver::run(int Argc, char *Argv[]) {
             return 1;
         }
     }
+
+    // -c/-S/-emit-llvm/-dump-* alongside a precompiled .o/.a (issue #277):
+    // none of those modes ever reaches the link step where linkerArgs would
+    // otherwise be consumed, so name what is about to be silently ignored.
+    // Skipped for a linker-only invocation (no .pas input at all): compile()
+    // sends that straight to link() regardless of Opts.mode, so the file is
+    // not actually unused there. Only bare .o/.a filenames are named -- the
+    // same subset the input/output-collision check above already isolates --
+    // since -l/-L/-Wl,/-Xlinker are recognized linker flags in their own
+    // right, not files that look like this one was meant to be consumed and
+    // was not; neither gcc nor clang warns about those in -c mode either
+    // (verified empirically against both).
+    if (!Opts.inputFile.empty() && Opts.mode != OutputMode::Executable) {
+        for (const auto &A : Opts.linkerArgs) {
+            if (A.empty() || A[0] == '-' || A.size() < 2) continue;
+            const std::string_view Ext(A.data() + A.size() - 2, 2);
+            if (Ext == ".o" || Ext == ".a") diag(diag::warn_linker_input_unused, {A});
+        }
+        // -Werror turns the diagnostic just above into "error:", the same
+        // way it does for warn_unrecognized_argument -- but unlike that one,
+        // reported from inside parseArgs with a hasErrors() check right
+        // after it returns, this one is reported well after that check
+        // already ran, so it needs its own or -Werror would print "error:"
+        // and then compile anyway.
+        if (Diags_.hasErrors()) return 1;
+    }
+
     return compile(Opts);
 }
