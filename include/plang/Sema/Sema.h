@@ -589,6 +589,15 @@ private:
     foldBounds(const ExprNode& Low, const ExprNode& High,
                const Type& Base, DiagID LowID, DiagID HighID);
 
+    // ISO §6.4.2.2/§6.4.3.2: reports err_bound_types_differ (against High's
+    // location) and returns false when LoTy and HiTy are both ordinal but
+    // not of the same ordinal type.  True (nothing to report here) when
+    // either side is already an error, or is not ordinal at all -- that half
+    // of the question belongs to the caller, which already has its own
+    // not-ordinal diagnostic in scope.
+    [[nodiscard]] bool boundsShareOrdinalType(const Type& LoTy, const ExprNode& High,
+                                              const Type& HiTy);
+
     // ---- statement checking ----
     void checkStmt      (const StmtNode*   Stmt);
     void checkCompound  (const CompoundStmt& S);

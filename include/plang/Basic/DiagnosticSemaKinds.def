@@ -285,6 +285,16 @@ DIAG(err_array_index_not_ordinal, Error,
      "an index type is an ordinal type with a bounded range")
 DIAG(err_bound_range_inverted, Error,
      "lower bound %0 exceeds upper bound %1, so the type has no values")
+// ISO §6.4.2.2: a subrange-type's two bounds are constants of the SAME
+// ordinal type, which becomes the subrange's host type; ISO §6.4.3.2 makes
+// an index type written as a range the same rule.  Each bound used to be
+// checked only for being ordinal on its own, never against the OTHER
+// bound, so `1..b` (integer, enum) and `'a'..100` (char, integer) were
+// both silently accepted with whichever bound came first deciding the
+// host type and the other's disagreement going unheard (issue #251).
+DIAG(err_bound_types_differ, Error,
+     "lower bound has type '%0' but upper bound has type '%1'; "
+     "both bounds of a range must be of the same ordinal type")
 // ISO §6.6.3.1: procedural and functional parameters
 DIAG(err_proc_param_needs_proc_name, Error,
      "parameter '%0' is a procedural parameter, so the argument must be the name "

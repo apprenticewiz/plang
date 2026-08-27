@@ -106,6 +106,30 @@ Sema::foldBounds(const ExprNode& Low, const ExprNode& High,
     return std::pair{*Lo, *Hi};
 }
 
+/// ISO §6.4.2.2: a subrange-type's two bounds shall be constants of the same
+/// ordinal type, which becomes the subrange's host type; ISO §6.4.3.2 makes
+/// an index type written as a range the same rule.  The callers used to pick
+/// a host type from "whichever bound is ordinal" -- Low if it qualified,
+/// else High, else a silent fallback to integer -- and never asked whether
+/// the OTHER bound agreed, so `1..b` (integer, enum) and `'a'..100` (char,
+/// integer) were each accepted as if the second bound's type were the
+/// first's (issue #251).
+///
+/// Silent (true) when either side is already Error, so one bad bound is not
+/// reported twice, and when either side is not ordinal at all: that is a
+/// different mistake than a mismatched PAIR of ordinal types, and is left
+/// for the caller's own not-ordinal diagnostic (or, failing that, for
+/// foldBounds/constBound to find nothing to fold).
+bool Sema::boundsShareOrdinalType(const Type& LoTy, const ExprNode& High,
+                                  const Type& HiTy) {
+    if (LoTy.isError() || HiTy.isError())     return true;
+    if (!LoTy.isOrdinal() || !HiTy.isOrdinal()) return true;
+    if (isAssignCompatible(LoTy, HiTy) || isAssignCompatible(HiTy, LoTy))
+        return true;
+    error(High.Loc, diag::err_bound_types_differ, {LoTy.Name, HiTy.Name});
+    return false;
+}
+
 std::shared_ptr<Type> Sema::resolveType(const TypeNode& Node) {
     auto T = resolveTypeImpl(Node);
     // Record the result on the node so codegen can lower type denoters whose
@@ -304,6 +328,7 @@ std::shared_ptr<Type> Sema::resolveTypeImpl(const TypeNode& Node) {
         // Determine the ordinal base type of the index from the declared bounds.
         auto Lo = checkExpr(*N->Low);
         auto Hi = checkExpr(*N->High);
+        if (!boundsShareOrdinalType(*Lo, *N->High, *Hi)) return TyErr;
         auto BaseOrd = (Lo->isOrdinal() ? Lo : (Hi->isOrdinal() ? Hi : TyInt));
         // As for a string capacity above: whether THESE bounds read a
         // discriminant, not whether anything in the enclosing body did.
@@ -337,6 +362,7 @@ std::shared_ptr<Type> Sema::resolveTypeImpl(const TypeNode& Node) {
     if (auto* N = llvm::dyn_cast<SubrangeTypeNode>(&Node)) {
         auto Lo = checkExpr(*N->Low);
         auto Hi = checkExpr(*N->High);
+        if (!boundsShareOrdinalType(*Lo, *N->High, *Hi)) return TyErr;
         auto Base = (Lo->isOrdinal() ? Lo : (Hi->isOrdinal() ? Hi : TyInt));
         const bool SavedUsed = SchemaBindingUsed_;
         SchemaBindingUsed_   = false;
