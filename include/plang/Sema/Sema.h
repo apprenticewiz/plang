@@ -607,9 +607,29 @@ private:
     // When `Callables` is null the symbol table is used to resolve var-param flags.
     // When `Callables` is non-null (inter-procedural mode) the symbol table scope
     // for the for-loop's block is already closed; use the supplied AST proc list.
+    // `Shadowed` is true once a `with` between the for-statement and `Stmt`
+    // exposes a field or discriminant spelled like `VarName`: a bare reference
+    // to that spelling from there down denotes the field, not the control
+    // variable (see withExposesName), so none of the checks apply until the
+    // shadowing `with` is left.
     void checkForBody(const StmtNode* Stmt, const std::string& VarName,
                       SourceLocation ForLoc,
-                      const std::vector<const ProcDecl*>* Callables = nullptr);
+                      const std::vector<const ProcDecl*>* Callables = nullptr,
+                      bool Shadowed = false);
+
+    /// Static type of a `with`-clause record expression, resolved without
+    /// checkExpr's diagnostics.  checkForBody runs before the body is
+    /// type-checked for real, so calling checkExpr here would re-evaluate an
+    /// expression checkWith is about to and double-report anything wrong with
+    /// it.  Returns null wherever the answer is not immediately at hand; that
+    /// is always a safe answer, since the caller only uses this to rule a name
+    /// safely OUT of being the control variable.
+    std::shared_ptr<Type> quietWithRecordType(const ExprNode* E);
+
+    /// Does a `with` over \p S's record(s) expose \p Name as a field or a
+    /// schema discriminant, so that a bare reference to it inside the with
+    /// body denotes THAT rather than any same-spelled outer variable?
+    bool withExposesName(const WithStmt& S, const std::string& Name);
 
     /// Does \p P declare \p Name of its own, so that the name denotes something
     /// other than the outer variable everywhere inside it?  ISO §6.8.3.9 forbids
