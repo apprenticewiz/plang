@@ -326,10 +326,16 @@ std::shared_ptr<Type> Sema::checkIndex(const IndexExpr& E) {
         error(E.Loc, diag::err_subscript_non_array, {ArrTy->Name});
         return TyErr;
     }
-    if (!IdxTy->isError() && !IdxTy->isOrdinal())
+    const bool IdxNotOrdinal = !IdxTy->isError() && !IdxTy->isOrdinal();
+    if (IdxNotOrdinal)
         error(E.Loc, diag::err_index_not_ordinal, {IdxTy->Name});
-    // ISO §6.5.3.2: index expression must be assignment-compatible with the declared index type.
-    if (!IdxTy->isError() && ArrTy->IndexType && !ArrTy->IndexType->isError()
+    // ISO §6.5.3.2: index expression must be assignment-compatible with the
+    // declared index type.  Skipped once err_index_not_ordinal has already
+    // fired for this same index expression -- a non-ordinal index is never
+    // assignment-compatible with an ordinal index type either, so the second
+    // check would only restate the same root cause as a separate diagnostic.
+    if (!IdxNotOrdinal && !IdxTy->isError() && ArrTy->IndexType
+        && !ArrTy->IndexType->isError()
         && !isAssignCompatible(*ArrTy->IndexType, *IdxTy))
         error(E.Loc, diag::err_index_type_mismatch,
               {IdxTy->Name, ArrTy->IndexType->Name});
