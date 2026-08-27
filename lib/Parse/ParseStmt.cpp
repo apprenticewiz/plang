@@ -333,14 +333,15 @@ std::unique_ptr<CaseStmt> Parser::parseCaseStmt() {
         // Parse comma-separated case labels; each may be a point or lo..hi range.
         auto parseCaseLabel = [&]() -> CaseLabel {
             CaseLabel Lbl;
-            Lbl.Low = parseFactor();
+            // ISO §6.8.3.5 / §6.3: a case-constant may carry a sign.
+            Lbl.Low = parseCaseConstant();
             // EP §6.9.3.5: a case-constant may be a range.  Standard Pascal's
             // is one constant, and every value has to be written out.
             if (check(TokenKind::DotDot)) {
                 if (!Opts.has(LangOptions::Feature::CaseConstantRanges))
                     emitError(Current.toLoc(), diag::err_ep_case_range);
                 advance();
-                Lbl.High = parseFactor();
+                Lbl.High = parseCaseConstant();
             }
             return Lbl;
         };

@@ -442,6 +442,18 @@ private:
     /// Adds the fields of a variant part, and of the variants nested in it, to
     /// the record type T, so that field access can find them (§6.4.3.3).
     void walkVariantFields(const VariantPart& Vp, Type& T);
+    /// ISO §6.6.5.3: checks one of new/dispose's extra arguments -- \p Which
+    /// is "new" or "dispose", for the diagnostic -- against \p Vp, the
+    /// variant level it selects: the argument must be a value of \p Vp's own
+    /// tag type.  Returns the NestedVariant of whichever of \p Vp's arms the
+    /// argument names (or null if it named none, or was not itself a
+    /// constant), i.e. the level the *next* argument, if any, must answer
+    /// for -- so the caller can walk as many levels as arguments were given
+    /// and tell a valid path from one with more arguments than the record
+    /// has nesting to check them against.
+    const VariantPart* checkVariantTagArg(const std::string& Which,
+                                          const ExprNode& Arg, const Type& At,
+                                          const VariantPart& Vp);
     [[nodiscard]] std::shared_ptr<Type> resolveNamed(const NamedTypeNode& N);
     /// EP §6.6: checks a denoter's 'value' clause against the type it denotes.
     void checkInitialState(const TypeNode& Node, const Type& T);
