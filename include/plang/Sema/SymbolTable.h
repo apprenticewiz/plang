@@ -158,6 +158,16 @@ struct Symbol {
     /// re-matched on its spelling further down.
     BuiltinID BuiltinKind{BuiltinID::None};
 
+    /// Set only for the entries Sema::registerBuiltins() puts in the global
+    /// scope -- the required identifiers ISO §6.2.2.10 places in a region
+    /// enclosing the program.  A program's own declaration of one of these
+    /// names already shadows it for free (it lands in a nested block scope);
+    /// this flag is what lets SymbolTable::define grant the same courtesy to
+    /// an unqualified module import, which is defined into the SAME (global)
+    /// scope as the builtins rather than a nested one, and would otherwise
+    /// collide with it name-for-name and be silently dropped.
+    bool IsRequiredIdentifier{false};
+
     // --- Schema symbols (EP §6.4.7) ---
     /// One declared discriminant parameter of this schema.
     struct SchemaParam { std::string Name; std::shared_ptr<Type> Ty; };
@@ -199,6 +209,16 @@ public:
     /// Define a symbol in the current (innermost) scope.
     /// Returns false (without inserting) if the lowercase name already exists
     /// in the current scope. The caller emits the duplicate-declaration error.
+    ///
+    /// Exception: if the name that already exists in the current scope names
+    /// a required identifier (Symbol::IsRequiredIdentifier), the new symbol
+    /// REPLACES it and this returns true.  ISO §6.2.2.10 (and EP alike)
+    /// entitles a program to redeclare a required identifier; ordinarily that
+    /// redeclaration lands in a nested scope and shadows for free, but an
+    /// unqualified module import is defined into this same (global) scope as
+    /// the required identifiers themselves, so without this exception it
+    /// could never win the collision -- the builtin would stay bound and the
+    /// import would be dropped with no diagnostic.
     [[nodiscard]] bool define(Symbol Sym);
 
     /// Look up Name case-insensitively starting at the innermost scope.
