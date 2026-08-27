@@ -1758,7 +1758,18 @@ bool Sema::isAssignCompatible(const Type& Dst, const Type& Src,
                             && Dst.RecordDecl == Src.RecordDecl)
                         return true;
                 }
-                if (Depth > 16) return true;   // give up rather than misjudge
+                // The cap exists so a record reachable from itself only
+                // through a chain of distinct anonymous record types (no
+                // RecordDecl to short-circuit on) cannot recurse without end;
+                // it is not license to call two types compatible once the
+                // structure below it goes unexamined.  Two records that were
+                // never shown equal are not equal, so this refuses rather
+                // than misjudges -- the same conservative default the
+                // restricted-type check above makes when it cannot say yes.
+                // A false negative here is a diagnostic to rename or
+                // restructure a type; a false positive is a value of one
+                // layout copied over another's.
+                if (Depth > 16) return false;
                 // ISO §6.4.3.1: `packed` is part of what the type IS, and two
                 // records that differ in it have different layouts.  Ignoring
                 // it let a padded record be stored into a packed one --
@@ -1782,11 +1793,29 @@ bool Sema::isAssignCompatible(const Type& Dst, const Type& Src,
                 if (!Dst.ElemType || !Src.ElemType) return Dst.Name == Src.Name;
                 return isAssignCompatible(*Dst.ElemType, *Src.ElemType);
 
-            // Pointer: compatible when pointee types are compatible.
+            // Pointer: ISO §6.4.4 requires the two pointer-types' domain
+            // types to be the SAME type, not merely assignment-compatible
+            // with one another -- there is no covariance or contravariance
+            // through a pointer.  Recursing into isAssignCompatible on the
+            // pointees let a subrange's own compatibility with its base type
+            // leak through a pointer: `^integer` and `^(1..10)` were
+            // accepted either way round, though a range check the subrange
+            // requires never runs on a value read back through the integer
+            // pointer.
+            //
+            // Pointer types are interned by pointee identity (see
+            // TypeContext::getPointer) and Enum/Record types carry their own
+            // declaration as their identity (ISO §6.4.2.3, §6.4.3.3), so two
+            // pointers to the same domain type are already the same Type
+            // object and were caught by the `&Dst == &Src` shortcut above.
+            // Reaching here with Dst.Kind == Src.Kind == Pointer means the
+            // domain types are genuinely different, so isIdenticalType --
+            // the same canonical-identity test ISO §6.6.3.3 uses for a var
+            // parameter -- is what settles it, not the general assignability
+            // relation.
             case TypeKind::Pointer:
                 if (!Dst.PointeeType || !Src.PointeeType) return false;
-                return isAssignCompatible(*Dst.PointeeType, *Src.PointeeType,
-                                          /*ExactBounds=*/true);
+                return isIdenticalType(Dst.PointeeType, Src.PointeeType);
 
             default:
                 return Dst.Name == Src.Name;
