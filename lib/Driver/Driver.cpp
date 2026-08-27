@@ -14,6 +14,7 @@
 #include "plang/Basic/DiagnosticPrinter.h"
 #include "plang/Basic/LangOptions.h"
 #include "plang/Basic/MessageCatalog.h"
+#include "plang/Basic/StringUtil.h"
 #include "plang/Basic/Version.h"
 
 #include <algorithm>
@@ -541,8 +542,13 @@ int Driver::runTool(const std::string &Prog,
                     const std::vector<std::string> &Args,
                     bool Verbose, bool DryRun) {
     if (Verbose || DryRun) {
-        std::cerr << Prog;
-        for (const auto &A : Args) std::cerr << ' ' << A;
+        // Args carries the input file straight from argv (see makeFEArgs and
+        // the Opts.inputFile push below): -v/-### echo it unsanitized
+        // otherwise, the same terminal-escape/log-injection hole a raw
+        // filename opens in a diagnostic's "file:line:col:" prefix -- see
+        // DiagnosticPrinter::printHeadline.
+        std::cerr << escapeControlChars(Prog);
+        for (const auto &A : Args) std::cerr << ' ' << escapeControlChars(A);
         std::cerr << '\n';
     }
     if (DryRun) return 0;

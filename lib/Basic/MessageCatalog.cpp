@@ -36,6 +36,7 @@
 
 #include "plang/Basic/MessageCatalog.h"
 
+#include "plang/Basic/StringUtil.h"
 #include "plang/Basic/Token.h"
 
 #include <algorithm>
@@ -550,13 +551,21 @@ LocaleResolution selectLocale(std::string_view Tag, const std::string& ExeDir,
 
 std::string describeLocale() {
     const LocaleResolution& R = currentLocale();
-    if (!R.Path.empty()) return R.Language + " (" + R.Path + ")";
+    // R.Requested (and, through catalogSearchOrder, R.Language) traces back to
+    // $LANG/$LC_MESSAGES/-fdiagnostics-language=, none of which plang chose;
+    // escapeControlChars keeps a tag such as "fr\x1b[2J...HIJACKED" from
+    // steering the terminal --version prints to, the same way
+    // DiagnosticPrinter guards a source filename for the same reason.  R.Path
+    // gets the same treatment: it is Dir + Language + ".po", and Dir can be
+    // $PLANG_LOCALE_DIR, so it is no more plang's own text than Language is.
+    if (!R.Path.empty())
+        return escapeControlChars(R.Language) + " (" + escapeControlChars(R.Path) + ")";
     // Nothing was loaded.  Whether that is the answer or a disappointment
     // depends on whether a catalog was ever going to be looked for.
     if (catalogSearchOrder(R.Requested).empty())
-        return (R.Requested.empty() ? std::string("en_US") : R.Requested)
+        return escapeControlChars(R.Requested.empty() ? std::string("en_US") : R.Requested)
              + " (built-in)";
-    return R.Requested + " (no catalog found; using built-in en_US)";
+    return escapeControlChars(R.Requested) + " (no catalog found; using built-in en_US)";
 }
 
 // ---------------------------------------------------------------------------
