@@ -407,10 +407,21 @@ ctest --test-dir build -j$(getconf _NPROCESSORS_ONLN)
 ```
 
 `ctest` works in a build configured without the tests as well, and reports that
-it found none. It also works without `lit`/`FileCheck` on `PATH` — the
-`check-lit-*` targets and their `lit-*` CTest entries are simply unavailable,
-with a CMake-configure-time warning saying so (`pip install lit` and
-reconfigure to pick them up).
+it found none. By default it also works without `lit`/`FileCheck` on `PATH` —
+the `check-lit-*` targets and their `lit-*` CTest entries are simply
+unavailable, with a CMake-configure-time warning saying so (`pip install lit`
+and reconfigure to pick them up). `-DPLANG_TESTS_REQUIRE_LIT=ON` turns that
+warning into a configure-time error instead, for anyone who needs "lit/
+FileCheck missing" to fail loudly rather than silently shrink the suite down
+to the GoogleTest tier alone — CI builds this way (issue #184), since there a
+missing tool is a packaging regression, not a matter of developer taste.
+CI also runs `test/tools/assert-test-discovery.sh` right after Configure,
+which independently re-derives the `lit-*` suite list from `ctest -N` and the
+individual test count each suite discovers from `lit --show-tests`, and fails
+if either looks too small — catching, for example, a single suite's
+`add_plang_lit_suite()` call being deleted, which touches neither
+`LIT_EXECUTABLE` nor `FILECHECK_EXECUTABLE` and so is invisible to
+`PLANG_TESTS_REQUIRE_LIT` above.
 
 To run one GoogleTest binary directly, with the usual GoogleTest filters:
 

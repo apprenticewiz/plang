@@ -324,6 +324,17 @@ install(DIRECTORY share/plang/gdb/
 # acceptance cases are the bulk of the build.
 option(PLANG_ENABLE_TESTS "Build the test suite" OFF)
 
+# Off by default, same reasoning as test/CMakeLists.txt's own WARNING (not
+# FATAL_ERROR) when lit/FileCheck can't be found: a developer who enabled
+# PLANG_ENABLE_TESTS for the GoogleTest tier alone shouldn't be blocked by
+# one lit tool's absence on their machine. CI turns this on (issue #184) --
+# there, "lit/FileCheck missing" must fail the build loudly, not quietly
+# fall back to running only the ~51 GoogleTest cases while ctest still
+# exits 0 and the ~2,000+ black-box tests never ran.
+option(PLANG_TESTS_REQUIRE_LIT
+    "Fail configure (instead of warning and skipping) if PLANG_ENABLE_TESTS \
+is on but lit/FileCheck cannot be found" OFF)
+
 # enable_testing() unconditionally, so that ctest in a build without the tests
 # says "No tests were found" rather than failing to find CTestTestfile.cmake.
 enable_testing()
