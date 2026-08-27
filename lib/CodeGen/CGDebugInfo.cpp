@@ -625,6 +625,30 @@ std::optional<uint64_t> CGDebugInfo::computeSchemaFingerprint(const RecordTypeNo
     return fnv1a64(canon);
 }
 
+namespace {
+/// issue #144: plang_schema_printers.py used to read every non-array field
+/// as a raw signed integer regardless of its real plang type -- a real
+/// field showed its IEEE-754 bit pattern, a set field an arbitrary integer,
+/// and a 16-byte field (complex) crashed the printer outright.  This tags
+/// each scalar field with the shape the Python side needs to format it
+/// correctly; a kind this compiler-side switch does not know how to name
+/// specially just gets "integer", which is the same raw-integer read the
+/// script already did for it and stays correct for anything ordinal-shaped
+/// (Integer, Subrange, Enum).
+const char* schemaScriptTypeKind(const Type* T) {
+    if (!T) return "integer";
+    switch (T->Kind) {
+        case TypeKind::Real:    return "real";
+        case TypeKind::Complex: return "complex";
+        case TypeKind::Set:     return "set";
+        case TypeKind::Boolean: return "boolean";
+        case TypeKind::Char:    return "char";
+        case TypeKind::Pointer: return "pointer";
+        default:                return "integer";
+    }
+}
+} // namespace
+
 void CGDebugInfo::recordSchemaLayoutForScript(const Type& T, const RecordTypeNode& rt,
                                                uint64_t hdrBytes) {
     if (!Types) return;
@@ -726,8 +750,22 @@ void CGDebugInfo::recordSchemaLayoutForScript(const Type& T, const RecordTypeNod
             fieldJson += "}";
         } else {
             const uint64_t sizeBytes = DL.getTypeAllocSize(FieldLLTy);
+            const Type* FieldTy = fd.Type->ResolvedType.get();
+            const char* typeKind = schemaScriptTypeKind(FieldTy);
             fieldJson += "\"kind\":\"scalar\",\"sizeBytes\":" + std::to_string(sizeBytes)
-                       + ",\"alignBytes\":" + std::to_string(align) + "}";
+                       + ",\"alignBytes\":" + std::to_string(align)
+                       + ",\"typeKind\":\"" + typeKind + "\"";
+            // A set's members are a bitmask over its base type's ordinals, bit
+            // 0 standing for the base type's own origin rather than for
+            // ordinal 0 (see SetOps::setBitIndex / setBaseOffset) -- the
+            // script needs that same offset to decode the bits back into the
+            // ordinals the program actually put in, not ordinals shifted by
+            // whatever the base type's lower bound happens to be.
+            if (FieldTy && FieldTy->Kind == TypeKind::Set) {
+                const int64_t setBase = FieldTy->ElemType ? setBaseOffset(*FieldTy->ElemType) : 0;
+                fieldJson += ",\"setBase\":" + std::to_string(setBase);
+            }
+            fieldJson += "}";
         }
 
         if (!firstField) J += ",";

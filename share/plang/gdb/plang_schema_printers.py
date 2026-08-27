@@ -17,14 +17,15 @@ This script sidesteps DWARF for exactly those fields: alongside the DWARF
 type, plang (when compiled with -g) writes a sidecar file next to each
 source file it compiles, <source>.plang-schemas.json, describing every
 run-time-varying schema type's REAL layout as data -- field order, sizes,
-alignments, and each array field's bound as a small serialized arithmetic
-form over the schema's own discriminants (see CGDebugInfo::jsonEncodeExtentForm
-for the producer). This script reads that data and, entirely independently
-of what the DWARF type says, walks it against the object's LIVE memory --
-exactly the same walk plang's own runtime (SchemaLayoutEngine::rtWalkFields/
-alignUpV) performs when it lays the object out in the first place, just
-re-run here in Python instead of at compile time in LLVM IR or (the
-approach that turned out not to work) DWARF opcodes.
+alignments, each field's plang type kind (issue #144), and each array
+field's bound as a small serialized arithmetic form over the schema's own
+discriminants (see CGDebugInfo::jsonEncodeExtentForm for the producer).
+This script reads that data and, entirely independently of what the DWARF
+type says, walks it against the object's LIVE memory -- exactly the same
+walk plang's own runtime (SchemaLayoutEngine::rtWalkFields/alignUpV)
+performs when it lays the object out in the first place, just re-run here
+in Python instead of at compile time in LLVM IR or (the approach that
+turned out not to work) DWARF opcodes.
 
 Issue #140 (same name, different body): two schema types (two different
 procedures, or two different modules) can declare their own schema type
@@ -93,7 +94,19 @@ Known limitations, honestly stated rather than silently wrong:
   attempted here -- lldb's synthetic-children/data-formatter Python API is
   a different enough shape (SBValue-based, not gdb.Value-based) to need its
   own script, not a port of this one.
+
+issue #144 also hardened this script against malformed/unexpected sidecar
+content: every risky operation (indexing into the JSON, walking an
+ExtentForm, reading target memory) is wrapped so a missing key or a
+pathologically nested form degrades to a clear, bounded message -- either
+for just the one field that hit it (the rest of the struct still prints)
+or, for a structural failure (no "fields"/"discs" at all), by returning
+None so gdb falls back to its own default DWARF printing instead of
+splicing a raw Python traceback into the output.
 """
+
+import struct
+import sys
 
 import json
 import os
@@ -116,25 +129,62 @@ def _fnv1a64(s):
     return h
 
 
-def _eval_form(form, discs):
+class _SchemaDataError(Exception):
+    """Raised for a sidecar shape this script cannot make sense of --
+    caught close to where it happens so one bad field or a structurally
+    broken schema entry degrades cleanly instead of as a raw traceback."""
+
+
+# Matches Sema's own MaxExprDepth (lib/Sema/SemaExpr.cpp) -- an ExtentForm's
+# nesting is bounded by the same expression-depth guard on the compiler
+# side, so a form nested past this is not a real one; walking it further
+# would just be chasing a corrupted or hand-edited sidecar into a Python
+# RecursionError.
+#
+# Python's own default recursion limit (1000) is already partly spent on
+# gdb's own call stack by the time _eval_form's first call is reached, so
+# raising it here gives this guard the headroom to actually fire -- a
+# clean _SchemaDataError -- instead of losing the race to a raw
+# RecursionError from the interpreter itself.
+_MAX_FORM_DEPTH = 1000
+if sys.getrecursionlimit() < _MAX_FORM_DEPTH + 500:
+    sys.setrecursionlimit(_MAX_FORM_DEPTH + 500)
+
+
+def _eval_form(form, discs, depth=0):
     """form: a JSON-decoded ["op", ...] list, per CGDebugInfo::jsonEncodeExtentForm.
     discs: a list of already-read discriminant int values, by index."""
+    if depth > _MAX_FORM_DEPTH:
+        raise _SchemaDataError("extent form nested past %d levels" % _MAX_FORM_DEPTH)
+    if not isinstance(form, list) or not form:
+        raise _SchemaDataError("malformed extent form: %r" % (form,))
     op = form[0]
     if op == "const":
+        if len(form) < 2:
+            raise _SchemaDataError("'const' form missing its value")
         return form[1]
     if op == "disc":
-        return discs[form[1]]
+        if len(form) < 2:
+            raise _SchemaDataError("'disc' form missing its index")
+        try:
+            return discs[form[1]]
+        except (IndexError, TypeError):
+            raise _SchemaDataError("'disc' index %r out of range" % (form[1],))
     if op == "neg":
-        return -_eval_form(form[1], discs)
-    a = _eval_form(form[1], discs)
-    b = _eval_form(form[2], discs)
+        if len(form) < 2:
+            raise _SchemaDataError("'neg' form missing its operand")
+        return -_eval_form(form[1], discs, depth + 1)
+    if len(form) < 3:
+        raise _SchemaDataError("'%s' form missing an operand" % (op,))
+    a = _eval_form(form[1], discs, depth + 1)
+    b = _eval_form(form[2], discs, depth + 1)
     if op == "add": return a + b
     if op == "sub": return a - b
     if op == "mul": return a * b
     if op == "div": return int(a / b) if b != 0 else 0
     if op == "mod": return a - b * int(a / b) if b != 0 else 0
     if op == "pow": return a ** b
-    return 0
+    raise _SchemaDataError("unknown extent form op %r" % (op,))
 
 
 def _align_up(v, align):
@@ -252,12 +302,22 @@ def _type_fingerprint(t):
     return "%016x" % _fnv1a64(canon)
 
 
+def _read_i64(inferior, addr):
+    data = inferior.read_memory(addr, 8)
+    return int.from_bytes(bytes(data), byteorder="little", signed=True)
+
+
 def _layout_walk(schema, base_addr, inferior, discs, hdr_override=None):
     """Returns a list of (name, addr, kind, extra) for every field in
     declaration order, mirroring SchemaLayoutEngine::rtWalkFields/alignUpV
     exactly: align the running offset up to each field's own alignment,
     record it, then advance past that field's real (possibly
     discriminant-dependent) size.
+
+    Raises _SchemaDataError for a structural problem (an entry too broken
+    to walk at all); a problem local to one field is instead folded into
+    that field's own "extra" as an error marker, so the fields around it
+    still come out right.
 
     discs is supplied by the caller rather than read from base_addr here:
     for a var-parameter reference (see PlangSchemaValue.children's own
@@ -269,28 +329,85 @@ def _layout_walk(schema, base_addr, inferior, discs, hdr_override=None):
     off = schema["hdrBytes"] if hdr_override is None else hdr_override
     results = []
     for field in schema["fields"]:
-        align = field.get("alignBytes", 8)
-        off = _align_up(off, align)
-        if field["kind"] == "array":
-            lo = _eval_form(field["low"], discs)
-            hi = _eval_form(field["high"], discs)
-            count = max(0, hi - lo + 1)
-            stride = _align_up(field["elemSizeBytes"], field["elemAlignBytes"])
-            for name in field["names"]:
-                results.append((name, base_addr + off, "array",
-                                 (count, field["elemSizeBytes"])))
-                off += count * stride
-        else:
-            size = field["sizeBytes"]
-            for name in field["names"]:
-                results.append((name, base_addr + off, "scalar", size))
-                off += size
+        try:
+            names = field["names"]
+            align = field.get("alignBytes", 8)
+            off = _align_up(off, align)
+            if field["kind"] == "array":
+                lo = _eval_form(field["low"], discs)
+                hi = _eval_form(field["high"], discs)
+                count = max(0, hi - lo + 1)
+                stride = _align_up(field["elemSizeBytes"], field["elemAlignBytes"])
+                for name in names:
+                    results.append((name, base_addr + off, "array",
+                                     (count, field["elemSizeBytes"])))
+                    off += count * stride
+            elif field["kind"] == "scalar":
+                size = field["sizeBytes"]
+                type_kind = field.get("typeKind", "integer")
+                for name in names:
+                    results.append((name, base_addr + off, "scalar",
+                                     (size, type_kind, field)))
+                    off += size
+            else:
+                raise _SchemaDataError("unknown field kind %r" % (field["kind"],))
+        except _SchemaDataError as e:
+            # A field we could not lay out (bad "kind", bad extent form, ...)
+            # -- surface an error marker for it and stop the walk, since
+            # every field after this one has an offset that depends on this
+            # field's own (unknown) size. Whatever laid out fine so far is
+            # still returned.
+            results.append((field.get("names", ["?"])[0] if isinstance(field, dict) else "?",
+                             base_addr, "error", str(e)))
+            break
+        except (KeyError, TypeError) as e:
+            results.append((field.get("names", ["?"])[0] if isinstance(field, dict) else "?",
+                             base_addr, "error", "malformed field entry: %s" % e))
+            break
     return results
 
 
-def _read_i64(inferior, addr):
-    data = inferior.read_memory(addr, 8)
-    return int.from_bytes(bytes(data), byteorder="little", signed=True)
+def _format_set(inferior, addr, size_bytes, set_base):
+    """Decodes a plang set's flat bitmask -- one bit per ordinal, bit 0
+    standing for set_base (SetOps::setBitIndex/setBaseOffset) -- into the
+    member ordinals the program actually put in."""
+    raw = bytes(inferior.read_memory(addr, size_bytes))
+    bits = int.from_bytes(raw, byteorder="little", signed=False)
+    members = [i + set_base for i in range(size_bytes * 8) if (bits >> i) & 1]
+    return "[" + ", ".join(str(m) for m in members) + "]"
+
+
+def _format_scalar(inferior, addr, size, type_kind, field):
+    """Formats one non-array field according to its real plang type
+    (issue #144) instead of blindly reading it as a signed integer."""
+    raw = bytes(inferior.read_memory(addr, size))
+    if type_kind == "real":
+        if size == 8:
+            return struct.unpack("<d", raw)[0]
+        if size == 4:
+            return struct.unpack("<f", raw)[0]
+        raise _SchemaDataError("real field has unexpected size %d" % size)
+    if type_kind == "complex":
+        if size != 16:
+            raise _SchemaDataError("complex field has unexpected size %d" % size)
+        re, im = struct.unpack("<dd", raw)
+        return "{re = %r, im = %r}" % (re, im)
+    if type_kind == "set":
+        set_base = field.get("setBase", 0)
+        return _format_set(inferior, addr, size, set_base)
+    if type_kind == "boolean":
+        return bool(int.from_bytes(raw, byteorder="little", signed=False) & 1)
+    if type_kind == "char":
+        v = raw[0] if raw else 0
+        return "'%s'" % chr(v) if 32 <= v < 127 else "chr(%d)" % v
+    if type_kind == "pointer":
+        return hex(int.from_bytes(raw, byteorder="little", signed=False))
+    # "integer" and anything this script does not special-case: the same
+    # raw-integer read this script has always done, which is exactly right
+    # for an ordinal (Integer, Subrange, Enum) field.
+    if size == 8:
+        return _read_i64(inferior, addr)
+    return int.from_bytes(raw, byteorder="little", signed=True)
 
 
 def _read_ptr(inferior, addr):
@@ -328,38 +445,82 @@ class PlangSchemaValue(object):
         except gdb.error:
             return
         inferior = gdb.selected_inferior()
-        discs = [_read_i64(inferior, base_addr + i * 8)
-                 for i in range(len(self.schema["discs"]))]
+        try:
+            disc_names = self.schema["discs"]
+        except (KeyError, TypeError):
+            # Should not happen -- _plang_schema_pretty_printer already
+            # checked this schema has "discs" -- but children() is called
+            # by gdb well after that check, against whatever the sidecar
+            # says now, so this stays defensive rather than trusting it.
+            yield "<plang-schema-error>", "malformed sidecar entry (no 'discs')"
+            return
+
         # Discriminants first, exactly where DWARF already puts them
         # correctly -- shown here too so this printer's output is a
         # complete, self-consistent replacement rather than a partial one
-        # a reader has to mentally merge with gdb's own default view.
-        for name, value in zip(self.schema["discs"], discs):
+        # a reader has to mentally merge with gdb's own default view. Also
+        # collected into `discs` (values, not names) since _layout_walk
+        # needs them by index -- issue #142: for a var/value-parameter
+        # reference these come from the SHADOW BLOCK at base_addr, which is
+        # correct either way (a direct object's own header starts with the
+        # identical discriminant words).
+        discs = []
+        for i, name in enumerate(disc_names):
+            try:
+                value = _read_i64(inferior, base_addr + i * 8)
+            except gdb.error as e:
+                yield name, "<error reading discriminant: %s>" % e
+                discs.append(0)  # keep the index aligned for _layout_walk
+                continue
+            discs.append(value)
             yield name, value
+
         if self.is_ref:
             # The shadow block's trailing member: a plain pointer to the
             # real body, stored (not computed) at the header's own size --
             # matches declareSchemaParamRef's own layout exactly.
-            body_addr = _read_ptr(inferior, base_addr + self.schema["hdrBytes"])
+            try:
+                body_addr = _read_ptr(inferior, base_addr + self.schema["hdrBytes"])
+            except (gdb.error, KeyError, TypeError) as e:
+                yield "<plang-schema-error>", \
+                    "could not read the referenced body's address: %s" % e
+                return
             field_addr, hdr_for_walk = body_addr, 0
         else:
             field_addr, hdr_for_walk = base_addr, None
-        for name, addr, kind, extra in _layout_walk(
-                self.schema, field_addr, inferior, discs, hdr_for_walk):
-            if kind == "scalar":
-                size = extra
-                yield name, _read_i64(inferior, addr) if size == 8 else \
-                    int.from_bytes(bytes(inferior.read_memory(addr, size)),
-                                    byteorder="little", signed=True)
-            else:
-                count, elem_size = extra
-                values = [
-                    int.from_bytes(
-                        bytes(inferior.read_memory(addr + j * elem_size, elem_size)),
-                        byteorder="little", signed=True)
-                    for j in range(count)
-                ]
-                yield name, "{" + ", ".join(str(v) for v in values) + "}"
+
+        try:
+            walked = _layout_walk(self.schema, field_addr, inferior, discs, hdr_for_walk)
+        except _SchemaDataError as e:
+            yield "<plang-schema-error>", str(e)
+            return
+        except (KeyError, TypeError) as e:
+            yield "<plang-schema-error>", "malformed sidecar entry: %s" % e
+            return
+
+        for name, addr, kind, extra in walked:
+            try:
+                if kind == "scalar":
+                    size, type_kind, field = extra
+                    yield name, _format_scalar(inferior, addr, size, type_kind, field)
+                elif kind == "array":
+                    count, elem_size = extra
+                    values = [
+                        int.from_bytes(
+                            bytes(inferior.read_memory(addr + j * elem_size, elem_size)),
+                            byteorder="little", signed=True)
+                        for j in range(count)
+                    ]
+                    yield name, "{" + ", ".join(str(v) for v in values) + "}"
+                else:  # "error", from _layout_walk's own per-field fallback
+                    yield name, "<plang-schema-error: %s>" % extra
+            except (gdb.error, gdb.MemoryError, _SchemaDataError,
+                    OverflowError, struct.error) as e:
+                # A problem reading or formatting just THIS field (e.g. an
+                # address gdb can no longer read, or a field whose declared
+                # size does not match its typeKind) -- yield an error marker
+                # for it alone so every field around it still prints.
+                yield name, "<error: %s>" % e
 
 
 def _plang_schema_pretty_printer(val):
@@ -367,7 +528,10 @@ def _plang_schema_pretty_printer(val):
     if not sidecar:
         return None
     schemas = sidecar.get("schemas", {})
-    type_name = val.type.strip_typedefs().tag
+    try:
+        type_name = val.type.strip_typedefs().tag
+    except gdb.error:
+        return None
     if not type_name:
         return None
     # ".ref": CGDebugInfo::declareSchemaParamRef's own tag suffix for a
@@ -396,7 +560,18 @@ def _plang_schema_pretty_printer(val):
             % (sidecar_id, live_id, lookup_name))
         return None
 
-    variants = schemas[lookup_name]
+    # issue #144: a structural failure -- a variant with no "fields"/"discs"
+    # at all -- is not something one error-marker child can paper over
+    # (there is no layout to walk in the first place), so it's filtered out
+    # here rather than trusted; gdb falls back to its own default DWARF-only
+    # printing if that leaves nothing usable, exactly as if this script had
+    # never seen the type.
+    def _structurally_valid(variant):
+        return isinstance(variant, dict) and "fields" in variant and "discs" in variant
+
+    variants = [v for v in schemas[lookup_name] if _structurally_valid(v)]
+    if not variants:
+        return None
     if len(variants) == 1:
         return PlangSchemaValue(val, variants[0], lookup_name, is_ref)
 
