@@ -30,14 +30,19 @@ public:
     std::optional<FileID> addBuffer(std::string Name, std::string Text);
 
     /// Read a file and take its contents as a buffer, or return nullopt if it
-    /// cannot be opened, or for the same reason addBuffer can fail.
+    /// cannot be opened, or for the same reason addBuffer can fail.  The
+    /// file's size is stat'd and checked against wouldOverflow before
+    /// anything is read, so a file too large to ever fit is rejected without
+    /// the read (and the allocation it would take) that addBuffer's own
+    /// check alone cannot prevent.
     std::optional<FileID> addFile(const std::string& Path);
 
     /// Whether a buffer of \p TextSize bytes would run the coordinate space
     /// past what a 32-bit SourceLocation can address.  Exposed so a caller
     /// that can tell "not found" from "too large" apart some other way --
-    /// Scanner's file-path constructor, which knows addFile only reaches
-    /// this once the file has already opened -- can report the right one.
+    /// Scanner's file-path constructor, which knows addFile fails either
+    /// before opening the file (too large) or because it could not be
+    /// opened at all (not found), but not which -- can report the right one.
     [[nodiscard]] bool wouldOverflow(size_t TextSize) const;
 
     /// The location of byte \p Offset within \p FID.  An offset at or past the

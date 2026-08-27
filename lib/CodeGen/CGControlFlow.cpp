@@ -139,16 +139,42 @@ void CGControlFlow::emitForIn(const ForInStmt& s) {
     // name gave the loop body one variable and everything else another -- a
     // procedure called from the body read the declared variable, which the
     // loop never wrote, and saw it unset both times round.
-    llvm::Value* loopVar = nullptr;
-    if (const auto* ve = SymTab.findVar(s.Var); ve && ve->ptr && ve->type == elemTy)
-        loopVar = ve->ptr;
+    //
+    // Issue #217: the declared variable's own LLVM storage need not be the
+    // same WIDTH as the set's element type -- `c: 'a'..'z'` is i64 (every
+    // ordinal but Char and Boolean is stored at full width; see
+    // TypeContext::getSubrange) while `set of char`'s element type is i8 --
+    // and writing through it just needs the same zext-or-trunc an ordinary
+    // assignment already gets.  Requiring an exact type match sent that
+    // (entirely legal) case down the "no declaration" branch below, which
+    // used to mint an alloca under the SAME name and rebind it into the
+    // CURRENT scope with no push/pop to ever undo it.  The rebinding then
+    // outlived the loop: a nested procedure that had already captured the
+    // real variable's address, at its declared width, kept resolving the
+    // name to the new and narrower alloca for the rest of the block, and
+    // read past its end -- confirmed with AddressSanitizer, a
+    // stack-buffer-overflow read of 8 bytes out of a 1-byte object.  The same
+    // rebind also meant any further write to a mismatched GLOBAL control
+    // variable landed on the throwaway local alloca instead, so the global
+    // itself silently stopped tracking the loop at all.
+    llvm::Value* loopVar   = nullptr;
+    llvm::Type*  loopVarTy = elemTy;
+    if (const auto* ve = SymTab.findVar(s.Var); ve && ve->ptr && ve->type->isIntegerTy()) {
+        loopVar   = ve->ptr;
+        loopVarTy = ve->type;
+    }
     auto* bitAlloca = CreateEntryAlloca(I64Ty, "forin.bit");
     B.CreateStore(llvm::ConstantInt::get(I64Ty, 0), bitAlloca);
 
+    // No declaration to write into, or one of a shape (non-ordinal) this loop
+    // cannot store through: bind a fresh alloca under the same name instead
+    // of storage the program never gave it.  Scoped to the body alone --
+    // pushed here, popped the moment it is emitted -- so this stand-in name
+    // cannot shadow the real one for anything that follows the loop.
+    bool pushedForInScope = false;
     if (!loopVar) {
-        // No declaration to write into, or one of a shape this loop cannot
-        // store through: keep the old behaviour rather than store somewhere
-        // the program did not ask for.
+        SymTab.pushScope();
+        pushedForInScope = true;
         loopVar = CreateEntryAlloca(elemTy, s.Var + ".addr");
         SymTab.defVar(s.Var, loopVar, elemTy);
     }
@@ -185,8 +211,9 @@ void CGControlFlow::emitForIn(const ForInStmt& s) {
     if (const int64_t base = Sets.setBaseOf(*s.SetExpr); base != 0)
         bit3 = B.CreateAdd(bit3, llvm::ConstantInt::get(I64Ty, base, true),
                                  "forin.rebase");
-    B.CreateStore(B.CreateZExtOrTrunc(bit3, elemTy, "forin.ord"), loopVar);
+    B.CreateStore(B.CreateZExtOrTrunc(bit3, loopVarTy, "forin.ord"), loopVar);
     EmitStmt(s.Body.get());
+    if (pushedForInScope) SymTab.popScope();
     BrIfNeeded(incBB);
 
     // Increment bit counter.

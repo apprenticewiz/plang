@@ -15,6 +15,19 @@
 
 using namespace plang;
 
+// Ceiling on live parseComponentValue and parseVariantPartValue activations
+// together (Parser::ValueDepth).  Mirrors MaxExprDepth in ParseExpr.cpp: 500
+// levels of nesting is nowhere near exhausting an 8MB default stack -- both
+// recursive shapes EP §6.8.7's structured-value-constructor grammar allows,
+// an arm value nested arbitrarily deep ('value [1:[1: ... :0]]') and a
+// variant part nested arbitrarily deep ('value [case 1 of [case 1 of
+// [...]]]'), crash only tens of thousands of levels deeper than this on this
+// machine -- while no legitimate Extended Pascal program nests a structured
+// value anywhere close to this deep.  Without a ceiling here, a source file
+// built specifically to nest deeply (or a generated/fuzzed one) drives the
+// real call stack instead of a diagnostic.
+static constexpr unsigned MaxValueDepth = 500;
+
 // ---------------------------------------------------------------------------
 // Type expression parsing
 // ---------------------------------------------------------------------------
@@ -36,6 +49,29 @@ void Parser::parseInitialState(TypeNode& Node) {
 // three, a set-constructor being an expression, and what tells them apart is
 // the colon that every arm of a structured value has.
 std::unique_ptr<ExprNode> Parser::parseComponentValue() {
+    // Every recursive re-entry through an arm's value -- 'value [1:[1: ...
+    // :0]]' -- funnels straight back through this activation, so this is one
+    // of the two places (see parseVariantPartValue below for the other) a
+    // ceiling bounds the whole EP §6.8.7 structured-value-constructor cycle.
+    // Checked before the RAII bump a few lines down: a caller already
+    // sitting at the ceiling must return without recursing again, not
+    // recurse once more and only then stop.
+    if (ValueDepth >= MaxValueDepth) {
+        if (!ValueDepthLimitHit) {
+            ValueDepthLimitHit = true;
+            emitError(Current.toLoc(), diag::err_value_too_deeply_nested);
+        }
+        // Deliberately does not consume Current (typically another '[') --
+        // every caller up the stack is still waiting on its own closing
+        // token (']', ';', etc.) and unwinds on its own once it sees the
+        // same token still there.
+        auto Node   = std::make_unique<IntLitExpr>();
+        Node->Loc   = Current;
+        Node->Value = 0;
+        return Node;
+    }
+    ValueDepthScope DepthGuard(ValueDepth, ValueDepthLimitHit);
+
     if (!check(TokenKind::LeftBracket)) return parseExpression();
     Token Loc = Current;
     advance(); // '['
@@ -52,7 +88,14 @@ std::unique_ptr<ExprNode> Parser::parseComponentValue() {
     if (check(TokenKind::Case) || check(TokenKind::Otherwise)) {
         auto Node = structured();
         parseValueArms(*Node);
-        expect(TokenKind::RightBracket);
+        // Suppressed while unwinding from the depth ceiling above: every
+        // enclosing '[' between here and the ceiling is missing its ']' for
+        // the same reason, and expect()'s diagnostic once per level would
+        // bury the one diagnostic that actually explains the failure.
+        if (ValueDepthLimitHit)
+            match(TokenKind::RightBracket);
+        else
+            expect(TokenKind::RightBracket);
         return Node;
     }
 
@@ -77,7 +120,14 @@ std::unique_ptr<ExprNode> Parser::parseComponentValue() {
     Arm.Value  = parseComponentValue();
     Node->Arms.push_back(std::move(Arm));
     if (match(TokenKind::Semicolon)) parseValueArms(*Node);
-    expect(TokenKind::RightBracket);
+    // Suppressed while unwinding from the depth ceiling above: every
+    // enclosing '[' between here and the ceiling is missing its ']' for the
+    // same reason, and expect()'s diagnostic once per level would bury the
+    // one diagnostic that actually explains the failure.
+    if (ValueDepthLimitHit)
+        match(TokenKind::RightBracket);
+    else
+        expect(TokenKind::RightBracket);
     return Node;
 }
 
@@ -137,6 +187,29 @@ void Parser::parseValueArms(StructuredValueExpr& Node) {
 // IndexExpr and call parsePostfix so that chained postfixes ([j], .f, ^) work.
 //
 void Parser::parseVariantPartValue(StructuredValueExpr& Node) {
+    // Every recursive re-entry through a variant part's field-list -- 'value
+    // [case 1 of [case 1 of [...]]]' -- funnels straight back through this
+    // activation without ever passing through parseComponentValue again, so
+    // this is the other of the two places (see parseComponentValue above) a
+    // ceiling bounds the whole EP §6.8.7 structured-value-constructor cycle.
+    // Checked before the RAII bump a few lines down, and before consuming
+    // 'case': a caller already sitting at the ceiling must return without
+    // recursing again, not recurse once more and only then stop.
+    if (ValueDepth >= MaxValueDepth) {
+        if (!ValueDepthLimitHit) {
+            ValueDepthLimitHit = true;
+            emitError(Current.toLoc(), diag::err_value_too_deeply_nested);
+        }
+        // Deliberately does not consume 'case' -- every caller up the stack
+        // (parseValueArms, parseFieldListValue, parseStructuredValueOrIndex)
+        // is looping on a semicolon or unwinding toward its own closing ']'
+        // and stops cleanly once it sees the same 'case' still sitting there
+        // unconsumed, the same way the other guards above leave their own
+        // lookahead token untouched.
+        return;
+    }
+    ValueDepthScope DepthGuard(ValueDepth, ValueDepthLimitHit);
+
     advance(); // 'case'
 
     // The tag-field-identifier is optional, and what follows it looks the same
@@ -164,7 +237,14 @@ void Parser::parseVariantPartValue(StructuredValueExpr& Node) {
     }
 
     parseFieldListValue(Node);
-    expect(TokenKind::RightBracket);
+    // Suppressed while unwinding from the depth ceiling above: every
+    // enclosing 'case ... of [' between here and the ceiling is missing its
+    // ']' for the same reason, and expect()'s diagnostic once per level
+    // would bury the one diagnostic that actually explains the failure.
+    if (ValueDepthLimitHit)
+        match(TokenKind::RightBracket);
+    else
+        expect(TokenKind::RightBracket);
 }
 
 void Parser::parseFieldListValue(StructuredValueExpr& Node) {
@@ -204,7 +284,14 @@ Parser::parseStructuredValueOrIndex(std::string Name, Token Loc) {
         Node->TypeName = Name;
         parseVariantPartValue(*Node);
         match(TokenKind::Semicolon);
-        expect(TokenKind::RightBracket);
+        // Suppressed while unwinding from the depth ceiling above: every
+        // enclosing '[' between here and the ceiling is missing its ']' for
+        // the same reason, and expect()'s diagnostic once per level would
+        // bury the one diagnostic that actually explains the failure.
+        if (ValueDepthLimitHit)
+            match(TokenKind::RightBracket);
+        else
+            expect(TokenKind::RightBracket);
         return parsePostfix(std::move(Node));
     }
 
@@ -308,7 +395,14 @@ Parser::parseStructuredValueOrIndex(std::string Name, Token Loc) {
             Node->Arms.push_back(std::move(nextArm));
         }
 
-        expect(TokenKind::RightBracket);
+        // Suppressed while unwinding from the depth ceiling above: every
+        // enclosing '[' between here and the ceiling is missing its ']' for
+        // the same reason, and expect()'s diagnostic once per level would
+        // bury the one diagnostic that actually explains the failure.
+        if (ValueDepthLimitHit)
+            match(TokenKind::RightBracket);
+        else
+            expect(TokenKind::RightBracket);
         return parsePostfix(std::move(Node));
     }
 

@@ -224,8 +224,26 @@ public:
     /// so it is interned under the placeholder's address.  Without re-filing,
     /// a later `^node` would look up the real type, miss, and mint a second
     /// pointer type that is not identical to the first.
+    ///
+    /// The placeholder's OLD entry is erased, not just overwritten with a new
+    /// one: every key here is an address (see the class comment), and this is
+    /// the one place a key's address can go on to name something else.  The
+    /// placeholder is a Sema-owned stub (Kind=Error) whose only remaining
+    /// owner, after the line below replaces PointeeType, is whatever pinned
+    /// it before this call; today that is the AST, since Sema::resolveType
+    /// (SemaType.cpp) stamps every TypeNode's resolved type onto the node for
+    /// the whole compilation, so the stub outlives this TypeContext and its
+    /// address is never freed, let alone reused, while this cache can still
+    /// be read.  Leaving the stale entry behind is therefore inert *today*,
+    /// but it is load-bearing on that pinning: the moment anything frees a
+    /// stub while its TypeContext lives on, a later, unrelated Type placed at
+    /// the freed address would collide with the stale "ptr:<addr>" key and
+    /// getPointer would hand back this pointer's identity instead of minting
+    /// (or finding) its own -- two structurally unrelated types made
+    /// pointer-equal, which is exactly what `identical` exists to not do.
     void rebindPointer(const std::shared_ptr<Type>& ptr,
                        std::shared_ptr<Type> pointee) {
+        PointerCache_.erase("ptr:" + addrKey(ptr->PointeeType));
         ptr->Name        = "^" + pointee->Name;
         ptr->PointeeType = pointee;
         PointerCache_["ptr:" + addrKey(pointee)] = ptr;
