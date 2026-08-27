@@ -445,8 +445,12 @@ void BuiltinIO::emitReadArg(const ExprNode& arg, llvm::Value* fp) {
     // `d: 1..9` accepted 99 and left the variable holding a value its type
     // cannot represent -- which every later use then trusts: an array indexed
     // by it, a case selector, a `for` bound.
+    // Lo == Hi (e.g. `5..5`) is a legal singleton subrange, not a sentinel
+    // for "no real bounds" -- Kind == Subrange already guarantees these are
+    // real, so excluding Lo == Hi here would just let read() write any value
+    // into a singleton subrange uncaught.
     if (const auto& rt = arg.ResolvedType;
-            rt && rt->Kind == TypeKind::Subrange && rt->SubLo != rt->SubHi) {
+            rt && rt->Kind == TypeKind::Subrange) {
         auto* got = B.CreateLoad(ty, addr, "rd.chk");
         RangeGuards.emitRangeCheck(ToI64(got), rt->SubLo, rt->SubHi,
                        /*isIndex=*/false, arg.Loc);

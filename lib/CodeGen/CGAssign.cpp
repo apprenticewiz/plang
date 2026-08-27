@@ -243,7 +243,12 @@ void CGAssign::emitAssign(const AssignStmt& s) {
                     }
                 }
             }
-        if (!checked && tt->SubLo != tt->SubHi)
+        // Lo == Hi is a legal singleton subrange (ISO §6.4.7 puts no floor on
+        // the interval's width), not a sentinel for "no real bounds" -- Kind
+        // == Subrange above already guarantees these bounds are real, so a
+        // `SubLo != SubHi` guard here would just exempt `5..5` from the very
+        // check this block exists to perform.
+        if (!checked)
             RangeGuards.emitRangeCheck(rhs, tt->SubLo, tt->SubHi, /*isIndex=*/false, s.Loc);
     }
 
