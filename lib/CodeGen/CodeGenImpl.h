@@ -1249,9 +1249,14 @@ struct Codegen::Impl {
         return schemaAccess_->schemaBodySize(schema, discs);
     }
     /// EP §6.7.5.3: new(p, d1..ds) for a pointer whose domain is a schema.
+    /// CGProcCall.cpp is the one caller actually reached from emitCallStmt;
+    /// this wrapper follows the same two steps it does (allocate, then apply
+    /// the body's `value` clauses under the new object's own discriminants)
+    /// so a future caller of the Impl-level API gets the same behavior.
     void emitNewSchema(const ExprNode& ptrArg, const plang::Type& schema,
                        std::span<const std::unique_ptr<ExprNode>> discArgs) {
-        schemaAccess_->emitNewSchema(ptrArg, schema, discArgs);
+        SchemaRef ref = schemaAccess_->emitNewSchema(ptrArg, schema, discArgs);
+        emitSchemaInitialState(ref.data, schema, ref.discs);
     }
     void emitStrFromCStr(llvm::Value* dst, llvm::Value* cap, llvm::Value* cstr) {
         strings_->emitStrFromCStr(dst, cap, cstr);
@@ -1339,6 +1344,23 @@ struct Codegen::Impl {
     /// variable begins in.
     void emitInitialState(llvm::Value* ptr, llvm::Type* ty,
                           const TypeNode* tn, int depth = 0);
+    /// EP §6.6 with §6.4.7: emitInitialState's counterpart for a schema
+    /// instance new() just allocated.  new()'s discriminants need not be
+    /// constants (EP §6.7.5.3), so the body below the header is laid out at
+    /// RUN TIME in general -- emitInitialState's static llvm::Type* / GEP-
+    /// by-index walk only exists for a schema bound to compile-time-constant
+    /// discriminants (a declared `var v: t(20)`).  This is SchemaLayoutEngine's
+    /// run-time walk instead -- the differential-oracle counterpart the class
+    /// itself is documented as never sharing an implementation with the
+    /// static one -- applied to "store a value" rather than "find a field".
+    void emitSchemaInitialState(llvm::Value* bodyAddr, const plang::Type& schema,
+                                const std::vector<llvm::Value*>& discs);
+    /// The recursive walk behind emitSchemaInitialState.  \p discs are the
+    /// discriminants in force at \p addr (the object's own, or a nested
+    /// instantiation's own once descendIntoInstantiation has recomputed them).
+    void emitSchemaInitialStateAt(llvm::Value* addr,
+                                  const std::vector<llvm::Value*>& discs,
+                                  const TypeNode* tn, int depth = 0);
     /// EP §6.8.7: gives a constant that is an array, record or set value the
     /// storage it needs, to be filled in by emitGlobalVarInits.
     void emitStructuredConst(const ConstDef& cd);
