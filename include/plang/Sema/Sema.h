@@ -102,7 +102,7 @@ private:
     // Live activations of checkExpr.  Every recursive re-entry into expression
     // checking -- a binary/unary operand, a call argument, an index/field/
     // deref base -- funnels through checkExpr, so bounding activations there
-    // (see ExprDepthScope and MaxExprDepth in SemaExpr.cpp) bounds the whole
+    // (see ExprDepthScope and MaxExprDepth below) bounds the whole
     // AST-walking recursion against a flat operator chain built specifically
     // to be deep, e.g. `1+1+1+...+1` with tens of thousands of terms.  Unlike
     // deeply NESTED parenthesized input, which the parser's own ExprDepth
@@ -112,8 +112,31 @@ private:
     // recursively, and without a ceiling here that walk used to exhaust the
     // real C++ stack instead of failing with a diagnostic. Same shape as
     // Parser::ExprDepth; see its comment for the rationale.
-    unsigned                 ExprDepth{};
-    bool                     ExprDepthLimitHit{};
+    //
+    // constBound and buildExtentForm (SemaType.cpp) recurse over the same
+    // kind of AST -- a bound written as a flat chain, e.g. an array's
+    // `array[1..1+1+...+1]` -- by a different route (constBound/
+    // constBoundImpl call each other; buildExtentForm calls itself) that
+    // checkExpr's own guard does not cover: checkExpr is run on a bound
+    // first and stops safely at MaxExprDepth, but foldBounds then walks the
+    // SAME chain again through constBound with nothing stopping it.  Sharing
+    // this counter and ceiling, rather than each giving itself an
+    // independent one, is what "share the same depth budget as checkExpr"
+    // (issue #204) means: whichever of the two is active, recursing through
+    // either one now counts against the one ceiling.  const because
+    // constBound/constBoundImpl/buildExtentForm are; SchemaBindingUsed_
+    // below is the existing precedent for a mutable scratch counter in an
+    // otherwise-const fold.
+    mutable unsigned          ExprDepth{};
+    mutable bool              ExprDepthLimitHit{};
+    // 1000 levels of recursion through checkExpr -> checkBinary/checkUnary/
+    // ... -> checkExpr, or through constBound -> constBoundImpl ->
+    // constBound -> ..., is well under the crash threshold observed
+    // empirically on this build's default 8MB stack (a flat chain starts
+    // crashing a few thousand terms in), while no legitimate Pascal
+    // expression -- handwritten or reasonably generated -- nests anywhere
+    // close to this deep.
+    static constexpr unsigned MaxExprDepth = 1000;
     struct ExprDepthScope {
         unsigned& N;
         bool&     LimitHit;
@@ -363,10 +386,20 @@ private:
     // IsGlobalScope: true for a program block or a module body, where every
     // variable becomes a single linked object subject to the relocation-range
     // check in Phase 4 below; false for a procedure/function body, whose
-    // locals are stack storage and never hit that limit.
+    // locals are stack storage instead.  Phase 4 runs the same byte-size gate
+    // either way (#223) -- an oversized local has no relocation to overflow,
+    // but hangs the LLVM backend lowering its `alloca` well before it would
+    // fit any real stack -- and uses this flag only to choose which of
+    // err_global_var_too_large / err_local_var_too_large names the variable's
+    // scope accurately.
+    // IsModuleBlock: true only for a module's own body (Sema::processModuleBody).
+    // Stamped onto each label this block declares (Symbol::LabelInModuleBlock)
+    // so checkGoto can refuse a non-local goto from one of the module's own
+    // procedures back into it -- see that field's comment for why.
     void checkBlock(const BlockNode& Block,
                     llvm::function_ref<void()> BeforePop = {},
-                    bool IsGlobalScope = false);
+                    bool IsGlobalScope = false,
+                    bool IsModuleBlock = false);
     void checkProcSignature(const ProcDecl& Proc);
     void checkProcBody     (const ProcDecl& Proc);
     /// Records which value parameters a body modifies; see ProcDecl::ModifiedParams.

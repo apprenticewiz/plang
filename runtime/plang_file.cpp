@@ -58,6 +58,7 @@ static const char* findBinding(PascalFile *F);
 [[noreturn]] void plang_err_cannot_open(const char *Msg);
 [[noreturn]] void plang_err_field_width(int64_t W);
 [[noreturn]] void plang_err_file_wrong_mode(const char *Op);
+[[noreturn]] void plang_err_seek_failed(const char *Op, int64_t N);
 
 /// Look at the next character without consuming it.
 static void prime(PascalFile *F) {
@@ -709,10 +710,19 @@ void plang_update(PascalFile *F, const char *Name) {
 // "ord(n)-ord(a)", a of type T being the index type's smallest value.  Only
 // the difference is a component count; n itself never was one except for
 // the common case where a happens to be 0.
+//
+// That computed offset is never range-checked before it reaches fseek, so a
+// value the C library cannot honor (behind the index type's origin, most
+// directly, which computes a negative byte offset) must have fseek's own
+// failure checked: on failure it leaves the stream positioned exactly where
+// it already was, so ignoring the return does not just skip the seek, it
+// silently redirects whatever read or write comes next onto that unrelated,
+// previously-current component instead (issue #233).
 
 void plang_seekread(PascalFile *F, int64_t N, int64_t ElemSize, int64_t IndexLow) {
     abortIfClosed(F, "SeekRead");
-    std::fseek(F->Fp, (N - IndexLow) * ElemSize, SEEK_SET);
+    if (std::fseek(F->Fp, (N - IndexLow) * ElemSize, SEEK_SET) != 0)
+        plang_err_seek_failed("SeekRead", N);
     F->Readable = 1;
     unloadComponent(F);
     prime(F);
@@ -720,7 +730,8 @@ void plang_seekread(PascalFile *F, int64_t N, int64_t ElemSize, int64_t IndexLow
 
 void plang_seekwrite(PascalFile *F, int64_t N, int64_t ElemSize, int64_t IndexLow) {
     abortIfClosed(F, "SeekWrite");
-    std::fseek(F->Fp, (N - IndexLow) * ElemSize, SEEK_SET);
+    if (std::fseek(F->Fp, (N - IndexLow) * ElemSize, SEEK_SET) != 0)
+        plang_err_seek_failed("SeekWrite", N);
     F->Buf      = PlangFileUninit;
     F->Readable = 0;
     unloadComponent(F);
@@ -728,7 +739,8 @@ void plang_seekwrite(PascalFile *F, int64_t N, int64_t ElemSize, int64_t IndexLo
 
 void plang_seekupdate(PascalFile *F, int64_t N, int64_t ElemSize, int64_t IndexLow) {
     abortIfClosed(F, "SeekUpdate");
-    std::fseek(F->Fp, (N - IndexLow) * ElemSize, SEEK_SET);
+    if (std::fseek(F->Fp, (N - IndexLow) * ElemSize, SEEK_SET) != 0)
+        plang_err_seek_failed("SeekUpdate", N);
     F->Buf      = PlangFileUninit;
     F->Readable = 2; // both directions -- see the note in plang_extend
     unloadComponent(F);
