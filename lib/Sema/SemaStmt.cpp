@@ -854,6 +854,20 @@ void Sema::checkCallStmt(const CallStmt& S) {
             const Type* Pointee = PtrTy->Kind == TypeKind::Pointer
                                       ? PtrTy->PointeeType.get() : nullptr;
             const bool ToSchema = Pointee && Pointee->Kind == TypeKind::Schema;
+            // ISO §6.6.5.3: for a record with a variant part, new's extra
+            // arguments are its case-constants -- one per nested variant
+            // level actually reached, each a value of that level's own tag
+            // type -- not schema discriminants.  Vp is walked one level
+            // deeper per argument by checkVariantTagArg; once it runs out
+            // (the reached level's case-constants nest no further, or an
+            // argument did not name any of them), ExtraReported flags that
+            // every argument from there on is one too many.  This used to be
+            // entirely unchecked: neither the count nor the type of these
+            // arguments was validated for a variant record.
+            const bool ToVariant = !ToSchema && Pointee && Pointee->Kind == TypeKind::Record
+                                    && Pointee->RecordDecl && Pointee->RecordDecl->Variant;
+            const VariantPart* Vp = ToVariant ? Pointee->RecordDecl->Variant.get() : nullptr;
+            bool ExtraReported = false;
             for (size_t I = 1; I < S.Args.size(); ++I) {
                 auto At = checkExpr(*S.Args[I]);
                 if (ToSchema && !At->isError() && I - 1 < Pointee->SchemaDiscs.size()) {
@@ -873,6 +887,14 @@ void Sema::checkCallStmt(const CallStmt& S) {
                                  && !isAssignCompatible(*Disc.Ty, *At))
                         error(S.Args[I]->Loc, diag::err_assign_mismatch,
                               {At->Name, Disc.Ty->Name});
+                } else if (ToVariant) {
+                    if (Vp) {
+                        Vp = checkVariantTagArg(Lo, *S.Args[I], *At, *Vp);
+                    } else if (!ExtraReported) {
+                        error(S.Args[I]->Loc, diag::err_variant_tag_arg_extra,
+                              {Lo, Pointee->Name});
+                        ExtraReported = true;
+                    }
                 }
             }
             if (ToSchema && S.Args.size() - 1 != Pointee->SchemaDiscs.size())
@@ -886,9 +908,7 @@ void Sema::checkCallStmt(const CallStmt& S) {
             // evaluated and then dropped, so `new(p, 20)` for a `^string` --
             // where `string` is the unbounded string and not the schema --
             // allocated the default and silently lost the 20.
-            if (!ToSchema && S.Args.size() > 1 && Pointee && !Pointee->isError()
-                    && !(Pointee->Kind == TypeKind::Record && Pointee->RecordDecl
-                         && Pointee->RecordDecl->Variant))
+            if (!ToSchema && !ToVariant && S.Args.size() > 1 && Pointee && !Pointee->isError())
                 // EP §6.4.3.3 does make `string` a schema with a capacity
                 // discriminant, so `new(p, 20)` for a `^string` is legal there
                 // and only plang's modelling of the bare name as the unbounded
@@ -899,6 +919,38 @@ void Sema::checkCallStmt(const CallStmt& S) {
                           ? diag::err_new_string_capacity
                           : diag::err_new_extra_args,
                       {Pointee->Name});
+            return;
+        }
+
+        // ISO §6.6.5.3: dispose's extra arguments are new's, read the same
+        // way -- case-constants selecting a path through a variant record's
+        // nesting, each checked against that level's own tag type.  dispose
+        // had no argument checking of any kind before this, schema or
+        // variant: arity aside, `dispose(p, 42)` was accepted whatever
+        // `p`'s domain type was and whatever 42 was supposed to select.
+        // Schema discriminants are deliberately not re-checked here: unlike
+        // a variant's case-constants, they are not re-supplied to dispose at
+        // all (the instance already carries them from new), so there is
+        // nothing here for them to be checked against.
+        if (Lo == "dispose" && !S.Args.empty()) {
+            auto PtrTy = checkExpr(*S.Args[0]);
+            const Type* Pointee = PtrTy->Kind == TypeKind::Pointer
+                                      ? PtrTy->PointeeType.get() : nullptr;
+            const bool ToVariant = Pointee && Pointee->Kind == TypeKind::Record
+                                    && Pointee->RecordDecl && Pointee->RecordDecl->Variant;
+            const VariantPart* Vp = ToVariant ? Pointee->RecordDecl->Variant.get() : nullptr;
+            bool ExtraReported = false;
+            for (size_t I = 1; I < S.Args.size(); ++I) {
+                auto At = checkExpr(*S.Args[I]);
+                if (!ToVariant) continue;
+                if (Vp) {
+                    Vp = checkVariantTagArg(Lo, *S.Args[I], *At, *Vp);
+                } else if (!ExtraReported) {
+                    error(S.Args[I]->Loc, diag::err_variant_tag_arg_extra,
+                          {Lo, Pointee->Name});
+                    ExtraReported = true;
+                }
+            }
             return;
         }
 

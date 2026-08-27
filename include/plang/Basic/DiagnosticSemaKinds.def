@@ -210,6 +210,15 @@ DIAG(err_case_label_duplicate, Error, "case label %0 is used by more than one ar
 // compiled into a plausible-looking one.
 DIAG(err_case_label_not_const, Error, "case label is not a constant")
 DIAG(err_variant_label_duplicate, Error, "case label %0 is used by more than one variant")
+// ISO §6.4.3.3: tag-type is an ordinal-type, whether or not a tag-field name
+// was written before it ('case b: boolean of' vs. anonymous 'case boolean of').
+DIAG(err_variant_tag_not_ordinal, Error, "variant tag type must be an ordinal type, got '%0'")
+// ISO §6.4.3.3: a variant's case-constants are values of the tag field's own
+// type, the same rule a case-statement's labels are held to against its
+// selector (err_case_label_mismatch) -- worded separately because this one
+// names a declared tag type rather than a selector expression's type.
+DIAG(err_variant_label_type, Error,
+     "variant case-constant has type '%0', which is not compatible with tag type '%1'")
 DIAG(err_line_proc_not_text, Error, "'%0' applies to a text file only, not to 'file of %1'")
 DIAG(err_assign_file, Error, "a variable of a file type, or with a file component, cannot be assigned")
 DIAG(err_function_result_type, Error, "a function result must be a simple or pointer type, not '%0'")
@@ -337,6 +346,16 @@ DIAG(err_new_string_capacity, Error,
 DIAG(err_schema_not_a_discriminant, Error, "schema '%0' has no discriminant '%1'")
 DIAG(err_schema_arg_not_schematic, Error,
      "argument for parameter '%0' must be a '%1', got '%2'")
+// ISO §6.6.5.3: new/dispose's extra arguments for a record with a variant
+// part are its case-constants, one per nested variant level actually
+// selected, each a value of that level's own tag type -- the same rule
+// err_variant_label_type enforces at the declaration itself.  %0 is 'new'
+// or 'dispose', so the two share one message instead of near-duplicates.
+DIAG(err_variant_tag_arg_type, Error,
+     "'%0' case-constant has type '%1', which is not compatible with "
+     "variant tag type '%2'")
+DIAG(err_variant_tag_arg_extra, Error,
+     "'%0' was given more case-constants than '%1' has variant levels to select")
 
 // EP §6.8.7: Structured value constructors
 DIAG(err_constructor_type_not_found, Error, "type '%0' not found for value constructor")

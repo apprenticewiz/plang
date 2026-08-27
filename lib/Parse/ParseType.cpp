@@ -683,10 +683,10 @@ std::unique_ptr<VariantPart> Parser::parseVariantPart() {
     // Parse variant cases until 'end' (which belongs to the enclosing record).
     while (!check(TokenKind::End) && !check(TokenKind::Eof)) {
         VariantCase Vc;
-        // Case label list
-        Vc.Labels.push_back(parseFactor());
+        // Case label list.  ISO §6.4.3.3 / §6.3: a case-constant may carry a sign.
+        Vc.Labels.push_back(parseCaseConstant());
         while (match(TokenKind::Comma)) {
-            Vc.Labels.push_back(parseFactor());
+            Vc.Labels.push_back(parseCaseConstant());
         }
         expect(TokenKind::Colon);
         expect(TokenKind::LeftParen);

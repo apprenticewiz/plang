@@ -187,38 +187,64 @@ void Sema::checkInitialState(const TypeNode& Node, const Type& T) {
 }
 
 void Sema::walkVariantFields(const VariantPart& Vp, Type& T) {
-    // Tag field (the discriminator variable, e.g. 'b' in 'case b: boolean of')
-    // Resolved once: an enumeration written out here declares its values, and
-    // resolving the denoter a second time would declare them again.
+    // Tag type (e.g. 'boolean' in 'case b: boolean of', or the anonymous
+    // '(aa, bb)' in 'case (aa, bb) of').  Resolved unconditionally -- not
+    // only when a tag FIELD NAME was also written -- and exactly once: an
+    // enumeration written out here declares its values as a side effect of
+    // resolveType, and resolving the denoter a second time would declare
+    // them again.  Gating this on the tag field's name used to leave an
+    // anonymous selector's type never resolved at all, which meant two
+    // things: a non-ordinal tag such as 'case real of' had nothing to check
+    // it against and was silently accepted, and an inline enumeration's
+    // values, such as aa/bb above, were never declared as symbols, so using
+    // either anywhere read as "undefined identifier" and the duplicate-label
+    // fold below could not fold them either.
     std::shared_ptr<Type> TagTy;
-    if (!Vp.TagField.empty() && Vp.TagType) {
+    if (Vp.TagType) {
         TagTy = resolveType(*Vp.TagType);
-        // §6.4.3.3: the tag field's name is a field name like any other, and
-        // must be distinct from the fixed part and every earlier variant --
-        // the same rule the loop below enforces for variant fields.  This
-        // used to be silently SKIPPED instead of diagnosed, which dropped
-        // the tag out of Sema's flattened field list while codegen still
-        // laid out storage for the discriminator, so the layout cross-check
-        // gate aborted the compiler with no file and no line.  A user's
-        // mistake reported as an internal error is still the wrong answer.
-        if (std::ranges::any_of(T.RecordFields,
-                [&](const Type::Field& F) { return eqCI(F.Name, Vp.TagField); })) {
-            error(Vp.TagType->Loc, diag::err_duplicate_field, {Vp.TagField});
-        } else {
-            T.RecordFields.push_back({ .Name = Vp.TagField, .Ty = TagTy, .IsTagField = true });
+        // ISO §6.4.3.3: tag-type is an ordinal-type.
+        if (!TagTy->isError() && !TagTy->isOrdinal())
+            error(Vp.TagType->Loc, diag::err_variant_tag_not_ordinal, {TagTy->Name});
+        if (!Vp.TagField.empty()) {
+            // §6.4.3.3: the tag field's name is a field name like any other, and
+            // must be distinct from the fixed part and every earlier variant --
+            // the same rule the loop below enforces for variant fields.  This
+            // used to be silently SKIPPED instead of diagnosed, which dropped
+            // the tag out of Sema's flattened field list while codegen still
+            // laid out storage for the discriminator, so the layout cross-check
+            // gate aborted the compiler with no file and no line.  A user's
+            // mistake reported as an internal error is still the wrong answer.
+            if (std::ranges::any_of(T.RecordFields,
+                    [&](const Type::Field& F) { return eqCI(F.Name, Vp.TagField); })) {
+                error(Vp.TagType->Loc, diag::err_duplicate_field, {Vp.TagField});
+            } else {
+                T.RecordFields.push_back({ .Name = Vp.TagField, .Ty = TagTy, .IsTagField = true });
+            }
         }
     }
-    // §6.4.3.3: the case-constants of a variant part shall be distinct, for the
-    // reason they must be in a case-statement — the tag value has to name one
-    // variant and not two.
+    // §6.4.3.3: each case-constant of a variant part is a value of the tag
+    // type -- the same rule a case-statement's labels are held to against
+    // its selector (checkCase, SemaStmt.cpp) -- and, among themselves, the
+    // case-constants of a variant part shall be distinct, for the reason
+    // they must be in a case-statement: the tag value has to name one
+    // variant and not two.  The type check used to be entirely missing, so
+    // a boolean tag accepted case-constants that were not one of its two
+    // values at all.
     std::set<int64_t> SeenTags;
     for (const auto& Vc : Vp.Cases)
-        for (const auto& Lbl : Vc.Labels)
-            if (Lbl)
-                if (auto V = constBound(*Lbl); V && !SeenTags.insert(*V).second)
-                    error(Lbl->Loc, diag::err_variant_label_duplicate,
-                          {TagTy ? spellOrdinal(*TagTy, *V)
-                                 : std::to_string(*V)});
+        for (const auto& Lbl : Vc.Labels) {
+            if (!Lbl) continue;
+            auto LblTy = checkExpr(*Lbl);
+            if (TagTy && !TagTy->isError() && !LblTy->isError()
+                    && !isAssignCompatible(*TagTy, *LblTy)
+                    && !isAssignCompatible(*LblTy, *TagTy))
+                error(Lbl->Loc, diag::err_variant_label_type,
+                      {LblTy->Name, TagTy->Name});
+            if (auto V = constBound(*Lbl); V && !SeenTags.insert(*V).second)
+                error(Lbl->Loc, diag::err_variant_label_duplicate,
+                      {TagTy ? spellOrdinal(*TagTy, *V)
+                             : std::to_string(*V)});
+        }
 
     // All fixed fields from every variant case, plus recursion into nested
     // variants.
@@ -244,6 +270,35 @@ void Sema::walkVariantFields(const VariantPart& Vp, Type& T) {
         }
         if (Vc.NestedVariant) walkVariantFields(*Vc.NestedVariant, T);
     }
+}
+
+// ISO §6.6.5.3: see the declaration (Sema.h) for the walk this is one step
+// of.  \p Vp's TagType was resolved by walkVariantFields when the record
+// itself was resolved (once, before any statement -- new/dispose among
+// them -- is checked), so its ResolvedType is read here rather than
+// resolved again, the same reason walkVariantFields itself resolves an
+// inline enumeration only once: a second resolution would declare its
+// values a second time.
+const VariantPart* Sema::checkVariantTagArg(const std::string& Which,
+                                            const ExprNode& Arg, const Type& At,
+                                            const VariantPart& Vp) {
+    const Type* TagTy = Vp.TagType ? Vp.TagType->ResolvedType.get() : nullptr;
+    if (TagTy && !TagTy->isError() && !At.isError()
+            && !isAssignCompatible(*TagTy, At))
+        error(Arg.Loc, diag::err_variant_tag_arg_type, {Which, At.Name, TagTy->Name});
+    // Which of Vp's arms this argument names, so the caller knows whether a
+    // FURTHER argument has a nested level to be checked against.  Only a
+    // constant can answer that; a non-constant argument (already reported by
+    // checkExpr's own walk, since new/dispose's arguments are ordinary
+    // expressions to it) simply ends the walk here, the same as an argument
+    // that named none of Vp's arms.
+    if (auto V = constBound(Arg))
+        for (const auto& Vc : Vp.Cases)
+            for (const auto& Lbl : Vc.Labels)
+                if (Lbl)
+                    if (auto LV = constBound(*Lbl); LV && *LV == *V)
+                        return Vc.NestedVariant.get();
+    return nullptr;
 }
 
 std::shared_ptr<Type> Sema::resolveTypeImpl(const TypeNode& Node) {
