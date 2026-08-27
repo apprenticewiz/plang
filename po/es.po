@@ -128,11 +128,6 @@ msgid "no such file or directory: '%0'"
 msgstr "no existe el fichero o el directorio: «%0»"
 
 #, fuzzy
-msgctxt "diag/err_comment_delim_mismatch"
-msgid "comment delimiter mismatch: %0"
-msgstr "delimitadores de comentario discordantes: %0"
-
-#, fuzzy
 msgctxt "diag/err_unterminated_comment"
 msgid "unterminated comment"
 msgstr "comentario sin terminar"
@@ -678,11 +673,6 @@ msgid "write requires at least one argument"
 msgstr "write requiere al menos un argumento"
 
 #, fuzzy
-msgctxt "diag/err_readln_not_text"
-msgid "readln is only valid for text files, got 'file of %0'"
-msgstr "readln solo es válido para ficheros de texto, se obtuvo «file of %0»"
-
-#, fuzzy
 msgctxt "diag/err_read_type_mismatch"
 msgid "type mismatch in read: file element type is '%0', but variable has type '%1'"
 msgstr "tipo incompatible en read: el tipo de elemento del fichero es «%0», pero la variable es de tipo «%1»"
@@ -936,11 +926,6 @@ msgstr "el esquema «%0» espera %1 discriminante(s), se obtuvo %2"
 msgctxt "diag/err_schema_disc_not_const"
 msgid "schema discriminant '%0' must be a constant expression"
 msgstr "el discriminante de esquema «%0» debe ser una expresión constante"
-
-#, fuzzy
-msgctxt "diag/err_schema_disc_type_mismatch"
-msgid "schema discriminant '%0' has wrong type"
-msgstr "el discriminante de esquema «%0» es de tipo incorrecto"
 
 #, fuzzy
 msgctxt "diag/err_schema_undiscriminated"

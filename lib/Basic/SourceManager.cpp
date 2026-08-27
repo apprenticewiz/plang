@@ -44,9 +44,25 @@ std::optional<FileID> SourceManager::addBuffer(std::string Name, std::string Tex
 
     // Index the line starts once, so that resolving a location later is a
     // binary search rather than a scan from the top of the file.
+    //
+    // \n and \r\n both end a line at the byte right after the \n, same as
+    // before #285.  A bare \r -- classic Mac OS's own line ending, with no
+    // \n anywhere -- ends a line too: without this, a file that uses it
+    // exclusively has no \n at all, so the loop below would never push a
+    // second entry and every diagnostic in the file would resolve to line
+    // 1, with getLineText handing back the entire file as "the line". When
+    // a \r is immediately followed by \n, they are one terminator, not two:
+    // counting them separately would insert a spurious empty line between
+    // every real line of a CRLF file.
     B.LineStarts.push_back(0);
-    for (size_t I = 0; I < B.Text.size(); ++I)
-        if (B.Text[I] == '\n') B.LineStarts.push_back(static_cast<unsigned>(I + 1));
+    for (size_t I = 0; I < B.Text.size(); ++I) {
+        if (B.Text[I] == '\n') {
+            B.LineStarts.push_back(static_cast<unsigned>(I + 1));
+        } else if (B.Text[I] == '\r') {
+            if (I + 1 < B.Text.size() && B.Text[I + 1] == '\n') ++I;
+            B.LineStarts.push_back(static_cast<unsigned>(I + 1));
+        }
+    }
 
     // One past the end of the text is a valid position: it is where the
     // end-of-file token sits.  Hence the +1.
@@ -121,11 +137,20 @@ PresumedLoc SourceManager::getPresumedLoc(SourceLocation Loc) const {
     const unsigned Off = Loc.raw() - B->Base;
     // The last line whose start is at or before the offset.
     auto It = std::upper_bound(B->LineStarts.begin(), B->LineStarts.end(), Off);
-    const size_t Idx = static_cast<size_t>(It - B->LineStarts.begin()) - 1;
+    const size_t   Idx   = static_cast<size_t>(It - B->LineStarts.begin()) - 1;
+    const unsigned Start = B->LineStarts[Idx];
 
-    return PresumedLoc{ B->Name,
-                        static_cast<unsigned>(Idx) + 1,
-                        Off - B->LineStarts[Idx] + 1 };
+    // The column a terminal would show, not a byte count (#285): every
+    // UTF-8 continuation byte between the line's start and Off belongs to a
+    // character already counted by its lead byte, so it does not get a
+    // column of its own.  For an all-ASCII line (the common case) every
+    // byte is a lead byte, so this counts exactly the same as the plain
+    // `Off - Start` it replaces.
+    unsigned Column = 1;
+    for (unsigned I = Start; I < Off; ++I)
+        if (!isUtf8ContinuationByte(B->Text[I])) ++Column;
+
+    return PresumedLoc{ B->Name, static_cast<unsigned>(Idx) + 1, Column };
 }
 
 std::string_view SourceManager::getBufferData(FileID FID) const {

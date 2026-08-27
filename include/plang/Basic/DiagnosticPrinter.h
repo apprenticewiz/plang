@@ -2,6 +2,7 @@
 
 #include "plang/Basic/Diagnostic.h"
 #include "plang/Basic/SourceManager.h"
+#include "plang/Basic/StringUtil.h"
 
 #include <format>
 #include <string>
@@ -50,8 +51,11 @@ public:
             if (Prefix.empty()) return std::format("{}: {}", Sev, D.Message);
             return std::format("{}: {}: {}", Prefix, Sev, D.Message);
         }
-        return std::format("{}:{}:{}: {}: {}", P.Filename, P.Line, P.Column, Sev,
-                           D.Message);
+        // P.Filename is whatever the command line named -- not text plang
+        // wrote -- so it goes through escapeControlChars before it reaches
+        // stderr: see that function's comment for why.
+        return std::format("{}:{}:{}: {}: {}", escapeControlChars(P.Filename),
+                           P.Line, P.Column, Sev, D.Message);
     }
 
     /// The offending source line with a caret under it, or empty if there is
@@ -64,11 +68,20 @@ public:
 
         // Indent the caret with the line's own leading whitespace so that it
         // lands under the right character however the source is indented; a
-        // tab in the text has to stay a tab in the indent.
+        // tab in the text has to stay a tab in the indent.  P.Column counts
+        // display cells, not bytes (#285, see SourceManager::getPresumedLoc),
+        // so this has to walk Line the same way: a UTF-8 continuation byte
+        // belongs to the same cell as the lead byte before it and gets no
+        // indent character of its own, or a multi-byte character earlier on
+        // the line would push the caret further right than P.Column says.
         std::string Indent;
         Indent.reserve(P.Column);
-        for (unsigned I = 0; I + 1 < P.Column && I < Line.size(); ++I)
+        unsigned Col = 1;
+        for (size_t I = 0; I < Line.size() && Col < P.Column; ++I) {
+            if (isUtf8ContinuationByte(Line[I])) continue;
             Indent += (Line[I] == '\t') ? '\t' : ' ';
+            ++Col;
+        }
 
         std::string Caret = UseColor ? "\033[1;32m^\033[0m" : "^";
         return std::string(Line) + "\n" + Indent + Caret;

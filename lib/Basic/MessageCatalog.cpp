@@ -36,13 +36,16 @@
 
 #include "plang/Basic/MessageCatalog.h"
 
+#include "plang/Basic/StringUtil.h"
 #include "plang/Basic/Token.h"
 
 #include <algorithm>
 #include <cctype>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <limits>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -210,12 +213,29 @@ CatalogReport MessageCatalog::loadText(std::string_view Text, bool Merge) {
 
     // The header entry has no msgctxt; its metadata is read here and it is not
     // stored.  Everything else needs a msgctxt to be found by.
+    bool SawHeader = false; // the genuine header, once its entry has been read
     auto flush = [&]() -> bool {
         struct Reset { Pending& P; Field& F;
                        ~Reset() { P.reset(); F = Field::None; } } _{P, Cur};
 
         if (!P.HasCtxt) {
             if (!P.HasStr) return true;             // nothing at all: fine
+
+            // gettext's header is the entry with an empty msgid, and only the
+            // first one is it.  msgctxt is optional in gettext and most
+            // real-world entries never carry one, so without the Id check
+            // here, an ordinary "msgid / msgstr" pair -- ctxt-less, like the
+            // header, but a message like any other -- would be misread as
+            // the header the moment its msgstr happened to contain a line
+            // starting "Content-Type:" or "X-Plang-Catalog-ABI:", and could
+            // refuse the whole catalog over a charset that was never
+            // actually declared.
+            if (!P.Id.empty() || SawHeader) {
+                ++R.Unknown; // msgctxt-less and not the header: no key to load it under
+                return true;
+            }
+            SawHeader = true;
+
             // The header.  Only two fields can refuse the file.
             std::string_view H = P.Str;
             const auto find = [&](std::string_view Key) -> std::string_view {
@@ -249,10 +269,25 @@ CatalogReport MessageCatalog::loadText(std::string_view Text, bool Merge) {
                 }
             }
             if (std::string_view Abi = find("X-Plang-Catalog-ABI:"); !Abi.empty()) {
-                unsigned V = 0;
-                for (char Ch : Abi)
-                    if (Ch >= '0' && Ch <= '9') V = V * 10 + unsigned(Ch - '0');
-                    else break;
+                // A saturating parse.  CatalogAbi is a small constant, so all
+                // that matters past it is "bigger" -- but an accumulator that
+                // wraps on overflow can come back around to something small
+                // and *equal*, which is how 2**32 + 1 previously wrapped to 1
+                // and a catalog claiming an ABI four billion newer than this
+                // reader was silently accepted.  Clamping instead of wrapping
+                // keeps an oversized or adversarial number reading as "newer
+                // than this plang" -- refused -- rather than as anything a
+                // real ABI could be.
+                std::uint64_t V = 0;
+                for (char Ch : Abi) {
+                    if (Ch < '0' || Ch > '9') break;
+                    const auto Digit = static_cast<std::uint64_t>(Ch - '0');
+                    if (V > (std::numeric_limits<std::uint64_t>::max() - Digit) / 10) {
+                        V = std::numeric_limits<std::uint64_t>::max();
+                        break;
+                    }
+                    V = V * 10 + Digit;
+                }
                 if (V > CatalogAbi) {
                     R.FatalReason = "catalog needs a newer plang (ABI " +
                                     std::to_string(V) + ")";
@@ -550,13 +585,21 @@ LocaleResolution selectLocale(std::string_view Tag, const std::string& ExeDir,
 
 std::string describeLocale() {
     const LocaleResolution& R = currentLocale();
-    if (!R.Path.empty()) return R.Language + " (" + R.Path + ")";
+    // R.Requested (and, through catalogSearchOrder, R.Language) traces back to
+    // $LANG/$LC_MESSAGES/-fdiagnostics-language=, none of which plang chose;
+    // escapeControlChars keeps a tag such as "fr\x1b[2J...HIJACKED" from
+    // steering the terminal --version prints to, the same way
+    // DiagnosticPrinter guards a source filename for the same reason.  R.Path
+    // gets the same treatment: it is Dir + Language + ".po", and Dir can be
+    // $PLANG_LOCALE_DIR, so it is no more plang's own text than Language is.
+    if (!R.Path.empty())
+        return escapeControlChars(R.Language) + " (" + escapeControlChars(R.Path) + ")";
     // Nothing was loaded.  Whether that is the answer or a disappointment
     // depends on whether a catalog was ever going to be looked for.
     if (catalogSearchOrder(R.Requested).empty())
-        return (R.Requested.empty() ? std::string("en_US") : R.Requested)
+        return escapeControlChars(R.Requested.empty() ? std::string("en_US") : R.Requested)
              + " (built-in)";
-    return R.Requested + " (no catalog found; using built-in en_US)";
+    return escapeControlChars(R.Requested) + " (no catalog found; using built-in en_US)";
 }
 
 // ---------------------------------------------------------------------------

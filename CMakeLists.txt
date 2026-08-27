@@ -285,13 +285,37 @@ install(TARGETS plang_runtime plang_runtime_shared
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )
-# Public headers for embedders (exclude internal AST detail headers).
-# Version.h.in is not matched, being a template rather than a header; the
-# header it generates is installed from the build directory below.
+# Public headers for embedders.  This used to exclude AST/Ast*.h as an
+# "internal detail", but it is not one: Parser.h's parse() hands back a
+# ProgramNode, CodeGen.h's emit() takes one, and Sema.h/SemaUtil.h both
+# include AST/Ast.h directly, so those headers -- and therefore every
+# embedder that follows Frontend.h's own advertised pipeline -- need the
+# whole AST/ subtree (Ast.h is only the umbrella that pulls in AstBase.h,
+# AstDecl.h, AstExpr.h, AstStmt.h, and AstType.h). Excluding it left the
+# transitive closure of the public API uninstallable (issue #169) while
+# leaving TypeContext.h, the one AST/ header the old pattern happened not to
+# match, in place.
+#
+# *.def is matched for the same reason, not out of caution: Token.h textually
+# includes TokenKinds.def, LangOptions.h includes Dialects.def/
+# LangFeatures.def and (via SwitchTable.h) CompilerSwitches.def, Diagnostic.h
+# includes DiagnosticMessages.def (which itself pulls in the four
+# Diagnostic*Kinds.def files), BuiltinIDs.h includes Builtins.def, and
+# Driver/Options.h includes Options.def -- every one of those headers sits on
+# the path from Parser.h/Sema.h/CodeGen.h out, same as AST/Ast.h did, so an
+# install fixed only for *.h would still fail two headers later.
+#
+# With both gaps closed there is nothing left under include/plang/ to
+# sub-select: the whole tree is the public API, so there is no pattern here
+# to fall out of sync with it again the way the AST/Ast*.h EXCLUDE did.
+# Version.h.in is the one file this deliberately does not match, being a
+# template rather than a header; the header it generates is installed from
+# the build directory below.
 install(DIRECTORY include/plang/
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/plang
-    FILES_MATCHING PATTERN "*.h"
-    PATTERN "AST/Ast*.h" EXCLUDE
+    FILES_MATCHING
+        PATTERN "*.h"
+        PATTERN "*.def"
 )
 install(FILES ${CMAKE_BINARY_DIR}/include/plang/Basic/Version.h
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/plang/Basic

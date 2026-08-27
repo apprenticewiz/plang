@@ -4,9 +4,9 @@ add_subdirectory(Basic)
 add_subdirectory(Sema)
 add_subdirectory(CodeGen)
 # The GoogleTest tier's black-box Driver tests migrated to test/Driver/ --
-# see issue #34. Driver/ here is not a reversal of that: it holds one
-# narrow, permanent exception for a Driver property with no CLI-observable
-# proxy at all (issue #174) -- the same kind of exception
+# see issue #34. Driver/ here is not a reversal of that: it holds two
+# narrow, permanent exceptions for Driver properties with no CLI-observable
+# proxy at all (issues #174 and #250) -- the same kind of exception
 # test/unittests/Basic/catalog_test.cpp's own header comment documents for
 # itself, not a return to testing Driver's ordinary CLI behavior here.
 add_subdirectory(Driver)
