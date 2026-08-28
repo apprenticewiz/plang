@@ -11,6 +11,10 @@ bool RangeCheckGuards::assertionsAt(plang::SourceLocation Loc) const {
     return Opts.switchOn(plang::Switch::Assertions, Loc);
 }
 
+bool RangeCheckGuards::boolEvalAt(plang::SourceLocation Loc) const {
+    return Opts.switchOn(plang::Switch::BoolEval, Loc);
+}
+
 void RangeCheckGuards::emitGuard(llvm::Value* failCond, const char* name,
                                   llvm::function_ref<void()> emitFail) {
     auto* failBB = llvm::BasicBlock::Create(Ctx, llvm::Twine(name) + ".fail", CurFn);

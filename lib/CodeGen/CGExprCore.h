@@ -68,6 +68,29 @@ public:
           ExprIsVarStr(std::move(ExprIsVarStr)),
           ExprStrCapStatic(std::move(ExprStrCapStatic)) {}
 
+    /// Invariant every caller of emitExpr (directly, or indirectly through
+    /// the EmitExpr closures threaded into CGBinaryOps, CGControlFlow, and
+    /// the rest of CodeGen) must hold: emitExpr may split the CURRENT basic
+    /// block into several and leave the IRBuilder's insertion point in a
+    /// block other than the one that was current when it was called -- it is
+    /// not guaranteed to return with the builder still sitting in whatever
+    /// block the caller last set.  That has always been true for EP's
+    /// and_then/or_else (CGBinaryOps::emitShortCircuit's two-block-plus-PHI
+    /// shape) and, since Turbo's `{$B-}` short-circuiting `and`/`or` reuses
+    /// that same shape, now also for an ordinary Boolean `and`/`or` under
+    /// Turbo.  A caller that needs "the block this value's control flow came
+    /// from" -- most concretely, a PHI's addIncoming predecessor -- MUST
+    /// call B.GetInsertBlock() AFTER emitExpr returns, never reuse a
+    /// BasicBlock* captured before calling it: the pre-call block may no
+    /// longer be the one whose terminator actually falls through to here.
+    /// Every current caller already does this (CGBinaryOps::emitShortCircuit
+    /// itself re-fetches fromRhs post-call; every other caller either never
+    /// builds a PHI at all or, like Codegen::Impl::StackScope, only ever
+    /// queries the CURRENT block through the builder's live insertion point
+    /// rather than a stashed one) -- this comment makes that already-relied-
+    /// upon rule explicit rather than leaving it to be independently
+    /// rediscovered by the next feature that makes emitExpr split a block in
+    /// a new place.
     llvm::Value* emitExpr(const plang::ExprNode& e);
     /// Returns the POINTER to the storage for an lvalue expression.
     llvm::Value* emitLValue(const plang::ExprNode& e);
