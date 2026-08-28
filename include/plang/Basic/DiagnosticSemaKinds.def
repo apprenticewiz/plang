@@ -649,3 +649,25 @@ DIAG(warn_unused_parameter, Warning, "parameter '%0' is never used")
 // arguments -- rather than a second, near-identical diagnostic.
 DIAG(err_assert_cond_not_boolean, Error,
      "condition of 'assert' must be boolean, got '%0'")
+
+// TP-only: Break/Continue (Builtins.def) leave/skip the innermost
+// while/for/for-in/repeat loop and are refused with no loop of their own to
+// name -- checkCallStmt's own arm, gated on LoopDepth_ (Sema.h).  A nested
+// procedure does not inherit its caller's loop context (LoopDepth_ is reset
+// for its own body, checkProcBody), so `break`/`continue` written inside one
+// that is itself called from a loop's body is refused here too, the same
+// way `fpc -Mtp` itself refuses it ("BREAK not allowed", confirmed
+// empirically).
+DIAG(err_break_outside_loop, Error,
+     "'break' is not valid outside a while, for, for-in or repeat loop")
+DIAG(err_continue_outside_loop, Error,
+     "'continue' is not valid outside a while, for, for-in or repeat loop")
+
+// TP-only: Exit([value]) leaves the current procedure or function
+// immediately; the optional value is FPC's extension to strict Delphi's
+// argument-less Exit, and is legal only where CurrentRetType is non-null --
+// inside a FUNCTION, never inside a procedure and never at a program's own
+// top level, matching `fpc -Mtp`'s own "Procedures cannot return a value"
+// (confirmed empirically) for exactly the same two cases.
+DIAG(err_exit_value_outside_function, Error,
+     "'exit' may only take a value inside a function; a procedure cannot return one")

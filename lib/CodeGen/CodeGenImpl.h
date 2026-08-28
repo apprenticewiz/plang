@@ -224,6 +224,15 @@ struct Codegen::Impl {
     llvm::Function*     curFunc{nullptr};
     llvm::AllocaInst*   curRetAlloca{nullptr}; // alloca for function result
     llvm::Type*         curRetType{nullptr};    // return type (null for procedures)
+    /// The same return type curRetType lowers, as Sema resolved it -- null
+    /// wherever curRetType is.  TP-only: `Exit(value)` (CGProcCall) needs the
+    /// SEMANTIC type, not just the LLVM one, to stamp a synthesized result
+    /// IdentExpr the same way the parser would have for an ordinary
+    /// `FuncName := value` (CGAssign::emitAssignValue reads ResolvedType
+    /// throughout -- ExprIsVarStr, the subrange check, ...).  Set alongside
+    /// curRetType in emitFunctionDef; saved/restored by CGFunction the same
+    /// way.
+    std::shared_ptr<Type> curRetSemaType;
     std::string         curFuncName;            // for result-variable detection
     std::string         namePrefix{PlangProcPrefix};   // mangling prefix
     std::string         globalPrefix{PlangGlobalPrefix}; // ditto, for globals
@@ -389,11 +398,44 @@ struct Codegen::Impl {
         /// parameter prologue.
         std::vector<llvm::Value*> ValueConformantCopies;
 
+        /// TP-only: Break/Continue's targets (ContinueBB, BreakBB), pushed by
+        /// CGControlFlow on entering a while/for/for-in/repeat loop's own
+        /// codegen and popped on leaving it, so a Break/Continue inside
+        /// nested loops targets the INNERMOST one (CGProcCall's own
+        /// Break/Continue handling reads .back()). Owned outright by this
+        /// activation exactly like StaticLink/OuterVarNames above -- empty
+        /// for a fresh activation regardless of how deep a loop the CALLING
+        /// function's own body is nested in, which is what keeps a
+        /// Break/Continue inside a procedure nested inside a loop's
+        /// enclosing block from ever seeing the outer loop's targets:
+        /// emitAllProcedures (called from within emitFunctionDef, before the
+        /// enclosing function's own body is emitted) constructs a fresh
+        /// CGFunction -- and so a fresh, empty LoopStack -- for every nested
+        /// procedure it recurses into.  Sema's LoopDepth_ (Sema.h) refuses
+        /// the same program at compile time before codegen is ever reached;
+        /// this is codegen's own mirror of that scoping, load-bearing on its
+        /// own once a program passes Sema (the two are independent checks,
+        /// not one relying on the other having run).
+        struct LoopTargets { llvm::BasicBlock* ContinueBB; llvm::BasicBlock* BreakBB; };
+        std::vector<LoopTargets> LoopStack;
+
+        /// TP-only: where a bare `Exit`/`Exit(value)` (CGProcCall) branches
+        /// to -- the one per-activation epilogue block that then runs the
+        /// ordinary return sequence (give back a value-conformant-array
+        /// parameter's heap copies, then load-and-ret or plain ret; see
+        /// emitFunctionDef/emitMain). Created unconditionally for every
+        /// activation, even one that never uses Exit, because the ordinary
+        /// "fall off the end" path is routed through it too, so there is
+        /// exactly one place that runs the epilogue regardless of which path
+        /// reached it.
+        llvm::BasicBlock* ExitBB{nullptr};
+
     private:
         Impl&              I;
         llvm::Function*    SavedFunc;
         llvm::AllocaInst*  SavedRetAlloca;
         llvm::Type*        SavedRetType;
+        std::shared_ptr<Type> SavedRetSemaType;
         std::string        SavedFuncName;
         std::string        SavedNamePrefix;
         // ISO §6.2.2.3: a type or constant declared in this block is
@@ -958,6 +1000,36 @@ struct Codegen::Impl {
     void brIfNeeded(llvm::BasicBlock* target) {
         if (!isTerminated()) builder.CreateBr(target);
     }
+
+    // ====================================================================
+    // TP-only: Exit/Break/Continue targets (CGFunction::LoopStack/ExitBB)
+    //
+    // Bridged to CGControlFlow (push/pop, at loop entry/exit) and CGProcCall
+    // (the readers, from Exit/Break/Continue's own CallStmt dispatch) as
+    // narrow closures the same way every other per-activation query already
+    // reaches curFn_ -- see buildStaticLinkFrame's own precedent, named in
+    // curFn_'s doc comment.  Every caller here runs only from inside a
+    // function body that Sema already accepted (a loop for Break/Continue, a
+    // function/procedure for Exit at all), so curFn_ and, for the loop
+    // queries, a non-empty LoopStack are both guaranteed rather than
+    // defensively checked -- the same trust CGAssign's EmitLValue closures
+    // already place in Sema having run first.
+    // ====================================================================
+    void pushLoopTargets(llvm::BasicBlock* continueBB, llvm::BasicBlock* breakBB) {
+        curFn_->LoopStack.push_back({continueBB, breakBB});
+    }
+    void popLoopTargets() { curFn_->LoopStack.pop_back(); }
+    llvm::BasicBlock* currentContinueTarget() const {
+        return curFn_->LoopStack.back().ContinueBB;
+    }
+    llvm::BasicBlock* currentBreakTarget() const {
+        return curFn_->LoopStack.back().BreakBB;
+    }
+    /// Where a bare `Exit`/`Exit(value)` branches to; see ExitBB's own
+    /// comment.  Set unconditionally in emitFunctionDef/emitMain before
+    /// either one's body is emitted, so this is never null once reached from
+    /// a real Exit statement.
+    llvm::BasicBlock* exitBlock() const { return curFn_->ExitBB; }
 
     // ====================================================================
     // EP String helpers

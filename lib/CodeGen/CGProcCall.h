@@ -13,6 +13,7 @@
 #include "llvm/IR/LLVMContext.h"
 
 #include "BuiltinIO.h"
+#include "CGAssign.h"
 #include "CGLinkage.h"
 #include "CGPackUnpack.h"
 #include "CGSymbolTable.h"
@@ -25,7 +26,7 @@
 #include "SetOps.h"
 #include "StringCallMarshalling.h"
 
-namespace llvm { class Module; class Value; }
+namespace llvm { class BasicBlock; class Module; class Value; }
 namespace plang {
 struct CallStmt; struct ExprNode; struct TypeNode;
 struct ProcedureTypeNode;
@@ -39,6 +40,7 @@ public:
                SchemaAccess& Schema, CGTypes& Types, CGSymbolTable& SymTab,
                CGLinkage& Linkage, SetOps& Sets, StringCallMarshalling& StrCall,
                CGPackUnpack& PackUnpack, RangeCheckGuards& RangeGuards,
+               CGAssign& Assign,
                llvm::IntegerType* I8Ty, llvm::IntegerType* I64Ty, llvm::PointerType* PtrTy,
                std::function<llvm::Value*(const plang::ExprNode&)> EmitExpr,
                std::function<llvm::Value*(const plang::ExprNode&)> EmitLValue,
@@ -53,11 +55,16 @@ public:
                std::function<const plang::ProcedureTypeNode*(const std::string&, size_t)> ProcParamArg,
                std::function<bool(const std::string&, size_t)> ParamIsByRef,
                std::function<size_t(const std::string&, size_t)> ConformantDimsOf,
-               std::function<std::optional<int64_t>(const std::string&, size_t)> ParamSetBaseOf)
+               std::function<std::optional<int64_t>(const std::string&, size_t)> ParamSetBaseOf,
+               std::function<const std::string&()> CurFuncName,
+               std::function<std::shared_ptr<plang::Type>()> CurRetSemaType,
+               std::function<llvm::BasicBlock*()> CurrentContinueTarget,
+               std::function<llvm::BasicBlock*()> CurrentBreakTarget,
+               std::function<llvm::BasicBlock*()> ExitBlock)
         : Ctx(Ctx), Mod(Mod), B(B), FileVars(FileVars), RtFns(RtFns),
           Builtins(Builtins), ClosureAbi(ClosureAbi), Schema(Schema), Types(Types),
           SymTab(SymTab), Linkage(Linkage), Sets(Sets), StrCall(StrCall),
-          PackUnpack(PackUnpack), RangeGuards(RangeGuards),
+          PackUnpack(PackUnpack), RangeGuards(RangeGuards), Assign(Assign),
           I8Ty(I8Ty), I64Ty(I64Ty), PtrTy(PtrTy),
           EmitExpr(std::move(EmitExpr)), EmitLValue(std::move(EmitLValue)),
           ToI64(std::move(ToI64)), EnsureI1(std::move(EnsureI1)),
@@ -68,7 +75,11 @@ public:
           BuildStaticLinkFrame(std::move(BuildStaticLinkFrame)),
           ProcParamArg(std::move(ProcParamArg)), ParamIsByRef(std::move(ParamIsByRef)),
           ConformantDimsOf(std::move(ConformantDimsOf)),
-          ParamSetBaseOf(std::move(ParamSetBaseOf)) {}
+          ParamSetBaseOf(std::move(ParamSetBaseOf)),
+          CurFuncName(std::move(CurFuncName)), CurRetSemaType(std::move(CurRetSemaType)),
+          CurrentContinueTarget(std::move(CurrentContinueTarget)),
+          CurrentBreakTarget(std::move(CurrentBreakTarget)),
+          ExitBlock(std::move(ExitBlock)) {}
 
     void emitCallStmt(const plang::CallStmt& s);
     void emitUserProcCall(const plang::CallStmt& s);
@@ -93,6 +104,10 @@ private:
     /// carries the Opts reference this needs and the emitGuard/reporter
     /// shape Assert's own guard is built from.
     RangeCheckGuards& RangeGuards;
+    /// TP-only: Exit(value)'s store into the enclosing function's result --
+    /// see emitAssignValue's own doc comment for why this is reused rather
+    /// than reimplemented here.
+    CGAssign& Assign;
     llvm::IntegerType* I8Ty;
     llvm::IntegerType* I64Ty;
     llvm::PointerType* PtrTy;
@@ -119,4 +134,26 @@ private:
     std::function<bool(const std::string&, size_t)> ParamIsByRef;
     std::function<size_t(const std::string&, size_t)> ConformantDimsOf;
     std::function<std::optional<int64_t>(const std::string&, size_t)> ParamSetBaseOf;
+
+    // TP-only: Exit/Break/Continue (all reached through CallStmt, dispatched
+    // on spelling below exactly like Halt/Assert).
+    /// The enclosing function or procedure's own mangled-source name --
+    /// Exit(value)'s synthesized target IdentExpr is named this, which
+    /// EmitLValue's own IdentExpr case already resolves straight to
+    /// CurRetAlloca (its fast path, matched on this same name) exactly as it
+    /// would for a written-out `FuncName := value`.
+    std::function<const std::string&()> CurFuncName;
+    /// The semantic type CurFuncName's result cell holds, or null outside a
+    /// function -- Sema's checkCallStmt Exit arm has already refused
+    /// Exit(value) wherever this would be null, so it is read only when
+    /// non-null.  See CodeGenImpl.h's curRetSemaType.
+    std::function<std::shared_ptr<plang::Type>()> CurRetSemaType;
+    /// CGFunction::LoopStack.back()'s two halves -- see CGControlFlow.h's
+    /// PushLoopTargets/PopLoopTargets for where the stack is maintained.
+    /// Sema's LoopDepth_ (Sema.h) has already refused a Break/Continue
+    /// reaching here with nothing pushed.
+    std::function<llvm::BasicBlock*()> CurrentContinueTarget;
+    std::function<llvm::BasicBlock*()> CurrentBreakTarget;
+    /// Where Exit branches; see CGFunction::ExitBB.
+    std::function<llvm::BasicBlock*()> ExitBlock;
 };

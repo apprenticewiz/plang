@@ -13,6 +13,11 @@
 using namespace plang;
 
 void CGAssign::emitAssign(const AssignStmt& s) {
+    emitAssignValue(*s.Target, *s.Value, s.Loc);
+}
+
+void CGAssign::emitAssignValue(const ExprNode& Target, const ExprNode& Value,
+                                SourceLocation Loc) {
     // EP §6.4.7: a whole schematic variable copies its body, whose length only
     // the discriminants know.  It has to run before emitLValue because for p^
     // the body starts past the discriminant header.
@@ -24,8 +29,8 @@ void CGAssign::emitAssign(const AssignStmt& s) {
     // discriminants that a discriminated instance does not carry.  Both are
     // legal EP.
     {
-        const plang::Type* tt = s.Target->ResolvedType.get();
-        const plang::Type* vt = s.Value->ResolvedType.get();
+        const plang::Type* tt = Target.ResolvedType.get();
+        const plang::Type* vt = Value.ResolvedType.get();
         auto isSchema   = [](const plang::Type* T) {
             return T && T->Kind == TypeKind::Schema; };
         auto isInstance = [](const plang::Type* T) {
@@ -38,7 +43,7 @@ void CGAssign::emitAssign(const AssignStmt& s) {
         // here produced "assignment between schematic variables that codegen
         // cannot locate" for `s := 'zz'` -- the string branch further down is
         // the one that can do it.
-        const bool targetIsString = ExprIsVarStr(*s.Target);
+        const bool targetIsString = ExprIsVarStr(Target);
 
         // Two discriminated instances are ordinary values with a static layout
         // and keep the ordinary path; this is only for a pair where at least
@@ -54,8 +59,8 @@ void CGAssign::emitAssign(const AssignStmt& s) {
             // either one sizes the copy.
             const plang::Type& schemaTy = isSchema(tt) ? *tt : *vt;
             const auto n = static_cast<unsigned>(schemaTy.SchemaDiscs.size());
-            auto [dstData, dstDiscs] = Schema.schemaActual(*s.Target, n);
-            auto [srcData, srcDiscs] = Schema.schemaActual(*s.Value,  n);
+            auto [dstData, dstDiscs] = Schema.schemaActual(Target, n);
+            auto [srcData, srcDiscs] = Schema.schemaActual(Value,  n);
             SchemaAccess::SchemaRef dst{&schemaTy, dstData, dstDiscs};
             SchemaAccess::SchemaRef src{&schemaTy, srcData, srcDiscs};
             Schema.emitSchemaDiscMatch(dst, src);
@@ -73,12 +78,12 @@ void CGAssign::emitAssign(const AssignStmt& s) {
     // ADDRESS, not a loaded value, since every other caller wants a pointer
     // for the string runtime, so falling through would have stored a pointer
     // where a char belongs.
-    if (s.Target->ResolvedType && s.Target->ResolvedType->Kind == TypeKind::Char
-            && (ExprIsVarStr(*s.Value) || ExprIsCharStr(*s.Value)
-                || llvm::isa<StringLitExpr>(s.Value.get()))) {
+    if (Target.ResolvedType && Target.ResolvedType->Kind == TypeKind::Char
+            && (ExprIsVarStr(Value) || ExprIsCharStr(Value)
+                || llvm::isa<StringLitExpr>(&Value))) {
         llvm::Value* dataPtr = nullptr;
-        if (ExprIsVarStr(*s.Value)) {
-            auto [addr, cap] = Schema.strAddrAndCap(*s.Value);
+        if (ExprIsVarStr(Value)) {
+            auto [addr, cap] = Schema.strAddrAndCap(Value);
             dataPtr = addr ? Strings.strDataPtr(addr) : nullptr;
             // EP §6.4.6(f): a string value is assignment-compatible with a
             // char VARIABLE only when its length is exactly 1 -- char's own
@@ -99,14 +104,14 @@ void CGAssign::emitAssign(const AssignStmt& s) {
                         {len, i64c(1)});
                 });
             }
-        } else if (ExprIsCharStr(*s.Value)) {
-            dataPtr = EmitLValue(*s.Value);
+        } else if (ExprIsCharStr(Value)) {
+            dataPtr = EmitLValue(Value);
         } else {
-            dataPtr = Strings.internStrPtr(llvm::cast<StringLitExpr>(*s.Value).Value);
+            dataPtr = Strings.internStrPtr(llvm::cast<StringLitExpr>(Value).Value);
         }
         if (!dataPtr) codegenICE("string value assigned to a char has no address");
         auto* ch = B.CreateLoad(I8Ty, dataPtr, "char.of.str");
-        auto* dstAddr = EmitLValue(*s.Target);
+        auto* dstAddr = EmitLValue(Target);
         if (!dstAddr) codegenICE("assignment target is not addressable");
         B.CreateStore(ch, dstAddr);
         return;
@@ -115,7 +120,7 @@ void CGAssign::emitAssign(const AssignStmt& s) {
     // EP §6.5.6: assigning to a substring replaces those characters and leaves
     // the rest of the string as it was, so it cannot go through the ordinary
     // string store, which would replace the whole value.
-    if (auto* sub = llvm::dyn_cast<SubstringExpr>(s.Target.get())) {
+    if (auto* sub = llvm::dyn_cast<SubstringExpr>(&Target)) {
         // R5: address and capacity from ONE walk of the destination's access
         // path, or every subscript on the way to it is emitted twice.
         auto [dst, dstCap] = Schema.strAddrAndCap(*sub->Str);
@@ -131,7 +136,7 @@ void CGAssign::emitAssign(const AssignStmt& s) {
         // The value can be written any way a string value can, so it is built
         // where a string belongs and then copied in.
         auto* src = CreateEntryAlloca(Types.strStructType(cap), "substr.src");
-        StrCall.emitStrStore(src, i64c(cap), *s.Value);
+        StrCall.emitStrStore(src, i64c(cap), Value);
         auto* capV = dstCap;
         B.CreateCall(
             Strings.getStrFn("plang_str_substr_assign", llvm::Type::getVoidTy(Ctx),
@@ -145,10 +150,10 @@ void CGAssign::emitAssign(const AssignStmt& s) {
     // the access path from scratch -- so every subscript along the way was
     // emitted twice, and a side-effecting one in `q^.a[next].s := v` ran twice.
     // One walk, both answers.
-    if (ExprIsVarStr(*s.Target) && s.Target->ResolvedType->ExtentVaries)
-        if (auto path = Schema.schemaPathOf(*s.Target))
+    if (ExprIsVarStr(Target) && Target.ResolvedType->ExtentVaries)
+        if (auto path = Schema.schemaPathOf(Target))
             if (auto* cap = Schema.strCapFromPath(*path)) {
-                StrCall.emitStrStore(path->addr, cap, *s.Value);
+                StrCall.emitStrStore(path->addr, cap, Value);
                 return;
             }
 
@@ -182,13 +187,13 @@ void CGAssign::emitAssign(const AssignStmt& s) {
     // type on both sides whenever this branch is even reached), so the same
     // emitSchemaDiscMatch call the whole-object case already makes catches it
     // here too.
-    if (const auto& tt = s.Target->ResolvedType;
+    if (const auto& tt = Target.ResolvedType;
             tt && tt->ExtentVaries
             && (tt->Kind == TypeKind::Array || tt->Kind == TypeKind::Record
                 || tt->Kind == TypeKind::SchemaInstance
                 || tt->Kind == TypeKind::Schema))
-        if (auto dpath = Schema.schemaPathOf(*s.Target))
-            if (auto spath = Schema.schemaPathOf(*s.Value)) {
+        if (auto dpath = Schema.schemaPathOf(Target))
+            if (auto spath = Schema.schemaPathOf(Value)) {
                 Schema.emitSchemaDiscMatch(dpath->root, spath->root);
                 llvm::Value* sz = nullptr;
                 {
@@ -200,28 +205,28 @@ void CGAssign::emitAssign(const AssignStmt& s) {
                 return;
             }
 
-    auto* addr = EmitLValue(*s.Target);
+    auto* addr = EmitLValue(Target);
     if (!addr) codegenICE("assignment to a non-addressable target");
 
     // EP VarString assignment — dispatch on the Sema-annotated types.
-    if (ExprIsVarStr(*s.Target)) {
-        StrCall.emitStrStore(addr, Schema.exprStrCapV(*s.Target), *s.Value);
+    if (ExprIsVarStr(Target)) {
+        StrCall.emitStrStore(addr, Schema.exprStrCapV(Target), Value);
         return;
     }
 
     // ISO §6.4.3.2: a packed array[1..n] of char takes a string value, which
     // may be a literal or a string(n) and so is not an array to load and store.
-    if (ExprIsCharStr(*s.Target)) {
-        StrCall.emitCharStrStore(addr, ExprCharStrLen(*s.Target), *s.Value);
+    if (ExprIsCharStr(Target)) {
+        StrCall.emitCharStrStore(addr, ExprCharStrLen(Target), Value);
         return;
     }
 
-    auto* rhs = EmitExpr(*s.Value);
+    auto* rhs = EmitExpr(Value);
     if (!rhs) codegenICE("assignment from an unlowerable expression");
 
     // EP §6.8.7: structured value constructor for arrays/records returns a ptr
     // to a temporary alloca — use memcpy to copy it into the destination.
-    if (auto* sve = llvm::dyn_cast<StructuredValueExpr>(s.Value.get())) {
+    if (auto* sve = llvm::dyn_cast<StructuredValueExpr>(&Value)) {
         if (sve->ResolvedType &&
             (sve->ResolvedType->Kind == TypeKind::Array ||
              sve->ResolvedType->Kind == TypeKind::Record)) {
@@ -235,7 +240,7 @@ void CGAssign::emitAssign(const AssignStmt& s) {
     }
 
     // ISO §6.4.2.4: the value assigned to a subrange must lie within it.
-    if (const auto& tt = s.Target->ResolvedType;
+    if (const auto& tt = Target.ResolvedType;
         tt && tt->Kind == TypeKind::Subrange && rhs->getType()->isIntegerTy()) {
         // EP §6.4.7: `record k: 1..n end` -- the discriminant fixes the range k
         // is checked against, not any storage.  The recorded bounds are the
@@ -243,7 +248,7 @@ void CGAssign::emitAssign(const AssignStmt& s) {
         // discriminants the object carries.
         bool checked = false;
         if (tt->ExtentVaries)
-            if (auto path = Schema.schemaPathOf(*s.Target)) {
+            if (auto path = Schema.schemaPathOf(Target)) {
                 const TypeNode* d = path->decl;
                 while (auto* pk = llvm::dyn_cast_or_null<PackedTypeNode>(d))
                     d = pk->Inner.get();
@@ -257,7 +262,7 @@ void CGAssign::emitAssign(const AssignStmt& s) {
                     auto* lo = b ? b->first  : nullptr;
                     auto* hi = b ? b->second : nullptr;
                     if (lo && hi) {
-                        RangeGuards.emitRangeCheckDyn(rhs, lo, hi, /*isIndex=*/false, s.Loc);
+                        RangeGuards.emitRangeCheckDyn(rhs, lo, hi, /*isIndex=*/false, Loc);
                         checked = true;
                     }
                 }
@@ -268,23 +273,23 @@ void CGAssign::emitAssign(const AssignStmt& s) {
         // `SubLo != SubHi` guard here would just exempt `5..5` from the very
         // check this block exists to perform.
         if (!checked)
-            RangeGuards.emitRangeCheck(rhs, tt->SubLo, tt->SubHi, /*isIndex=*/false, s.Loc);
+            RangeGuards.emitRangeCheck(rhs, tt->SubLo, tt->SubHi, /*isIndex=*/false, Loc);
     }
 
     // What the destination holds, not what the source produced: an array
     // element and a record field are just as much a real as a bare variable
     // is, and taking the source's type here stores the integer bit pattern.
     llvm::Type* dstTy = nullptr;
-    if (auto* id = llvm::dyn_cast<IdentExpr>(s.Target.get()))
+    if (auto* id = llvm::dyn_cast<IdentExpr>(&Target))
         if (auto* ve = SymTab.findVar(id->Name)) dstTy = ve->type;
-    if (!dstTy && s.Target->ResolvedType)
-        dstTy = Types.llvmTypeOfSemaType(*s.Target->ResolvedType);
+    if (!dstTy && Target.ResolvedType)
+        dstTy = Types.llvmTypeOfSemaType(*Target.ResolvedType);
     if (!dstTy) dstTy = rhs->getType();
 
     // A set crossing into a type whose base begins elsewhere moves with it.
-    if (const auto& tt = s.Target->ResolvedType;
+    if (const auto& tt = Target.ResolvedType;
         tt && tt->Kind == TypeKind::Set)
-        rhs = Sets.alignSet(rhs, Sets.setBaseOf(*s.Value), Sets.setBaseOf(*s.Target));
+        rhs = Sets.alignSet(rhs, Sets.setBaseOf(Value), Sets.setBaseOf(Target));
 
     // EP §6.4.2.2: integer/real → complex widening.
     if (dstTy == Complex.complexTy() && rhs->getType() != Complex.complexTy())
@@ -312,5 +317,5 @@ void CGAssign::emitAssign(const AssignStmt& s) {
     auto* st = B.CreateStore(rhs, addr);
     // A field of a packed record is at a byte offset that need not satisfy its
     // own type's alignment; see packedAccessAlign.
-    if (auto A = PackedAccessAlign(*s.Target)) st->setAlignment(*A);
+    if (auto A = PackedAccessAlign(Target)) st->setAlignment(*A);
 }

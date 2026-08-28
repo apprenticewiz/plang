@@ -368,6 +368,7 @@ void Sema::checkWhile(const WhileStmt& S) {
     auto Cond = checkExpr(*S.Cond);
     if (!Cond->isError() && Cond->Kind != TypeKind::Boolean)
         error(S.Loc, diag::err_while_not_boolean, {Cond->Name});
+    LoopScope LS(LoopDepth_);
     checkStmt(S.Body.get());
 }
 
@@ -446,6 +447,7 @@ void Sema::checkFor(const ForStmt& S) {
 
     // ISO §6.8.3.9: the body must not threaten the control variable (assign to it).
     checkForBody(S.Body.get(), S.Var, S.Loc);
+    LoopScope LS(LoopDepth_);
     checkStmt(S.Body.get());
 }
 
@@ -674,7 +676,10 @@ void Sema::checkForBody(const StmtNode* Stmt, const std::string& VarName,
 
 void Sema::checkRepeat(const RepeatStmt& S) {
     warnUnreachable(S.Stmts);
-    for (const auto& St : S.Stmts) checkStmt(St.get());
+    {
+        LoopScope LS(LoopDepth_);
+        for (const auto& St : S.Stmts) checkStmt(St.get());
+    }
     auto Cond = checkExpr(*S.Cond);
     if (!Cond->isError() && Cond->Kind != TypeKind::Boolean)
         error(S.Cond->Loc, diag::err_repeat_not_boolean, {Cond->Name});
@@ -1214,6 +1219,49 @@ void Sema::checkCallStmt(const CallStmt& S) {
             return;
         }
 
+        // TP-only: Break/Continue leave/skip the innermost while/for/for-in/
+        // repeat loop.  Arity (0 arguments) was already checked against
+        // Builtins.def above; this is only the structural-context check
+        // Builtins.def cannot express, LoopDepth_ (Sema.h) tracking that
+        // context the same way StructStack tracks goto's.
+        if (Lo == "break" || Lo == "continue") {
+            if (LoopDepth_ == 0)
+                error(S.Loc, Lo == "break" ? diag::err_break_outside_loop
+                                            : diag::err_continue_outside_loop);
+            return;
+        }
+
+        // TP-only: Exit([value]).  A value is legal only inside a function
+        // -- CurrentRetType is null both at a program's own top level and
+        // inside a plain procedure (checkProcBody resets it there), exactly
+        // the "Procedures cannot return a value" restriction `fpc -Mtp`
+        // itself enforces (confirmed empirically).  The value obeys the same
+        // rule an ordinary `FuncName := value` assignment to the function's
+        // own result would (err_assign_mismatch, reused rather than a
+        // second near-identical diagnostic -- see checkAssign's own use of
+        // it) and marks the result assigned the same way checkAssign does
+        // (resultFrameFor): a function whose only assignment is
+        // `Exit(value)` on every path would otherwise be wrongly refused
+        // err_function_no_result, since Exit is a CallStmt and never goes
+        // through checkAssign at all.
+        if (Lo == "exit") {
+            if (!S.Args.empty()) {
+                auto ValTy = checkExpr(*S.Args[0]);
+                if (!CurrentRetType) {
+                    error(S.Loc, diag::err_exit_value_outside_function);
+                } else {
+                    if (!ValTy->isError() && !CurrentRetType->isError()
+                            && !isAssignCompatible(*CurrentRetType, *ValTy))
+                        error(S.Args[0]->Loc, diag::err_assign_mismatch,
+                              {ValTy->Name, CurrentRetType->Name});
+                    checkStringCapacity(*CurrentRetType, *S.Args[0]);
+                    warnIfConstantOutOfRange(*CurrentRetType, *S.Args[0]);
+                    if (!FuncStack.empty()) FuncStack.back().HasResult = true;
+                }
+            }
+            return;
+        }
+
         // EP §6.7.5.5: readstr(e, v1,...,vn) reads e and assigns every v;
         // writestr(e, ...) is the mirror, assigning only e.  Neither had a
         // dedicated arm before this -- both fell through to the generic
@@ -1620,6 +1668,9 @@ void Sema::checkForIn(const ForInStmt& S) {
     // the latter but never for this form, leaving every one of those
     // threats silently unchecked here.
     checkForBody(S.Body.get(), S.Var, S.Loc);
-    checkStmt(S.Body.get());
+    {
+        LoopScope LS(LoopDepth_);
+        checkStmt(S.Body.get());
+    }
     Symtab.popScope();
 }

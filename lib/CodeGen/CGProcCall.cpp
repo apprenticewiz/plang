@@ -201,7 +201,7 @@ void CGProcCall::emitCallStmt(const CallStmt& s) {
         return;
     }
 
-    if (lo == "halt" || lo == "exit") {
+    if (lo == "halt") {
         // EP §6.7.5.7 halt takes no argument; halt(n) is the widespread extension
         // that sets the exit status.
         auto* status = s.Args.empty() ? llvm::ConstantInt::get(I64Ty, 0)
@@ -210,6 +210,47 @@ void CGProcCall::emitCallStmt(const CallStmt& s) {
         B.CreateUnreachable();
         return;
     }
+
+    // TP-only: Break/Continue leave/skip the innermost loop.  Sema's
+    // LoopDepth_ (Sema.h) has already refused either one reaching here with
+    // no enclosing loop, including from a procedure nested inside a loop's
+    // body -- a nested procedure does not inherit its caller's loop context
+    // -- so CurrentContinueTarget/CurrentBreakTarget's own CGFunction::
+    // LoopStack is guaranteed non-empty.  The branch alone is the whole of
+    // it: it terminates the current block exactly like a goto or halt does,
+    // and emitCompound's own IsTerminated()/resumeAfterTerminator() (called
+    // for every following statement in this same body, generically, not
+    // specially for these two) already opens a fresh block for whatever
+    // follows.
+    if (lo == "break") {
+        B.CreateBr(CurrentBreakTarget());
+        return;
+    }
+    if (lo == "continue") {
+        B.CreateBr(CurrentContinueTarget());
+        return;
+    }
+
+    // TP-only: Exit([value]) leaves the current procedure or function
+    // immediately.  Sema's checkCallStmt Exit arm has already refused a
+    // value argument outside function context and checked one given against
+    // CurrentRetType, so this only has to perform the store -- exactly the
+    // store an ordinary `FuncName := value` would make (CGAssign::
+    // emitAssignValue, reused rather than reimplemented: see its own doc
+    // comment for why the target is a freshly-synthesized IdentExpr rather
+    // than a real AssignStmt node).
+    if (lo == "exit") {
+        if (!s.Args.empty()) {
+            IdentExpr target;
+            target.Loc          = s.Loc;
+            target.Name         = CurFuncName();
+            target.ResolvedType = CurRetSemaType();
+            Assign.emitAssignValue(target, *s.Args[0], s.Loc);
+        }
+        B.CreateBr(ExitBlock());
+        return;
+    }
+
     if (lo == "new" && !s.Args.empty()) {
         // EP §6.7.5.3: new(p, d1..ds) when p's domain-type is a schema-name.
         if (const auto& pt = s.Args[0]->ResolvedType;

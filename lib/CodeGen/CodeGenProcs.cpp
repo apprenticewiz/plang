@@ -458,6 +458,10 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
         retTy = llvmTypeOfNode(*hd.ReturnType);
     }
     curRetType = (retTy->isVoidTy()) ? nullptr : retTy;
+    // TP-only: Exit(value)'s own use, alongside curRetType -- see
+    // curRetSemaType's own comment (CodeGenImpl.h).
+    curRetSemaType = (hd.IsFunction && hd.ReturnType) ? hd.ReturnType->ResolvedType
+                                                       : nullptr;
 
     // Create function, or take over the declaration already standing under
     // this name.  A procedure declared 'forward' is called before its body is
@@ -694,6 +698,11 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
     } else {
         curRetAlloca = nullptr;
     }
+
+    // TP-only: where Exit branches to -- see CGFunction::ExitBB's own
+    // comment for why this is created unconditionally, before the body
+    // (which may contain an Exit) is emitted below.
+    curFn.ExitBB = llvm::BasicBlock::Create(ctx, "exit", func);
 
     // Taken before any of this activation's own by-value conformant array
     // copies (below) are made, so unwinding back to it at the end of this
@@ -957,6 +966,17 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
         closeLabelScope();
     }
 
+    // TP-only: Exit (CGProcCall) branches to ExitBB from anywhere in the
+    // body; the ordinary "fall off the end" path (this brIfNeeded) is routed
+    // through the same block, so the epilogue below runs in exactly one
+    // place regardless of which of the two reached it.  A non-local goto out
+    // of THIS procedure terminates the block its own way
+    // (LabelGotoEngine's longjmp landing pad) and is excluded here for the
+    // same reason it always was: isTerminated() is false only on a path that
+    // reaches the end of the body -- or an explicit Exit -- normally.
+    brIfNeeded(exitBlock());
+    builder.SetInsertPoint(exitBlock());
+
     // Give back the heap a value conformant array parameter was copied into.
     // Unwinding to the mark taken before this activation's own copies were
     // pushed frees exactly those and nothing else: whatever this body called
@@ -964,21 +984,18 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
     // same way, or left by a non-local goto whose landing pad already
     // unwound what it abandoned (LabelGotoEngine::closeLabelScope) -- so
     // nothing but this activation's own copies can still be above the mark
-    // here.  A non-local goto out of THIS procedure skips this call
-    // entirely (isTerminated() is false only on the fall-through path), but
-    // that is fine: the same copies are still on the shadow stack for
-    // whichever ancestor's landing pad the goto reaches to free instead.
-    if (!isTerminated() && confArrEntryMark)
+    // here.  A non-local goto out of THIS procedure never reaches ExitBB at
+    // all (see above), but that is fine: the same copies are still on the
+    // shadow stack for whichever ancestor's landing pad the goto reaches to
+    // free instead.
+    if (confArrEntryMark)
         builder.CreateCall(getConfArrUnwindFn(), {confArrEntryMark});
 
-    // Emit return if the last block is not yet terminated.
-    if (!isTerminated()) {
-        if (curRetType && curRetAlloca) {
-            auto* rv = builder.CreateLoad(curRetType, curRetAlloca, "retval");
-            builder.CreateRet(rv);
-        } else {
-            builder.CreateRetVoid();
-        }
+    if (curRetType && curRetAlloca) {
+        auto* rv = builder.CreateLoad(curRetType, curRetAlloca, "retval");
+        builder.CreateRet(rv);
+    } else {
+        builder.CreateRetVoid();
     }
 
     popScope();
@@ -1652,6 +1669,7 @@ void Codegen::Impl::emitMain(const BlockNode& block,
     namePrefix   = PlangProcPrefix;
     curRetType   = nullptr;
     curRetAlloca = nullptr;
+    curRetSemaType = nullptr;
 
     auto* funcTy = llvm::FunctionType::get(i32Ty, {}, false);
     auto* func   = llvm::Function::Create(funcTy, llvm::Function::ExternalLinkage,
@@ -1672,6 +1690,13 @@ void Codegen::Impl::emitMain(const BlockNode& block,
 
     auto* entry = llvm::BasicBlock::Create(ctx, "entry", func);
     builder.SetInsertPoint(entry);
+
+    // TP-only: where a bare `Exit` at the program's own top level branches
+    // to -- confirmed against `fpc -Mtp` that Exit at program scope ends the
+    // program (same as falling off the end of the body) rather than being
+    // refused; see CGFunction::ExitBB's own comment for why this is created
+    // unconditionally.
+    curFn.ExitBB = llvm::BasicBlock::Create(ctx, "exit", func);
 
     pushScope();
     // Program-level variables were already given storage as module globals by
@@ -1702,17 +1727,22 @@ void Codegen::Impl::emitMain(const BlockNode& block,
     if (block.Body) emitCompound(*block.Body);
     closeLabelScope();
 
+    // TP-only: Exit (CGProcCall) branches to ExitBB from anywhere in the
+    // program body; the ordinary "fall off the end" path (this brIfNeeded)
+    // is routed through the same block, so the epilogue below runs in
+    // exactly one place regardless of which of the two reached it.
+    brIfNeeded(exitBlock());
+    builder.SetInsertPoint(exitBlock());
+
     // EP §6.11.2: the finalisers run in the reverse of the order the
     // initialisers did.  A module is initialized after the ones it imports, so
     // running the finalisers forward would tear down a module while one that
     // depends on it is still to be finalized.  Each initialiser registered its
     // own finaliser as it completed, which is the order the runtime unwinds.
-    if (!isTerminated())
-        builder.CreateCall(getExternFnN("plang_module_finals_run",
-                                         llvm::Type::getVoidTy(ctx), {}), {});
+    builder.CreateCall(getExternFnN("plang_module_finals_run",
+                                     llvm::Type::getVoidTy(ctx), {}), {});
 
-    if (!isTerminated())
-        builder.CreateRet(llvm::ConstantInt::get(i32Ty, 0));
+    builder.CreateRet(llvm::ConstantInt::get(i32Ty, 0));
 
     popScope();
 

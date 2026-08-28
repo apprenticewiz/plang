@@ -43,7 +43,9 @@ public:
                   std::function<bool()> IsTerminated,
                   std::function<void(llvm::BasicBlock*)> BrIfNeeded,
                   std::function<bool(const plang::Type*)> OrdinalIsUnsigned,
-                  std::function<llvm::Value*(std::function<llvm::Value*()>)> WithStackScope)
+                  std::function<llvm::Value*(std::function<llvm::Value*()>)> WithStackScope,
+                  std::function<void(llvm::BasicBlock*, llvm::BasicBlock*)> PushLoopTargets,
+                  std::function<void()> PopLoopTargets)
         : Ctx(Ctx), B(B), CurFn(CurFn), SymTab(SymTab), Types(Types), Sets(Sets),
           RtFns(RtFns), I1Ty(I1Ty), I64Ty(I64Ty), Opts(Opts),
           EmitExpr(std::move(EmitExpr)), EmitStmt(std::move(EmitStmt)),
@@ -53,7 +55,9 @@ public:
           ResumeAfterTerminator(std::move(ResumeAfterTerminator)),
           IsTerminated(std::move(IsTerminated)), BrIfNeeded(std::move(BrIfNeeded)),
           OrdinalIsUnsigned(std::move(OrdinalIsUnsigned)),
-          WithStackScope(std::move(WithStackScope)) {}
+          WithStackScope(std::move(WithStackScope)),
+          PushLoopTargets(std::move(PushLoopTargets)),
+          PopLoopTargets(std::move(PopLoopTargets)) {}
 
     void emitIf(const plang::IfStmt& s);
     void emitWhile(const plang::WhileStmt& s);
@@ -84,4 +88,12 @@ private:
     std::function<void(llvm::BasicBlock*)> BrIfNeeded;
     std::function<bool(const plang::Type*)> OrdinalIsUnsigned;
     std::function<llvm::Value*(std::function<llvm::Value*()>)> WithStackScope;
+    /// TP-only: Break/Continue's targets (CGFunction::LoopStack).  Pushed on
+    /// entering a while/for/for-in/repeat loop's own codegen, immediately
+    /// after its blocks exist, and popped once its own EmitStmt(body) call
+    /// returns -- see each emit* function's own call sites for the target
+    /// pair a Continue/Break need for THAT loop kind (they are not the same
+    /// two blocks for every kind; see emitFor's own comment).
+    std::function<void(llvm::BasicBlock* continueBB, llvm::BasicBlock* breakBB)> PushLoopTargets;
+    std::function<void()> PopLoopTargets;
 };

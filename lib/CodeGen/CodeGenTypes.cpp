@@ -273,7 +273,10 @@ void Codegen::Impl::init(const std::string& progName) {
         [this](llvm::BasicBlock* target){ brIfNeeded(target); },
         [](const Type* t){ return ordinalIsUnsigned(t); },
         [this](std::function<llvm::Value*()> body) -> llvm::Value* {
-            StackScope frame(*this); return body(); });
+            StackScope frame(*this); return body(); },
+        [this](llvm::BasicBlock* continueBB, llvm::BasicBlock* breakBB){
+            pushLoopTargets(continueBB, breakBB); },
+        [this](){ popLoopTargets(); });
     // with-statement emission.  EmitLValue/CreateEntryAlloca/EmitStmt are
     // narrow closures into methods not yet extracted (CodeGenExprs.cpp,
     // and the recursive re-entry into the shared dispatcher itself).
@@ -314,7 +317,7 @@ void Codegen::Impl::init(const std::string& progName) {
     procCall_ = std::make_unique<CGProcCall>(ctx, *mod, builder,
         *fileVarHelpers_, *runtimeFns_, *builtinIO_, *closureAbi_,
         *schemaAccess_, *cgTypes_, *symTab_, *linkage_, *setOps_,
-        *strCallMarshal_, *packUnpack_, *rangeGuards_,
+        *strCallMarshal_, *packUnpack_, *rangeGuards_, *assign_,
         i8Ty, i64Ty, ptrTy,
         [this](const ExprNode& e){ return emitExpr(e); },
         [this](const ExprNode& e){ return emitLValue(e); },
@@ -341,7 +344,15 @@ void Codegen::Impl::init(const std::string& progName) {
             auto it = paramMeta_.find(mangledName);
             if (it == paramMeta_.end() || astArgIdx >= it->second.size()) return std::nullopt;
             return it->second[astArgIdx].setBase;
-        });
+        },
+        // TP-only: Exit/Break/Continue -- see CGProcCall.h's own comments on
+        // each closure for what guarantees Sema already made before codegen
+        // ever reads curFn_ through these.
+        [this]() -> const std::string& { return curFuncName; },
+        [this]() -> std::shared_ptr<Type> { return curRetSemaType; },
+        [this](){ return currentContinueTarget(); },
+        [this](){ return currentBreakTarget(); },
+        [this](){ return exitBlock(); });
     // Record field access and pointer dereference.  EmitLValue/EmitExpr
     // are narrow closures into methods not yet extracted (both still in
     // CodeGenExprs.cpp -- emitExpr/emitLValue themselves).

@@ -7,7 +7,8 @@
 Codegen::Impl::CGFunction::CGFunction(Impl& I)
     : I(I),
       SavedFunc(I.curFunc), SavedRetAlloca(I.curRetAlloca),
-      SavedRetType(I.curRetType), SavedFuncName(I.curFuncName),
+      SavedRetType(I.curRetType), SavedRetSemaType(I.curRetSemaType),
+      SavedFuncName(I.curFuncName),
       SavedNamePrefix(I.namePrefix),
       SavedTypeAliases(I.typeAliases), SavedConsts(I.consts),
       SavedRequiredConsts(I.requiredConsts),
@@ -21,6 +22,7 @@ Codegen::Impl::CGFunction::~CGFunction() {
     I.curFunc      = SavedFunc;
     I.curRetAlloca = SavedRetAlloca;
     I.curRetType   = SavedRetType;
+    I.curRetSemaType = std::move(SavedRetSemaType);
     I.curFuncName  = SavedFuncName;
     I.namePrefix   = SavedNamePrefix;
     I.typeAliases  = std::move(SavedTypeAliases);
