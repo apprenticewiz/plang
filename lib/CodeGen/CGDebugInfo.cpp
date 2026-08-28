@@ -776,10 +776,10 @@ void CGDebugInfo::recordSchemaLayoutForScript(const Type& T, const RecordTypeNod
     schemaScriptEntries_[T.Name].emplace_back(fp, std::move(J));
 }
 
-void CGDebugInfo::writeSchemaDebugScript() {
-    if (schemaScriptEntries_.empty() || !SrcMgr) return;
+bool CGDebugInfo::writeSchemaDebugScript() {
+    if (schemaScriptEntries_.empty() || !SrcMgr) return true;
     const std::filesystem::path SidecarPath = schemaSidecarPath();
-    if (SidecarPath.empty()) return;
+    if (SidecarPath.empty()) return true;
 
     // Issue #140: each name now maps to a JSON ARRAY of variant bodies (one
     // per distinct structural fingerprint seen under that name), not a
@@ -806,8 +806,36 @@ void CGDebugInfo::writeSchemaDebugScript() {
     }
     J += "}}";
 
+    // Issue #396: this used to be "if (Out) Out << J;" -- an open failure
+    // (a full disk, a permissions error) was silently ignored, and a write
+    // failure after a successful open was never checked at all, so a
+    // failure here always reported the same clean compile as success while
+    // a later gdb session, loading plang_schema_printers.py, either fell
+    // back to raw values or misbehaved with no way to tell the sidecar
+    // write is what actually failed.  Same "fail loud, don't vanish
+    // silently" contract issues #246 (Frontend.cpp's own -o output writer)
+    // and #397 (its .pmi writer) already gave the compiler's other output
+    // writers.
     std::ofstream Out(SidecarPath);
-    if (Out) Out << J;
+    if (!Out) {
+        std::cerr << "plang: cannot open -g schema sidecar file '"
+                   << SidecarPath.string() << "'\n";
+        return false;
+    }
+    Out << J;
+    // A write can fail only after the open already succeeded (ENOSPC is the
+    // reproducible case) -- std::ofstream surfaces that solely through its
+    // own failbit, which a write under the internal buffer size does not
+    // set until the stream is actually flushed.  close() first, then check,
+    // exactly like reportIfWriteFailed's own comment in Frontend.cpp
+    // (issue #246) documents this same gotcha for.
+    Out.close();
+    if (!Out) {
+        std::cerr << "plang: error writing -g schema sidecar file '"
+                   << SidecarPath.string() << "'\n";
+        return false;
+    }
+    return true;
 }
 
 llvm::DISubprogram* CGDebugInfo::emitFunctionStart(llvm::Function* Fn, llvm::DIScope* Scope,

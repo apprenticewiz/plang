@@ -175,8 +175,14 @@ bool Codegen::emit(const ProgramNode& prog, std::ostream& os) {
 
     // -g: construct whatever deferred debug-info nodes DIBuilder collected
     // (e.g. forward-declared types) before the module is inspected by
-    // anything else.  A no-op when Debug is unset.
-    PImpl->dbgInfo_->finalize();
+    // anything else.  A no-op when Debug is unset.  Also writes the -g
+    // schema sidecar; a failure there has already been diagnosed to stderr
+    // (issue #396), so fail the whole compile here rather than go on to
+    // verify/optimize/emit and report success for a sidecar
+    // plang_schema_printers.py cannot actually load -- the same "fail loud"
+    // contract the verifyModule failure just below already has.
+    if (!PImpl->dbgInfo_->finalize())
+        return false;
 
     // Verify the module before emitting — a failed verify indicates a codegen
     // bug and must not produce output that downstream tools would accept.
