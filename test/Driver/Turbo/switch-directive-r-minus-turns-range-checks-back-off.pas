@@ -1,9 +1,11 @@
 (*
 The other half of the position-keyed proof: a switch is not a one-way
 latch.  {$R+} first (a valid index, so nothing aborts -- confirming the
-'+' spelling itself is recognized, not just '-', and that plain
--std=turbo really does start checked -- see the sibling {$R+} file's own
-comment on why), then {$R-}, then an out-of-range index that must now be
+'+' spelling itself is recognized, not just '-'; plain -std=turbo actually
+starts UNCHECKED by default -- see the sibling {$R+} file's own comment --
+so this {$R+} is what makes checking on at all from here forward, not a
+restatement of the dialect's own default), then {$R-}, then an out-of-range
+index that must now be
 let all the way through to a normal, successful exit.  If {$R-} were not
 really recorded as its own point in the table -- if, say,
 dispatchSwitchDirective only ever remembered the LAST switch seen for

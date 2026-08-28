@@ -662,6 +662,80 @@ static void escapeCC(const char *S, std::FILE *Stream) {
     std::exit(PlangRuntimeErrorStatus);
 }
 
+// ---- -std=turbo run-time error reporting: the plang_tp_* family ----
+//
+// Every check above shares ONE mechanism: report through plang_err_*, exit
+// PlangRuntimeErrorStatus (70) regardless of which check it was.  That is
+// wrong for Turbo, where real Turbo Pascal / FPC programs exit with the
+// numbered run-time error itself (200 for division by zero, 201 for a range
+// check, 215 for arithmetic overflow, 216 for a nil/bad-pointer access, ...)
+// and print "Runtime error <n> at $<address>" -- a script driving a
+// compiled program (or a person who has used real Turbo Pascal) reads that
+// exit status directly, and plang's own shared 70 would say nothing.
+//
+// This is a PARALLEL family, not a mode flag on the existing one.  This
+// project's object files may be linked together from more than one -std=
+// (see e.g. the module/program split any -std=turbo program already
+// exercises), so "which dialect is this" can never be a single global the
+// runtime consults -- each compiled object's own generated code must call
+// whichever reporter ITS OWN -std= wants, decided once at codegen time
+// (RangeCheckGuards.cpp's isTurbo()/emitTpRunError, CGProcCall.cpp's
+// `runerror` arm), never asked of the runtime at the call site.  A shared
+// `if (dialect == turbo)` branch inside ONE plang_err_* function would be
+// exactly that global mode word, just moved into the runtime instead of
+// the compiler -- and would be wrong the instant an ISO object and a Turbo
+// object are linked into the same program, since the two would then be
+// fighting over one answer to "which dialect is this".
+//
+// A single entry point, plang_tp_runerror(code), serves every caller: the
+// numbered checks above (each already knows its own code -- 200/201/215/216
+// -- so it passes that literal straight through) and TP's own
+// RunError(code) builtin (CGProcCall.cpp) alike; RunError's no-argument form
+// passes 0, Free Pascal's own empirically-confirmed default (`fpc -Mtp`:
+// `RunError;` with no pending error reports "Runtime error 0" and exits 0,
+// not 216 or any other check's number).
+//
+// The address in "at $<address>" is __builtin_return_address(0) -- read
+// directly here, in the function generated code calls straight into, so it
+// is the real return address on the CALLER's own frame: the instruction in
+// the Pascal program immediately after the `call` that reached this check,
+// a genuine hardware address rather than a placeholder.  It is an
+// approximation of "where" in exactly the sense FPC's own first reported
+// address is (compare this file's `fpc -Mtp` transcripts above): the return
+// site, not necessarily the exact failing instruction, and with no symbol
+// name or source line -- plang keeps no unwind tables or debug-info reader
+// in the runtime to do better, and a full symbolizing backtrace is more
+// machinery than this milestone's "don't over-engineer it" scope calls for.
+[[noreturn]] void plang_tp_runerror(int64_t Code) {
+    std::fflush(stdout);
+    const void *Addr = __builtin_return_address(0);
+    std::fprintf(stderr, "Runtime error %" PRId64 " at $%016" PRIxPTR "\n",
+                 Code, reinterpret_cast<std::uintptr_t>(Addr));
+    std::exit(static_cast<int>(Code));
+}
+
+/// TP `ExitCode: Integer` (Sema::registerBuiltins, -std=turbo only) -- the
+/// value emitMain (CodeGenProcs.cpp) returns to the OS when the program
+/// block ends normally rather than through Halt (which takes its own exit
+/// status as an argument and never reads this).  The FIRST predefined
+/// PLANG identifier backed by a mutable runtime global rather than a
+/// per-compilation one: a program built from several .pas files
+/// (extraInputFiles) compiles each to its own object, and every one that
+/// mentions ExitCode has to agree on the SAME storage -- if each object
+/// defined its own `plang_tp_exitcode`, the final link would fail on a
+/// duplicate symbol.  Defining it exactly once here, and having every
+/// compiled Turbo object only DECLARE it (Codegen::Impl::
+/// emitPredefinedGlobals, CodeGenProcs.cpp -- an LLVM GlobalVariable built
+/// with no initializer), gives the whole program one shared answer no
+/// matter how many objects it is linked from.  int16_t, not int64_t: it has
+/// to match the LLVM type codegen declares this under exactly (Turbo's
+/// Integer is always 16 bits -- LangOptions::defaultIntWidth() -- and
+/// ExitCode is only ever registered under Turbo), so both sides agree on
+/// how many bytes this occupies without either one guessing at the other's
+/// layout.  A later Tier 3 (FileMode/RandSeed/DosError/TextAttr) is
+/// expected to reuse this exact mechanism rather than invent another one.
+int16_t plang_tp_exitcode = 0;
+
 } // extern "C"
 
 } // namespace plang

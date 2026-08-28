@@ -880,7 +880,20 @@ static std::vector<std::string> makeFEArgs(const Options &Opts,
     if (!Opts.target.empty())  { Args.push_back("--target=" + Opts.target); }
     if (Opts.suppressWarnings)   Args.push_back("-w");
     if (Opts.warningsAsErrors)   Args.push_back("-Werror");
-    if (!Opts.rangeChecks)       Args.push_back("-fno-range-checks");
+    // Forwarded explicitly either way -- not just when checks are off, the
+    // way this used to read -- so that -pc1 is never left to guess.  Its own
+    // default (LangOptions.h's RangeChecks, computed the same way once Std
+    // is known) is now dialect-aware, and leaving this "say nothing when
+    // Opts.rangeChecks looks true" would make an explicit -frange-checks
+    // under -std=turbo indistinguishable from no flag at all, silently
+    // dropping the user's request to turn checks back on where Turbo starts
+    // with them off.
+    {
+        const bool IsTurbo = LangOptions::parseDialect(Opts.std)
+                              == LangOptions::Standard::Turbo;
+        Args.push_back(Opts.rangeChecks.value_or(!IsTurbo)
+                            ? "-frange-checks" : "-fno-range-checks");
+    }
     if (!Opts.nilChecks)         Args.push_back("-fno-nil-checks");
     // The front end runs the LLVM pipeline; llc gets the same level separately
     // for instruction selection.

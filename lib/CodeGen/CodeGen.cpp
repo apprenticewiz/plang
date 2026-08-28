@@ -67,6 +67,11 @@ bool Codegen::emit(const ProgramNode& prog, std::ostream& os) {
 
     PImpl->pushScope(); // global scope
 
+    // -std=turbo only: ExitCode's storage, before anything that might
+    // reference it -- a module's own procedures included, which are
+    // emitted starting in the very next loop below.
+    PImpl->emitPredefinedGlobals();
+
     // EP §6.11: emit module bodies (globals + procedures) before the program.
     //
     // Each body gets its own naming scope and its own mangling prefix.  A

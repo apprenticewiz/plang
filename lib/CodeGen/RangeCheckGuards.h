@@ -38,6 +38,15 @@ public:
     /// anything about the call is emitted -- unlike every guard below, which
     /// always evaluates its operands and only branches around the failure.
     [[nodiscard]] bool assertionsAt(plang::SourceLocation Loc) const;
+    /// Whether the active dialect is Turbo -- read both internally (every
+    /// guard below routes its failure through the plang_tp_* reporter
+    /// family instead of the shared ISO/EP plang_err_* one when this is
+    /// true) and by CGBinaryOps' own mod codegen, which has no LangOptions
+    /// of its own to ask: TP's mod takes its sign from the dividend (plain
+    /// srem, confirmed against `fpc -Mtp`), not ISO §6.7.2.2's "0 <= mod <
+    /// divisor" normalization, so that adjustment has to be skipped there
+    /// too, not just the divisor-positive guard here.
+    [[nodiscard]] bool isTurbo() const { return Opts.turbo(); }
     void emitGuard(llvm::Value* failCond, const char* name,
                    llvm::function_ref<void()> emitFail);
     /// \p Width is the operand's Type::Width (ISO 7185 and Extended Pascal
@@ -94,6 +103,16 @@ public:
                             bool isIndex, plang::SourceLocation Loc);
 
 private:
+    /// Emits the call every Turbo-routed guard failure below shares: TP's
+    /// parallel plang_tp_runerror(code) reporter (runtime/plang_sys.cpp),
+    /// which prints "Runtime error <code> at $<addr>" and exits with status
+    /// \p Code itself -- never the shared ISO/EP PlangRuntimeErrorStatus.
+    /// Factored out because five call sites (div-zero, div-overflow, nil,
+    /// and both range-check shapes) would otherwise repeat the same
+    /// getExternFnN/ConstantInt boilerplate for the five numbered codes
+    /// Borland/FPC assign each check (200/215/201/216).
+    void emitTpRunError(int64_t Code);
+
     llvm::LLVMContext& Ctx;
     llvm::IRBuilder<>& B;
     llvm::Function*& CurFn;

@@ -397,9 +397,15 @@ llvm::Value* CGBinaryOps::emitBinary(const BinaryExpr& e) {
         case TokenKind::Mod: {
             auto* d = ToI64(rv);
             RangeGuards.emitModDivisorCheck(d);
+            auto* r = B.CreateSRem(ToI64(lv), d, "srem");
+            // Turbo's mod takes its sign from the DIVIDEND -- exactly what
+            // srem already computes -- rather than ISO's "0 <= mod <
+            // divisor".  Confirmed against `fpc -Mtp`: (-7) mod 3 is -1,
+            // not ISO's normalized 2; the divisor may be negative there too
+            // (emitModDivisorCheck, just above, does not fire for Turbo).
+            if (RangeGuards.isTurbo()) return r;
             // ISO §6.7.2.2 wants 0 <= i mod j < j, but srem takes its sign from
             // the dividend, so (-17) mod 5 comes back as -2 instead of 3.
-            auto* r   = B.CreateSRem(ToI64(lv), d, "srem");
             auto* neg = B.CreateICmpSLT(r, llvm::ConstantInt::get(I64Ty, 0),
                                               "mod.neg");
             return B.CreateSelect(neg, B.CreateAdd(r, d, "mod.adj"),

@@ -251,6 +251,24 @@ void CGProcCall::emitCallStmt(const CallStmt& s) {
         return;
     }
 
+    // TP-only: RunError([errorcode: Integer]).  Builtins.def gates this to
+    // -std=turbo (Dialects = TP), so unlike RangeCheckGuards' own guards --
+    // which serve every dialect from the same call site and so have to ask
+    // Opts at run time -- reaching this arm at all already means the active
+    // dialect is Turbo.  Routes through the same plang_tp_runerror(code)
+    // every numbered check (div-zero, range, ...) reports through, so
+    // RunError(200) and an actual division by zero are indistinguishable to
+    // whatever reads the process's exit status, exactly as on real
+    // Turbo/FPC.  fpc -Mtp confirms the no-argument form's default: 0.
+    if (lo == "runerror") {
+        auto* code = s.Args.empty() ? llvm::ConstantInt::get(I64Ty, 0)
+                                    : ToI64(EmitExpr(*s.Args[0]));
+        B.CreateCall(
+            RtFns.getExternFnN("plang_tp_runerror", llvm::Type::getVoidTy(Ctx), {I64Ty}),
+            {code});
+        B.CreateUnreachable();
+        return;
+    }
     if (lo == "new" && !s.Args.empty()) {
         // EP §6.7.5.3: new(p, d1..ds) when p's domain-type is a schema-name.
         if (const auto& pt = s.Args[0]->ResolvedType;

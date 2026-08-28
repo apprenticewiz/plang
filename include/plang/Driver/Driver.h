@@ -36,7 +36,17 @@ struct Options {
     std::string  std;                      ///< -std=<dialect>
     bool         suppressWarnings{false};  ///< -w
     bool         warningsAsErrors{false};  ///< -Werror
-    bool         rangeChecks{true};        ///< -fno-range-checks disables
+    /// -frange-checks/-fno-range-checks sets this explicitly; unset (the
+    /// default) means "whatever the active dialect starts with" -- ISO 7185
+    /// and Extended Pascal on, Turbo off ({$R-}, matching real Turbo
+    /// Pascal) -- resolved in makeFEArgs, once -std is known, since the two
+    /// may arrive in either order on the command line.  A plain bool here
+    /// could not tell "the user asked for checks on" apart from "nothing
+    /// was said and true is just the field's own default", which is what
+    /// silently dropped an explicit -frange-checks under -std=turbo: this
+    /// struct's old default of true and Turbo's own true-when-explicit both
+    /// looked identical to makeFEArgs's forwarding check.
+    std::optional<bool> rangeChecks;
     bool         nilChecks{true};          ///< -fno-nil-checks disables
     std::vector<std::string> frontendArgs; ///< options passed straight to -pc1
     std::vector<std::string> linkerArgs;   ///< -Wl,… / -Xlinker / -L / -l extras
