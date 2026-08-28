@@ -680,3 +680,20 @@ DIAG(err_continue_outside_loop, Error,
 // (confirmed empirically) for exactly the same two cases.
 DIAG(err_exit_value_outside_function, Error,
      "'exit' may only take a value inside a function; a procedure cannot return one")
+
+// TP-only: real Turbo Pascal 7 ran on 16-bit real-mode DOS and exposed a
+// family of standard identifiers for talking directly to that hardware/OS --
+// segment/offset pointer manipulation (Seg, Ofs, Ptr, ...), raw memory/port
+// access (Mem, Port, ...), heap-internals variables (HeapOrg, FreeList, ...)
+// and low-level DOS/BIOS interrupt calls (Intr, MsDos, ...).  None of that
+// has any meaning on plang's flat-address-space, 64-bit Linux/macOS target,
+// and silently no-op'ing a call like `Intr($21, Regs)` would be far worse
+// than refusing it outright.  isRealModeDosName (SemaExpr.cpp) is the one
+// place that lists the names; this is the one diagnostic all of them share.
+// It only ever fires once ordinary name resolution has already failed --
+// a program's own declaration of, say, `Mem` as a variable always wins, the
+// same as any other identifier -- so this is not a reserved word and is not
+// registered as a Symbol.
+DIAG(err_turbo_real_mode_facility, Error,
+     "'%0' is a real-mode DOS facility and has no meaning under -std=turbo "
+     "on this target")

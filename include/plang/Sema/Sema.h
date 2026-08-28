@@ -804,6 +804,19 @@ private:
     /// implies -std=iso10206 accepts it, when no dialect but Turbo does.
     /// Returns false when a diagnostic was emitted.
     [[nodiscard]] bool checkEPOnly(const Symbol& Sym, SourceLocation Loc);
+    /// Diagnoses a name from Turbo Pascal's real-mode DOS surface (Seg, Ofs,
+    /// Mem, Intr, ...; the full list is isRealModeDosName's, in SemaExpr.cpp)
+    /// used where ordinary lookup has already failed to resolve it to any
+    /// declaration -- built-in, imported, or the program's own.  Only ever
+    /// worth asking under -std=turbo (no other dialect has ever had these
+    /// names) and only once Symtab.lookup has already come back null, so a
+    /// program's own `var Mem: Integer` always wins and never reaches this
+    /// check at all.  These names are deliberately NOT Symbol table entries;
+    /// this is the one place that knows the list.  Returns true (and emits
+    /// err_turbo_real_mode_facility) when Name is one of them; the caller is
+    /// then done and must not also emit its own generic undefined-X
+    /// diagnostic for the same name.
+    [[nodiscard]] bool checkRealModeDosName(const std::string& Name, SourceLocation Loc);
     /// Diagnoses a read-parameter of a type §6.9.2 does not read into.
     void checkReadParamType(const Type& T, SourceLocation Loc);
     /// TargetHint: a bounded Set type this literal is known to be assigned

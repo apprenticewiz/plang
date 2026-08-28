@@ -774,6 +774,12 @@ void Sema::checkReadParamType(const Type& T, SourceLocation Loc) {
 void Sema::checkCallStmt(const CallStmt& S) {
     Symbol* Sym = Symtab.lookup(S.Name);
     if (!Sym) {
+        // Several of Turbo's real-mode DOS names -- Mark, Release, Keep,
+        // Intr, MsDos, GetIntVec, SetIntVec -- are ordinarily called as
+        // procedure STATEMENTS, never used as expression values, so this
+        // needs its own check: checkIdent's (SemaExpr.cpp) never runs for
+        // `Intr($21, Regs);` written as a bare statement.
+        if (checkRealModeDosName(S.Name, S.Loc)) return;
         error(S.Loc, diag::err_undefined_procedure, {S.Name});
         return;
     }
