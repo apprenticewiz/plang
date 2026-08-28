@@ -25,19 +25,22 @@ static constexpr std::array keywords {
 };
 
 static_assert(std::ranges::is_sorted(keywords, {}, &KW::first),
-              "the KEYWORD entries in TokenKinds.def must stay in ascending "
-              "order of spelling: this table is binary-searched");
+              "the KEYWORD and DIALECT_KEYWORD entries in TokenKinds.def must "
+              "stay in ascending order of spelling: this table is "
+              "binary-searched");
 
-// True for a word only ISO 10206 reserves.  Under -std=iso7185 the scanner
-// hands these back as identifiers, since a conforming ISO 7185 program is
-// entitled to use one as a name.
-static constexpr bool isEPOnlyKeyword(TokenKind K) {
+// The dialects that reserve K, as D_* bits (LangOptions::DialectBits).  A
+// word not built from DIALECT_KEYWORD -- an ordinary KEYWORD -- is reserved
+// in every dialect, so the switch has no case for it and the default answers
+// "all of them."  Under a dialect not in this set the scanner hands the word
+// back as an identifier, since a conforming program in that dialect is
+// entitled to use it as a name.
+static constexpr unsigned keywordDialects(TokenKind K) {
     switch (K) {
-#define EPKEYWORD(Id, Spelling) case TokenKind::Id:
+#define DIALECT_KEYWORD(Id, Spelling, Dialects) case TokenKind::Id: return (Dialects);
 #include "plang/Basic/TokenKinds.def"
-        return true;
     default:
-        return false;
+        return ~0u;
     }
 }
 
@@ -174,8 +177,8 @@ Token Scanner::scanIdentifierOrKeyword(size_t TokenStart) {
     auto It = std::ranges::lower_bound(keywords, Lower, {}, &KW::first);
     TokenKind Kind = (It != keywords.end() && It->first == Lower) ? It->second
                                                                    : TokenKind::Identifier;
-    // EP-only keywords are plain identifiers in iso7185 mode.
-    if (isEPOnlyKeyword(Kind) && !Opts.extendedPascal())
+    // A keyword the active dialect does not reserve is a plain identifier.
+    if ((keywordDialects(Kind) & Opts.dialectBit()) == 0)
         Kind = TokenKind::Identifier;
     return make(Kind, Word, TokenStart);
 }

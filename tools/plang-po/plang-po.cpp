@@ -205,9 +205,9 @@ int main(int Argc, char** Argv) {
       << "msgstr \"" << (Pseudo ? "[!" + escape(Description) + "!]" : "") << "\"\n";
 #define PUNCT(Id, Spelling)
 #define KEYWORD(Id, Spelling)
-#define EPKEYWORD(Id, Spelling)
+#define DIALECT_KEYWORD(Id, Spelling, Dialects)
 #include "plang/Basic/TokenKinds.def"
-#undef EPKEYWORD
+#undef DIALECT_KEYWORD
 #undef KEYWORD
 #undef PUNCT
 #undef TOK

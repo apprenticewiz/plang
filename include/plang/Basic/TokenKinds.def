@@ -2,7 +2,7 @@
 //
 // Everything that has to know a token kind is generated from this file: the
 // TokenKind enumeration, the enumerator names, the source spellings, the
-// scanner's keyword table, and which words only Extended Pascal reserves.
+// scanner's keyword table, and which dialects reserve which words.
 // Adding a token means adding one line here.
 //
 // A consumer defines the macros it cares about and includes this file; the
@@ -12,15 +12,16 @@
 //                             what a diagnostic calls it ("identifier").
 //   PUNCT(Id, Spelling)       Punctuation, or an operator written in symbols.
 //   KEYWORD(Id, Spelling)     A word reserved in every dialect plang accepts.
-//   EPKEYWORD(Id, Spelling)   A word reserved only by ISO 10206 Extended
-//                             Pascal.  Under -std=iso7185 the scanner hands
-//                             these back as identifiers, which is what ISO
-//                             7185 requires of a program that uses one as a
-//                             name.
+//   DIALECT_KEYWORD(Id, Spelling, Dialects)
+//                             A word reserved only by some dialects, as a D_*
+//                             bitmask from LangOptions::DialectBits.  Under a
+//                             dialect not in Dialects the scanner hands these
+//                             back as identifiers, which is what a program in
+//                             that dialect is entitled to use one as a name.
 //
-// The KEYWORD and EPKEYWORD entries are in ascending order of spelling and
-// must stay that way: the scanner binary-searches the table it builds from
-// them, and Scanner.cpp static_asserts that they are sorted.
+// The KEYWORD and DIALECT_KEYWORD entries are in ascending order of spelling
+// and must stay that way: the scanner binary-searches the table it builds
+// from them, and Scanner.cpp static_asserts that they are sorted.
 //
 //===----------------------------------------------------------------------===//
 
@@ -36,10 +37,10 @@
 #define KEYWORD(Id, Spelling) TOK(Id, Spelling)
 #endif
 
-// An Extended Pascal keyword is a keyword; a consumer that does not care about
-// the distinction gets the same treatment for both.
-#ifndef EPKEYWORD
-#define EPKEYWORD(Id, Spelling) KEYWORD(Id, Spelling)
+// A dialect-restricted keyword is a keyword; a consumer that does not care
+// which dialects reserve it gets the same treatment as an unconditional one.
+#ifndef DIALECT_KEYWORD
+#define DIALECT_KEYWORD(Id, Spelling, Dialects) KEYWORD(Id, Spelling)
 #endif
 
 //===----------------------------------------------------------------------===//
@@ -60,63 +61,86 @@ TOK(Error,      "invalid character")
 // Keywords, in ascending order of spelling
 //===----------------------------------------------------------------------===//
 
-KEYWORD  (And,        "and")
-EPKEYWORD(AndThen,    "and_then")     // EP §6.8.3.3
-KEYWORD  (Array,      "array")
-KEYWORD  (Begin,      "begin")
-EPKEYWORD(Bindable,   "bindable")     // EP §6.10
-KEYWORD  (Boolean,    "boolean")
-KEYWORD  (Case,       "case")
-KEYWORD  (Char,       "char")
-KEYWORD  (Const,      "const")
-KEYWORD  (Div,        "div")
-KEYWORD  (Do,         "do")
-KEYWORD  (Downto,     "downto")
-KEYWORD  (Else,       "else")
-KEYWORD  (End,        "end")
-EPKEYWORD(Export,     "export")       // EP §6.12
-KEYWORD  (False,      "false")
-KEYWORD  (File,       "file")
-KEYWORD  (For,        "for")
-KEYWORD  (Forward,    "forward")
-KEYWORD  (Function,   "function")
-KEYWORD  (Goto,       "goto")
-KEYWORD  (If,         "if")
-EPKEYWORD(Import,     "import")       // EP §6.12
-KEYWORD  (In,         "in")
-KEYWORD  (Integer,    "integer")
-EPKEYWORD(Interface,  "interface")    // EP §6.11
-KEYWORD  (Label,      "label")
-KEYWORD  (Mod,        "mod")
-EPKEYWORD(Module,     "module")       // EP §6.12
-KEYWORD  (Nil,        "nil")
-KEYWORD  (Not,        "not")
-KEYWORD  (Of,         "of")
-EPKEYWORD(Only,       "only")         // EP §6.12
-KEYWORD  (Or,         "or")
-EPKEYWORD(OrElse,     "or_else")      // EP §6.8.3.3
-EPKEYWORD(Otherwise,  "otherwise")    // EP §6.9.3.5
-KEYWORD  (Packed,     "packed")
-EPKEYWORD(Pow,        "pow")          // EP §6.8.3.2
-KEYWORD  (Procedure,  "procedure")
-KEYWORD  (Program,    "program")
-EPKEYWORD(Protected,  "protected")    // EP §6.6.3.7
-EPKEYWORD(Qualified,  "qualified")    // EP §6.12
-KEYWORD  (Real,       "real")
-KEYWORD  (Record,     "record")
-KEYWORD  (Repeat,     "repeat")
-EPKEYWORD(Restricted, "restricted")   // EP §6.4.1
-KEYWORD  (Set,        "set")
-KEYWORD  (String,     "string")
-KEYWORD  (Then,       "then")
-KEYWORD  (To,         "to")
-KEYWORD  (True,       "true")
-KEYWORD  (Type,       "type")
-KEYWORD  (Until,      "until")
-EPKEYWORD(Value,      "value")        // EP §6.6
-KEYWORD  (Var,        "var")
-KEYWORD  (While,      "while")
-KEYWORD  (With,       "with")
+// Short names for the DIALECT_KEYWORD entries below, the same shape
+// Builtins.def uses for BUILTIN's Dialects column.  Qualified because this
+// file is included outside the LangOptions class that owns the D_* bits.
+#define EP (LangOptions::D_ISO10206)
+#define TP (LangOptions::D_Turbo)
+
+KEYWORD       (And,           "and")
+DIALECT_KEYWORD(AndThen,      "and_then",      EP)  // EP §6.8.3.3
+KEYWORD       (Array,         "array")
+DIALECT_KEYWORD(Asm,          "asm",           TP)  // Turbo inline assembly
+KEYWORD       (Begin,         "begin")
+DIALECT_KEYWORD(Bindable,     "bindable",      EP)  // EP §6.10
+KEYWORD       (Boolean,       "boolean")
+KEYWORD       (Case,          "case")
+KEYWORD       (Char,          "char")
+KEYWORD       (Const,         "const")
+DIALECT_KEYWORD(Constructor,  "constructor",   TP)  // Turbo objects
+DIALECT_KEYWORD(Destructor,   "destructor",    TP)  // Turbo objects
+KEYWORD       (Div,           "div")
+KEYWORD       (Do,            "do")
+KEYWORD       (Downto,        "downto")
+KEYWORD       (Else,          "else")
+KEYWORD       (End,           "end")
+DIALECT_KEYWORD(Export,       "export",        EP)  // EP §6.12
+DIALECT_KEYWORD(Exports,      "exports",       TP)  // Turbo units
+KEYWORD       (False,         "false")
+KEYWORD       (File,          "file")
+KEYWORD       (For,           "for")
+KEYWORD       (Forward,       "forward")
+KEYWORD       (Function,      "function")
+KEYWORD       (Goto,          "goto")
+KEYWORD       (If,            "if")
+DIALECT_KEYWORD(Implementation, "implementation", TP)  // Turbo units
+DIALECT_KEYWORD(Import,       "import",        EP)  // EP §6.12
+KEYWORD       (In,            "in")
+DIALECT_KEYWORD(Inherited,    "inherited",     TP)  // Turbo objects
+DIALECT_KEYWORD(Inline,       "inline",        TP)  // Turbo inline directive
+KEYWORD       (Integer,       "integer")
+DIALECT_KEYWORD(Interface,    "interface",     EP)  // EP §6.11
+KEYWORD       (Label,         "label")
+DIALECT_KEYWORD(Library,      "library",       TP)  // Turbo DLLs
+KEYWORD       (Mod,           "mod")
+DIALECT_KEYWORD(Module,       "module",        EP)  // EP §6.12
+KEYWORD       (Nil,           "nil")
+KEYWORD       (Not,           "not")
+DIALECT_KEYWORD(Object,       "object",        TP)  // Turbo objects
+KEYWORD       (Of,            "of")
+DIALECT_KEYWORD(Only,         "only",          EP)  // EP §6.12
+KEYWORD       (Or,            "or")
+DIALECT_KEYWORD(OrElse,       "or_else",       EP)  // EP §6.8.3.3
+DIALECT_KEYWORD(Otherwise,    "otherwise",     EP)  // EP §6.9.3.5
+KEYWORD       (Packed,        "packed")
+DIALECT_KEYWORD(Pow,          "pow",           EP)  // EP §6.8.3.2
+KEYWORD       (Procedure,     "procedure")
+KEYWORD       (Program,       "program")
+DIALECT_KEYWORD(Protected,    "protected",     EP)  // EP §6.6.3.7
+DIALECT_KEYWORD(Qualified,    "qualified",     EP)  // EP §6.12
+KEYWORD       (Real,          "real")
+KEYWORD       (Record,        "record")
+KEYWORD       (Repeat,        "repeat")
+DIALECT_KEYWORD(Restricted,   "restricted",    EP)  // EP §6.4.1
+KEYWORD       (Set,           "set")
+DIALECT_KEYWORD(Shl,          "shl",           TP)  // Turbo shift-left
+DIALECT_KEYWORD(Shr,          "shr",           TP)  // Turbo shift-right
+KEYWORD       (String,        "string")
+KEYWORD       (Then,          "then")
+KEYWORD       (To,            "to")
+KEYWORD       (True,          "true")
+KEYWORD       (Type,          "type")
+DIALECT_KEYWORD(Unit,         "unit",          TP)  // Turbo units
+KEYWORD       (Until,         "until")
+DIALECT_KEYWORD(Uses,         "uses",          TP)  // Turbo units
+DIALECT_KEYWORD(Value,        "value",         EP)  // EP §6.6
+KEYWORD       (Var,           "var")
+KEYWORD       (While,         "while")
+KEYWORD       (With,          "with")
+DIALECT_KEYWORD(Xor,          "xor",           TP)  // Turbo bitwise/logical xor
+
+#undef TP
+#undef EP
 
 //===----------------------------------------------------------------------===//
 // Operators and delimiters written in symbols
@@ -146,7 +170,7 @@ PUNCT(StarStar,           "**")       // EP §6.8.3.2, exponentiation
 PUNCT(SymDiff,            "><")       // EP §6.8.3.4, symmetric set difference
 PUNCT(Times,              "*")
 
-#undef EPKEYWORD
+#undef DIALECT_KEYWORD
 #undef KEYWORD
 #undef PUNCT
 #undef TOK

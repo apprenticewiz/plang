@@ -13,8 +13,8 @@ second). Neither scenario ever links an -std=iso7185 object together with an
 -std=iso10206 object.
 
 Extended Pascal's module system can't provide that directly: both `module`
-and `import` are EPKEYWORD entries in TokenKinds.def, reserved only under
--std=iso10206, so a module -- and whatever program imports one -- can only
+and `import` are DIALECT_KEYWORD entries in TokenKinds.def reserved only for
+D_ISO10206, so a module -- and whatever program imports one -- can only
 ever be compiled Extended Pascal. There is no way for an -std=iso7185
 `program` (the only top-level unit ISO 7185 has at all) to import an
 Extended Pascal module; the importing side would need EP too. So this test
@@ -28,8 +28,8 @@ sharing one Extended Pascal object file:
      dead weight nobody runs.
   2. That *same* fmt.o is then linked together with a program compiled
      -std=iso7185 that redeclares `otherwise` as an ordinary variable.
-     `otherwise` is reserved only by Extended Pascal (EPKEYWORD(Otherwise);
-     it spells EP's case-statement default arm), so the program only
+     `otherwise` is reserved only by Extended Pascal (a DIALECT_KEYWORD for
+     D_ISO10206; it spells EP's case-statement default arm), so the program only
      compiles under -std=iso7185. The mixed link succeeds, and the ISO 7185
      program's own output is exactly what it is when linked alone -- proving
      that linking a genuinely Extended-Pascal-compiled object into the same
