@@ -639,3 +639,13 @@ DIAG(warn_case_not_exhaustive, Warning,
 // doing anything, and is usually left over from an edit.
 DIAG(warn_unused_variable, Warning, "'%0' is declared but never used")
 DIAG(warn_unused_parameter, Warning, "parameter '%0' is never used")
+
+// TP-only: Assert(cond: Boolean [; msg: string]) -- Builtins.def, gated on
+// Switch::Assertions.  Type-checked the same way regardless of whether
+// {$C-} will later compile the call away entirely (CGProcCall::emitCallStmt):
+// a program with assertions off still gets told about a type error in a call
+// it wrote.  The message argument reuses err_string_fn_arg_type -- the same
+// "must be char or string" check EQ/LT/GT/... already give their own
+// arguments -- rather than a second, near-identical diagnostic.
+DIAG(err_assert_cond_not_boolean, Error,
+     "condition of 'assert' must be boolean, got '%0'")

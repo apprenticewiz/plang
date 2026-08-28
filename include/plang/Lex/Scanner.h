@@ -6,6 +6,7 @@
 #include "plang/Basic/Token.h"
 
 #include <initializer_list>
+#include <memory>
 #include <optional>
 #include <set>
 #include <string>
@@ -48,6 +49,24 @@ public:
     /// Codegen::setSourceManager, which needs the main file's FileID).
     /// Invalid if construction failed to open a buffer at all.
     [[nodiscard]] FileID fileID() const { return FID; }
+
+    /// The position-keyed table `{$R+}`-style switch directives have built up
+    /// so far, or null if none has been seen -- the same "no directive, no
+    /// table" contract LangOptions::Switches documents, since this Scanner's
+    /// own `Switches` member below IS that table under construction.  Null for
+    /// every ISO 7185 and Extended Pascal scan, and for a Turbo scan that
+    /// never wrote a switch directive.
+    ///
+    /// A caller that wants `Opts.switchOn` to see what THIS scan recorded has
+    /// to attach this back onto the LangOptions it hands to Parser/Sema/
+    /// Codegen itself: the Scanner is handed its own copy of LangOptions at
+    /// construction (see the Opts field below) and mutates only that copy, the
+    /// same way every other dialect option already works, so nothing
+    /// downstream sees this by just sharing the constructor's LangOptions
+    /// argument.  frontendPC1Main calls this once parsing has finished
+    /// (Parser::switches(), which forwards to this) and sets Opts.Switches
+    /// from it before constructing Sema/Codegen.
+    [[nodiscard]] std::shared_ptr<const SwitchTable> switches() const { return Switches; }
 
 private:
     LangOptions          Opts;   // dialect and warning options (owned copy)
@@ -141,20 +160,12 @@ private:
     // longest run of letters at the front, folded for lookup the same way
     // an identifier is -- and an argument -- everything after it, trimmed
     // of leading/trailing whitespace but otherwise passed through verbatim.
-    // Dispatches by name to the one category implemented so far
-    // (dispatchMessageDirective); an unrecognized name is reported rather
-    // than silently ignored or treated as a plain comment.
-    //
-    // This is the extension point Cluster B's later items plug into: a
-    // conditional-compilation handler ({$IFDEF}/{$IFNDEF}/{$ENDIF}/{$ELSE}/
-    // {$ELSEIF}) -- dispatchConditionalDirective, below -- an {$I file}/
-    // {$INCLUDE file} handler -- dispatchIncludeDirective, further below --
-    // and a {$R+}-style switch handler (CompilerSwitches.def's SwitchTable
-    // already exists and is only waiting for this) each add their own "try
-    // this category" call here, in dispatchMessageDirective's own shape --
-    // (Name, Argument, Loc) -> bool handled -- tried in turn before the
-    // final warn_directive_unknown fallback.  The last of the three does
-    // not exist yet.
+    // Dispatches by name to each category in turn -- dispatchMessageDirective,
+    // dispatchConditionalDirective, dispatchIncludeDirective,
+    // dispatchSwitchDirective, dispatchIgnoredDirective, in that order, each
+    // in the same (Name, Argument, Loc) -> bool "handled?" shape -- and
+    // reports an unrecognized name rather than silently ignoring it or
+    // treating it as a plain comment.
     void dispatchDirective(std::string_view Body, SourceLocation Loc);
 
     // The {$MESSAGE}/{$INFO}/{$NOTE}/{$HINT}/{$WARNING}/{$ERROR}/{$FATAL}
@@ -342,14 +353,13 @@ private:
     // dispatchDirective in dispatchMessageDirective's own (Name, Argument,
     // Loc) -> bool shape.  Returns false, having done nothing, for every
     // Name but "i"/"include" folded -- OR for "i" with an Argument of
-    // exactly '+' or '-', which is the (separately tracked, not yet
-    // dispatched from anywhere -- CompilerSwitches.def's own later task)
-    // IOChecks switch instead: its long name is "iochecks", never
-    // "include", so only the one-letter spelling needs this guard.  Leaving
-    // {$I+}/{$I-} unhandled here is what keeps them reaching
-    // warn_directive_unknown exactly as they did before this function
-    // existed, rather than being misread as an attempt to include a file
-    // literally named "+" or "-".
+    // exactly '+' or '-', which is the IOChecks switch instead (its long
+    // name is "iochecks", never "include", so only the one-letter spelling
+    // needs this guard): dispatchDirective tries dispatchSwitchDirective
+    // right after this one, so leaving {$I+}/{$I-} unclaimed here is what
+    // lets them reach it and be recorded as the real switch toggle they are,
+    // rather than being misread as an attempt to include a file literally
+    // named "+" or "-".
     //
     // A recognized Argument is unquoted (a single layer of surrounding '
     // ... ', if present, stripped -- confirmed against `fpc -Mtp`, which
@@ -392,6 +402,68 @@ private:
     // alone, when IncludeStack is already empty -- next()'s cue that this
     // really is the end of the whole token stream.
     bool popInclude();
+
+    // ---- {$R+}-style switches (lib/Lex/Directives.cpp) ---------------------
+    //
+    // CompilerSwitches.def's SWITCH table, letter or long name, '+'/'-' (both
+    // spellings) or ' ON'/' OFF' (long name only) argument -- see
+    // dispatchSwitchDirective's own comment for exactly which combination is
+    // accepted and why, confirmed against fpc -Mtp's own scanner source
+    // rather than assumed.  Recorded into Switches/CurrentSwitchState below,
+    // which is what switches() above hands back to a caller once scanning is
+    // done.
+
+    // The table under construction, or null until the first switch directive
+    // this scan actually recognizes -- see switches()'s own comment for why
+    // null has to mean exactly that.  Lazily allocated rather than built
+    // eagerly in every Turbo constructor: a Turbo file that never writes a
+    // switch directive (the common case) then costs nothing beyond the one
+    // null check switchOn already makes.
+    std::shared_ptr<SwitchTable> Switches;
+
+    // The state Switches was last recorded at, i.e. what the NEXT record()
+    // call starts from -- record() only ever hears about the one switch that
+    // just changed, not the other thirteen, so this is what lets `{$R+}`
+    // then `{$Q-}` combine into one CompilerState with both bits set rather
+    // than each directive's own record() call overwriting the other's.
+    // Meaningless (never read) while Switches is null; seeded from
+    // Opts.defaultSwitches() the moment Switches is first allocated.
+    CompilerState CurrentSwitchState;
+
+    // Tries the switch-directive family against Name, called from
+    // dispatchDirective in dispatchMessageDirective's own (Name, Argument,
+    // Loc) -> bool shape, after dispatchIncludeDirective (whose own comment
+    // explains the one letter, 'I', both this and it can mean).  Recognizes
+    // Name as either a switch's Letter (exactly one character, case
+    // insensitive) or its LongName (folded the same way every other
+    // directive name is); a Name that matches neither, or an Argument that
+    // does not parse for the spelling actually used, is left unclaimed --
+    // returns false, doing nothing -- rather than diagnosed, since a
+    // matching Letter with an unrecognized Argument is real, unimplemented
+    // Borland/FPC syntax on the very same character (`{$R resourcefile}`,
+    // `{$L object.o}`, ...) at least as often as it is a typo, and
+    // warn_directive_unknown is the honest answer to both.
+    bool dispatchSwitchDirective(std::string_view Name, std::string_view Argument,
+                                 SourceLocation Loc);
+
+    // ---- Accept-and-ignore directives (lib/Lex/Directives.cpp) -------------
+    //
+    // Every other real Turbo/Borland/FPC compiler directive this milestone
+    // does not act on: DOS/Windows/386-target concerns (data alignment,
+    // object linking, memory sizing, emulation, calling convention,
+    // overlays, smart-linking safety, ...) this project's own target (a
+    // native LLVM-backed Linux/macOS compiler) has no analogue for, plus a
+    // handful of modern Delphi/FPC-only directives with the same shape.
+    // Tried last, right before the unknown-directive fallback: recognized by
+    // name (case insensitive, whatever its own argument grammar happens to
+    // be -- unlike a switch's Argument, which is inspected, an ignored
+    // directive's is not even looked at) and reported through
+    // warn_directive_ignored rather than either silently doing nothing (a
+    // user has no way to tell that from plang mis-scanning past it) or
+    // warn_directive_unknown (which says "plang has never heard of this,"
+    // untrue of a real directive this project has simply chosen not to
+    // implement).
+    bool dispatchIgnoredDirective(std::string_view Name, SourceLocation Loc);
 
     Token scanIdentifierOrKeyword(size_t TokenStart);
     Token scanNumber(size_t TokenStart);

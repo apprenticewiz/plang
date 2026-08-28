@@ -97,6 +97,21 @@ BRACE_CHECK_EXEMPT = {
     # spellings dispatchIncludeDirective must NOT treat as an include (see
     # CompilerSwitches.def's 'i' == IOChecks).  Not a hazard to fix.
     "test/Driver/Turbo/dollar-i-plus-and-minus-are-not-mistaken-for-an-include.pas",
+    # Same reasoning again (only ever compiles under -std=turbo -- see each
+    # file's own RUN: line -- so the matched-delimiter rule this check
+    # doesn't model is the one that actually applies), for the {$R+}-style
+    # switch and accept-and-ignore directive tests: their header prose and/or
+    # CHECK blocks discuss '{$R+}'/'{$R-}' syntax and 'assert'/switch
+    # examples in English, the same shape as the entries just above.  Not a
+    # hazard to fix.
+    "test/Driver/Turbo/accept-and-ignore-directives-warn-but-still-compile-and-run.pas",
+    "test/Driver/Turbo/assert-with-a-message-aborts-with-runtime-error-227.pas",
+    "test/Driver/Turbo/assert-with-assertions-off-compiles-to-nothing.pas",
+    "test/Driver/Turbo/objectchecks-and-goto-have-no-letter-spelling-of-their-own.pas",
+    "test/Driver/Turbo/switch-directive-long-name-form-works-the-same-as-the-letter.pas",
+    "test/Driver/Turbo/switch-directive-r-minus-turns-range-checks-back-off.pas",
+    "test/Driver/Turbo/switch-directive-r-plus-turns-range-checks-on-partway-through-the-file.pas",
+    "test/Lex/ScannerTurbo/switch-directives-every-spelling-scans-cleanly.pas",
 }
 
 

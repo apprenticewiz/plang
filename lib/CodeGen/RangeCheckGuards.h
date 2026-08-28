@@ -30,6 +30,14 @@ public:
 
     /// Whether range checking is on where \p Loc is.
     [[nodiscard]] bool rangeChecksAt(plang::SourceLocation Loc) const;
+    /// Whether TP's Assertions switch is on where \p Loc is -- the same
+    /// position-keyed Opts.switchOn query as rangeChecksAt, just a different
+    /// Switch.  CGProcCall::emitCallStmt's Assert arm is the one call site: a
+    /// program's `{$C-}` has to make Assert(cond) compile to nothing at all,
+    /// not even evaluating cond, so the decision has to be made before
+    /// anything about the call is emitted -- unlike every guard below, which
+    /// always evaluates its operands and only branches around the failure.
+    [[nodiscard]] bool assertionsAt(plang::SourceLocation Loc) const;
     void emitGuard(llvm::Value* failCond, const char* name,
                    llvm::function_ref<void()> emitFail);
     /// \p Width is the operand's Type::Width (ISO 7185 and Extended Pascal

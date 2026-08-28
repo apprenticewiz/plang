@@ -132,6 +132,18 @@ BUILTIN(Bind,         "bind",         Proc, EP, 2, 2, R_None)
 BUILTIN(Unbind,       "unbind",       Proc, EP, 1, 1, R_None)
 BUILTIN(Binding,      "binding",      Func, EP, 1, 1, R_BindingType)
 
+// -std=turbo only: this file's first genuinely TP-only entry -- everything
+// above either serves every dialect (ALL) or, like Halt, is EP|TP.  Real
+// Borland/FPC's Assert(cond: Boolean [; msg: string]) -- gated at the call
+// site on the Assertions switch (CompilerSwitches.def), which CGProcCall's
+// emitCallStmt reads through Opts.switchOn(Switch::Assertions, s.Loc) rather
+// than anything recorded here: {$C-} makes the whole call compile to
+// nothing, not even evaluating cond (confirmed against `fpc -Mtp`: a
+// condition with an observable side effect never runs it once assertions are
+// off), which the arity/dialect gate every OTHER builtin gets from this table
+// alone cannot express.
+BUILTIN(Assert,       "assert",       Proc, TP, 1, 2, R_None)
+
 #undef ALL
 #undef TP
 #undef EP

@@ -35,6 +35,29 @@ void CGProcCall::emitCallStmt(const CallStmt& s) {
         return;
     }
 
+    // TP-only: Assert(cond[, msg]).  Gated on Switch::Assertions at the
+    // CALL's own location, decided before anything else about the call is
+    // emitted -- Turbo's `{$C-}` makes the whole call compile to nothing,
+    // not even evaluating cond (confirmed against `fpc -Mtp`: a side-
+    // effecting cond never runs its side effect with assertions off), which
+    // is why this is checked here, first, rather than inside a guard the
+    // way every other runtime check below is -- every one of those always
+    // evaluates its own operands and only branches around the failure.
+    if (lo == "assert" && !s.Args.empty()) {
+        if (!RangeGuards.assertionsAt(s.Loc)) return;
+        auto* cond = EnsureI1(EmitExpr(*s.Args[0]));
+        auto* msg  = s.Args.size() > 1
+            ? StrCall.emitCStrArg(*s.Args[1])
+            : llvm::ConstantPointerNull::get(PtrTy);
+        RangeGuards.emitGuard(B.CreateNot(cond), "assert", [&] {
+            B.CreateCall(
+                RtFns.getExternFnN("plang_err_assert_failed",
+                                    llvm::Type::getVoidTy(Ctx), {PtrTy}),
+                {msg});
+        });
+        return;
+    }
+
     if (lo == "write" || lo == "writeln") {
         Builtins.emitBuiltinWrite(s.Args, lo == "writeln");
         return;
