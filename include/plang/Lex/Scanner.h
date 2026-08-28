@@ -55,6 +55,17 @@ private:
     DiagnosticsEngine&   Diags;  // shared diagnostic sink
     size_t               Pos;    // index of the next character to be consumed
 
+    // The kind of the last non-Error token next() returned, or Eof before the
+    // first one.  The only consumer is the Turbo `^ctrl` control-character
+    // literal (see caretLooksLikeControlChar()/startsExpression in
+    // Scanner.cpp): `^` is also Caret, used for postfix dereference (`p^`)
+    // and for a pointer type's prefix (`type P = ^T`), so a fresh `^` at the
+    // top of next() is only read as the start of a new literal when the
+    // token just before it is one that can begin an expression -- never
+    // Colon/Equal/Of, which is how `type PM = ^Integer` keeps meaning a
+    // pointer type instead of being misread as a control-character literal.
+    TokenKind            PrevKind = TokenKind::Eof;
+
     // The position of byte Offset in the buffer.  Line and column are the
     // SourceManager's business, which is why the scanner tracks neither.
     [[nodiscard]] SourceLocation locAt(size_t Offset) const {
@@ -88,9 +99,38 @@ private:
     Token scanIdentifierOrKeyword(size_t TokenStart);
     Token scanNumber(size_t TokenStart);
 
-    // Scans a single-quoted string.  On an unterminated or newline-spanning
-    // string, appends a diagnostic and returns the partial content as a StringLit.
+    // Scans a single-quoted string, or, under -std=turbo, a run of one or
+    // more adjacent string / #code / ^ctrl fragments glued into a single
+    // StringLit -- 'AB'#13#10'CD' is one 6-character token, not four.  On an
+    // unterminated or newline-spanning quoted fragment, appends a diagnostic
+    // and returns the partial content accumulated so far as a StringLit.
     Token scanString(size_t TokenStart);
+
+    // The three fragment kinds scanString glues together.  Each appends its
+    // decoded character(s) to Lexeme and leaves Pos just past what it
+    // consumed.  scanQuotedFragment/scanControlCodeFragment return false,
+    // having already emitted a diagnostic, on malformed input (an
+    // unterminated quote, or a '#' with no digits or a value that overflows
+    // a Char) -- scanCaretFragment cannot fail, since it is only ever called
+    // once caretLooksLikeControlChar() has confirmed the shape.
+    bool scanQuotedFragment(std::string& Lexeme);
+    bool scanControlCodeFragment(std::string& Lexeme);
+    void scanCaretFragment(std::string& Lexeme);
+
+    // True when the scanner is sitting on a '^' immediately followed (no gap)
+    // by a letter -- the shape of a Turbo `^ctrl` control-character literal.
+    // A shape check only: it says nothing about whether this position is
+    // where a literal is actually wanted (see PrevKind's comment), which is
+    // why mid-glue callers may use this alone but next()'s fresh-token
+    // dispatch additionally consults startsExpression(PrevKind).
+    [[nodiscard]] bool caretLooksLikeControlChar() const;
+
+    // Turbo `$FF`-style hexadecimal integer literal: '$' followed by one or
+    // more hex digits.  Not EP's `16#FF` nondecimal-base literal (that one is
+    // handled inside scanNumber, gated on extendedPascal(), and shares no
+    // code with this): different dialect, different leading character.  On
+    // no digits or overflow, emits a diagnostic and returns TokenKind::Error.
+    Token scanHexLiteral(size_t TokenStart);
 
     // Scans a one- or two-character operator / delimiter.
     // Returns TokenKind::Error (with the bad character as the lexeme) for any
