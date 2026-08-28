@@ -195,10 +195,19 @@ void Scanner::skipWhitespaceAndComments() {
         char C = Text[Pos];
         if (std::isspace(static_cast<unsigned char>(C))) {
             ++Pos;
+        // A '{' or '(*' immediately followed by '$' -- no gap -- is a
+        // Turbo compiler directive, not an ordinary comment: ISO 7185 and
+        // Extended Pascal have no such convention (Opts.turbo() gates this
+        // entirely), so `{$anything}` stays a plain, ignored comment there,
+        // handled below exactly as it always has been.
         } else if (C == '{') {
-            skipBraceComment();
+            if (Opts.turbo() && peek() == '$') skipDirective(/*Braced=*/true);
+            else skipBraceComment();
         } else if (C == '(' && peek() == '*') {
-            skipParenthesisComment();
+            if (Opts.turbo() && Pos + 2 < Text.size() && Text[Pos + 2] == '$')
+                skipDirective(/*Braced=*/false);
+            else
+                skipParenthesisComment();
         // C++-style line comments are Turbo's own addition (not in ISO 7185
         // or Extended Pascal); a single '/' is division under every dialect
         // including Turbo, so only a doubled '//' qualifies.

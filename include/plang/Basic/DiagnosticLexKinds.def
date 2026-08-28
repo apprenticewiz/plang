@@ -15,3 +15,18 @@ DIAG(err_hex_literal_no_digits, Error, "hexadecimal literal has no digits")
 DIAG(err_hex_literal_out_of_range, Error, "hexadecimal literal is out of range")
 DIAG(err_control_code_no_digits, Error, "control-character code has no digits")
 DIAG(err_control_code_out_of_range, Error, "control-character code '%0' is out of range (must be 0-255)")
+
+// Turbo `{$...}` compiler directives (lib/Lex/Directives.cpp).  The message
+// directive family -- {$MESSAGE}/{$INFO}/{$NOTE}/{$HINT}/{$WARNING}/
+// {$ERROR}/{$FATAL} -- each just echoes its own free-text argument as %0, at
+// the severity Borland/FPC give that keyword ({$ERROR} and {$FATAL} both
+// fail compilation like any other error; {$FATAL} additionally stops the
+// scanner right where it stands, verified against `fpc -Mtp`).
+DIAG(note_directive_message, Info, "%0")
+DIAG(note_directive_info, Info, "%0")
+DIAG(note_directive_note, Info, "%0")
+DIAG(warn_directive_hint, Warning, "%0")
+DIAG(warn_directive_warning, Warning, "%0")
+DIAG(err_directive_error, Error, "%0")
+DIAG(err_directive_fatal, Error, "%0")
+DIAG(warn_directive_unknown, Warning, "unknown compiler directive '%0'")
