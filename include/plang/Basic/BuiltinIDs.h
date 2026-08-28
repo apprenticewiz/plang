@@ -77,6 +77,39 @@ struct BuiltinArity { int Min, Max; };
     return false;
 }
 
+/// Whether a call to this builtin unconditionally leaves the statement
+/// sequence it appears in, the same way a goto does: Halt and RunError end
+/// the program, Exit ends the function or procedure it is written in, and
+/// Break/Continue end the loop iteration they are written in.  Nothing that
+/// textually follows one, in the sequence it is in, is a path the two
+/// callers below need to consider live.
+///
+/// Not one of Builtins.def's own columns, unlike the queries above: it is
+/// not a property every entry has an opinion on, and a builtin added later
+/// defaults to false here (does not transfer) rather than needing a row
+/// added to a table it would otherwise silently fall out of -- the same
+/// one-way bias plang/Sema/SemaFlow.cpp's own header comment explains for
+/// definite assignment: missing a warning costs a warning, and a warning
+/// about correct code costs the reader's trust in all the others.
+///
+/// Two callers: SemaStmt.cpp's alwaysTransfers (warn_unreachable_code) and
+/// SemaFlow.cpp's flowStmt (definite assignment across Break/Continue/Exit/
+/// Halt/RunError), which is also why this lives beside BuiltinID rather than
+/// in either Sema*.cpp: giving both the same one-line answer instead of two
+/// hand-kept lists is the whole point.
+[[nodiscard]] constexpr bool builtinAlwaysTransfers(BuiltinID ID) {
+    switch (ID) {
+    case BuiltinID::Halt:
+    case BuiltinID::Exit:
+    case BuiltinID::Break:
+    case BuiltinID::Continue:
+    case BuiltinID::RunError:
+        return true;
+    default:
+        return false;
+    }
+}
+
 /// The result type of a function builtin, as a tag Sema turns into a Type.
 enum class BuiltinResult { None, Int, Real, Char, Bool, Str, Complex, BindingType };
 
