@@ -941,6 +941,22 @@ void plang_extend(PascalFile *F, const char *Name, int8_t IsText) {
     // keeps a subsequent writeln from gluing onto an unterminated line left
     // by an earlier rewrite+write+extend with no close in between.
     if (IsText) closeFinalLine(F);
+    // Issue #411: see the identical note in plang_reset/plang_rewrite
+    // (issue #239) -- Name is about to be overwritten by the bind()/
+    // retained-name fallback just below, so whether it was the caller's own
+    // explicit argument has to be captured first.
+    const bool HasExplicitName = Name && Name[0] != '\0';
+    // EP §6.7.5.6 / issue #411: a file bound to an external entity (via
+    // bind(), or via #239's retained-name convention for a name given
+    // directly to an earlier reset/rewrite/extend/update) reopens that same
+    // entity even when extend is called without an explicit name -- unlike
+    // plang_reset/plang_rewrite, extend and update never called
+    // findBinding() at all, so a name-less extend used to fall straight
+    // through to the internal-tmpfile path below regardless of any name the
+    // file had previously been opened with, and whatever it wrote vanished
+    // the moment that tmpfile was closed instead of being appended to the
+    // real, on-disk file.
+    if (!HasExplicitName) Name = findBinding(F);
     if (!Name || Name[0] == '\0') {
         // Internal file: seek to end of existing temp storage.
         if (F->Fp) {
@@ -965,6 +981,11 @@ void plang_extend(PascalFile *F, const char *Name, int8_t IsText) {
         }
         std::fseek(F->Fp, 0, SEEK_END);
         setWritePath(F, Name);
+        // Issue #239/#411: retain an explicit name the same way bind() does,
+        // so a later reset/rewrite/extend/update with no name reopens this
+        // same external entity instead of silently diverting to fresh,
+        // unnamed internal storage.
+        if (HasExplicitName) setBinding(F, Name);
     }
     F->Buf      = PlangFileUninit;
     // 2, not 1: extend opens both directions (named files get "r+b" above,
@@ -977,6 +998,12 @@ void plang_extend(PascalFile *F, const char *Name, int8_t IsText) {
 void plang_update(PascalFile *F, const char *Name, int8_t IsText) {
     // §6.4.3.5 / issue #234: see the same call in plang_extend just above.
     if (IsText) closeFinalLine(F);
+    // Issue #411: see the identical note in plang_extend just above (and in
+    // plang_reset/plang_rewrite, issue #239).
+    const bool HasExplicitName = Name && Name[0] != '\0';
+    // EP §6.7.5.6 / issue #411: see the identical note in plang_extend just
+    // above -- update never called findBinding() either.
+    if (!HasExplicitName) Name = findBinding(F);
     if (!Name || Name[0] == '\0') {
         // Internal file: reposition to start without truncating.
         if (F->Fp) {
@@ -1001,6 +1028,11 @@ void plang_update(PascalFile *F, const char *Name, int8_t IsText) {
         }
         std::rewind(F->Fp);
         setWritePath(F, Name);
+        // Issue #239/#411: retain an explicit name the same way bind() does,
+        // so a later reset/rewrite/extend/update with no name reopens this
+        // same external entity instead of silently diverting to fresh,
+        // unnamed internal storage.
+        if (HasExplicitName) setBinding(F, Name);
     }
     F->Buf      = PlangFileUninit;
     F->Readable = 2; // both directions -- see the same note in plang_extend
@@ -1022,10 +1054,39 @@ void plang_update(PascalFile *F, const char *Name, int8_t IsText) {
 // it already was, so ignoring the return does not just skip the seek, it
 // silently redirects whatever read or write comes next onto that unrelated,
 // previously-current component instead (issue #233).
+//
+// The subtraction and multiply that compute that offset are themselves
+// plain, unchecked int64_t arithmetic, so a huge caller-supplied n can
+// overflow the multiply and wrap around to a small, in-range-looking offset
+// -- e.g. a file[1..100] of integer (ElemSize 8) with n = 2^61: (n - 1) is
+// 2^61, and 2^61 * 8 is exactly 2^64, which wraps to 0, indistinguishable
+// from a legitimate seek to the very first record. fseek would then happily
+// honor that wrapped offset and return success, so its own failure check
+// above never fires -- this is the same silent-corruption failure mode
+// #233 closed, just reached through overflow instead of through a value
+// fseek itself rejects (issue #403). Checked with __builtin_{sub,mul}_
+// overflow before the offset ever reaches fseek, the same idiom already
+// used for int64 overflow elsewhere in the runtime (plang_math.cpp's
+// plang_ipow/plang_sqr_int); either operation overflowing, or fseek itself
+// then failing on whatever offset resulted, reports through the same
+// plang_err_seek_failed as #233's fix -- a value that overflows the very
+// arithmetic that produces a byte offset is exactly as "not reachable in
+// this file" as one fseek itself refuses.
+
+static bool seekOffset(int64_t N, int64_t ElemSize, int64_t IndexLow,
+                        long *Offset) {
+    int64_t Diff, Off;
+    if (__builtin_sub_overflow(N, IndexLow, &Diff)) return false;
+    if (__builtin_mul_overflow(Diff, ElemSize, &Off)) return false;
+    *Offset = static_cast<long>(Off);
+    return true;
+}
 
 void plang_seekread(PascalFile *F, int64_t N, int64_t ElemSize, int64_t IndexLow) {
     abortIfClosed(F, "SeekRead");
-    if (std::fseek(F->Fp, (N - IndexLow) * ElemSize, SEEK_SET) != 0)
+    long Offset;
+    if (!seekOffset(N, ElemSize, IndexLow, &Offset) ||
+        std::fseek(F->Fp, Offset, SEEK_SET) != 0)
         plang_err_seek_failed("SeekRead", N);
     F->Readable = 1;
     unloadComponent(F);
@@ -1034,7 +1095,9 @@ void plang_seekread(PascalFile *F, int64_t N, int64_t ElemSize, int64_t IndexLow
 
 void plang_seekwrite(PascalFile *F, int64_t N, int64_t ElemSize, int64_t IndexLow) {
     abortIfClosed(F, "SeekWrite");
-    if (std::fseek(F->Fp, (N - IndexLow) * ElemSize, SEEK_SET) != 0)
+    long Offset;
+    if (!seekOffset(N, ElemSize, IndexLow, &Offset) ||
+        std::fseek(F->Fp, Offset, SEEK_SET) != 0)
         plang_err_seek_failed("SeekWrite", N);
     F->Buf      = PlangFileUninit;
     F->Readable = 0;
@@ -1043,7 +1106,9 @@ void plang_seekwrite(PascalFile *F, int64_t N, int64_t ElemSize, int64_t IndexLo
 
 void plang_seekupdate(PascalFile *F, int64_t N, int64_t ElemSize, int64_t IndexLow) {
     abortIfClosed(F, "SeekUpdate");
-    if (std::fseek(F->Fp, (N - IndexLow) * ElemSize, SEEK_SET) != 0)
+    long Offset;
+    if (!seekOffset(N, ElemSize, IndexLow, &Offset) ||
+        std::fseek(F->Fp, Offset, SEEK_SET) != 0)
         plang_err_seek_failed("SeekUpdate", N);
     F->Buf      = PlangFileUninit;
     F->Readable = 2; // both directions -- see the note in plang_extend
