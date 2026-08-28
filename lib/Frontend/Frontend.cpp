@@ -568,7 +568,18 @@ static std::string buildPMIContent(const ModuleNode& Mod,
     // through Diags rather than doing it quietly (issue #397).  Every site
     // below that used to just "continue"/"return" without writing anything
     // calls this instead.
+    //
+    // Constants and types are attempted whether or not the export-list names
+    // them (see the comments above and at the type loop below) -- that part
+    // of issue #397's fix is unchanged.  But only a name the export-list
+    // actually contains can ever be needed by anything outside this module,
+    // so only that case is worth failing the compile over: an internal-only
+    // declaration nothing can import was already fine to drop silently
+    // before #397, and #397 must not turn that into a hard error just
+    // because it happens to share these two loops with declarations that do
+    // matter (issue #413).
     auto reportDropped = [&](std::string_view Kind, const std::string& Name) {
+        if (!exported(Name)) return;
         Diags.report(SourceLocation(), diag::err_pmi_cannot_serialize_export,
                      {Kind, Name, Mod.Name});
     };
@@ -682,6 +693,22 @@ static bool writePMIFiles(const ProgramNode& Program,
             PmiDir = InputFile.substr(0, Slash);
     }
 
+    // Every .pmi this call has actually published (renamed into place), so
+    // that a failure discovered later -- either this module's own I/O
+    // failure, or another module's, including one buildPMIContent already
+    // reported through Diags -- can undo them before returning false.  This
+    // compilation unit is what the driver reports success or failure for as
+    // a whole: nothing outside it can tell an interface published before the
+    // failure was found from one published after, so an all-or-nothing
+    // compile must not leave an all-or-nothing-shaped mix of some published
+    // and some not (issue #414). Each entry here already went through the
+    // atomic write-temp-then-rename dance below, so undoing one is a plain
+    // best-effort remove -- there is no partial file to worry about.
+    std::vector<std::string> PublishedPaths;
+    auto cleanupPublished = [&]() {
+        for (const auto& P : PublishedPaths) llvm::sys::fs::remove(P);
+    };
+
     // For each body module, find its matching interface (if any) for the
     // export filter, then serialize.
     for (const auto& Mod : Program.OwnedModules) {
@@ -728,6 +755,7 @@ static bool writePMIFiles(const ProgramNode& Program,
                                                         TmpFd, TmpPath)) {
             std::cerr << "plang -pc1: cannot create module interface file '"
                        << PmiPath << "': " << EC.message() << "\n";
+            cleanupPublished();
             return false;
         }
 
@@ -742,6 +770,7 @@ static bool writePMIFiles(const ProgramNode& Program,
                            << Mod->Name << "' to '" << PmiPath << "': "
                            << EC.message() << "\n";
                 llvm::sys::fs::remove(TmpPath);
+                cleanupPublished();
                 return false;
             }
         }
@@ -751,15 +780,25 @@ static bool writePMIFiles(const ProgramNode& Program,
                        << Mod->Name << "' to '" << PmiPath << "': "
                        << EC.message() << "\n";
             llvm::sys::fs::remove(TmpPath);
+            cleanupPublished();
             return false;
         }
+        PublishedPaths.push_back(PmiPath);
     }
     // Every module's own interface published cleanly, unless one of them had
     // a declaration buildPMIContent could not serialize (issue #397): that
     // module's .pmi was skipped above, but the loop still ran to completion
     // over the rest, so this checks Diags rather than the loop itself having
-    // already returned false.
-    return !Diags.hasErrors();
+    // already returned false.  A module later in the loop than the one that
+    // failed can still have published its own .pmi successfully by this
+    // point (issue #414) -- undo those too before reporting failure, so a
+    // compile that is about to fail overall never leaves any of this call's
+    // interfaces sitting on disk for something else to find and trust.
+    if (Diags.hasErrors()) {
+        cleanupPublished();
+        return false;
+    }
+    return true;
 }
 
 /// Diagnoses and reports whether Os is in a fail state after its writer has
