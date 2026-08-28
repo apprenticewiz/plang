@@ -219,6 +219,16 @@ DIAG(err_read_param_type, Error,
 // into and either aborted the compiler outright or silently read into a
 // throwaway temporary that nothing could ever see.
 DIAG(err_read_not_variable, Error, "read/readln target must be a variable, got '%0'")
+// EP §6.7.5.5: readstr(e, v1,...,vn) reads e and assigns every v -- the same
+// variable-access requirement err_read_not_variable gives read/readln's
+// targets, just for readstr's own v1..vn.  Nothing enforced it here either,
+// so a non-variable target reached codegen with no storage to read into and
+// aborted the compiler instead of being refused at the call site.
+DIAG(err_readstr_not_variable, Error, "readstr target must be a variable, got '%0'")
+// EP §6.7.5.5: writestr(e, ...) formats its remaining arguments into e, so e
+// itself must be a variable-access to receive the result -- the same
+// requirement, for writestr's own destination argument.
+DIAG(err_writestr_not_variable, Error, "writestr destination must be a variable, got '%0'")
 // EP §6.7.6.7: EQ/LT/GT/NE/LE/GE's arguments "shall each be of char-type or
 // the canonical-string-type" — the same requirement §6.8.3.6 gives '+'.
 DIAG(err_string_fn_arg_type, Error,
@@ -452,6 +462,14 @@ DIAG(err_schema_body_not_representable, Error,
 // for the program to be rejected here.
 DIAG(err_new_arg_not_pointer, Error,
      "'new' expects a pointer as its first argument, got '%0'")
+// ISO 7185 §6.6.5.3: dispose's argument is the same pointer variable new
+// created; dispose's own argument-checking block (added for #253) resolves
+// its type the same way new's does but never added the matching
+// non-Pointer check new's own #206 fix gave it, so `dispose(i)` for a plain
+// `integer` i reached CodeGen with no pointee to size and hit an LLVM IR
+// verifier abort instead of being rejected here.
+DIAG(err_dispose_arg_not_pointer, Error,
+     "'dispose' expects a pointer as its first argument, got '%0'")
 // TRANSLATORS: "discriminant(s)" is an English plural dodge.
 DIAG(err_schema_new_needs_discs, Error,
      "'new' for a pointer to schema '%0' needs %1 discriminant(s), got %2")
