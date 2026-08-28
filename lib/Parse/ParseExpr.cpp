@@ -310,6 +310,23 @@ std::unique_ptr<ExprNode> Parser::parseFactor() {
             return Node;
         }
 
+        // Turbo prefix address-of: '@' factor.  The scanner (Scanner.cpp's
+        // '@' dispatch) is the sole dialect gate -- it only ever hands back
+        // an At token under -std=turbo, so this case is unreachable under
+        // ISO 7185/EP the same way an EP-only keyword token would be.
+        // Recursing into parseFactor (not a narrower production) lets '@'
+        // stack with postfix operators the way 'not' does above: '@x.f'
+        // reads as the address of field f, '@x^' as the address of what x
+        // points to, matching how tightly '.'/'^'/'[' already bind.
+        case TokenKind::At: {
+            auto Node     = std::make_unique<UnaryExpr>();
+            Node->Loc     = Loc;
+            Node->Op      = TokenKind::At;
+            advance();
+            Node->Operand = parseFactor();
+            return Node;
+        }
+
         case TokenKind::LeftParen: {
             advance();
             auto Expr = parseExpression();

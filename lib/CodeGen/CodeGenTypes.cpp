@@ -375,17 +375,21 @@ void Codegen::Impl::init(const std::string& progName) {
         [this](llvm::Value* v, llvm::Type* t){ return coerceToType(v, t); },
         [this](const TypeNode* tn){ return initialStateShapeOf(tn); },
         [this](llvm::Type* t, const std::string& n){ return createEntryAlloca(t, n); });
-    // ISO §6.7.2 binary/unary operators.  EmitExpr/EnsureI1/ToDouble/ToI64/
-    // CoerceToType/CreateEntryAlloca/CreateDynStrAlloca are narrow closures
-    // into methods not yet extracted (all still in CodeGenExprs.cpp/
-    // CodeGenTypes.cpp).  OrdinalIsUnsigned is a second, independent
-    // bridge to the same shared Impl method CGControlFlow already
-    // bridges (Wave 11) -- same multi-bridge precedent as peelPackedNode.
+    // ISO §6.7.2 binary/unary operators.  EmitExpr/EmitLValue/EnsureI1/
+    // ToDouble/ToI64/CoerceToType/CreateEntryAlloca/CreateDynStrAlloca are
+    // narrow closures into methods not yet extracted (all still in
+    // CodeGenExprs.cpp/CodeGenTypes.cpp).  EmitLValue is Turbo `@x`'s: it is
+    // the same closure CGFieldAccess/CGIndexAccess/CGAssign already bridge,
+    // reused rather than re-derived.  OrdinalIsUnsigned is a second,
+    // independent bridge to the same shared Impl method CGControlFlow
+    // already bridges (Wave 11) -- same multi-bridge precedent as
+    // peelPackedNode.
     binaryOps_ = std::make_unique<CGBinaryOps>(ctx, builder, curFunc,
         *complexOps_, *schemaAccess_, *strCallMarshal_, *strings_,
         *cgTypes_, *setOps_, *rangeGuards_, *runtimeFns_,
         i1Ty, i64Ty, i8Ty, dblTy, ptrTy,
         [this](const ExprNode& e){ return emitExpr(e); },
+        [this](const ExprNode& e){ return emitLValue(e); },
         [this](llvm::Value* v){ return ensureI1(v); },
         [this](llvm::Value* v){ return toDouble(v); },
         [this](llvm::Value* v){ return toI64(v); },

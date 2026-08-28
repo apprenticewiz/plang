@@ -147,6 +147,11 @@ DIALECT_KEYWORD(Xor,          "xor",           TP)  // Turbo bitwise/logical xor
 //===----------------------------------------------------------------------===//
 
 PUNCT(Assign,             ":=")
+// Turbo Pascal's prefix address-of, `@x`.  ISO 7185/EP §6.1.9 instead fold
+// '@' into Caret -- see the Scanner.cpp dispatch, which is the only place
+// that decides between the two; nothing downstream re-checks the dialect,
+// so this token kind is only ever produced under -std=turbo.
+PUNCT(At,                 "@")
 PUNCT(Caret,              "^")
 PUNCT(Colon,              ":")
 PUNCT(Comma,              ",")

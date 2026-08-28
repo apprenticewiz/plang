@@ -356,8 +356,18 @@ Token Scanner::scanSymbol(size_t TokenStart) {
         // it is provided: the Pascal written for terminals lacking the arrow
         // spells every pointer type and every dereference this way, and a
         // program using it is standard Pascal.
+        // Turbo Pascal gives '@' a different job than ISO 7185's alternative
+        // spelling above: a prefix address-of operator (`@x`), unrelated to
+        // '^' (postfix dereference, or a pointer type's prefix marker).
+        // Under -std=turbo '@' is therefore its own token kind rather than
+        // folded into Caret -- this is the one and only place that decision
+        // is made, so nothing later in the pipeline has to ask the dialect
+        // again.
         case '^':  return make(TokenKind::Caret,        "^", TokenStart);
-        case '@':  return make(TokenKind::Caret,        "@", TokenStart);
+        case '@':
+            if (Opts.turbo())
+                return make(TokenKind::At, "@", TokenStart);
+            return make(TokenKind::Caret, "@", TokenStart);
         default:
             std::string cs(1, C);
             emitError(locAt(TokenStart),

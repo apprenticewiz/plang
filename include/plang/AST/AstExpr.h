@@ -103,7 +103,7 @@ struct BinaryExpr : ExprNode {
 struct UnaryExpr : ExprNode {
     static bool classof(const Node* n) { return n->Kind == NodeKind::UnaryExpr; }
     UnaryExpr() : ExprNode(NodeKind::UnaryExpr) {}
-    TokenKind                 Op{TokenKind::Eof};  /// Minus (negation) or Not
+    TokenKind                 Op{TokenKind::Eof};  /// Minus/Plus, Not, or At (Turbo `@x` address-of)
     std::unique_ptr<ExprNode> Operand;
 };
 

@@ -434,6 +434,17 @@ llvm::Value* CGBinaryOps::emitBinary(const BinaryExpr& e) {
 }
 
 llvm::Value* CGBinaryOps::emitUnary(const UnaryExpr& e) {
+    // Turbo `@x`: the result IS the operand's address, not a value computed
+    // from it, so this takes the EmitLValue path instead of the EmitExpr one
+    // every other unary operator shares below -- EmitExpr would load (or, for
+    // an index/field path, needlessly re-walk) storage this only ever needs
+    // the address of.  Sema's isLValue check (checkUnary) already guarantees
+    // an addressable operand, so a null address here means the two disagree.
+    if (e.Op == TokenKind::At) {
+        auto* addr = EmitLValue(*e.Operand);
+        if (!addr) codegenICE("'@' applied to a non-addressable operand");
+        return addr;
+    }
     auto* v = EmitExpr(*e.Operand);
     if (!v) codegenICE("unary operator with an unlowerable operand");
     switch (e.Op) {
