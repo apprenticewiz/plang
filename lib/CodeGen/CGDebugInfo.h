@@ -273,15 +273,24 @@ public:
 
     /// -g: construct whatever deferred debug-info nodes DIBuilder collected
     /// (e.g. forward-declared types) before the module is inspected by
-    /// anything else.  A no-op when Debug is unset.  Also writes the schema
-    /// debug-script sidecar (see writeSchemaDebugScript) -- this is the one
-    /// place every compile with Debug set reaches exactly once, late enough
-    /// that every schema type debugTypeOfSemaType ever built has already
-    /// called recordSchemaLayoutForScript.
-    void finalize() {
-        if (!DBuilder) return;
+    /// anything else.  A no-op (returns true) when Debug is unset.  Also
+    /// writes the schema debug-script sidecar (see writeSchemaDebugScript)
+    /// -- this is the one place every compile with Debug set reaches exactly
+    /// once, late enough that every schema type debugTypeOfSemaType ever
+    /// built has already called recordSchemaLayoutForScript.
+    ///
+    /// Returns false, having already reported a diagnostic to stderr, if the
+    /// sidecar could not be written (issue #396 -- the same "a write that
+    /// used to silently drop something now fails loud" contract issues
+    /// #246/#397 gave the compiler's own -o output and .pmi writers).
+    /// Callers must fail the whole compile rather than emit anything when
+    /// this returns false: a missing or truncated sidecar would otherwise be
+    /// reported as a clean compile, and the gap would only surface later, in
+    /// an unrelated gdb session, with nothing to connect it back to here.
+    bool finalize() {
+        if (!DBuilder) return true;
         DBuilder->finalize();
-        writeSchemaDebugScript();
+        return writeSchemaDebugScript();
     }
 
 private:
@@ -319,12 +328,23 @@ private:
     std::optional<uint64_t> computeSchemaFingerprint(const plang::RecordTypeNode& rt,
                                                        size_t numDiscs);
     /// Serializes every schema recordSchemaLayoutForScript has collected to
-    /// <source file>.plang-schemas.json, once, here in finalize() --
-    /// silently does nothing if none were recorded (Debug set but no
+    /// <source file>.plang-schemas.json, once, here in finalize() -- does
+    /// nothing (returns true) if none were recorded (Debug set but no
     /// ExtentVaries schema ever reached codegen) or SrcMgr is null (the
     /// -pc1 internal frontend always sets it when Debug is on; see
     /// Codegen::setSourceManager's own call site).
-    void writeSchemaDebugScript();
+    ///
+    /// Returns false, having already printed a "plang: ..." diagnostic to
+    /// stderr, if the sidecar could not be opened for writing or a write to
+    /// it failed (issue #396): a full disk or a permissions failure left
+    /// this simply doing nothing, with the build reporting success for a
+    /// sidecar that was missing or truncated.  A write failure can surface
+    /// only after a successful open (e.g. ENOSPC) -- std::ofstream only
+    /// exposes that through its own failbit, and a small write does not set
+    /// it until the buffer is actually flushed, so the stream is
+    /// close()'d and rechecked before this trusts it, the same fix issue
+    /// #246 gave Frontend.cpp's own output writer.
+    bool writeSchemaDebugScript();
     /// <source file>.plang-schemas.json -- shared by writeSchemaDebugScript
     /// and the constructor's own early truncation of any pre-existing
     /// sidecar (issue #141: shrinks the window in which a stale sidecar
