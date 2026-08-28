@@ -97,6 +97,12 @@ DIAG(err_op_numeric, Error, "operator '%0' requires numeric operands, got '%1' a
 DIAG(err_op_divide_numeric, Error, "operator '/' requires numeric operands, got '%0' and '%1'")
 DIAG(err_op_integer, Error, "operator '%0' requires integer operands, got '%1' and '%2'")
 DIAG(err_op_boolean, Error, "operator '%0' requires boolean operands, got '%1' and '%2'")
+// Turbo overloads and/or/xor: logical on two Boolean operands, bitwise on
+// two Integer ones (5 and 3 = 1).  err_op_boolean's wording is wrong here --
+// it would tell a Turbo programmer their integer operands are the problem,
+// when the actual fault is a MIXED pair (one Boolean, one Integer) or some
+// third kind entirely.
+DIAG(err_op_boolean_or_integer, Error, "operator '%0' requires boolean or integer operands, got '%1' and '%2'")
 DIAG(err_op_symdiff_set, Error, "operator '><' requires set operands, got '%0' and '%1'")
 DIAG(err_op_set_mixed, Error, "operator '%0' cannot mix set and non-set operands, got '%1' and '%2'")
 DIAG(err_op_set_base, Error, "operator '%0' requires sets with compatible base types, got set of '%1' and set of '%2'")
@@ -109,6 +115,9 @@ DIAG(err_in_incompatible, Error, "type '%0' is not compatible with set of '%1'")
 DIAG(err_unknown_binop, Error, "unknown binary operator")
 DIAG(err_unary_numeric, Error, "unary '%0' requires a numeric operand, got '%1'")
 DIAG(err_not_requires_boolean, Error, "'not' requires a boolean operand, got '%0'")
+// Turbo overloads 'not' the same way: bitwise two's-complement negation on
+// an Integer operand, logical negation on a Boolean one.
+DIAG(err_not_requires_boolean_or_integer, Error, "'not' requires a boolean or integer operand, got '%0'")
 // Turbo `@x`: '@' takes the address of a variable, so its operand has to be
 // one -- the same requirement a 'var' parameter's argument has
 // (err_var_param_needs_lvalue), just spelled for '@' since the operand here

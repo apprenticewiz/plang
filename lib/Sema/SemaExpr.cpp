@@ -587,14 +587,63 @@ std::shared_ptr<Type> Sema::checkBinary(const BinaryExpr& E) {
 
         case TokenKind::And:
         case TokenKind::Or:
+            // Turbo: `and`/`or` are overloaded -- on two INTEGER operands
+            // they are bitwise (`5 and 3` = 1), not logical, while on two
+            // Boolean operands they stay logical, same as ISO/EP.
+            // CGBinaryOps::emitBinary's own comment says the two dispatch
+            // orders have to agree: operand type decides bitwise vs.
+            // Boolean here in Sema the same way it decides bitwise vs.
+            // short-circuit there in CodeGen.
+            if (Opts.turbo() && Lt->isIntegral() && Rt->isIntegral())
+                return TyInt;
+            [[fallthrough]];
         case TokenKind::AndThen:  // EP §6.8.3.3
         case TokenKind::OrElse:   // EP §6.8.3.3
             if (Lt->Kind != TypeKind::Boolean || Rt->Kind != TypeKind::Boolean) {
-                error(E.Loc, diag::err_op_boolean,
+                // err_op_boolean_or_integer only ever applies to And/Or:
+                // AndThen/OrElse are EP-only tokens, and EP is never Turbo,
+                // so Opts.turbo() is always false whenever this shared arm
+                // is reached for one of them.
+                if (Opts.turbo())
+                    error(E.Loc, diag::err_op_boolean_or_integer,
+                          {opSpelling(E.Op), Lt->Name, Rt->Name});
+                else
+                    error(E.Loc, diag::err_op_boolean,
+                          {opSpelling(E.Op), Lt->Name, Rt->Name});
+                return TyErr;
+            }
+            return TyBool;
+
+        // Turbo `xor`: overloaded the identical way `and`/`or` are --
+        // bitwise on two Integer operands, logical (exclusive-or) on two
+        // Boolean ones.  Only ever reached under -std=turbo: the scanner is
+        // the sole gate on the Xor token (DIALECT_KEYWORD, D_Turbo alone),
+        // the same way an EP-only keyword never reaches Sema under ISO 7185
+        // (see checkUnary's At case for the identical reasoning).  Unlike
+        // and/or, xor never short-circuits -- both operands always matter to
+        // an exclusive-or result, and CGBinaryOps has no dispatch for it to
+        // agree with -- so there is no AndThen/OrElse-shaped sibling case.
+        case TokenKind::Xor:
+            if (Lt->isIntegral() && Rt->isIntegral())
+                return TyInt;
+            if (Lt->Kind != TypeKind::Boolean || Rt->Kind != TypeKind::Boolean) {
+                error(E.Loc, diag::err_op_boolean_or_integer,
                       {opSpelling(E.Op), Lt->Name, Rt->Name});
                 return TyErr;
             }
             return TyBool;
+
+        // Turbo `shl`/`shr`: integer-only shift operators with no ISO/EP
+        // equivalent at all -- only ever reached under -std=turbo (same
+        // scanner gate as Xor above).
+        case TokenKind::Shl:
+        case TokenKind::Shr:
+            if (!Lt->isIntegral() || !Rt->isIntegral()) {
+                error(E.Loc, diag::err_op_integer,
+                      {opSpelling(E.Op), Lt->Name, Rt->Name});
+                return TyErr;
+            }
+            return TyInt;
 
         case TokenKind::StarStar: // EP §6.8.3.2: ** — always a real result
         case TokenKind::Pow:      // EP §6.8.3.2: pow — result follows the base
@@ -768,11 +817,17 @@ std::shared_ptr<Type> Sema::checkUnary(const UnaryExpr& E) {
             }
             return T;
         case TokenKind::Not:
-            if (T->Kind != TypeKind::Boolean) {
+            // Turbo overloads 'not' like 'and'/'or'/'xor': bitwise
+            // two's-complement negation on an Integer operand, logical
+            // negation on a Boolean one.  ISO/EP have no bitwise 'not' --
+            // an Integer operand there is the same error it always was.
+            if (T->Kind == TypeKind::Boolean) return TyBool;
+            if (Opts.turbo() && T->isIntegral()) return TyInt;
+            if (Opts.turbo())
+                error(E.Loc, diag::err_not_requires_boolean_or_integer, {T->Name});
+            else
                 error(E.Loc, diag::err_not_requires_boolean, {T->Name});
-                return TyErr;
-            }
-            return TyBool;
+            return TyErr;
         case TokenKind::At:
             // Turbo `@x`: only ever reached under -std=turbo -- the scanner
             // is the sole gate on the At token (see its '@' dispatch), the

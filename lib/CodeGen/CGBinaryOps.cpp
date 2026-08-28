@@ -53,28 +53,35 @@ llvm::Value* CGBinaryOps::emitBinary(const BinaryExpr& e) {
     // the same shape EP's and_then/or_else always uses; `{$B+}` restores
     // full evaluation from that point in the source forward.
     //
-    // Bitwise and/or on Integer operands is a separate, later task, and it
-    // has to "agree the dispatch order" with this one: operand type checked
-    // FIRST, short-circuit dispatch second -- which is exactly the shape
-    // below, so that task can add its own operand-type arm alongside
-    // bothBoolean without restructuring this.  Short-circuiting only makes
-    // sense for a Boolean operand (EnsureI1 below assumes an i1-shaped
-    // value), so bothBoolean is checked before any switch is even asked.
+    // Bitwise and/or on Integer operands: operand type checked FIRST, short-
+    // circuit dispatch second -- which is exactly the shape below.
+    // Short-circuiting only makes sense for a Boolean operand (EnsureI1
+    // below assumes an i1-shaped value), so bothBoolean is checked before
+    // any switch is even asked.  Sema::checkBinary has already refused every
+    // operand pairing except "both Boolean" or, under Turbo, "both
+    // Integer" -- so !bothBoolean here means both operands ARE Integer, and
+    // falling through (no return) below sends them to the generic integer
+    // path further down, the same one Plus/Minus/Times already share: it
+    // does the width-unification a bitwise op needs the identical way an
+    // arithmetic one does, and its own switch has the And/Or bitwise cases.
     if (e.Op == TokenKind::And || e.Op == TokenKind::Or) {
         const bool bothBoolean =
             e.Left->ResolvedType  && e.Left->ResolvedType->Kind  == TypeKind::Boolean &&
             e.Right->ResolvedType && e.Right->ResolvedType->Kind == TypeKind::Boolean;
-        const bool isAnd = e.Op == TokenKind::And;
-        // RangeGuards.boolEvalAt alone is not the whole answer -- see its own
-        // comment (RangeCheckGuards.h) for why isTurbo() has to gate it:
-        // SwitchTable's default answers "short-circuit" for every dialect,
-        // ISO 7185 and Extended Pascal included, and those two have no
-        // `{$B}` directive to ever say otherwise.
-        if (bothBoolean && RangeGuards.isTurbo() && !RangeGuards.boolEvalAt(e.Loc))
-            return emitShortCircuit(e, isAnd);
-        auto* l = EnsureI1(EmitExpr(*e.Left));
-        auto* r = EnsureI1(EmitExpr(*e.Right));
-        return isAnd ? B.CreateAnd(l, r, "and") : B.CreateOr(l, r, "or");
+        if (bothBoolean) {
+            const bool isAnd = e.Op == TokenKind::And;
+            // RangeGuards.boolEvalAt alone is not the whole answer -- see its own
+            // comment (RangeCheckGuards.h) for why isTurbo() has to gate it:
+            // SwitchTable's default answers "short-circuit" for every dialect,
+            // ISO 7185 and Extended Pascal included, and those two have no
+            // `{$B}` directive to ever say otherwise.
+            if (RangeGuards.isTurbo() && !RangeGuards.boolEvalAt(e.Loc))
+                return emitShortCircuit(e, isAnd);
+            auto* l = EnsureI1(EmitExpr(*e.Left));
+            auto* r = EnsureI1(EmitExpr(*e.Right));
+            return isAnd ? B.CreateAnd(l, r, "and") : B.CreateOr(l, r, "or");
+        }
+        // else: both Integer (Turbo bitwise and/or) -- fall through.
     }
 
     // EP §6.8.3.3: and_then / or_else always short-circuit, regardless of
@@ -440,6 +447,59 @@ llvm::Value* CGBinaryOps::emitBinary(const BinaryExpr& e) {
             return B.CreateSelect(neg, B.CreateAdd(r, d, "mod.adj"),
                                         r, "mod");
         }
+        // Turbo bitwise and/or/xor on Integer operands (5 and 3 = 1).  lv/rv
+        // are already unified to a common integer width by the "two
+        // compatible ordinals" coercion above, so this is a plain LLVM
+        // bitwise instruction at that width -- not forced to i64 the way
+        // Div/Mod above are.  The And/Or arms are only ever reached here
+        // with two Integer operands: emitBinary's own top-of-function block
+        // already peeled off and returned the Boolean (logical) case.
+        case TokenKind::And: return B.CreateAnd(lv, rv, "and.bits");
+        case TokenKind::Or:  return B.CreateOr(lv, rv, "or.bits");
+        // Xor is overloaded exactly like and/or, but never short-circuits
+        // (both operands always matter to an exclusive-or), so it has no
+        // top-of-function special case to peel off first -- CreateXor is
+        // exactly right for either overload: on two i1 Booleans it is
+        // logical exclusive-or, at any wider common integer width it is
+        // bitwise.
+        case TokenKind::Xor: return B.CreateXor(lv, rv, "xor");
+        case TokenKind::Shl:
+        case TokenKind::Shr: {
+            // Unlike And/Or/Xor/Not just above -- which are bitwise
+            // per-position, so computing them at a wider sign-extended width
+            // and truncating back gives bit-identical low bits to computing
+            // narrow directly -- a SHIFT's answer genuinely depends on which
+            // bit is "the top one": both the (width-1) mask below and, for
+            // 'shr', which bit fills in from the top are meaningless without
+            // the TRUE width.  lv/rv's own LLVM type is not reliable for
+            // this: an integer literal always lowers to an i64 ConstantInt
+            // regardless of dialect (CGExprCore::emitExpr's IntLitExpr
+            // case), so `1 shl 20` under Turbo (both operands literals) had
+            // lv/rv already sitting at i64 by the time control reached here,
+            // silently computing an unmasked 64-bit shift instead of a
+            // masked 16-bit one. e.ResolvedType->Width is the answer Sema
+            // already committed to (TyInt, i.e. LangOptions::
+            // defaultIntWidth() -- 16 under Turbo, 64 otherwise), so operands
+            // are re-coerced to it explicitly rather than trusting whatever
+            // width they arrived in.
+            llvm::Type* bitsTy = llvm::IntegerType::get(
+                Ctx, e.ResolvedType ? e.ResolvedType->Width : 64);
+            auto* l = CoerceToType(lv, bitsTy);
+            auto* r = CoerceToType(rv, bitsTy);
+            // LLVM's shl/lshr are POISON (not merely wrong) if the shift
+            // amount is >= the operand's bit width -- e.g. `x shl 20` on a
+            // 16-bit Turbo Integer -- so the count is masked to (width-1)
+            // first, exactly what a hardware shift instruction (and FPC's
+            // own codegen) does.
+            const unsigned width = bitsTy->getIntegerBitWidth();
+            auto* mask  = llvm::ConstantInt::get(bitsTy, width - 1);
+            auto* count = B.CreateAnd(r, mask, "shift.count");
+            // 'shr' is a LOGICAL shift even on a signed Integer: it does NOT
+            // sign-extend the way `div` by a power of two would, so a
+            // negative operand's top bit is filled with zero, not carried.
+            return e.Op == TokenKind::Shl ? B.CreateShl(l, count, "shl")
+                                           : B.CreateLShr(l, count, "shr");
+        }
         case TokenKind::Equal:
             return needFP ? B.CreateFCmpOEQ(lv, rv, "feq")
                           : B.CreateICmpEQ(lv, rv, "eq");
@@ -495,6 +555,18 @@ llvm::Value* CGBinaryOps::emitUnary(const UnaryExpr& e) {
                 return B.CreateFNeg(v, "fneg");
             return B.CreateNeg(v, "neg");
         case TokenKind::Not: {
+            // Turbo overloads 'not' like 'and'/'or'/'xor': bitwise
+            // two's-complement negation (`not x` = `-x-1`) on an Integer
+            // operand, logical negation on a Boolean one.  Sema::checkUnary
+            // already refused every other operand type, so ResolvedType's
+            // Kind alone tells the two apart -- the same way emitBinary's
+            // bothBoolean check does for and/or.  LLVM's CreateNot is a
+            // plain xor-with-all-ones at whatever width v already is, so the
+            // bitwise case needs no EnsureI1 (which would wrongly truncate a
+            // wide Integer down to its low bit).
+            const bool isBool = e.Operand->ResolvedType
+                              && e.Operand->ResolvedType->Kind == TypeKind::Boolean;
+            if (!isBool) return B.CreateNot(v, "not.bits");
             auto* b = EnsureI1(v);
             return B.CreateNot(b, "not");
         }
