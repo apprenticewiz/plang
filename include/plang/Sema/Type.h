@@ -361,8 +361,14 @@ struct Type {
 /// The first and last values of an ordinal type, or nothing when it has no
 /// bounded range.  ISO §6.4.3.2 lets an array index be named by its type —
 /// `array[color]` — and the extent then has to come from the type itself.
-/// `integer` is deliberately excluded: an array over the whole of it is not
-/// something an implementation can lay out.
+///
+/// ISO 7185 and Extended Pascal's `integer` (Width == 64) is deliberately
+/// excluded: an array over the whole of it is not something an
+/// implementation can lay out.  Turbo's Integer/Byte/ShortInt/Word/LongInt
+/// (Width < 64, see Type::Width's own comment) are genuinely bounded --
+/// Byte's 0..255 is exactly as much a laid-out-able domain as a hand-written
+/// subrange over it would be -- so those widths answer here instead of
+/// falling into the same `default: nullopt` a bare 64-bit integer does.
 [[nodiscard]] inline std::optional<std::pair<int64_t, int64_t>>
 ordinalRange(const Type& T) {
     switch (T.Kind) {
@@ -373,6 +379,13 @@ ordinalRange(const Type& T) {
         if (T.EnumValues.empty()) return std::nullopt;
         return std::pair<int64_t, int64_t>{
             0, static_cast<int64_t>(T.EnumValues.size()) - 1};
+    case TypeKind::Integer:
+        if (T.Width >= 64) return std::nullopt; // the ISO 7185/EP case above
+        if (T.IsSigned) {
+            const int64_t Half = int64_t{1} << (T.Width - 1);
+            return std::pair<int64_t, int64_t>{-Half, Half - 1};
+        }
+        return std::pair<int64_t, int64_t>{0, (int64_t{1} << T.Width) - 1};
     default: return std::nullopt;
     }
 }
