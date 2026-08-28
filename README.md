@@ -3,9 +3,9 @@
 plang is a Pascal compiler built on LLVM, currently targeting both Linux
 and macOS platforms using either x86_64 or aarch64 CPUs.  It implements
 ISO 7185 Standard Pascal at level 1 (conformant array parameters
-included) and ISO 10206 Extended Pascal, with future support planned for
-other Pascal dialects and extensions, including Turbo Pascal,
-Delphi/Object Pascal, and Free Pascal.
+included) and ISO 10206 Extended Pascal.  Turbo Pascal support is in
+development, with future support also planned for Delphi/Object Pascal
+and Free Pascal.
 
 Native Windows support is not available, although it may be considered
 for a future update.  For now, Windows users can run plang using WSL.
@@ -62,14 +62,15 @@ plang intends to support a rich set of Pascal language dialects:
 |-------------------|-------------|--------|
 | `iso7185` | ISO 7185 Standard Pascal, level 1 | Feature complete |
 | `iso10206` | ISO 10206 Extended Pascal | Feature complete |
-| `turbo` | Turbo Pascal extensions | Planned |
+| `turbo` | Turbo Pascal extensions | In development |
 | `delphi` | Delphi / Object Pascal extensions | Planned |
 | `fpc` | Free Pascal extensions | Planned |
 
 Unimplemented dialects are accepted on the command line but rejected
-with an error; only `iso7185` and `iso10206` are currently accepted.
-`iso7185` is the default Pascal dialect unless another dialect is
-specified.
+with an error; only `iso7185`, `iso10206`, and `turbo` are currently
+accepted (`turbo` is in development and does not yet support the full
+Turbo Pascal language).  `iso7185` is the default Pascal dialect unless
+another dialect is specified.
 
 plang currently passes all of the tests for ISO 7185 Standard Pascal in
 the [Pascal Acceptance Test](http://pascal.hansotten.com/standard-pascal-and-validation/pat/).
@@ -135,7 +136,7 @@ plang -O2 program.pas -o program
 plang -g program.pas -o program
 gdb program
 
-# Dialect selection (iso7185 is the default; turbo, delphi and fpc are planned)
+# Dialect selection (iso7185 is the default; turbo is in development, delphi and fpc are planned)
 plang -std=iso10206 program.pas -o program   # Extended Pascal
 
 # Show the commands without running them

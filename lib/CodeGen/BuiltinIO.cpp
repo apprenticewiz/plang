@@ -207,6 +207,19 @@ void BuiltinIO::emitWriteValue(llvm::Value* val, bool newline, llvm::Value* fp,
     if (isChar && !ty->isIntegerTy(8)) {
         val = B.CreateTrunc(val, I8Ty, "char.narrow");
         ty  = val->getType();
+    } else if (!isBool && !isChar && ty->isIntegerTy() && !ty->isIntegerTy(64)) {
+        // Every ISO 7185/EP ordinal that reaches here is already i64 (both
+        // dialects stamp Width=64 on Integer/Subrange/Enum); Turbo's 16-bit
+        // Integer is the first thing that can arrive narrower.  Without this,
+        // the chain below falls all the way to the string writer for the
+        // narrower width, since none of isIntegerTy(64)/isDoubleTy/isBool/
+        // isIntegerTy(8) match it -- passing a non-pointer integer where the
+        // runtime's string writer expects a ptr is an LLVM IR verifier abort,
+        // not a silently wrong answer.
+        const bool signedExt = !semaTy || semaTy->IsSigned;
+        val = signedExt ? B.CreateSExt(val, I64Ty, "int.widen")
+                         : B.CreateZExt(val, I64Ty, "int.widen");
+        ty  = val->getType();
     }
     auto* voidTy    = llvm::Type::getVoidTy(Ctx);
     std::string pfx = fp ? "plang_write_file" : (std::string("plang_write") + (newline ? "ln" : ""));
@@ -270,8 +283,18 @@ void BuiltinIO::emitWriteValueFormatted(llvm::Value* val, llvm::Value* w, llvm::
         return;
     }
     const bool isBool = writesAsBoolean(ty, semaTy);
-    if (!isBool && writesAsChar(ty, semaTy) && !ty->isIntegerTy(8)) {
+    const bool isChar = !isBool && writesAsChar(ty, semaTy);
+    if (isChar && !ty->isIntegerTy(8)) {
         val = B.CreateTrunc(val, I8Ty, "char.narrow");
+        ty  = val->getType();
+    } else if (!isBool && !isChar && ty->isIntegerTy() && !ty->isIntegerTy(64)) {
+        // Same widening as the unformatted emitWriteValue above, needed here
+        // too since a `writeln(i:5)` field-width form goes through this
+        // separate dispatch chain with an identical isIntegerTy(64)/isDoubleTy/
+        // isBool/isIntegerTy(8)/else-string shape.
+        const bool signedExt = !semaTy || semaTy->IsSigned;
+        val = signedExt ? B.CreateSExt(val, I64Ty, "int.widen")
+                         : B.CreateZExt(val, I64Ty, "int.widen");
         ty  = val->getType();
     }
 
@@ -416,8 +439,20 @@ void BuiltinIO::emitReadArg(const ExprNode& arg, llvm::Value* fp) {
     while (base && base->Kind == TypeKind::Subrange && base->SubBase)
         base = base->SubBase.get();
 
+    // readTy is the WIDTH THE READER ITSELF WRITES THROUGH dest AT, which
+    // must track suffix, not ty: readFnSuffix's fallback is always "_i64"
+    // for anything that isn't double or i8 (an ordinal reader has exactly
+    // one width, plang_read_i64, regardless of the destination's own
+    // width), so a Turbo 16-bit Integer's ty=i16 must still get readTy=I64Ty
+    // here -- leaving readTy == ty (as this used to, unconditionally) makes
+    // `convert` false below and hands plang_read_i64 a pointer to a 2-byte
+    // stack slot, an 8-byte write through it that clobbers 6 bytes past the
+    // end.  ISO 7185/EP never reach this arm at a narrower width (both
+    // dialects stamp Integer/Subrange/Enum at Width=64), so this is
+    // unreachable before Turbo, the same way the write-side widening above
+    // was.
     std::string suffix  = readFnSuffix(ty);
-    llvm::Type* readTy  = ty;
+    llvm::Type* readTy  = I64Ty;
     if (base && base->Kind == TypeKind::Real)      { suffix = "_f64";  readTy = DblTy; }
     else if (base && base->Kind == TypeKind::Char) { suffix = "_char"; readTy = I8Ty;  }
 

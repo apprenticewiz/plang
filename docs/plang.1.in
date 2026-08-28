@@ -155,7 +155,7 @@ part of a case-statement, and the rest \(em are rejected under this dialect.
 ISO 10206 Extended Pascal (implemented).
 .TP
 .B turbo
-Turbo Pascal extensions (planned; not yet implemented).
+Turbo Pascal extensions (in development; not all features are implemented yet).
 .TP
 .B delphi
 Delphi / Object Pascal (planned; not yet implemented).
