@@ -14,6 +14,21 @@
 
 using namespace plang;
 
+// MS-DOS text files end with a Ctrl-Z (0x1A) byte, and Turbo Pascal's scanner
+// -- reading through the DOS text-mode CRT, not raw bytes -- never saw
+// anything written after one.  -std=turbo reproduces that at the buffer
+// level, once, before any scanning starts: everything from the first 0x1A
+// onward is simply not there, the same way it never reached TP's own lexer.
+// ISO 7185 and Extended Pascal have no such convention and are left alone;
+// 0x1A is just another byte to them (an unexpected character wherever it's
+// not inside a string or comment, same as any other control byte).
+static std::string_view truncateAtCtrlZ(std::string_view Text, const LangOptions& Opts) {
+    if (!Opts.turbo()) return Text;
+    if (const size_t Z = Text.find('\x1A'); Z != std::string_view::npos)
+        return Text.substr(0, Z);
+    return Text;
+}
+
 using KW = std::pair<std::string_view, TokenKind>;
 
 // The reserved words, built from the one list in TokenKinds.def.  Spellings
@@ -49,7 +64,7 @@ Scanner::Scanner(SourceManager& SM, std::string Filename,
     : Opts(Opts), SM(&SM), Diags(Diags), Pos(0) {
     if (auto ID = SM.addFile(Filename)) {
         FID  = *ID;
-        Text = SM.getBufferData(FID);
+        Text = truncateAtCtrlZ(SM.getBufferData(FID), Opts);
         return;
     }
     // No buffer, so no location to report it at; Text stays empty and next()
@@ -72,7 +87,7 @@ Scanner::Scanner(SourceManager& SM, std::string SourceName, std::string Content,
     // convention, not by guarantee.
     if (auto ID = SM.addBuffer(SourceName, std::move(Content))) {
         FID  = *ID;
-        Text = SM.getBufferData(FID);
+        Text = truncateAtCtrlZ(SM.getBufferData(FID), Opts);
         return;
     }
     emitError({}, diag::err_source_too_large, {SourceName});
@@ -115,6 +130,11 @@ void Scanner::skipWhitespaceAndComments() {
             skipBraceComment();
         } else if (C == '(' && peek() == '*') {
             skipParenthesisComment();
+        // C++-style line comments are Turbo's own addition (not in ISO 7185
+        // or Extended Pascal); a single '/' is division under every dialect
+        // including Turbo, so only a doubled '//' qualifies.
+        } else if (Opts.turbo() && C == '/' && peek() == '/') {
+            skipLineComment();
         } else {
             break;
         }
@@ -130,6 +150,7 @@ void Scanner::skipWhitespaceAndComments() {
 // pair to be matched — either terminator ends either comment — so both are
 // looked for here whichever opened it.
 void Scanner::skipComment(bool Braced) {
+    if (Opts.turbo()) { skipCommentTurbo(Braced); return; }
     const size_t CommentStart = Pos;
     if (Braced) ++Pos; else Pos += 2;
     while (Pos < Text.size()) {
@@ -143,8 +164,60 @@ void Scanner::skipComment(bool Braced) {
     emitError(locAt(CommentStart), diag::err_unterminated_comment);
 }
 
+// Borland's rule is the opposite of ISO §6.1.8's: a comment opened with '{'
+// is closed only by '}', and one opened with '(*' only by '*)' -- confirmed
+// against a real compiler (`fpc -Mtp`) before writing this, not assumed from
+// the name "Turbo Pascal" alone.  `fpc -Mtp` on `{ ... *) ... }` compiles
+// clean (the embedded, wrong-kind closer is inert -- just comment text) and
+// on `{ ... *)` with no real '}' anywhere reports an unterminated comment at
+// EOF.  This reproduces both: SawOtherCloser only ever turns an
+// EOF-with-no-real-terminator into the more specific
+// err_comment_delim_mismatch instead of the generic err_unterminated_comment
+// -- it never makes the wrong-kind sequence act as a terminator, so a
+// harmless one embedded in an otherwise-well-formed comment still compiles.
+void Scanner::skipCommentTurbo(bool Braced) {
+    const size_t CommentStart = Pos;
+    if (Braced) ++Pos; else Pos += 2;
+    bool SawOtherCloser = false;
+    while (Pos < Text.size()) {
+        const char C = Text[Pos++];
+        if (Braced) {
+            if (C == '}') return;
+            if (C == '*' && Pos < Text.size() && Text[Pos] == ')') {
+                SawOtherCloser = true;
+                ++Pos;
+            }
+        } else {
+            if (C == '*' && Pos < Text.size() && Text[Pos] == ')') {
+                ++Pos;
+                return;
+            }
+            if (C == '}') SawOtherCloser = true;
+        }
+    }
+    if (SawOtherCloser) {
+        const std::string_view Opener = Braced ? "{" : "(*";
+        const std::string_view Closer = Braced ? "}" : "*)";
+        emitError(locAt(CommentStart), diag::err_comment_delim_mismatch,
+                  {Opener, Closer});
+    } else {
+        emitError(locAt(CommentStart), diag::err_unterminated_comment);
+    }
+}
+
 void Scanner::skipBraceComment()       { skipComment(/*Braced=*/true); }
 void Scanner::skipParenthesisComment() { skipComment(/*Braced=*/false); }
+
+// A -std=turbo `//` line comment: Pos is at the first '/' on entry (the
+// second is confirmed but not yet consumed by the caller); runs to the
+// newline that ends it, or EOF, whichever is first.  The newline itself is
+// left for skipWhitespaceAndComments' own isspace branch to consume next
+// time around, the same division of labor skipComment leaves to it for the
+// space after a brace comment.
+void Scanner::skipLineComment() {
+    Pos += 2; // the two '/'s
+    while (Pos < Text.size() && Text[Pos] != '\n') ++Pos;
+}
 
 Token Scanner::scanIdentifierOrKeyword(size_t TokenStart) {
     size_t Start = Pos;

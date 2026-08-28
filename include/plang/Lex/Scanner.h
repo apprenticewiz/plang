@@ -64,16 +64,26 @@ private:
     // Returns the character at Pos+1 without advancing, or '\0' at end of input.
     char peek() const;
 
-    // Advances past whitespace and Pascal comments ({ } or (* *)).
+    // Advances past whitespace and comments: { } and (* *) in every dialect,
+    // plus, under -std=turbo only, a `//` line comment running to the next
+    // newline.
     void skipWhitespaceAndComments();
 
     // Advances past a comment, opened with '{' when \p Braced and with '(*'
     // otherwise.  ISO §6.1.8 lets either terminator close either, so which one
     // opened it decides only how many characters to step over.  An
     // unterminated comment appends a diagnostic and returns where it stopped.
+    // Dispatches to skipCommentTurbo instead when Opts.turbo(): Borland's rule
+    // is the opposite one (a delimiter must be closed by its own kind), so
+    // that path is a full fork rather than a branch threaded through this one.
     void skipComment(bool Braced);
+    void skipCommentTurbo(bool Braced);
     void skipBraceComment();
     void skipParenthesisComment();
+
+    // Advances past a -std=turbo `//` line comment (already positioned at the
+    // first '/'), stopping before the newline that ends it (or at EOF).
+    void skipLineComment();
 
     Token scanIdentifierOrKeyword(size_t TokenStart);
     Token scanNumber(size_t TokenStart);
