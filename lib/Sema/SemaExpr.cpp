@@ -1166,6 +1166,18 @@ std::shared_ptr<Type> Sema::checkSetLit(const SetLiteralExpr& E, const std::shar
                 T->ElemType = Ctx_.getSubrange(TyInt, Window->first, Window->second);
             }
         }
+    } else if (T->ElemType && !T->ElemType->isError()) {
+        // Issue #404: a non-Integer ordinal element type (an Enum, most
+        // plausibly, but also e.g. a Subrange picked up from a variable's own
+        // type) has a fixed width of its own that does not depend on folding
+        // the literal's elements the way literalSetWindow does for Integer --
+        // it is exactly the same check checkSetBaseRange makes for a named
+        // `set of Base` (SemaType.cpp) and the one issue #227 added to the
+        // `x in [...]` adoption path above.  This, the OLDER untyped fallback
+        // that predates #227, never made it at all: `card([e0, e299])` for a
+        // >256-value enum silently dropped e299 past bit 255 in the runtime
+        // bitmask instead of being diagnosed.
+        checkSetBaseRange(*T->ElemType, E.Loc);
     }
     return T;
 }
@@ -1692,35 +1704,20 @@ void Sema::checkCallArgs(const Symbol& Sym, SourceLocation CallLoc,
             }
             if (!isConformable(*Param.Ty, *Actual)) {
                 // ISO §6.7.3.8: report whichever of a)/d)/the element type
-                // actually failed, in the same order isConformable checks
-                // them -- otherwise a packedness or index-type mismatch was
-                // reported as an element-type mismatch with the SAME type
-                // named on both sides ("expected 'integer', got 'integer'"),
-                // which only isConformable's old element-only check could
-                // never produce and this one now can.
-                const std::shared_ptr<Type> FormalOrdTy =
-                    !Param.Ty->ConformantBounds.empty()
-                        ? Param.Ty->ConformantBounds[0].OrdType : nullptr;
-                const std::shared_ptr<Type> ActualIdxTy = outerIndexTypeOf(*Actual);
-                if (Actual->Kind != TypeKind::Array
-                        && Actual->Kind != TypeKind::ConformantArray) {
-                    error(ArgNode.Loc, diag::err_conformant_actual_not_array,
-                          {Param.Name, At->Name});
-                } else if (Param.Ty->Packed != Actual->Packed) {
-                    error(ArgNode.Loc, diag::err_conformant_packed_mismatch,
-                          {Param.Name, Param.Ty->Packed ? "packed" : "unpacked",
-                           Actual->Packed ? "packed" : "unpacked"});
-                } else if (FormalOrdTy && !FormalOrdTy->isError()
-                               && ActualIdxTy && !ActualIdxTy->isError()
-                               && !isAssignCompatible(*FormalOrdTy, *ActualIdxTy)) {
-                    error(ArgNode.Loc, diag::err_conformant_index_type_mismatch,
-                          {Param.Name, FormalOrdTy->Name, ActualIdxTy->Name});
-                } else {
-                    error(ArgNode.Loc, diag::err_conformant_elem_mismatch,
-                          {Param.Name,
-                           Param.Ty->ElemType ? Param.Ty->ElemType->Name : "?",
-                           At->ElemType       ? At->ElemType->Name       : "?"});
-                }
+                // actually failed, in the same order (and at the same nesting
+                // level) isConformable itself checks them -- otherwise a
+                // packedness or index-type mismatch was reported as an
+                // element-type mismatch with the SAME type named on both
+                // sides ("expected 'integer', got 'integer'"), which only
+                // isConformable's old element-only check could never
+                // produce and this one now can.  Issue #406: this used to
+                // inspect only the OUTERMOST dimension itself instead of
+                // delegating to a helper that recurses the same way
+                // isConformable does, so a multi-dimensional schema whose
+                // mismatch was in an INNER dimension still fell through to
+                // the generic element-type message even though isConformable
+                // (which does recurse) was the very thing that rejected it.
+                diagnoseConformMismatch(Param.Name, ArgNode.Loc, *Param.Ty, *Actual);
             }
             // Conformant var params still require an lvalue.
             // A var-parameter actual is written to by the callee as surely
@@ -1869,6 +1866,50 @@ bool Sema::isConformable(const Type& Formal, const Type& Actual) const {
     if (Formal.ElemType->Kind == TypeKind::ConformantArray)
         return isConformable(*Formal.ElemType, *Actual.ElemType);
     return isAssignCompatible(*Formal.ElemType, *Actual.ElemType);
+}
+
+// Issue #406: this walks Formal/Actual in lock-step with isConformable above
+// -- same order of checks, same recursion into a formal ConformantArray's
+// ElemType -- so the diagnostic it reports names whichever dimension and
+// condition actually made isConformable(Formal, Actual) false, not only the
+// outermost one.  The two must never disagree about what makes a pair
+// (non-)conformable, or this could report a dimension that in fact conforms.
+void Sema::diagnoseConformMismatch(const std::string& ParamName, SourceLocation Loc,
+                                   const Type& Formal, const Type& Actual) {
+    if (Actual.Kind != TypeKind::Array && Actual.Kind != TypeKind::ConformantArray) {
+        error(Loc, diag::err_conformant_actual_not_array, {ParamName, Actual.Name});
+        return;
+    }
+    if (Formal.Packed != Actual.Packed) {
+        error(Loc, diag::err_conformant_packed_mismatch,
+              {ParamName, Formal.Packed ? "packed" : "unpacked",
+               Actual.Packed ? "packed" : "unpacked"});
+        return;
+    }
+    if (!Formal.ConformantBounds.empty()) {
+        const auto& FormalOrdTy = Formal.ConformantBounds[0].OrdType;
+        auto ActualIdxTy = outerIndexTypeOf(Actual);
+        if (FormalOrdTy && !FormalOrdTy->isError()
+                && ActualIdxTy && !ActualIdxTy->isError()
+                && !isAssignCompatible(*FormalOrdTy, *ActualIdxTy)) {
+            error(Loc, diag::err_conformant_index_type_mismatch,
+                  {ParamName, FormalOrdTy->Name, ActualIdxTy->Name});
+            return;
+        }
+    }
+    // ISO §6.6.3.8: a formal whose element type is itself a schema is a
+    // parameter of more than one dimension -- recurse the same way
+    // isConformable does, so an inner-dimension mismatch is diagnosed at the
+    // dimension it actually occurs in rather than reported as this level's
+    // (matching) element type.
+    if (Formal.ElemType && Actual.ElemType
+            && Formal.ElemType->Kind == TypeKind::ConformantArray) {
+        diagnoseConformMismatch(ParamName, Loc, *Formal.ElemType, *Actual.ElemType);
+        return;
+    }
+    error(Loc, diag::err_conformant_elem_mismatch,
+          {ParamName, Formal.ElemType ? Formal.ElemType->Name : "?",
+           Actual.ElemType             ? Actual.ElemType->Name : "?"});
 }
 
 bool Sema::isAssignCompatible(const Type& Dst, const Type& Src,
