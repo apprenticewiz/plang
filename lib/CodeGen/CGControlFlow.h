@@ -11,6 +11,8 @@
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/LLVMContext.h"
 
+#include "plang/Basic/LangOptions.h"
+
 #include "CGSymbolTable.h"
 #include "CGTypes.h"
 #include "RuntimeFunctionCache.h"
@@ -30,6 +32,7 @@ public:
                   CGSymbolTable& SymTab, CGTypes& Types, SetOps& Sets,
                   RuntimeFunctionCache& RtFns,
                   llvm::IntegerType* I1Ty, llvm::IntegerType* I64Ty,
+                  const plang::LangOptions& Opts,
                   std::function<llvm::Value*(const plang::ExprNode&)> EmitExpr,
                   std::function<void(const plang::StmtNode*)> EmitStmt,
                   std::function<llvm::Value*(llvm::Value*)> EnsureI1,
@@ -42,7 +45,7 @@ public:
                   std::function<bool(const plang::Type*)> OrdinalIsUnsigned,
                   std::function<llvm::Value*(std::function<llvm::Value*()>)> WithStackScope)
         : Ctx(Ctx), B(B), CurFn(CurFn), SymTab(SymTab), Types(Types), Sets(Sets),
-          RtFns(RtFns), I1Ty(I1Ty), I64Ty(I64Ty),
+          RtFns(RtFns), I1Ty(I1Ty), I64Ty(I64Ty), Opts(Opts),
           EmitExpr(std::move(EmitExpr)), EmitStmt(std::move(EmitStmt)),
           EnsureI1(std::move(EnsureI1)), ToI64(std::move(ToI64)),
           CoerceToType(std::move(CoerceToType)),
@@ -69,6 +72,7 @@ private:
     RuntimeFunctionCache& RtFns;
     llvm::IntegerType* I1Ty;
     llvm::IntegerType* I64Ty;
+    const plang::LangOptions& Opts;
     std::function<llvm::Value*(const plang::ExprNode&)> EmitExpr;
     std::function<void(const plang::StmtNode*)> EmitStmt;
     std::function<llvm::Value*(llvm::Value*)> EnsureI1;

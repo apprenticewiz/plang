@@ -324,8 +324,30 @@ std::unique_ptr<CaseStmt> Parser::parseCaseStmt() {
                 emitError(Current.toLoc(), diag::err_ep_case_otherwise);
             advance();
             Node->HasElse = true;
-            Node->Else    = parseStatement();
-            match(TokenKind::Semicolon);
+            if (Opts.turbo()) {
+                // Turbo's else/otherwise part is a STATEMENT LIST bounded by
+                // the case-statement's own 'end', the same shape a
+                // 'begin ... end' block's body has, just without the
+                // 'begin'/'end' keywords themselves (the case-statement's
+                // 'end' already closes it).  Parsed with the identical loop
+                // parseCompoundStmt uses for its own statement list, and
+                // wrapped in a CompoundStmt purely as a carrier so
+                // CaseStmt::Else stays exactly one child node whether the
+                // dialect is Turbo (a list) or ISO10206 (a single statement,
+                // below).
+                auto Seq = std::make_unique<CompoundStmt>();
+                Seq->Loc  = Current;
+                auto Stmt = parseStatement();
+                if (Stmt) Seq->Stmts.push_back(std::move(Stmt));
+                while (match(TokenKind::Semicolon)) {
+                    auto S = parseStatement();
+                    if (S) Seq->Stmts.push_back(std::move(S));
+                }
+                Node->Else = std::move(Seq);
+            } else {
+                Node->Else = parseStatement();
+                match(TokenKind::Semicolon);
+            }
             break;
         }
 

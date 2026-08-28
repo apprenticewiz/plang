@@ -255,10 +255,13 @@ void Codegen::Impl::init(const std::string& progName) {
     // Impl::StackScope's RAII (touches dynAllocaUsed_/builder/isTerminated,
     // none of it exposed otherwise) around a caller-supplied body, the same
     // "closure runs inside Impl-owned scope logic" shape RangeCheckGuards'
-    // emitGuard already uses for emitFail.
+    // emitGuard already uses for emitFail.  langOpts is passed by reference,
+    // the same way RangeCheckGuards already takes it, so emitCase's
+    // ISO-vs-Turbo unmatched-selector dialect check sees it directly rather
+    // than through a closure.
     controlFlow_ = std::make_unique<CGControlFlow>(ctx, builder, curFunc,
         *symTab_, *cgTypes_, *setOps_, *runtimeFns_,
-        i1Ty, i64Ty,
+        i1Ty, i64Ty, langOpts,
         [this](const ExprNode& e){ return emitExpr(e); },
         [this](const StmtNode* stmt){ emitStmt(stmt); },
         [this](llvm::Value* v){ return ensureI1(v); },
