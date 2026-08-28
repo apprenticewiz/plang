@@ -647,6 +647,48 @@ const char* schemaScriptTypeKind(const Type* T) {
         default:                return "integer";
     }
 }
+
+/// Issue #416: a field's own type -- or an array field's element type --
+/// might not itself be a SchemaTypeNode (the shape issue #143's guards
+/// already catch, right where this is called) but might instead be an
+/// ORDINARY (non-schema) record that recursively contains a member whose
+/// extent was probed against the ENCLOSING schema's own discriminant.
+/// Sema's ProbeDiscNames_ propagates into every nested resolveTypeImpl call
+/// reached while resolving the enclosing schema body (see SemaType.cpp,
+/// guarded on !ProbeDiscNames_.empty()), so a StringTypeNode/ArrayTypeNode/
+/// SubrangeTypeNode buried inside a nested record's own fields gets its
+/// ExtentLow/ExtentHigh set exactly like a top-level varying field would --
+/// but recordSchemaLayoutForScript's loop only ever looks at fd.Type (or,
+/// for an array field, at->Element) ONE level deep, so a nested record hides
+/// that from both of its guards and falls through to the generic scalar
+/// branch, recording the nested record's own compile-time-PROBE size (every
+/// discriminant pinned to 1 -- see resolveNamed's own comment on the probe
+/// binding) as if it were that field's real, run-time-constant size.
+///
+/// Walks a nested record's own fields (and, transitively, any record nested
+/// further inside those) for exactly the shapes the caller already bails on
+/// at the top level: a schema-typed member, a variant part, or a member
+/// whose own type-node carries a probe-derived ExtentLow/ExtentHigh.
+/// Present on a top-level array field is normal and required -- the sidecar
+/// has a dedicated slot for its low/high forms -- but nothing here gives a
+/// NESTED member's own extent form anywhere to go, so its presence at any
+/// depth below the top means this whole subtree's size is not the
+/// compile-time constant the generic scalar branch would otherwise assume,
+/// and the containing schema's recording must bail the same way it already
+/// does for a direct schema-typed field.
+bool recordTypeHasOutOfScopeMember(const RecordTypeNode& rt) {
+    if (rt.Variant) return true;
+    for (const auto& fd : rt.Fields) {
+        auto* at = llvm::dyn_cast<ArrayTypeNode>(fd.Type.get());
+        if (llvm::isa<SchemaTypeNode>(fd.Type.get())) return true;
+        if (at && llvm::isa<SchemaTypeNode>(at->Element.get())) return true;
+        if (fd.Type->ExtentLow || fd.Type->ExtentHigh) return true;
+        const TypeNode* elemOrField = at ? at->Element.get() : fd.Type.get();
+        if (auto* nestedRt = llvm::dyn_cast<RecordTypeNode>(elemOrField))
+            if (recordTypeHasOutOfScopeMember(*nestedRt)) return true;
+    }
+    return false;
+}
 } // namespace
 
 void CGDebugInfo::recordSchemaLayoutForScript(const Type& T, const RecordTypeNode& rt,
@@ -723,6 +765,13 @@ void CGDebugInfo::recordSchemaLayoutForScript(const Type& T, const RecordTypeNod
         // run this pass at all).
         if (llvm::isa<SchemaTypeNode>(fd.Type.get())) return;
         if (at && llvm::isa<SchemaTypeNode>(at->Element.get())) return;
+        // Issue #416: neither guard above fires for an ORDINARY (non-schema)
+        // record field/element that itself, recursively, contains a member
+        // probed against this schema's own discriminant -- see
+        // recordTypeHasOutOfScopeMember's own comment for exactly why that
+        // shape is just as out of scope as the two direct checks above it.
+        if (auto* nestedRt = llvm::dyn_cast<RecordTypeNode>(at ? at->Element.get() : fd.Type.get()))
+            if (recordTypeHasOutOfScopeMember(*nestedRt)) return;
         if (at && (!at->ExtentLow || !at->ExtentHigh)) return; // see comment above
         if (!at && (fd.Type->ExtentLow || fd.Type->ExtentHigh)) return; // varying non-array field, out of scope
 
