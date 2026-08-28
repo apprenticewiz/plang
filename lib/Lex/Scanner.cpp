@@ -22,7 +22,12 @@ using namespace plang;
 // ISO 7185 and Extended Pascal have no such convention and are left alone;
 // 0x1A is just another byte to them (an unexpected character wherever it's
 // not inside a string or comment, same as any other control byte).
-static std::string_view truncateAtCtrlZ(std::string_view Text, const LangOptions& Opts) {
+//
+// A static member (declared in Scanner.h) rather than a file-local free
+// function, so that Directives.cpp's openInclude can apply the identical
+// rule to a buffer an {$I file}/{$INCLUDE file} opens mid-scan, the same
+// way each constructor below already applies it to the buffer it opens.
+std::string_view Scanner::truncateAtCtrlZ(std::string_view Text, const LangOptions& Opts) {
     if (!Opts.turbo()) return Text;
     if (const size_t Z = Text.find('\x1A'); Z != std::string_view::npos)
         return Text.substr(0, Z);
@@ -120,6 +125,13 @@ Scanner::Scanner(SourceManager& SM, std::string Filename,
     if (auto ID = SM.addFile(Filename)) {
         FID  = *ID;
         Text = truncateAtCtrlZ(SM.getBufferData(FID), Opts);
+        // This file's own identity, so that a self-including {$I <this
+        // file's own name>} is caught by openInclude's ordinary
+        // OpenIncludePaths check rather than recursing at all -- see
+        // OpenIncludePaths's own comment in Scanner.h for the invariant
+        // this establishes (one entry per file currently open, main file
+        // included).
+        OpenIncludePaths.push_back(canonicalIdentity(Filename));
         return;
     }
     // No buffer, so no location to report it at; Text stays empty and next()
@@ -143,6 +155,17 @@ Scanner::Scanner(SourceManager& SM, std::string SourceName, std::string Content,
     // SourceName is not moved from here (unlike Content): the failure path
     // below still needs it, and a moved-from string is only left empty by
     // convention, not by guarantee.
+    //
+    // Unlike the file-path constructor above, nothing is pushed onto
+    // OpenIncludePaths here: SourceName (e.g. "<pmi>") names no real file
+    // on disk for a self-include to reopen in the first place, so there is
+    // no cycle to protect against for this buffer itself. An {$I file}
+    // reached while scanning it (today only reachable if some future
+    // caller ever constructs this way under -std=turbo; loadPMI's own use
+    // of this constructor always forces -std=iso10206, which has no
+    // directives at all) still resolves and is still tracked correctly
+    // from that point on -- only the synthetic outermost buffer itself is
+    // unprotected.
     if (auto ID = SM.addBuffer(SourceName, std::move(Content))) {
         FID  = *ID;
         Text = truncateAtCtrlZ(SM.getBufferData(FID), Opts);
@@ -155,6 +178,15 @@ Token Scanner::next() {
     for (;;) {
         skipWhitespaceAndComments();
         if (Pos >= Text.size()) {
+            // The buffer currently being read has run out, but an
+            // {$I file}/{$INCLUDE file} may still have an outer file
+            // waiting to resume -- exactly the "splice the included text
+            // in, then resume where the directive ended" contract
+            // openInclude/popInclude (Directives.cpp) implement.  Checked
+            // before the real-Eof handling below: reaching the end of an
+            // included buffer is not the end of the token stream unless
+            // there is nothing left to pop back to.
+            if (popInclude()) continue;
             // A live {$IFDEF}/{$IFNDEF} whose own {$ENDIF} the file simply
             // never reached -- the one unterminated-conditional case
             // skipToNextConditionalMarker cannot itself catch, since it is

@@ -20,16 +20,18 @@
 // none does.
 //
 // The message-directive category ({$MESSAGE}/{$INFO}/{$NOTE}/{$HINT}/
-// {$WARNING}/{$ERROR}/{$FATAL}) and conditional compilation ({$DEFINE}/
-// {$UNDEF}/{$IFDEF}/{$IFNDEF}/{$ELSE}/{$ELSEIF}/{$ENDIF}) are both
-// implemented here.  Two later categories can share this same dispatch
-// point without it needing to change shape at all:
+// {$WARNING}/{$ERROR}/{$FATAL}), conditional compilation ({$DEFINE}/
+// {$UNDEF}/{$IFDEF}/{$IFNDEF}/{$ELSE}/{$ELSEIF}/{$ENDIF}), and
+// {$I file}/{$INCLUDE file} source inclusion are all implemented here.  One
+// later category can share this same dispatch point without it needing to
+// change shape at all:
 //
-//   - {$I file} includes add a dispatchIncludeDirective the same way.
 //   - {$R+}-style switches (letter or long name from CompilerSwitches.def,
 //     '+'/'-'/' ON'/' OFF' argument, recorded into a SwitchTable) are a
 //     second such handler; switchFromLetter/switchFromLongName already exist
-///    for it in SwitchTable.h, just not called from anywhere yet.
+///    for it in SwitchTable.h, just not called from anywhere yet.  Its
+//     letter 'I' already overlaps {$I file}'s own name -- see
+//     dispatchIncludeDirective's own comment for how the two are told apart.
 //
 // Conditional compilation is the one category that does not fit
 // dispatchDirective's plain "recognize Name, act, return" shape: a false
@@ -61,9 +63,11 @@
 #include "plang/Basic/StringUtil.h"
 
 #include <cctype>
+#include <filesystem>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <system_error>
 
 using namespace plang;
 
@@ -182,12 +186,15 @@ void Scanner::dispatchDirective(std::string_view Body, SourceLocation Loc) {
 
     if (dispatchMessageDirective(Name, Argument, Loc)) return;
     if (dispatchConditionalDirective(Name, Argument, Loc)) return;
+    if (dispatchIncludeDirective(Name, Argument, Loc)) return;
 
-    // Cluster B's remaining items ({$I file}, {$R+}-style switches -- see
-    // this file's header comment) each add their own "try this category"
-    // call above this line.  Neither exists yet, so every directive name but
-    // the message-directive and conditional-compilation ones reaches here.
-    // Reported rather than silently ignored or treated as a plain comment: a
+    // Cluster B's one remaining item ({$R+}-style switches -- see this
+    // file's header comment) adds its own "try this category" call above
+    // this line.  It does not exist yet, so every directive name but the
+    // message-directive, conditional-compilation, and include ones reaches
+    // here -- including {$I+}/{$I-}, which dispatchIncludeDirective
+    // deliberately leaves unhandled (see its own comment).  Reported
+    // rather than silently ignored or treated as a plain comment: a
     // `{$R+}` that does nothing and says nothing is worse than one that says
     // so.
     emitError(Loc, diag::warn_directive_unknown, {Name});
@@ -407,4 +414,151 @@ void Scanner::reportUnterminatedConditionals() {
         emitError(F.OpenLoc, diag::err_directive_unterminated_conditional,
                   {F.OpenName});
     CondStack.clear();
+}
+
+// ---------------------------------------------------------------------------
+// {$I file}/{$INCLUDE file}: Turbo source inclusion
+// ---------------------------------------------------------------------------
+//
+// Most of the design is already documented where each piece is declared in
+// Scanner.h (IncludeFrame/IncludeStack/OpenIncludePaths/canonicalIdentity/
+// dispatchIncludeDirective/resolveIncludePath/openInclude/popInclude) and in
+// next()'s own comment in Scanner.cpp for how popInclude fits into the
+// ordinary Eof check.  This section is just the bodies.
+
+namespace {
+
+// True when Path names a file that can actually be read as ordinary text --
+// not a directory, not a dangling symlink, not something that simply does
+// not exist.  is_regular_file follows symlinks itself, so a symlink to a
+// real file passes and one to nothing (or to a directory) does not.
+bool isReadableFile(const std::filesystem::path& Path) {
+    std::error_code Ec;
+    return std::filesystem::is_regular_file(Path, Ec) && !Ec;
+}
+
+} // namespace
+
+std::string Scanner::canonicalIdentity(const std::string& Path) {
+    std::error_code Ec;
+    const std::filesystem::path Canon = std::filesystem::canonical(Path, Ec);
+    return Ec ? Path : Canon.string();
+}
+
+bool Scanner::dispatchIncludeDirective(std::string_view Name,
+                                       std::string_view Argument,
+                                       SourceLocation Loc) {
+    const std::string Folded = toLower(Name);
+    if (Folded != "i" && Folded != "include") return false;
+
+    // {$I+}/{$I-}: the (separately tracked, not yet dispatched from
+    // anywhere -- CompilerSwitches.def's own later task) IOChecks switch,
+    // not this directive.  Its long name is "iochecks", never "include", so
+    // only the one-letter spelling can collide, and only for exactly these
+    // two arguments -- see this function's own comment in Scanner.h.
+    if (Folded == "i" && (Argument == "+" || Argument == "-")) return false;
+
+    // `fpc -Mtp` accepts both {$I foo.inc} and {$I 'foo.inc'} (confirmed
+    // empirically); matched here by stripping one layer of surrounding
+    // quotes, if present, before anything else sees Filename.  No escape
+    // handling inside the quotes -- a quoted include filename containing a
+    // literal quote is not a case real Turbo/FPC programs exercise, and
+    // this project's own Pascal string-literal escaping is a wholly
+    // separate grammar this directive argument is not one of.
+    std::string_view Filename = Argument;
+    if (Filename.size() >= 2 && Filename.front() == '\'' && Filename.back() == '\'')
+        Filename = Filename.substr(1, Filename.size() - 2);
+
+    if (Filename.empty()) {
+        emitError(Loc, diag::err_directive_include_expects_filename, {Name});
+        return true;
+    }
+
+    openInclude(Filename, Loc);
+    return true;
+}
+
+std::optional<std::string> Scanner::resolveIncludePath(std::string_view Filename) const {
+    namespace fs = std::filesystem;
+    const fs::path FP{std::string(Filename)};
+
+    if (FP.is_absolute())
+        return isReadableFile(FP) ? std::optional<std::string>(FP.string()) : std::nullopt;
+
+    // THIS scanner's currently active buffer's own directory, not the
+    // outermost file's: SM->getBufferName(FID) always names whichever
+    // buffer is presently being scanned, whether that is the main file or
+    // one an earlier {$I} already spliced in, so a nested include resolves
+    // relative to its own immediate parent -- most C-like #include
+    // conventions' rule, and the one this directive's own Scanner.h comment
+    // documents.
+    const fs::path CurDir = fs::path(std::string(SM->getBufferName(FID))).parent_path();
+    if (const fs::path Candidate = CurDir / FP; isReadableFile(Candidate))
+        return Candidate.string();
+
+    // Then -Fi<dir>, in the order given -- the same "try each candidate,
+    // first hit wins" shape Sema::resolveImports already uses for
+    // Opts.ModuleSearchPaths/.pmi.
+    for (const std::string& Dir : Opts.IncludeSearchPaths)
+        if (const fs::path Candidate = fs::path(Dir) / FP; isReadableFile(Candidate))
+            return Candidate.string();
+
+    return std::nullopt;
+}
+
+void Scanner::openInclude(std::string_view Filename, SourceLocation Loc) {
+    const std::optional<std::string> Resolved = resolveIncludePath(Filename);
+    if (!Resolved) {
+        emitError(Loc, diag::err_directive_include_not_found, {Filename});
+        return;
+    }
+
+    const std::string Identity = canonicalIdentity(*Resolved);
+    bool AlreadyOpen = false;
+    for (const std::string& Open : OpenIncludePaths)
+        if (Open == Identity) { AlreadyOpen = true; break; }
+    if (AlreadyOpen) {
+        // A includes A (Identity matches the main file's own entry, or an
+        // include still open further up the stack), or A includes B
+        // includes ... includes A -- either way, opening it for real would
+        // recurse into the exact same directive again the moment the new
+        // buffer reached it, forever.  Reported instead, and nothing is
+        // pushed: scanning simply continues in the current buffer right
+        // after this directive.
+        emitError(Loc, diag::err_directive_include_cycle, {Filename});
+        return;
+    }
+
+    const std::optional<FileID> NewID = SM->addFile(*Resolved);
+    if (!NewID) {
+        // resolveIncludePath just confirmed *Resolved names a readable
+        // regular file, so reaching here means addFile itself failed
+        // anyway: a race (removed, or its permissions changed, between the
+        // two calls) or SourceManager's own coordinate space has no room
+        // left for it (wouldOverflow).  Neither is common enough to need a
+        // diagnostic distinct from "could not be included".
+        emitError(Loc, diag::err_directive_include_not_found, {Filename});
+        return;
+    }
+
+    // Everything above only ever reads Scanner state; this is the one
+    // place that changes it, and only once every failure path above has
+    // already returned -- so a failed include leaves FID/Text/Pos, and
+    // both stacks, exactly as they were.
+    IncludeStack.push_back(IncludeFrame{FID, Text, Pos});
+    OpenIncludePaths.push_back(Identity);
+    FID  = *NewID;
+    Text = truncateAtCtrlZ(SM->getBufferData(FID), Opts);
+    Pos  = 0;
+}
+
+bool Scanner::popInclude() {
+    if (IncludeStack.empty()) return false;
+    const IncludeFrame& F = IncludeStack.back();
+    FID  = F.FID;
+    Text = F.Text;
+    Pos  = F.Pos;
+    IncludeStack.pop_back();
+    OpenIncludePaths.pop_back();
+    return true;
 }

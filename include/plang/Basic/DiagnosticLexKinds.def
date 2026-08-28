@@ -51,3 +51,16 @@ DIAG(err_directive_else_already_seen, Error,
      "'%0' after '{$ELSE}' for the same '{$IFDEF}'/'{$IFNDEF}'")
 DIAG(err_directive_unterminated_conditional, Error,
      "no matching '{$ENDIF}' for this '%0' directive")
+
+// `{$I file}`/`{$INCLUDE file}` (lib/Lex/Directives.cpp's
+// dispatchIncludeDirective/resolveIncludePath/openInclude).  `{$I+}`/`{$I-}`
+// are deliberately not among these: that is the (separately tracked, not
+// yet dispatched -- CompilerSwitches.def's own task) IOChecks switch, and
+// dispatchIncludeDirective leaves it alone, unhandled, so it keeps reaching
+// warn_directive_unknown exactly as it did before this file existed.
+DIAG(err_directive_include_expects_filename, Error,
+     "'%0' directive expects a filename")
+DIAG(err_directive_include_not_found, Error,
+     "cannot open include file '%0'")
+DIAG(err_directive_include_cycle, Error,
+     "include cycle: '%0' is already being included")

@@ -89,6 +89,14 @@ BRACE_CHECK_EXEMPT = {
     "test/Driver/Turbo/an-unrecognized-directive-is-a-clear-diagnostic-not-silence.pas",
     "test/Driver/Turbo/message-directives-are-informational-and-still-compile.pas",
     "test/Driver/Turbo/warning-directives-warn-and-still-compile.pas",
+    # Same reasoning as the three entries just above (only ever compiles
+    # under -std=turbo -- see its own RUN: line -- so the matched-delimiter
+    # rule this check doesn't model is the one that actually applies), for
+    # a fourth file added when the I/INCLUDE directive did: its header
+    # prose literally discusses '{$I+}'/'{$I-}' syntax, the very two
+    # spellings dispatchIncludeDirective must NOT treat as an include (see
+    # CompilerSwitches.def's 'i' == IOChecks).  Not a hazard to fix.
+    "test/Driver/Turbo/dollar-i-plus-and-minus-are-not-mistaken-for-an-include.pas",
 }
 
 

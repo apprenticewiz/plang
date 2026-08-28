@@ -231,6 +231,17 @@ struct LangOptions {
     /// Directories to search for .pmi module interface files (from -I flags).
     std::vector<std::string> ModuleSearchPaths;
 
+    /// Directories to search for a Turbo `{$I file}`/`{$INCLUDE file}`
+    /// (from -Fi flags), tried after the including file's own directory --
+    /// see dispatchIncludeDirective's own comment in Scanner.h for the full
+    /// resolution order.  Deliberately a separate list from
+    /// ModuleSearchPaths/-I above, and threaded to the Scanner the same way:
+    /// -I already means something else entirely (the ISO 10206 .pmi module
+    /// search path, consulted by Sema, never by the Scanner), and reusing it
+    /// for an unrelated file kind would make one flag mean two different
+    /// things depending on which dialect is active.
+    std::vector<std::string> IncludeSearchPaths;
+
     /// Symbols defined for -std=turbo's `{$IFDEF}`/`{$IFNDEF}`/`{$ELSEIF}`
     /// conditional compilation: the command line's `-d<symbol>`/`-u<symbol>`
     /// (applied in the order given, so a later -u undoes an earlier -d for
