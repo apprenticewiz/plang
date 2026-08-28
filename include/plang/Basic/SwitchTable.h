@@ -136,16 +136,37 @@ class SwitchTable {
 public:
     /// Records that from \p Loc onwards the state is \p State.
     ///
-    /// Locations must arrive in nondecreasing order, which is the order the
-    /// scanner produces them in.  A second point at the same location replaces
-    /// the first: two directives in one comment settle to their combined
-    /// effect, and only their combined effect is reachable.
+    /// Locations usually arrive in nondecreasing order -- that is the order
+    /// ordinary, single-buffer scanning produces them in, and the common case
+    /// this stays an O(1) append for.  They do NOT arrive that way across an
+    /// `{$I file}`/`{$INCLUDE file}` boundary: an included buffer occupies a
+    /// *later* stretch of the shared coordinate space than the file that
+    /// included it (SourceManager lays buffers out in the order they are
+    /// opened, not the order their text is read), so the point the scanner
+    /// records on RESUMING the includer -- see openInclude/popInclude in
+    /// Lex/Directives.cpp -- has a *smaller* raw offset than whatever the
+    /// include's own last point was, even though it comes later in read
+    /// order.  A plain "replace the back element when the new point does not
+    /// sort after it" (this method's previous shape) silently discarded that
+    /// last in-include point instead of inserting the resume point where it
+    /// actually belongs, corrupting every query for a location later in the
+    /// include than its own last switch directive.  Insert in sorted
+    /// position instead: the common case is still one comparison and a
+    /// push_back, and the out-of-order case -- bounded by how many `{$...}`
+    /// switch directives one file has, never large -- costs a linear
+    /// shift instead of silent data loss.  A second point at the same
+    /// location still replaces the first: two directives in one comment
+    /// settle to their combined effect, and only their combined effect is
+    /// reachable.
     void record(SourceLocation Loc, CompilerState State) {
-        if (!Points.empty() && Points.back().Loc.raw() >= Loc.raw()) {
-            Points.back() = {Loc, State};
+        const auto It = std::lower_bound(
+            Points.begin(), Points.end(), Loc.raw(),
+            [](const Point& P, unsigned Raw) { return P.Loc.raw() < Raw; });
+        if (It != Points.end() && It->Loc.raw() == Loc.raw()) {
+            It->State = State;
             return;
         }
-        Points.push_back({Loc, State});
+        Points.insert(It, Point{Loc, State});
     }
 
     /// The state in force at \p Loc, or \p Default where nothing was recorded

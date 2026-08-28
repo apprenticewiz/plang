@@ -19,6 +19,7 @@
 #include "CGTypes.h"
 #include "ClosureAndCallABI.h"
 #include "FileVarHelpers.h"
+#include "RangeCheckGuards.h"
 #include "RuntimeFunctionCache.h"
 #include "SchemaAccess.h"
 #include "SetOps.h"
@@ -37,11 +38,12 @@ public:
                BuiltinIO& Builtins, ClosureAndCallABI& ClosureAbi,
                SchemaAccess& Schema, CGTypes& Types, CGSymbolTable& SymTab,
                CGLinkage& Linkage, SetOps& Sets, StringCallMarshalling& StrCall,
-               CGPackUnpack& PackUnpack,
+               CGPackUnpack& PackUnpack, RangeCheckGuards& RangeGuards,
                llvm::IntegerType* I8Ty, llvm::IntegerType* I64Ty, llvm::PointerType* PtrTy,
                std::function<llvm::Value*(const plang::ExprNode&)> EmitExpr,
                std::function<llvm::Value*(const plang::ExprNode&)> EmitLValue,
                std::function<llvm::Value*(llvm::Value*)> ToI64,
+               std::function<llvm::Value*(llvm::Value*)> EnsureI1,
                std::function<const plang::TypeNode*(const plang::TypeNode*)> InitialStateShapeOf,
                std::function<bool(const plang::TypeNode*)> HasInitialState,
                std::function<void(llvm::Value*, llvm::Type*, const plang::TypeNode*)> EmitInitialState,
@@ -55,10 +57,10 @@ public:
         : Ctx(Ctx), Mod(Mod), B(B), FileVars(FileVars), RtFns(RtFns),
           Builtins(Builtins), ClosureAbi(ClosureAbi), Schema(Schema), Types(Types),
           SymTab(SymTab), Linkage(Linkage), Sets(Sets), StrCall(StrCall),
-          PackUnpack(PackUnpack),
+          PackUnpack(PackUnpack), RangeGuards(RangeGuards),
           I8Ty(I8Ty), I64Ty(I64Ty), PtrTy(PtrTy),
           EmitExpr(std::move(EmitExpr)), EmitLValue(std::move(EmitLValue)),
-          ToI64(std::move(ToI64)),
+          ToI64(std::move(ToI64)), EnsureI1(std::move(EnsureI1)),
           InitialStateShapeOf(std::move(InitialStateShapeOf)),
           HasInitialState(std::move(HasInitialState)),
           EmitInitialState(std::move(EmitInitialState)),
@@ -86,12 +88,22 @@ private:
     SetOps& Sets;
     StringCallMarshalling& StrCall;
     CGPackUnpack& PackUnpack;
+    /// TP's Assertions switch, read through RangeGuards.assertionsAt --
+    /// reused rather than duplicated here, since RangeCheckGuards already
+    /// carries the Opts reference this needs and the emitGuard/reporter
+    /// shape Assert's own guard is built from.
+    RangeCheckGuards& RangeGuards;
     llvm::IntegerType* I8Ty;
     llvm::IntegerType* I64Ty;
     llvm::PointerType* PtrTy;
     std::function<llvm::Value*(const plang::ExprNode&)> EmitExpr;
     std::function<llvm::Value*(const plang::ExprNode&)> EmitLValue;
     std::function<llvm::Value*(llvm::Value*)> ToI64;
+    /// Normalizes a Boolean expression's raw LLVM value to i1, the type
+    /// CreateCondBr (and so RangeGuards.emitGuard) requires -- the same
+    /// widening every OTHER boolean-condition call site (emitIf, emitWhile,
+    /// ...) already goes through, needed here for Assert's own condition.
+    std::function<llvm::Value*(llvm::Value*)> EnsureI1;
     std::function<const plang::TypeNode*(const plang::TypeNode*)> InitialStateShapeOf;
     std::function<bool(const plang::TypeNode*)> HasInitialState;
     std::function<void(llvm::Value*, llvm::Type*, const plang::TypeNode*)> EmitInitialState;

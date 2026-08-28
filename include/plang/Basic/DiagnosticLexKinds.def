@@ -64,3 +64,17 @@ DIAG(err_directive_include_not_found, Error,
      "cannot open include file '%0'")
 DIAG(err_directive_include_cycle, Error,
      "include cycle: '%0' is already being included")
+
+// {$R+}-style switches (CompilerSwitches.def, dispatchSwitchDirective) and
+// the accept-and-ignore table (dispatchIgnoredDirective) -- both in
+// Lex/Directives.cpp.  A switch whose Argument does not parse as one of
+// '+'/'-'/'on'/'off' is deliberately left unclaimed by
+// dispatchSwitchDirective rather than diagnosed here: real Borland/FPC
+// double up several of these same letters for an unrelated named directive
+// plang does not implement (`{$R resourcefile}`, `{$L object.o}`, ...), so a
+// switch letter with a non-toggle argument falls through to
+// warn_directive_unknown -- an honest "plang has never heard of this",
+// rather than a "you spelled the switch wrong" that would be true only by
+// coincidence.
+DIAG(warn_directive_ignored, Warning,
+     "compiler directive '%0' is recognized but has no effect")

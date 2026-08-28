@@ -709,8 +709,17 @@ private:
     [[nodiscard]] bool checkBuiltinArity(BuiltinID ID,
                                          const std::string& LowerName,
                                          SourceLocation Loc, size_t NumArgs);
-    /// Diagnoses use of a required word that only Extended Pascal has while
-    /// reading standard Pascal.  Returns false when a diagnostic was emitted.
+    /// Diagnoses use of a built-in name the active dialect does not declare
+    /// (Sym.NotInDialect, set at registration from Builtins.def's own
+    /// Dialects mask -- see registerBuiltins).  Named checkEPOnly from when
+    /// every such name was Extended Pascal's alone; picks between
+    /// err_ep_required_name and err_turbo_required_name by asking
+    /// builtinDialects(Sym.BuiltinKind) which dialect(s) the name is
+    /// ACTUALLY declared for, rather than assuming, so a Turbo-only name
+    /// (Assert, the first one) is not told it is an Extended Pascal
+    /// extension -- which would also be wrong in the specific way that
+    /// implies -std=iso10206 accepts it, when no dialect but Turbo does.
+    /// Returns false when a diagnostic was emitted.
     [[nodiscard]] bool checkEPOnly(const Symbol& Sym, SourceLocation Loc);
     /// Diagnoses a read-parameter of a type §6.9.2 does not read into.
     void checkReadParamType(const Type& T, SourceLocation Loc);

@@ -40,6 +40,15 @@ public:
     /// errors are already recorded in the shared diagnostics vector.
     [[nodiscard]] std::unique_ptr<ProgramNode> parse();
 
+    /// The `{$R+}`-style switch table Lex built up while parse() drove it
+    /// through the whole token stream (every include it spliced in along the
+    /// way included), or null if none was ever recorded -- forwards to
+    /// Scanner::switches(), whose own comment explains why a caller has to
+    /// ask for this explicitly rather than see it appear on Opts by itself.
+    /// Meaningful only after parse() returns; before that, Lex has not
+    /// necessarily read the directive that would have built it yet.
+    [[nodiscard]] std::shared_ptr<const SwitchTable> switches() const { return Lex.switches(); }
+
 private:
     LangOptions              Opts;         // dialect and warning options (owned copy)
     Scanner                  Lex;          // token source; owned by the parser

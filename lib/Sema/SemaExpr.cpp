@@ -814,15 +814,24 @@ bool Sema::checkBuiltinArity(BuiltinID ID, const std::string& LowerName,
 }
 
 bool Sema::checkEPOnly(const Symbol& Sym, SourceLocation Loc) {
-    // Every builtin plang has is Extended Pascal's, so the message names that
-    // standard; the first Turbo-only name is what will make it have to say
-    // which dialect, and the mask it would say it from is already recorded.
-    //
     // The dialect test already happened, at registration, against the mask in
-    // Builtins.def.  Asking extendedPascal() again here would be a second
-    // answer to the same question, and the wrong one as soon as a third
-    // dialect declares a name the second does not.
+    // Builtins.def.  Asking extendedPascal()/turbo() again here would be a
+    // second answer to the same question -- and Assert (Dialects = TP) is
+    // exactly the case where re-deriving it from Opts.Std would give the
+    // wrong one: this Sema instance's own dialect is whichever ONE was
+    // refused, never the name's, so it says nothing about which dialect
+    // WOULD have accepted it.
     if (!Sym.NotInDialect) return true;
+    // Turbo-only (Assert, the first one, and the shape any future one takes)
+    // gets its own message: err_ep_required_name unconditionally claims "an
+    // Extended Pascal extension," which is not just imprecise but actively
+    // wrong for a name EP does not have either -- it reads as a promise that
+    // -std=iso10206 accepts it.
+    const unsigned Dialects = builtinDialects(Sym.BuiltinKind);
+    if ((Dialects & LangOptions::D_Turbo) && !(Dialects & LangOptions::D_ISO10206)) {
+        error(Loc, diag::err_turbo_required_name, {Sym.Name});
+        return false;
+    }
     error(Loc, diag::err_ep_required_name, {Sym.Name});
     return false;
 }

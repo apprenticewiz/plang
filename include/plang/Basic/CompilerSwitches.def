@@ -55,4 +55,27 @@ SWITCH(Assertions,     'c', "assertions",     true,  false)
 SWITCH(WritableConst,  'j', "writeableconst", true,  false)
 SWITCH(GenerateGoto,   'w', "stackframes",    false, false)
 
+// FPC additions with no Borland Pascal 7 ancestor and, unlike every switch
+// above, no single-letter spelling in either compiler: confirmed against
+// fpc's own compiler source (scandir.pas registers 'OBJECTCHECKS' and
+// 'GOTO' only through its long-name directive table, never through
+// switches.pas's turboSwitchTable, which gives every OTHER letter A-Z some
+// single-character meaning) and against `fpc -Mtp` itself, which rejects
+// `{$IFOPT OBJECTCHECKS}`/`{$IFOPT GOTO}` outright as an "Illegal compiler
+// switch" -- {$IFOPT} only ever takes a letter.  '\0' here is that answer,
+// not a placeholder for a letter nobody got around to picking: inventing
+// one would mean claiming some OTHER real Borland/FPC directive's actual
+// letter (every letter A-Z already means something in real Turbo/FPC, even
+// the ones this project does not implement) for a directive it does not
+// spell that way.  switchFromLetter can never match '\0' -- a directive
+// name reaching it is always at least one real alphabetic character -- so
+// this costs nothing at the one call site that matters.
+//
+// Goto's TurboDefault of true is `fpc -h`'s own "-Sg Enable LABEL and GOTO
+// (default in -Mtp and -Mdelphi)"; ObjectChecks' false is the conservative
+// choice for a check on a language feature (Turbo's `object` types) this
+// milestone does not implement either.
+SWITCH(ObjectChecks,   '\0', "objectchecks",  false, false)
+SWITCH(Goto,           '\0', "goto",          true,  false)
+
 #undef SWITCH

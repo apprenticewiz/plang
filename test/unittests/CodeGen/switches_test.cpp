@@ -158,19 +158,23 @@ TEST(CompilerSwitches, ASwitchIsFoundByEitherSpelling) {
     EXPECT_EQ(switchFromLongName("nosuchswitch"), std::nullopt);
 }
 
-TEST(CompilerSwitches, EverySwitchHasBothSpellingsAndTheyAreDistinct) {
+TEST(CompilerSwitches, EveryLetteredSwitchIsDistinctAndEveryOneHasALongName) {
     // A duplicated letter would make `{$IFOPT}` answer about the wrong switch,
-    // silently, for one of the two.
+    // silently, for one of the two.  '\0' is not a duplicate-in-waiting: it is
+    // ObjectChecks/Goto's honest answer (see CompilerSwitches.def's own
+    // comment) that they have no single-letter spelling in real Turbo/FPC at
+    // all, and switchFromLetter can never be asked about '\0' for real, since
+    // a directive name reaching it is always at least one alphabetic
+    // character.
     std::string Letters;
     for (unsigned I = 0; I < NumSwitches; ++I) {
         const auto S = static_cast<Switch>(I);
-        ASSERT_NE(switchLetter(S), '\0');
         ASSERT_FALSE(switchLongName(S).empty());
+        if (switchLetter(S) == '\0') continue;
         EXPECT_EQ(Letters.find(switchLetter(S)), std::string::npos)
             << "two switches spelled '" << switchLetter(S) << "'";
         Letters += switchLetter(S);
     }
-    EXPECT_EQ(Letters.size(), NumSwitches);
 }
 
 TEST(CompilerSwitches, TurboStartsWithRangeCheckingOffAndPlangDoesNot) {

@@ -1226,6 +1226,18 @@ int frontendPC1Main(int Argc, char *Argv[]) {
     auto Program = P.parse();
     if (!Program) { emitAll(); return 1; }
 
+    // Parser::switches() forwards to the Scanner it moved Sc into, which has
+    // now read the whole token stream (every `{$I file}`/`{$INCLUDE file}`
+    // it spliced in along the way included) and so has seen every `{$R+}`-
+    // style switch directive there is to see.  Opts itself is a plain value
+    // copied into Sc/P at their own construction above (see Scanner::Opts's
+    // own comment for why), so nothing below sees what Sc recorded unless
+    // this attaches it back on -- null for every ISO 7185/Extended Pascal
+    // compile, and for a Turbo one that never wrote a switch directive,
+    // which is exactly what keeps LangOptions::switchOn on its no-table fast
+    // path for both (SwitchTable.h's own "null means none" contract).
+    Opts.Switches = P.switches();
+
     if (DumpParseTree)
         return withOutput([&](std::ostream& Os) { printAst(*Program, Os); });
 

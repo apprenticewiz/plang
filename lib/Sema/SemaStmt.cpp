@@ -1188,6 +1188,32 @@ void Sema::checkCallStmt(const CallStmt& S) {
             return;
         }
 
+        // TP-only: Assert(cond: Boolean [; msg: string]).  Type-checked
+        // exactly the same whether or not {$C-} is in effect at S.Loc --
+        // CGProcCall::emitCallStmt is where the switch is actually read, and
+        // it decides only whether the call is generated at all, not whether
+        // it type-checks; a program with assertions off still gets told
+        // about a type error in a call it wrote.  The message argument reuses
+        // err_string_fn_arg_type, the same "must be char or string" check
+        // EQ/LT/GT/... already give their own arguments, rather than a
+        // second, near-identical diagnostic just for this.
+        if (Lo == "assert" && !S.Args.empty()) {
+            auto CondTy = checkExpr(*S.Args[0]);
+            if (!CondTy->isError() && CondTy->Kind != TypeKind::Boolean)
+                error(S.Args[0]->Loc, diag::err_assert_cond_not_boolean,
+                      {CondTy->Name});
+            if (S.Args.size() > 1) {
+                auto MsgTy = checkExpr(*S.Args[1]);
+                if (!MsgTy->isError() && !isCharStringType(*MsgTy)
+                        && MsgTy->Kind != TypeKind::String
+                        && MsgTy->Kind != TypeKind::VarString
+                        && MsgTy->Kind != TypeKind::Char)
+                    error(S.Args[1]->Loc, diag::err_string_fn_arg_type,
+                          {Lo, MsgTy->Name});
+            }
+            return;
+        }
+
         // EP §6.7.5.5: readstr(e, v1,...,vn) reads e and assigns every v;
         // writestr(e, ...) is the mirror, assigning only e.  Neither had a
         // dedicated arm before this -- both fell through to the generic

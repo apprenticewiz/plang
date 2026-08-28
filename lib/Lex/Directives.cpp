@@ -15,23 +15,20 @@
 // comment syntactically) and hands it to dispatchDirective, which splits it
 // into a Name (the leading run of letters) and an Argument (everything
 // after, trimmed).  dispatchDirective then tries each directive *category*
-// in turn -- today just dispatchMessageDirective -- stopping at the first
-// one that recognizes Name, and falling back to warn_directive_unknown if
-// none does.
+// in turn, stopping at the first one that recognizes Name, and falling back
+// to warn_directive_unknown if none does.
 //
 // The message-directive category ({$MESSAGE}/{$INFO}/{$NOTE}/{$HINT}/
 // {$WARNING}/{$ERROR}/{$FATAL}), conditional compilation ({$DEFINE}/
-// {$UNDEF}/{$IFDEF}/{$IFNDEF}/{$ELSE}/{$ELSEIF}/{$ENDIF}), and
-// {$I file}/{$INCLUDE file} source inclusion are all implemented here.  One
-// later category can share this same dispatch point without it needing to
-// change shape at all:
-//
-//   - {$R+}-style switches (letter or long name from CompilerSwitches.def,
-//     '+'/'-'/' ON'/' OFF' argument, recorded into a SwitchTable) are a
-//     second such handler; switchFromLetter/switchFromLongName already exist
-///    for it in SwitchTable.h, just not called from anywhere yet.  Its
-//     letter 'I' already overlaps {$I file}'s own name -- see
-//     dispatchIncludeDirective's own comment for how the two are told apart.
+// {$UNDEF}/{$IFDEF}/{$IFNDEF}/{$ELSE}/{$ELSEIF}/{$ENDIF}),
+// {$I file}/{$INCLUDE file} source inclusion, {$R+}-style switches
+// (CompilerSwitches.def's SWITCH table, letter or long name, recorded
+// position-keyed into a SwitchTable -- see dispatchSwitchDirective's own
+// comment in Scanner.h), and an accept-and-ignore table for every other real
+// Turbo/Borland/FPC directive this milestone does not act on
+// (dispatchIgnoredDirective) are all implemented here.  The switch handler's
+// letter 'I' already overlaps {$I file}'s own name -- see
+// dispatchIncludeDirective's own comment for how the two are told apart.
 //
 // Conditional compilation is the one category that does not fit
 // dispatchDirective's plain "recognize Name, act, return" shape: a false
@@ -64,6 +61,7 @@
 
 #include <cctype>
 #include <filesystem>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -187,16 +185,14 @@ void Scanner::dispatchDirective(std::string_view Body, SourceLocation Loc) {
     if (dispatchMessageDirective(Name, Argument, Loc)) return;
     if (dispatchConditionalDirective(Name, Argument, Loc)) return;
     if (dispatchIncludeDirective(Name, Argument, Loc)) return;
+    if (dispatchSwitchDirective(Name, Argument, Loc)) return;
+    if (dispatchIgnoredDirective(Name, Loc)) return;
 
-    // Cluster B's one remaining item ({$R+}-style switches -- see this
-    // file's header comment) adds its own "try this category" call above
-    // this line.  It does not exist yet, so every directive name but the
-    // message-directive, conditional-compilation, and include ones reaches
-    // here -- including {$I+}/{$I-}, which dispatchIncludeDirective
-    // deliberately leaves unhandled (see its own comment).  Reported
-    // rather than silently ignored or treated as a plain comment: a
-    // `{$R+}` that does nothing and says nothing is worse than one that says
-    // so.
+    // Every category above has had its turn, including the accept-and-ignore
+    // table -- what reaches here is a directive plang genuinely does not
+    // recognize at all.  Reported rather than silently ignored or treated as
+    // a plain comment: a `{$R+}` that does nothing and says nothing is worse
+    // than one that says so.
     emitError(Loc, diag::warn_directive_unknown, {Name});
 }
 
@@ -451,9 +447,9 @@ bool Scanner::dispatchIncludeDirective(std::string_view Name,
     const std::string Folded = toLower(Name);
     if (Folded != "i" && Folded != "include") return false;
 
-    // {$I+}/{$I-}: the (separately tracked, not yet dispatched from
-    // anywhere -- CompilerSwitches.def's own later task) IOChecks switch,
-    // not this directive.  Its long name is "iochecks", never "include", so
+    // {$I+}/{$I-}: the IOChecks switch, not this directive -- dispatchDirective
+    // tries dispatchSwitchDirective right after this function, which is what
+    // actually records it.  Its long name is "iochecks", never "include", so
     // only the one-letter spelling can collide, and only for exactly these
     // two arguments -- see this function's own comment in Scanner.h.
     if (Folded == "i" && (Argument == "+" || Argument == "-")) return false;
@@ -550,6 +546,20 @@ void Scanner::openInclude(std::string_view Filename, SourceLocation Loc) {
     FID  = *NewID;
     Text = truncateAtCtrlZ(SM->getBufferData(FID), Opts);
     Pos  = 0;
+
+    // A switch table keys entirely on raw offset, and *NewID's whole buffer
+    // sits at a *later* stretch of the shared coordinate space than
+    // wherever in the includer this {$I} stood (SourceManager lays buffers
+    // out in the order they are opened, not the order their text is read) --
+    // so without an explicit point here, a query for a location early in the
+    // new buffer, before its own first switch directive (if it has one at
+    // all), would search backwards through raw offsets and could land on
+    // some earlier-included, higher-numbered buffer's own last point instead
+    // of the includer's actually-current state.  Only when Switches is
+    // already real: an include that never sees a switch directive, in a file
+    // that never sees one either, must cost nothing and change nothing (see
+    // switches()'s own null-means-none contract).
+    if (Switches) Switches->record(SM->getLocForOffset(FID, 0), CurrentSwitchState);
 }
 
 bool Scanner::popInclude() {
@@ -560,5 +570,138 @@ bool Scanner::popInclude() {
     Pos  = F.Pos;
     IncludeStack.pop_back();
     OpenIncludePaths.pop_back();
+
+    // The mirror of openInclude's own boundary point: {$I file} splices the
+    // included text in "as if" it had been typed at the directive itself, so
+    // a switch the include changed carries into whatever comes after it in
+    // the includer, exactly as it would if the file's contents had been
+    // pasted there by hand.  Without this, the includer's own resume offset
+    // -- always numerically SMALLER than anything in the buffer just
+    // finished, for the same reason openInclude's point had to be added --
+    // would search backwards past the whole include and find only the
+    // includer's OWN last point from before it, silently reverting any
+    // change the include just made the moment control returns.
+    if (Switches) Switches->record(SM->getLocForOffset(FID, Pos), CurrentSwitchState);
     return true;
+}
+
+// ---------------------------------------------------------------------------
+// {$R+}-style switches: CompilerSwitches.def's SWITCH table
+// ---------------------------------------------------------------------------
+//
+// Real Turbo/FPC give the letter form and the long-name form different
+// argument grammars, confirmed against fpc's own scanner source
+// (tscannerfile.handledirectives in scanner.pas) rather than assumed:
+//
+//   - The letter form is tried FIRST, before any directive name is even
+//     looked up by word, and ONLY when the name is exactly one character
+//     immediately followed by '+' or '-' -- no space, and no 'ON'/'OFF'.
+//     Anything else and the letter falls through to be looked up as a named
+//     directive instead, which is how `{$R+}` (RangeChecks) and
+//     `{$R resourcefile}` (a Windows-resource directive plang does not
+//     implement) coexist on the very same letter in real Borland/FPC: R, D,
+//     F, L and M are each a switch AND an unrelated named directive that
+//     takes a real argument, told apart purely by whether '+'/'-' comes
+//     right after.  plang's own SWITCH table never puts two meanings on one
+//     letter, so this matters here only for staying honest about what a
+//     letter that fails to parse as a switch falls through to (see below).
+//   - The long-name form accepts either the same bare '+'/'-', or, with a
+//     space before it, the word 'ON' or 'OFF'.  splitDirectiveBody already
+//     trims the space away by the time Argument reaches here, so both
+//     collapse to comparing the same trimmed text.
+//
+// A single directive body is one Name and one Argument in this codebase's
+// existing shape (dispatchMessageDirective, dispatchConditionalDirective and
+// dispatchIncludeDirective all assume it too) -- real FPC additionally lets
+// several switches share one `{$R+,I-}` comment via a comma; that is not
+// implemented here, on the same "keeps the shape every other category
+// already uses" grounds.
+bool Scanner::dispatchSwitchDirective(std::string_view Name,
+                                      std::string_view Argument,
+                                      SourceLocation Loc) {
+    std::optional<Switch> Sw;
+    std::optional<bool>   On;
+
+    if (Name.size() == 1) {
+        Sw = switchFromLetter(Name[0]);
+        if (Sw) {
+            if (Argument == "+")      On = true;
+            else if (Argument == "-") On = false;
+            // Anything else (a space, a filename, 'ON'/'OFF' with no '+'/'-')
+            // is not this switch in real Turbo/FPC either -- see this
+            // section's header comment -- so Sw stays set but On does not,
+            // and the function returns false below, same as if Name had
+            // never matched a switch at all.
+        }
+    } else {
+        Sw = switchFromLongName(toLower(Name));
+        if (Sw) {
+            if (Argument == "+")      On = true;
+            else if (Argument == "-") On = false;
+            else {
+                const std::string Folded = toLower(Argument);
+                if (Folded == "on")       On = true;
+                else if (Folded == "off") On = false;
+            }
+        }
+    }
+    if (!Sw || !On) return false;
+
+    // Lazily built: a Turbo file that never writes a switch directive -- the
+    // common case -- never allocates one, and Opts.switchOn (LangOptions.h)
+    // stays on its null-table fast path exactly as it did before this
+    // function existed.  Seeded from Opts.defaultSwitches(), the
+    // command-line state a directive overrides, the first time there is
+    // anything at all to record.
+    if (!Switches) {
+        Switches = std::make_shared<SwitchTable>();
+        CurrentSwitchState = Opts.defaultSwitches();
+    }
+    CurrentSwitchState.set(*Sw, *On);
+    Switches->record(Loc, CurrentSwitchState);
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// Accept-and-ignore: every other real Turbo/Borland/FPC directive this
+// milestone does not act on
+// ---------------------------------------------------------------------------
+//
+// A plain array, not an X-macro table: like the message-directive table
+// above, it has exactly one consumer and is not expected to grow much (it is
+// Borland/FPC's own fixed vocabulary of directives outside plang's scope, not
+// this compiler's own design surface) -- see this file's header comment for
+// why that is the deciding factor here, same as it was there.
+//
+// The single letters are DOS/Windows/386-target concerns this project's own
+// target (a native LLVM-backed Linux/macOS compiler, see README.md) has no
+// analogue for -- data alignment (A), debug/description info (D),
+// coprocessor emulation (E), far calls (F), 286 instructions / imported data
+// (G), object linking (L), memory sizing (M), numeric coprocessor (N),
+// overlays (O), reference/browser info (Y), 8086 smart callbacks (K), and
+// Pentium-safe FDIV (U).  The long names are newer Delphi/FPC directives
+// with the same "real, but nothing plang's own target needs it to mean"
+// shape: application type and codepage metadata for a produced executable
+// (APPTYPE, CODEPAGE), record/field layout hints CodeGen does not implement
+// (PACKRECORDS, ALIGN), linker behavior (SMARTLINK), an FPC-specific warning
+// vocabulary distinct from plang's own -W flags (WARN), and IDE code-folding
+// markers with no effect on compilation at all in ANY compiler
+// (REGION/ENDREGION -- included as a pair so a program that opens one is not
+// told plang has never heard of the one that closes it).
+namespace {
+constexpr std::string_view IgnoredDirectiveNames[] = {
+    "a", "d", "e", "f", "g", "l", "m", "n", "o", "y", "k", "u",
+    "apptype", "codepage", "packrecords", "align", "smartlink", "warn",
+    "region", "endregion",
+};
+} // namespace
+
+bool Scanner::dispatchIgnoredDirective(std::string_view Name, SourceLocation Loc) {
+    const std::string Folded = toLower(Name);
+    for (const std::string_view Known : IgnoredDirectiveNames) {
+        if (Folded != Known) continue;
+        emitError(Loc, diag::warn_directive_ignored, {Name});
+        return true;
+    }
+    return false;
 }

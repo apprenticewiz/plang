@@ -47,11 +47,23 @@ TEST(Builtins, ANameOfAnotherDialectIsDeclaredRatherThanUndefined) {
         return check(Src);
     };
     std::size_t Probed = 0;
+    // Assert (Dialects = TP) is the first name this loop meets that is not
+    // Extended Pascal's: Sema::checkEPOnly picks between err_ep_required_name
+    // and err_turbo_required_name by the same "has Turbo, does not have EP"
+    // test mirrored here, so a name declared only for Turbo has to be probed
+    // for the OTHER message -- asserting the EP one for it would be asserting
+    // the bug this same PR fixed (err_ep_required_name's wording promises
+    // -std=iso10206 accepts a name that, for a Turbo-only one, no dialect but
+    // Turbo does).
 #define BUILTIN(Id_, Spelling_, Kind_, Dialects_, Min_, Max_, Result_)         \
     if (!LangOptions{}.inDialect(Dialects_)) {                                 \
         ++Probed;                                                              \
         const auto R = probe(Spelling_, builtinIsFunction(BuiltinID::Id_));    \
-        EXPECT_TRUE(R.hasError("'" Spelling_ "' is an Extended Pascal"))       \
+        const bool TurboOnly = ((Dialects_) & LangOptions::D_Turbo)            \
+                             && !((Dialects_) & LangOptions::D_ISO10206);      \
+        EXPECT_TRUE(R.hasError(TurboOnly                                       \
+            ? "'" Spelling_ "' is a Turbo Pascal extension"                    \
+            : "'" Spelling_ "' is an Extended Pascal"))                        \
             << Spelling_;                                                      \
         EXPECT_FALSE(R.hasError("undefined")) << Spelling_;                    \
     }

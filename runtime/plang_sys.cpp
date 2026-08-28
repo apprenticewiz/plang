@@ -639,6 +639,29 @@ static void escapeCC(const char *S, std::FILE *Stream) {
     std::exit(PlangRuntimeErrorStatus);
 }
 
+/// TP `Assert(cond[, msg])` (Builtins.def, CGProcCall::emitCallStmt): called
+/// only once cond has already tested false, and only when
+/// Switch::Assertions was on at the call site -- with it off the whole call
+/// compiles to nothing, so this is never even reached from one of those.
+/// \p Msg is null when the one-argument form was used.  "Runtime error 227"
+/// is Borland/FPC's own numbered run-time error for a failed assertion
+/// (confirmed against `fpc -Mtp`, which reports exactly that number and
+/// exits 227); plang keeps the number in the message, for a user who
+/// recognizes it, but exits PlangRuntimeErrorStatus like every other check
+/// in this file rather than 227 itself, so a plang program's exit code still
+/// means one consistent thing -- "some plang runtime check failed" --
+/// regardless of which one it was.
+[[noreturn]] void plang_err_assert_failed(const char *Msg) {
+    std::fflush(stdout);
+    if (Msg && Msg[0])
+        std::fprintf(stderr, "plang runtime: Runtime error 227: Assertion "
+                              "failed: %s\n", Msg);
+    else
+        std::fprintf(stderr, "plang runtime: Runtime error 227: Assertion "
+                              "failed\n");
+    std::exit(PlangRuntimeErrorStatus);
+}
+
 } // extern "C"
 
 } // namespace plang

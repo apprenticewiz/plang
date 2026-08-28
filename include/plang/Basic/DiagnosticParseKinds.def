@@ -36,6 +36,13 @@ DIAG(err_ep_type, Error,
 DIAG(err_ep_required_name, Error,
      "'%0' is an Extended Pascal extension and is not available under "
      "-std=iso7185")
+// Sema::checkEPOnly's other half, for a required name only -std=turbo
+// declares (Assert, the first one) -- err_ep_required_name's own wording
+// would be actively wrong here, not just imprecise: it reads as a promise
+// that -std=iso10206 accepts the name, and no dialect but Turbo does.
+DIAG(err_turbo_required_name, Error,
+     "'%0' is a Turbo Pascal extension and is only available under "
+     "-std=turbo")
 DIAG(err_ep_two_arg_form, Error,
      "the two-argument form of '%0' is an Extended Pascal extension and is "
      "not available under -std=iso7185")

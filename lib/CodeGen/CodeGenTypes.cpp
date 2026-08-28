@@ -297,7 +297,7 @@ void Codegen::Impl::init(const std::string& progName) {
         [this](llvm::Value* v){ return toI64(v); },
         [](const TypeNode* tn){ return peelPackedNode(tn); });
     // The required-procedure dispatch chain and user-declared procedure
-    // calls.  EmitExpr/EmitLValue/ToI64/InitialStateShapeOf/
+    // calls.  EmitExpr/EmitLValue/ToI64/EnsureI1/InitialStateShapeOf/
     // HasInitialState/EmitInitialState/BuildStaticLinkFrame/ProcParamArg/
     // ParamIsByRef are narrow closures into methods not yet extracted or
     // (BuildStaticLinkFrame) deliberately staying on Impl permanently --
@@ -306,15 +306,17 @@ void Codegen::Impl::init(const std::string& progName) {
     // paramMeta_ access, the same narrow-derived-query treatment
     // SchemaArgDiscCountOf already got in Wave 5 -- paramMeta_ itself
     // stays on Impl, read from CodeGenExprs.cpp's parallel call-expression
-    // marshalling too.
+    // marshalling too.  rangeGuards_ (already built, above) and EnsureI1 are
+    // both new here, for Assert's own {$C-}-gated guard.
     procCall_ = std::make_unique<CGProcCall>(ctx, *mod, builder,
         *fileVarHelpers_, *runtimeFns_, *builtinIO_, *closureAbi_,
         *schemaAccess_, *cgTypes_, *symTab_, *linkage_, *setOps_,
-        *strCallMarshal_, *packUnpack_,
+        *strCallMarshal_, *packUnpack_, *rangeGuards_,
         i8Ty, i64Ty, ptrTy,
         [this](const ExprNode& e){ return emitExpr(e); },
         [this](const ExprNode& e){ return emitLValue(e); },
         [this](llvm::Value* v){ return toI64(v); },
+        [this](llvm::Value* v){ return ensureI1(v); },
         [this](const TypeNode* tn){ return initialStateShapeOf(tn); },
         [this](const TypeNode* tn){ return hasInitialState(tn); },
         [this](llvm::Value* ptr, llvm::Type* ty, const TypeNode* tn){
