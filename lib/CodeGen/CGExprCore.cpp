@@ -76,9 +76,41 @@ llvm::Value* CGExprCore::emitExpr(const ExprNode& e) {
             }
         }
         // Function result pseudo-variable (Pascal: assign to function name).
-        if (CurRetAlloca && toLower(n->Name) == toLower(CurFuncName)
+        // n->Resolution == ResultVariable alone is NOT enough: it only says
+        // Sema decided this name denotes SOME enclosing function's result,
+        // and ISO §6.8.2.2 lets a NESTED procedure's own assignment satisfy
+        // an OUTER function -- 'outer := 37' written inside a nested
+        // 'inner' still has Resolution == ResultVariable (checkIdent's own
+        // comment), but CurRetAlloca/CurFuncName here are INNER's, not
+        // outer's, while codegen is emitting inner's body.  The
+        // toLower(Name)==toLower(CurFuncName) comparison is still what
+        // narrows the fast path to "this function's own name" -- an outer
+        // enclosing function's result is found the other way, through
+        // SymTab.findVar below, which reaches it via the ordinary scope
+        // chain (defVar(proc.Name, curRetAlloca, ...) in emitFunctionDef
+        // registers each function's result alloca as an ordinary variable
+        // of its own name, in the SCOPE that function's body opened).
+        if (CurRetAlloca && n->Resolution == IdentExpr::IdentResolution::ResultVariable
+                && toLower(n->Name) == toLower(CurFuncName)
                 && !SymTab.boundInsideFunction(n->Name))
             return B.CreateLoad(CurRetType, CurRetAlloca, "retval");
+        // -std=turbo only (see checkIdent's own comment): a bare read of the
+        // enclosing function's own name that is NOT the assignment target is
+        // a recursive, zero-argument call.  Ahead of the SymTab.findVar
+        // lookup just below on purpose -- emitFunctionDef (CodeGenProcs.cpp)
+        // ALSO registers the result alloca as an ordinary variable under the
+        // function's own name (defVar(proc.Name, curRetAlloca, ...), so that
+        // ResolvedVariable's own fast path above still works once a nested
+        // procedure's own scope is pushed) -- so without this check first,
+        // falling through would find that SAME VarEntry and silently read
+        // the result cell again instead of calling.
+        if (n->Resolution == IdentExpr::IdentResolution::RecursiveCall) {
+            CallExpr Call;
+            Call.Name         = n->Name;
+            Call.Loc          = n->Loc;
+            Call.ResolvedType = e.ResolvedType;
+            return FuncCall.emitCallExpr(Call);
+        }
         // Variable table.
         auto* ve = SymTab.findVar(n->Name);
         // Constant table.  A required constant stands only where the program
@@ -251,9 +283,25 @@ llvm::Value* CGExprCore::emitExpr(const ExprNode& e) {
 // Returns the POINTER to the storage for an lvalue expression.
 llvm::Value* CGExprCore::emitLValue(const ExprNode& e) {
     if (auto* n = llvm::dyn_cast<IdentExpr>(&e)) {
-        if (CurRetAlloca && toLower(n->Name) == toLower(CurFuncName)
+        // See emitExpr's identical IdentExpr case just above for why this
+        // ALSO needs toLower(Name)==toLower(CurFuncName), not Resolution
+        // alone: a nested procedure's own assignment to an OUTER enclosing
+        // function's result (ISO §6.8.2.2) still has Resolution ==
+        // ResultVariable while CurRetAlloca here is the NESTED procedure's
+        // own, not the outer function's -- SymTab.findVar below is what
+        // finds the outer one, through the ordinary scope chain.
+        if (CurRetAlloca && n->Resolution == IdentExpr::IdentResolution::ResultVariable
+                && toLower(n->Name) == toLower(CurFuncName)
                 && !SymTab.boundInsideFunction(n->Name))
             return CurRetAlloca;
+        // See emitExpr's identical check just above: the result alloca is
+        // ALSO registered in SymTab under the function's own name, so this
+        // has to come before the SymTab.findVar lookup just below, or a
+        // recursive call's own address-needing use (@F, or F passed as a
+        // var-parameter actual) would read raw, wrong-phase storage instead
+        // of calling through and spilling the call's result.
+        if (n->Resolution == IdentExpr::IdentResolution::RecursiveCall)
+            return spillToTemporary(e);
         auto* ve = SymTab.findVar(n->Name);
         if (ve) return ve->ptr;
         // A string constant already lives in memory, as the { length, bytes }

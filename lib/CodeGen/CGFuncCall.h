@@ -5,7 +5,9 @@
 
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <optional>
+#include <span>
 #include <string>
 
 #include "llvm/IR/DerivedTypes.h"
@@ -74,6 +76,30 @@ public:
 
     llvm::Value* emitCallExpr(const plang::CallExpr& e);
     llvm::Value* emitUserFuncCall(const plang::CallExpr& e);
+
+    /// The built-in dispatch chain that used to be emitCallExpr's whole body,
+    /// factored out so a call site with no CallExpr of its own -- Turbo
+    /// `{$X+}`'s "a built-in function may be called as a statement, its
+    /// result discarded" -- can still reach it.  CGProcCall::emitCallStmt's
+    /// tail (a builtin call that matched none of the required-PROCEDURE
+    /// names it dispatches by spelling) is the one other caller: every
+    /// Proc-kind row in Builtins.def already has its own named arm there, so
+    /// reaching that tail with ResolvedBuiltin already known non-None means
+    /// this, a builtin FUNCTION, and Sema having allowed it through only
+    /// under {$X+}.  Args is a span, not an owned vector, so CGProcCall can
+    /// pass CallStmt's own Args straight through with nothing to move or
+    /// copy -- s.Args is not `mutable`, and this project's convention
+    /// reserves const_cast-around-constness for fields that ARE (see
+    /// ExprNode::ResolvedType's own comment).
+    ///
+    /// Returns nullptr only for a builtin name every arm below fails to
+    /// match, which Builtins.def and this dispatch's own completeness
+    /// should make unreachable -- emitCallExpr still falls back to
+    /// emitUserFuncCall the same way it always has, and CGProcCall's own
+    /// caller has no such fallback and reports a codegen ICE instead.
+    llvm::Value* emitBuiltinCall(const std::string& Name,
+                                  std::span<const std::unique_ptr<plang::ExprNode>> Args,
+                                  plang::SourceLocation Loc);
 
 private:
     llvm::LLVMContext& Ctx;

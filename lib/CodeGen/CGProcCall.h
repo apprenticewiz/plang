@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <functional>
 #include <optional>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -60,7 +61,10 @@ public:
                std::function<std::shared_ptr<plang::Type>()> CurRetSemaType,
                std::function<llvm::BasicBlock*()> CurrentContinueTarget,
                std::function<llvm::BasicBlock*()> CurrentBreakTarget,
-               std::function<llvm::BasicBlock*()> ExitBlock)
+               std::function<llvm::BasicBlock*()> ExitBlock,
+               std::function<llvm::Value*(const std::string&,
+                   std::span<const std::unique_ptr<plang::ExprNode>>,
+                   plang::SourceLocation)> EmitBuiltinFuncCall)
         : Ctx(Ctx), Mod(Mod), B(B), FileVars(FileVars), RtFns(RtFns),
           Builtins(Builtins), ClosureAbi(ClosureAbi), Schema(Schema), Types(Types),
           SymTab(SymTab), Linkage(Linkage), Sets(Sets), StrCall(StrCall),
@@ -79,7 +83,8 @@ public:
           CurFuncName(std::move(CurFuncName)), CurRetSemaType(std::move(CurRetSemaType)),
           CurrentContinueTarget(std::move(CurrentContinueTarget)),
           CurrentBreakTarget(std::move(CurrentBreakTarget)),
-          ExitBlock(std::move(ExitBlock)) {}
+          ExitBlock(std::move(ExitBlock)),
+          EmitBuiltinFuncCall(std::move(EmitBuiltinFuncCall)) {}
 
     void emitCallStmt(const plang::CallStmt& s);
     void emitUserProcCall(const plang::CallStmt& s);
@@ -156,4 +161,14 @@ private:
     std::function<llvm::BasicBlock*()> CurrentBreakTarget;
     /// Where Exit branches; see CGFunction::ExitBB.
     std::function<llvm::BasicBlock*()> ExitBlock;
+    /// Turbo `{$X+}`: CGFuncCall::emitBuiltinCall, bridged rather than
+    /// called directly because CGFuncCall (funcCall_) is constructed after
+    /// CGProcCall (procCall_) in Codegen::Impl::init -- see that ordering's
+    /// own comment in CodeGenTypes.cpp.  Reached only from emitCallStmt's
+    /// tail, once every required-PROCEDURE name it dispatches by spelling
+    /// has already failed to match; see emitBuiltinCall's own comment for
+    /// why that means a required FUNCTION called as a statement.
+    std::function<llvm::Value*(const std::string&,
+        std::span<const std::unique_ptr<plang::ExprNode>>,
+        plang::SourceLocation)> EmitBuiltinFuncCall;
 };

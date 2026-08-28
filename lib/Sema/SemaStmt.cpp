@@ -195,11 +195,33 @@ bool Sema::isFunctionResultTarget(const ExprNode& Target) const {
 }
 
 void Sema::checkAssign(const AssignStmt& S) {
+    // -std=turbo (checkIdent's own comment has the full rule): find the
+    // ROOT of this target -- 'result' alone in both 'result := x' and
+    // 'result.f := x' -- BEFORE resolving it, so checkIdent can recognize
+    // that exact node by pointer identity while checkExpr(*S.Target)
+    // recurses into it below.  Same index/field walk as the HasResult
+    // marking further down, computed a second time here rather than
+    // reusing that one: this one has to run BEFORE checkExpr(*S.Target),
+    // and that one depends on nothing checkExpr produces either, so the
+    // duplication is only two identical small loops, not two different
+    // answers.
+    const ExprNode* TargetRootForIdent = S.Target.get();
+    while (TargetRootForIdent) {
+        if (auto* Ix = llvm::dyn_cast<IndexExpr>(TargetRootForIdent))
+            { TargetRootForIdent = Ix->Array.get();  continue; }
+        if (auto* Fe = llvm::dyn_cast<FieldExpr>(TargetRootForIdent))
+            { TargetRootForIdent = Fe->Record.get(); continue; }
+        break;
+    }
+    const IdentExpr* SavedAssignTargetRoot = CurAssignTargetRoot_;
+    CurAssignTargetRoot_ = llvm::dyn_cast_or_null<IdentExpr>(TargetRootForIdent);
+
     // The target is resolved before it is judged, because whether it is
     // assignable can depend on what it turned out to be: `v.n` is a field in
     // the syntax and a schema discriminant in the type, and only the second
     // says it cannot be written to.
     auto Dst = checkExpr(*S.Target);
+    CurAssignTargetRoot_ = SavedAssignTargetRoot;
     if (!isLValue(*S.Target)) {
         // ISO §6.6.3.1: a functional parameter reads like the function-result
         // variable of the enclosing function, so say which one it is rather
@@ -791,10 +813,24 @@ void Sema::checkCallStmt(const CallStmt& S) {
         // function written as one reached codegen, which has no procedure of
         // that name to call and made one up: a call to a plang_abs that no
         // runtime defines, or one whose arguments were not what it takes.
+        //
+        // Turbo `{$X+}` (its default) lifts that requirement, the same as
+        // checkUserDefinedCall's identical gate does for a user-declared
+        // function just below -- falling through here reaches the ordinary
+        // builtin dispatch chain below with S.Args still to be type-checked
+        // and no `lo ==` arm of its own to match (no required FUNCTION
+        // shares a name with a required procedure), landing on the generic
+        // "evaluate for side effects, no result wanted" fallback at the end
+        // of this function.
         if (Sym->IsFunction) {
-            error(S.Loc, diag::err_func_as_statement, {S.Name});
-            for (const auto& Arg : S.Args) (void)checkExpr(*Arg);
-            return;
+            // Opts.turbo() is not redundant with switchOn -- see
+            // checkUserDefinedCall's identical gate (SemaExpr.cpp) for why.
+            if (!(Opts.turbo() && Opts.switchOn(Switch::ExtendedSyntax, S.Loc))) {
+                error(S.Loc, diag::err_func_as_statement, {S.Name});
+                for (const auto& Arg : S.Args) (void)checkExpr(*Arg);
+                return;
+            }
+            S.ResolvedType = Sym->ReturnType;
         }
 
         if (!checkEPOnly(*Sym, S.Loc)) {
@@ -1313,7 +1349,14 @@ void Sema::checkCallStmt(const CallStmt& S) {
         for (const auto& Arg : S.Args) (void)checkExpr(*Arg);
         return;
     }
-    (void)checkUserDefinedCall(*Sym, S.Loc, S.Args, /*expectFunction=*/false);
+    // Turbo `{$X+}`: when checkUserDefinedCall lets a function through this
+    // way, the type it returns is the callee's real result type -- record it
+    // on the CallStmt so codegen's own external-declaration fallback
+    // (CGProcCall::emitUserProcCall) knows it too, instead of guessing void.
+    // TyErr (an ordinary procedure call, or any error) collapses back to
+    // null: see CallStmt::ResolvedType's own comment.
+    auto RetTy = checkUserDefinedCall(*Sym, S.Loc, S.Args, /*expectFunction=*/false);
+    S.ResolvedType = (RetTy && !RetTy->isError()) ? RetTy : nullptr;
 }
 
 void Sema::checkWith(const WithStmt& S) {

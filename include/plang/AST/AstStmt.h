@@ -61,6 +61,19 @@ struct CallStmt : StmtNode {
     /// Which required procedure Sema resolved this call to, or None where it
     /// resolved to one the program declared.  See CallExpr::ResolvedBuiltin.
     mutable BuiltinID ResolvedBuiltin{BuiltinID::None};
+
+    /// Turbo `{$X+}`'s "a function may be called as a statement, its result
+    /// discarded" (ISO §6.8.2.2 refuses this outright, so outside {$X+} this
+    /// stays null): the callee's Sema-resolved return type, set only when
+    /// Sema::checkUserDefinedCall/checkCallStmt actually let a function
+    /// through this way.  Without it, CGProcCall::emitUserProcCall's
+    /// not-yet-defined-in-this-module fallback had no way to know the
+    /// callee's real return type and manufactured a void FunctionType,
+    /// which conflicted with the function's real, non-void declaration the
+    /// moment the SAME external function was also called anywhere as an
+    /// expression in this translation unit.  Null for an ordinary procedure
+    /// call, exactly like ExprNode::ResolvedType is null before Sema runs.
+    mutable std::shared_ptr<Type> ResolvedType;
 };
 
 struct WithStmt : StmtNode {

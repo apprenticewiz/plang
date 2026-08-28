@@ -288,6 +288,19 @@ private:
     [[nodiscard]] FuncFrame*       resultFrameFor(const std::string& Name);
     [[nodiscard]] const FuncFrame* resultFrameFor(const std::string& Name) const;
 
+    /// -std=turbo only (see checkIdent's own comment): the exact IdentExpr
+    /// node that is the ROOT of the assignment-statement currently being
+    /// checked's own target -- 'result' in 'result := x' and in
+    /// 'result.f := x' alike, found by checkAssign walking through any
+    /// IndexExpr/FieldExpr wrapper the same way its HasResult marking
+    /// already does.  Compared by POINTER identity, not by name: a name
+    /// match alone cannot tell 'result.x := 1' (the target) from
+    /// 'y := result.x' (an ordinary read of the SAME name, on the same
+    /// statement's RHS) apart, and only the target keeps the
+    /// assignment-statement's own ResultVariable meaning under Turbo.
+    /// Null outside of checking an assignment-statement's target.
+    const IdentExpr* CurAssignTargetRoot_{nullptr};
+
     // --- EP §6.4.7: active schema discriminant bindings ---
     // Populated during schema body resolution; consulted by constBound() and
     // checkIdent() so that discriminant names resolve to their integer values.

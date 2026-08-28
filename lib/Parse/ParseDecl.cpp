@@ -32,20 +32,40 @@ static constexpr unsigned MaxBlockDepth = 500;
 
 // program → 'program' identifier ( '(' identifier-list ')' )? ';'
 //            ['import' clauses]  block '.'
+//
+// Turbo drops the heading line entirely: a bare 'begin ... end.' is a
+// complete program.  (ISO 7185 already makes the file-parameter LIST
+// optional -- 'program name;' with no '(...)' -- the loop below; Turbo goes
+// one step further and makes the whole 'program name;' line optional too.)
+// Gated on Opts.turbo() directly rather than a LangFeatures.def entry: this
+// is Turbo's alone, not a capability ISO 10206 shares (EP's own §6.10.1
+// still requires the heading), so it asks the "which dialect" question
+// (LangOptions.h's own comment on extendedPascal()/turbo() explains the
+// distinction) instead of adding a one-dialect FEATURE.
 std::unique_ptr<ProgramNode> Parser::parseProgram() {
     auto Node  = std::make_unique<ProgramNode>();
     Node->Loc  = Current;
-    expect(TokenKind::Program);
-    Node->Name = expect(TokenKind::Identifier).Lexeme;
-    // Optional file-parameter list: program graph1(input, output);
-    if (match(TokenKind::LeftParen)) {
-        Node->FileParams.push_back(expect(TokenKind::Identifier).Lexeme);
-        while (match(TokenKind::Comma)) {
+    if (Opts.turbo() && !check(TokenKind::Program)) {
+        // No heading at all: codegen and diagnostics still want SOME name
+        // (it becomes the LLVM module's identifier -- Codegen::Impl::init),
+        // and this project's own convention for a name with nothing real to
+        // give -- Type::makeError()'s "<error>", Scanner's "<pmi>" for its
+        // own not-a-real-file source name -- is a bracketed placeholder
+        // rather than an empty string.
+        Node->Name = "<program>";
+    } else {
+        expect(TokenKind::Program);
+        Node->Name = expect(TokenKind::Identifier).Lexeme;
+        // Optional file-parameter list: program graph1(input, output);
+        if (match(TokenKind::LeftParen)) {
             Node->FileParams.push_back(expect(TokenKind::Identifier).Lexeme);
+            while (match(TokenKind::Comma)) {
+                Node->FileParams.push_back(expect(TokenKind::Identifier).Lexeme);
+            }
+            expect(TokenKind::RightParen);
         }
-        expect(TokenKind::RightParen);
+        expect(TokenKind::Semicolon);
     }
-    expect(TokenKind::Semicolon);
     // EP §6.11.3: optional import clauses before the block.
     if (Opts.extendedPascal() && check(TokenKind::Import)) {
         Node->Imports = parseImportClauses();
@@ -277,8 +297,16 @@ std::unique_ptr<ProcDecl> Parser::parseProcDecl(bool IsFunction,
     Node->Params = parseParamList();
 
     if (IsFunction) {
-        // EP §6.7.2: optional result-variable-specification: '=' identifier
+        // EP §6.6: optional result-variable-specification: '=' identifier.
+        // Recognized (and still parsed, for clean recovery) under every
+        // dialect -- '=' cannot start anything else here, ISO 7185's grammar
+        // going straight from the parameter list to ':'/';' -- but only kept
+        // as EP's own extension; issue found during a review of Turbo's
+        // {$X} declaration-parsing area: this had no dialect gate at all, so
+        // `-std=iso7185` silently accepted it.
         if (match(TokenKind::Equal)) {
+            if (!Opts.extendedPascal())
+                emitError(Current.toLoc(), diag::err_ep_named_result);
             Node->ResultName = expect(TokenKind::Identifier).Lexeme;
         }
         // ISO §6.6.1: the body of a function declared 'forward' is introduced

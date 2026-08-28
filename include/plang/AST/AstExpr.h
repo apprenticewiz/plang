@@ -71,6 +71,32 @@ struct IdentExpr : ExprNode {
     /// caught by an independent full-suite verification pass, not the
     /// fixing agent's own testing).
     mutable bool UserDeclaredCallable{false};
+
+    /// What a bare occurrence of an ENCLOSING FUNCTION'S OWN NAME (or its
+    /// EP §6.7.2 named result variable) means, decided once by
+    /// Sema::checkIdent and read back by codegen instead of re-deriving it
+    /// from `toLower(Name) == toLower(CurFuncName)` -- CodeGen has no
+    /// syntactic-position information of its own (whether THIS occurrence
+    /// was the direct target of an assignment or an ordinary read), and a
+    /// second, independent name comparison could only ever re-derive the
+    /// OLD, dialect-blind rule, not this one.  Meaningless (stays Ordinary)
+    /// for every other identifier.
+    enum class IdentResolution {
+        /// Not (or not yet) inside any enclosing function's own name.
+        Ordinary,
+        /// ISO §6.8.2.2's assignment-statement carve-out: 'name := expr'
+        /// (or 'name.field := expr' / 'name[i] := expr', the root of a
+        /// longer target path) inside the function it names.  Reads the
+        /// result cell in place; unaffected by -std=turbo.
+        ResultVariable,
+        /// Every OTHER bare occurrence of the enclosing function's own name
+        /// -- ISO §6.7.3's function-designator, called with zero actual
+        /// parameters.  Turbo only for now (see checkIdent's own comment);
+        /// ISO 7185/Extended Pascal keep ResultVariable here too, matching
+        /// this project's behaviour before this enum existed.
+        RecursiveCall,
+    };
+    mutable IdentResolution Resolution{IdentResolution::Ordinary};
 };
 
 struct IndexExpr : ExprNode {

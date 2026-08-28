@@ -371,7 +371,17 @@ void CGProcCall::emitCallStmt(const CallStmt& s) {
         return;
     }
 
-    emitUserProcCall(s);
+    // s.ResolvedBuiltin != BuiltinID::None (the top of this function already
+    // returned otherwise) and lo matched none of the required-PROCEDURE
+    // names above -- every Proc-kind row in Builtins.def has its own arm
+    // there.  The only builtin left is a required FUNCTION, which Sema
+    // resolves to this same statement shape only under Turbo `{$X+}`
+    // (Sema::checkCallStmt's err_func_as_statement arm).  Its result is
+    // simply not wanted, exactly like an ordinary user-defined function
+    // called as a statement just below.
+    if (auto* v = EmitBuiltinFuncCall(s.Name, s.Args, s.Loc)) { (void)v; return; }
+    codegenICE("'" + s.Name + "' resolved to a builtin function but matched "
+               "no builtin-function dispatch arm");
 }
 
 void CGProcCall::emitUserProcCall(const CallStmt& s) {
@@ -383,6 +393,18 @@ void CGProcCall::emitUserProcCall(const CallStmt& s) {
         // The procedure is not defined in this compilation unit; it must come
         // from a separately compiled module.  Create an external declaration
         // using LLVM types derived from the Sema-resolved argument types.
+        //
+        // Turbo `{$X+}`: s.ResolvedType is non-null exactly when this CallStmt
+        // is a FUNCTION called as a statement (Sema set it only on that path
+        // -- see CallStmt::ResolvedType's own comment) and void otherwise, an
+        // ordinary procedure having none to give.  Mirrors
+        // CGFuncCall::emitUserFuncCall's identical fallback for a call in
+        // expression position, which is what keeps the two from disagreeing
+        // about the same external function's return type should it be
+        // called both ways in this translation unit.
+        llvm::Type* retTy = llvm::Type::getVoidTy(Ctx);
+        if (s.ResolvedType && !s.ResolvedType->isError())
+            retTy = Types.llvmTypeOfSemaType(*s.ResolvedType);
         std::vector<llvm::Type*> paramTys;
         for (const auto& Arg : s.Args) {
             if (Arg && Arg->ResolvedType && !Arg->ResolvedType->isError())
@@ -390,7 +412,7 @@ void CGProcCall::emitUserProcCall(const CallStmt& s) {
             else
                 paramTys.push_back(I64Ty); // safe fallback
         }
-        auto* fnTy = llvm::FunctionType::get(llvm::Type::getVoidTy(Ctx), paramTys, false);
+        auto* fnTy = llvm::FunctionType::get(retTy, paramTys, false);
         callee = llvm::Function::Create(fnTy, llvm::Function::ExternalLinkage,
                                         mangledName, &Mod);
     }
