@@ -685,7 +685,12 @@ std::unique_ptr<VariantPart> Parser::parseVariantPart() {
             auto Low  = std::make_unique<IdentExpr>();
             Low->Loc  = Tok; Low->Name = Tok.Lexeme;
             auto Sub  = std::make_unique<SubrangeTypeNode>();
-            Sub->Loc  = Tok; Sub->Low = std::move(Low); Sub->High = parseFactor();
+            // ISO §6.4.3.3 / §6.3: this subrange bound, like a case-constant,
+            // may carry a sign -- a bare parseFactor() call rejected
+            // `case lo..-5 of` with "expected expression, got '-'" (#419,
+            // the same root cause #257 already fixed for case-constant
+            // labels via parseCaseConstant()).
+            Sub->Loc  = Tok; Sub->Low = std::move(Low); Sub->High = parseCaseConstant();
             Part->TagType = std::move(Sub);
         } else {
             // just a named type
