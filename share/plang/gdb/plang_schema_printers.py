@@ -151,6 +151,38 @@ if sys.getrecursionlimit() < _MAX_FORM_DEPTH + 500:
     sys.setrecursionlimit(_MAX_FORM_DEPTH + 500)
 
 
+def _iso_mod(a, b):
+    """ISO 7185 Section 6.7.2.2 `a mod b`: the result lies in [0, b), taking
+    its sign from the DIVISOR, not the dividend -- e.g. (-4) mod 3 is 2
+    ((-4) = (-2)*3 + 2), never -1.
+
+    This used to be `a - b * int(a / b)`: a C-truncating remainder (sign of
+    the DIVIDEND, matching C's `%` and LLVM's `srem`), the identical bug
+    issue #228 already fixed on the compiler side, in
+    SchemaLayoutEngine::emitExtentForm's raw `srem` lowering -- this is that
+    same fix, ported to Python for this script's own independent
+    re-implementation of the same arithmetic.
+
+    Computed as two exact integer steps -- a C/srem-style truncating
+    remainder, then the divisor added back exactly once if that came out
+    negative -- mirroring emitExtentForm's own fixed sequence
+    (CreateSRem then a CreateSelect on a negative remainder) instruction
+    for instruction, rather than going through `int(a / b)`'s float
+    round-trip (precision lost past 2**53, a bug of its own for a large
+    discriminant) or Python's native `%` (floor division -- already the
+    ISO answer for b > 0, but for consistency with the compiler's own
+    fix this does not lean on that, and the compiler's fix does not
+    special-case a negative divisor either: ISO requires b > 0, enforced
+    by a runtime check on the compiler side, and the schema examples
+    that exercise this all use a positive constant divisor)."""
+    r = abs(a) % abs(b)
+    if a < 0:
+        r = -r
+    if r < 0:
+        r += b
+    return r
+
+
 def _eval_form(form, discs, depth=0):
     """form: a JSON-decoded ["op", ...] list, per CGDebugInfo::jsonEncodeExtentForm.
     discs: a list of already-read discriminant int values, by index."""
@@ -182,7 +214,7 @@ def _eval_form(form, discs, depth=0):
     if op == "sub": return a - b
     if op == "mul": return a * b
     if op == "div": return int(a / b) if b != 0 else 0
-    if op == "mod": return a - b * int(a / b) if b != 0 else 0
+    if op == "mod": return _iso_mod(a, b) if b != 0 else 0
     if op == "pow": return a ** b
     raise _SchemaDataError("unknown extent form op %r" % (op,))
 
