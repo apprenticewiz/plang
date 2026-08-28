@@ -296,6 +296,14 @@ void CGControlFlow::emitCase(const CaseStmt& s) {
     B.SetInsertPoint(nextBB);
     if (s.HasElse) {
         if (s.Else) EmitStmt(s.Else.get());
+    } else if (Opts.turbo()) {
+        // Real Turbo Pascal's case is not exhaustive-or-die the way ISO
+        // 7185/Extended Pascal's is: an unmatched selector with no else/
+        // otherwise part just does nothing here and carries on after the
+        // case-statement.  Nothing to emit -- nextBB is left empty, and the
+        // BrIfNeeded(endBB) below routes it to the same after-block every
+        // arm's own body already reaches, exactly the way it would if this
+        // were an ordinary matched arm with an empty body.
     } else {
         // ISO §6.8.3.5: reaching here means no label matched, which is an
         // error rather than a silent no-op.

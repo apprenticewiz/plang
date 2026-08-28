@@ -1538,6 +1538,16 @@ void Sema::checkCase(const CaseStmt& S) {
     // arms miss, not the part having a statement in it.
     if (S.HasElse) return;
 
+    // Turbo's case is not exhaustive-or-die (see CGControlFlow::emitCase):
+    // an unmatched selector with no else/otherwise part falls through
+    // instead of trapping, so this warning's premise -- that reaching such a
+    // value "is an error" -- is simply false under this dialect.  Falling
+    // through with no else is the idiomatic, expected Turbo pattern, not a
+    // mistake worth flagging, and unlike an ordinary warning this is gated
+    // before the call below rather than left to -Wno-case-not-exhaustive: no
+    // -W flag can reintroduce a warning whose call site never runs.
+    if (Opts.turbo()) return;
+
     // §6.8.3.5: reaching a case-statement with a selector value that matches no
     // case-constant is an error, reported when the program runs.  Where the
     // selector's type is small enough to enumerate, the values that would go
