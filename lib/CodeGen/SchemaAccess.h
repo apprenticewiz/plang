@@ -183,4 +183,33 @@ private:
     std::pair<llvm::Value*, llvm::Value*> pendingArgVal_{};
 
     llvm::Constant* i64c(int64_t v) const;
+
+    /// EP §6.7.5.3: range-check one discriminant VALUE against its formal's
+    /// declared type, exactly as new()'s own top-level argument loop does.
+    /// Factored out so emitNewSchema's loop and rangeCheckNestedDiscs below
+    /// -- issue #409's fix, which needs the identical check applied to a
+    /// nested schema-instantiation field's own discriminant -- share one
+    /// implementation rather than two copies drifting apart.
+    void checkDiscRange(llvm::Value* v, const plang::Type::SchemaDisc& disc,
+                        plang::SourceLocation Loc);
+    /// Issue #409: a nested schema-instantiation FIELD inside the schema
+    /// being allocated -- `outer(n) = record x: inner(n) end` -- has its own
+    /// discriminant, derived from \p discs (the enclosing object's own) the
+    /// same way descendIntoInstantiation computes it for sizing/offset
+    /// purposes, or from a fixed literal when the field's actuals needed no
+    /// closed form at all (`x: inner(50)`; see rtSizeOfTypeNode's own #393
+    /// comment on why ActualForms.empty() means the ResolvedBody's Value is
+    /// already correct there).  Neither was ever range-checked: emitNewSchema
+    /// checked only the literal arguments passed directly to new() itself.
+    ///
+    /// Unlike descendIntoInstantiation, which only ever answers for ONE
+    /// access path already being read or written, this walks every reachable
+    /// nested instantiation in \p decl UNCONDITIONALLY -- called once, right
+    /// after new()'s own discriminants are range-checked -- because the
+    /// diagnostic has to fire whether or not the program later touches that
+    /// field, exactly as `new(q, 500)` traps directly on a `^inner` whether
+    /// or not the object it allocates is ever read back.
+    void rangeCheckNestedDiscs(const plang::TypeNode* decl,
+                               const std::vector<llvm::Value*>& discs,
+                               plang::SourceLocation Loc, int depth = 0);
 };
