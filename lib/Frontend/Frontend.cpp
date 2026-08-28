@@ -943,6 +943,7 @@ int frontendPC1Main(int Argc, char *Argv[]) {
     bool                      DumpTokens    = false;
     bool                      DumpParseTree = false;
     std::vector<std::string>  ModuleSearchPaths;
+    std::vector<std::string>  IncludeSearchPaths; // -Fi<dir>: {$I}/{$INCLUDE}
     // -d<symbol>/-u<symbol>, in the order given on the command line: true
     // for a -d (define), false for a -u (undefine).  Applied in order onto
     // Opts.Defines below, after addPredefinedConditionalSymbols has set the
@@ -1041,6 +1042,24 @@ int frontendPC1Main(int Argc, char *Argv[]) {
                 return 1;
             }
             ModuleSearchPaths.push_back(Argv[++I]);
+        // -Fi<dir>/-Fi dir: the {$I}/{$INCLUDE} search path, parsed the same
+        // JoinedOrSeparate way as -I just above -- a deliberately separate
+        // flag and a deliberately separate list (see
+        // LangOptions::IncludeSearchPaths's own comment for why -I itself is
+        // not reused here). Must come before the "-I" arms would ever be
+        // reached for it: they only match an exact "-I" or something
+        // starting with "-I" -- "-Fi..." starts with neither, so order
+        // between the two pairs does not actually matter, but keeping this
+        // one right after -I's own keeps the two search-path flags next to
+        // each other for anyone reading top to bottom.
+        } else if (Arg.starts_with("-Fi") && Arg.size() > 3) {
+            IncludeSearchPaths.push_back(Arg.substr(3));
+        } else if (Arg == "-Fi") {
+            if (I + 1 >= Argc) {
+                report(diag::err_arg_requires_value, {"-Fi"});
+                return 1;
+            }
+            IncludeSearchPaths.push_back(Argv[++I]);
         } else if (Arg.starts_with("-ferror-limit=")) {
             const std::string N = Arg.substr(14);
             if (N.find_first_not_of("0123456789") != std::string::npos ||
@@ -1127,6 +1146,7 @@ int frontendPC1Main(int Argc, char *Argv[]) {
         Opts.PointerWidthBits = T.isArch32Bit() ? 32 : 64;
     }
     Opts.ModuleSearchPaths = std::move(ModuleSearchPaths);
+    Opts.IncludeSearchPaths = std::move(IncludeSearchPaths);
 
     // Opts.Defines: the predefined platform symbols first (the baseline),
     // then -d/-u in the order given on the command line, so a later -u can

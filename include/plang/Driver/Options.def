@@ -76,6 +76,8 @@ OPTION("-std=", "-std=<dialect>", Joined, Both,
        "                       fpc       Free Pascal extensions     [not yet implemented]")
 OPTION("-I", "-I<dir>", JoinedOrSeparate, Both,
        "Add <dir> to the module (.pmi) search path")
+OPTION("-Fi", "-Fi<dir>", JoinedOrSeparate, Both,
+       "Add <dir> to the {$I}/{$INCLUDE} search path")
 OPTION("-d", "-d<symbol>", Joined, Both,
        "Define <symbol> for -std=turbo's {$IFDEF}/{$IFNDEF}\n"
        "                     (same as {$DEFINE <symbol>} from the start of the file)")

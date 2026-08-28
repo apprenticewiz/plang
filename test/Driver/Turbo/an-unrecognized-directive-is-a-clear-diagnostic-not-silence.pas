@@ -1,8 +1,9 @@
 (*
 A `{$name}` naming no category dispatchDirective knows about (every
-directive but the seven message directives, until Cluster B's later items
-add conditional compilation / {$I file} / {$R+}-style switches) gets its
-own clear "unknown compiler directive" diagnostic rather than silently
+directive but the message directives, conditional compilation, and
+{$I file}/{$INCLUDE file} -- until Cluster B's last remaining item,
+{$R+}-style switches, lands) gets its own clear "unknown compiler
+directive" diagnostic rather than silently
 doing nothing or being treated as an ordinary, ignored comment -- checked
 against real `fpc -Mtp` field practice, which reports an unrecognized
 directive as a Warning and keeps compiling (`t.pas(2,2) Warning: Illegal

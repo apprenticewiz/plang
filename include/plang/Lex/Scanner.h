@@ -51,7 +51,15 @@ public:
 
 private:
     LangOptions          Opts;   // dialect and warning options (owned copy)
-    const SourceManager* SM;     // owns the text; not owned here
+    // Owns the text; not owned here.  Non-const (unlike the SourceManager&
+    // this Scanner sees no other reason to mutate through) because an
+    // {$I file}/{$INCLUDE file} splices a new buffer into THIS same
+    // SourceManager mid-scan (openInclude, in Directives.cpp) -- the
+    // included file's text has to live somewhere past the directive that
+    // named it, and SourceManager's own deque-of-buffers design (see its
+    // header comment) is exactly what already lets a Scanner hold a
+    // string_view into a buffer that outlives the call that created it.
+    SourceManager*       SM;
     FileID               FID;    // the buffer being scanned
     std::string_view     Text;   // that buffer's text, owned by SM
     DiagnosticsEngine&   Diags;  // shared diagnostic sink
@@ -73,6 +81,15 @@ private:
     [[nodiscard]] SourceLocation locAt(size_t Offset) const {
         return SM->getLocForOffset(FID, Offset);
     }
+
+    // MS-DOS Ctrl-Z end-of-file truncation (-std=turbo only): see the
+    // constructors' own comment in Scanner.cpp, where this used to be a
+    // free function local to that file.  Promoted to a static member so
+    // openInclude (Directives.cpp) can apply the identical rule to a buffer
+    // an {$I file}/{$INCLUDE file} opens mid-scan, the same way each
+    // constructor already applies it to the buffer it opens.
+    static std::string_view truncateAtCtrlZ(std::string_view Text,
+                                            const LangOptions& Opts);
 
     // Returns the character at Pos+1 without advancing, or '\0' at end of input.
     char peek() const;
@@ -130,12 +147,13 @@ private:
     //
     // This is the extension point Cluster B's later items plug into: a
     // conditional-compilation handler ({$IFDEF}/{$IFNDEF}/{$ENDIF}/{$ELSE}/
-    // {$ELSEIF}) -- now dispatchConditionalDirective, below -- an {$I file}
-    // include handler, and a {$R+}-style switch handler (CompilerSwitches.def's
-    // SwitchTable already exists and is only waiting for this) each add
-    // their own "try this category" call here, in dispatchMessageDirective's
-    // own shape -- (Name, Argument, Loc) -> bool handled -- tried in turn
-    // before the final warn_directive_unknown fallback.  The latter two do
+    // {$ELSEIF}) -- dispatchConditionalDirective, below -- an {$I file}/
+    // {$INCLUDE file} handler -- dispatchIncludeDirective, further below --
+    // and a {$R+}-style switch handler (CompilerSwitches.def's SwitchTable
+    // already exists and is only waiting for this) each add their own "try
+    // this category" call here, in dispatchMessageDirective's own shape --
+    // (Name, Argument, Loc) -> bool handled -- tried in turn before the
+    // final warn_directive_unknown fallback.  The last of the three does
     // not exist yet.
     void dispatchDirective(std::string_view Body, SourceLocation Loc);
 
@@ -264,6 +282,116 @@ private:
     // no-op, as it must be for ISO 7185/Extended Pascal, whenever CondStack
     // is already empty, which it always is under those dialects.
     void reportUnterminatedConditionals();
+
+    // ---- {$I file}/{$INCLUDE file} (lib/Lex/Directives.cpp) ---------------
+    //
+    // Splices the named file's contents into the token stream right where
+    // the directive stands, "as if" it had been written there directly --
+    // this directive's own field name in real Turbo Pascal.  That "as if"
+    // is taken literally: unlike CondStack/CurrentDefines above, nothing
+    // about conditional-compilation state is saved or restored around an
+    // include, so a {$IFDEF} opened in one file and closed by an {$ENDIF}
+    // in another (or a {$DEFINE} that carries across the boundary either
+    // way) behaves exactly as it would if the included text had been
+    // pasted in by hand. What genuinely is per-file -- which buffer is
+    // being read, and where in it -- is saved and restored, in the same
+    // (FID, Text, Pos) triple every other scanning function already
+    // threads through, one IncludeFrame per file currently spliced in.
+
+    // One entry per include still open, in nesting order: IncludeStack.back()
+    // is the file that most recently did an {$I}/{$INCLUDE}, i.e. the one to
+    // resume once the current (innermost) buffer runs out.  Pushed by
+    // openInclude right before switching FID/Text/Pos onto the included
+    // buffer; popped by popInclude, called from next() in place of
+    // returning Eof whenever this is non-empty.
+    struct IncludeFrame {
+        FileID            FID;
+        std::string_view  Text;
+        size_t            Pos;
+    };
+    std::vector<IncludeFrame> IncludeStack;
+
+    // The on-disk identity (SM->addFile's own Path, canonicalized when
+    // possible -- see openInclude) of every file currently open: the main
+    // file, pushed once at construction, plus one entry per frame on
+    // IncludeStack, in the same order.  Invariant:
+    // OpenIncludePaths.size() == IncludeStack.size() + 1 whenever the main
+    // file was opened from disk (the Scanner(SourceManager&, std::string,
+    // ...) constructor); the in-memory-buffer constructor pushes nothing,
+    // since it names no real file to protect a self-include against -- see
+    // that constructor's own comment in Scanner.cpp.  What
+    // dispatchIncludeDirective checks a resolved candidate against before
+    // ever opening it: a match means A includes A, or A includes B
+    // includes ... includes A, and is reported instead of recursed into.
+    std::vector<std::string> OpenIncludePaths;
+
+    // The on-disk identity Path is recorded under in OpenIncludePaths: Path
+    // canonicalized (symlinks resolved, "."/".." segments collapsed) when
+    // that succeeds, or Path itself unchanged if it doesn't -- e.g. a
+    // transient race between the existence check that already confirmed
+    // Path names a real file and this call.  A same-file comparison that
+    // occasionally misses two different spellings of the same path because
+    // of a race is still strictly better than one that cannot be computed
+    // at all whenever canonicalization has a bad moment.  Used both by the
+    // file-path constructor (Scanner.cpp, for the main file) and by
+    // openInclude (Directives.cpp, for each included file), which is why
+    // this is declared here rather than file-local to either .cpp.
+    static std::string canonicalIdentity(const std::string& Path);
+
+    // Tries the {$I}/{$INCLUDE} directive family against Name, called from
+    // dispatchDirective in dispatchMessageDirective's own (Name, Argument,
+    // Loc) -> bool shape.  Returns false, having done nothing, for every
+    // Name but "i"/"include" folded -- OR for "i" with an Argument of
+    // exactly '+' or '-', which is the (separately tracked, not yet
+    // dispatched from anywhere -- CompilerSwitches.def's own later task)
+    // IOChecks switch instead: its long name is "iochecks", never
+    // "include", so only the one-letter spelling needs this guard.  Leaving
+    // {$I+}/{$I-} unhandled here is what keeps them reaching
+    // warn_directive_unknown exactly as they did before this function
+    // existed, rather than being misread as an attempt to include a file
+    // literally named "+" or "-".
+    //
+    // A recognized Argument is unquoted (a single layer of surrounding '
+    // ... ', if present, stripped -- confirmed against `fpc -Mtp`, which
+    // accepts both {$I foo.inc} and {$I 'foo.inc'}) and, if still empty,
+    // reported as err_directive_include_expects_filename; otherwise handed
+    // to openInclude.
+    bool dispatchIncludeDirective(std::string_view Name, std::string_view Argument,
+                                  SourceLocation Loc);
+
+    // Resolves Filename (already unquoted) to a readable regular file's
+    // path, or nullopt if none is found.  Search order: if Filename is
+    // already absolute, tried as-is with no search at all; otherwise THIS
+    // scanner's currently active buffer's own directory first (SM's Name
+    // for FID, not the outermost file -- a nested include resolves
+    // relative to its own immediate parent), then Opts.IncludeSearchPaths
+    // (-Fi<dir>) in the order given -- the same "try each candidate, first
+    // hit wins" shape Sema::resolveImports already uses for
+    // Opts.ModuleSearchPaths/.pmi.
+    [[nodiscard]] std::optional<std::string>
+    resolveIncludePath(std::string_view Filename) const;
+
+    // Resolves Filename via resolveIncludePath and, on success, switches
+    // this Scanner onto it: pushes an IncludeFrame capturing exactly where
+    // the including file's own scan currently stands, pushes the new
+    // file's identity onto OpenIncludePaths, then sets FID/Text/Pos to the
+    // start of the new buffer (added to *SM via addFile, the same call the
+    // file-path constructor makes for the main file).  Reports
+    // err_directive_include_not_found if Filename cannot be resolved or
+    // opened at all, or err_directive_include_cycle if resolving it would
+    // reopen a file already somewhere on OpenIncludePaths -- neither case
+    // pushes anything, so scanning simply continues in the current buffer
+    // right after the directive, same as any other directive that ends up
+    // doing nothing.
+    void openInclude(std::string_view Filename, SourceLocation Loc);
+
+    // Called from next() in place of returning Eof whenever IncludeStack is
+    // non-empty: pops the innermost frame, restoring FID/Text/Pos to
+    // exactly where the including file's own scan left off, and pops
+    // OpenIncludePaths to match. Returns false, having left everything
+    // alone, when IncludeStack is already empty -- next()'s cue that this
+    // really is the end of the whole token stream.
+    bool popInclude();
 
     Token scanIdentifierOrKeyword(size_t TokenStart);
     Token scanNumber(size_t TokenStart);
