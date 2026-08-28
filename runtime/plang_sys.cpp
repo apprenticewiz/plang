@@ -534,9 +534,47 @@ void plang_err_schema_disc(const char *Name, int64_t Dst, int64_t Src) {
 /// plang_file.cpp's caller has already worded for its own open attempt; this
 /// only supplies the shared "flush stdout, report, exit" convention every
 /// other runtime check here follows (issue #150).
+///
+/// Msg carries Name -- the external filename plang_file.cpp's reset/rewrite/
+/// extend/update was given -- verbatim (see e.g. its "cannot open '%s' for
+/// reading" callers).  That filename is a Pascal string *value*, not source
+/// text: a program can build it however it likes, including with chr(27) or
+/// any other control byte, and it reaches here unexamined.  Printed as-is,
+/// such a byte would steer whatever terminal or log is reading plang's
+/// stderr -- the same terminal/log-injection hole issue #281 closed for the
+/// compiler's OWN diagnostics (a source filename from argv, a locale tag,
+/// the -v/-### echo) via escapeControlChars (include/plang/Basic/
+/// StringUtil.h). That helper returns a std::string and lives under
+/// include/plang/Basic/, which the runtime cannot use: the runtime is linked
+/// into generated Pascal programs (see ModuleFinalisers's comment above),
+/// and that link carries no C++ standard library (Driver.cpp's link line
+/// pulls in only -lm/-lgcc/-lgcc_s/-lc, never -lstdc++), so std::string's
+/// operator new/exception machinery would leave every compiled program with
+/// unresolved symbols. escapeCC below is a freestanding equivalent -- same
+/// threshold, same \xHH escape -- written directly against fputc so it needs
+/// no dynamic buffer at all (issue #420, the runtime-side twin of #281).
+static void escapeCC(const char *S, std::FILE *Stream) {
+    static const char Hex[] = "0123456789abcdef";
+    if (!S) return;
+    for (const unsigned char *P = reinterpret_cast<const unsigned char *>(S);
+         *P; ++P) {
+        const unsigned char C = *P;
+        if (C < 0x20 || C == 0x7F) {
+            std::fputc('\\', Stream);
+            std::fputc('x', Stream);
+            std::fputc(Hex[C >> 4], Stream);
+            std::fputc(Hex[C & 0xF], Stream);
+        } else {
+            std::fputc(static_cast<char>(C), Stream);
+        }
+    }
+}
+
 [[noreturn]] void plang_err_cannot_open(const char *Msg) {
     std::fflush(stdout);
-    std::fprintf(stderr, "plang runtime: %s\n", Msg);
+    std::fputs("plang runtime: ", stderr);
+    escapeCC(Msg, stderr);
+    std::fputc('\n', stderr);
     std::exit(PlangRuntimeErrorStatus);
 }
 
