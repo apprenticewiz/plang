@@ -109,6 +109,14 @@ static constexpr bool startsExpression(TokenKind K) {
 Scanner::Scanner(SourceManager& SM, std::string Filename,
                  DiagnosticsEngine& Diags, LangOptions Opts)
     : Opts(Opts), SM(&SM), Diags(Diags), Pos(0) {
+    // Seeded here rather than left as a reference to Opts.Defines: `{$DEFINE}`/
+    // `{$UNDEF}` mutate this copy in place as they are scanned (see
+    // CurrentDefines's own comment in Scanner.h), and Opts.Defines is the
+    // read-only starting point, not something this scanner may change out
+    // from under whoever else is holding the same LangOptions.  Folded
+    // through toLower again regardless of whether Opts.Defines already was,
+    // since nothing enforces that on every caller that builds one.
+    for (const std::string& S : this->Opts.Defines) CurrentDefines.insert(toLower(S));
     if (auto ID = SM.addFile(Filename)) {
         FID  = *ID;
         Text = truncateAtCtrlZ(SM.getBufferData(FID), Opts);
@@ -129,6 +137,9 @@ Scanner::Scanner(SourceManager& SM, std::string Filename,
 Scanner::Scanner(SourceManager& SM, std::string SourceName, std::string Content,
                  DiagnosticsEngine& Diags, LangOptions Opts)
     : Opts(Opts), SM(&SM), Diags(Diags), Pos(0) {
+    // See the other constructor's identical loop for why this seeds a
+    // mutable copy rather than reading Opts.Defines directly.
+    for (const std::string& S : this->Opts.Defines) CurrentDefines.insert(toLower(S));
     // SourceName is not moved from here (unlike Content): the failure path
     // below still needs it, and a moved-from string is only left empty by
     // convention, not by guarantee.
@@ -143,8 +154,17 @@ Scanner::Scanner(SourceManager& SM, std::string SourceName, std::string Content,
 Token Scanner::next() {
     for (;;) {
         skipWhitespaceAndComments();
-        if (Pos >= Text.size())
+        if (Pos >= Text.size()) {
+            // A live {$IFDEF}/{$IFNDEF} whose own {$ENDIF} the file simply
+            // never reached -- the one unterminated-conditional case
+            // skipToNextConditionalMarker cannot itself catch, since it is
+            // never called for a branch that stayed live all the way to
+            // here.  A no-op (CondStack is always empty) for ISO 7185 and
+            // Extended Pascal, and for every subsequent next() call once
+            // this has already run once.
+            reportUnterminatedConditionals();
             return make(TokenKind::Eof, "", Pos);
+        }
 
         const size_t TokenStart = Pos;
         const char   C          = Text[Pos];

@@ -6,6 +6,8 @@
 #include "plang/Basic/Token.h"
 
 #include <initializer_list>
+#include <optional>
+#include <set>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -128,12 +130,13 @@ private:
     //
     // This is the extension point Cluster B's later items plug into: a
     // conditional-compilation handler ({$IFDEF}/{$IFNDEF}/{$ENDIF}/{$ELSE}/
-    // {$ELSEIF}), an {$I file} include handler, and a {$R+}-style switch
-    // handler (CompilerSwitches.def's SwitchTable already exists and is
-    // only waiting for this) each add their own "try this category" call
-    // here, in dispatchMessageDirective's own shape -- (Name, Argument,
-    // Loc) -> bool handled -- tried in turn before the final
-    // warn_directive_unknown fallback.  None of those three exist yet.
+    // {$ELSEIF}) -- now dispatchConditionalDirective, below -- an {$I file}
+    // include handler, and a {$R+}-style switch handler (CompilerSwitches.def's
+    // SwitchTable already exists and is only waiting for this) each add
+    // their own "try this category" call here, in dispatchMessageDirective's
+    // own shape -- (Name, Argument, Loc) -> bool handled -- tried in turn
+    // before the final warn_directive_unknown fallback.  The latter two do
+    // not exist yet.
     void dispatchDirective(std::string_view Body, SourceLocation Loc);
 
     // The {$MESSAGE}/{$INFO}/{$NOTE}/{$HINT}/{$WARNING}/{$ERROR}/{$FATAL}
@@ -155,6 +158,112 @@ private:
     // hook a real abort into (and is built -fno-exceptions besides).
     bool dispatchMessageDirective(std::string_view Name, std::string_view Argument,
                                   SourceLocation Loc);
+
+    // ---- Conditional compilation: {$DEFINE}/{$UNDEF}/{$IFDEF}/{$IFNDEF}/
+    // {$ELSE}/{$ELSEIF}/{$ENDIF} (lib/Lex/Directives.cpp) -------------------
+
+    // One entry per {$IFDEF}/{$IFNDEF} whose matching {$ENDIF} has not yet
+    // been scanned.  Pushed by dispatchConditionalDirective when the opening
+    // directive is dispatched (whether or not its own branch turns out to be
+    // live); popped when the matching {$ENDIF} is reached, either directly
+    // in dispatchConditionalDirective (ordinary/live scanning) or inside
+    // skipToNextConditionalMarker (skipping dead source).  A nested
+    // {$IFDEF}/{$IFNDEF} encountered *while* skipping dead source for some
+    // other frame is never pushed here at all -- see
+    // skipToNextConditionalMarker's own comment for why.
+    struct CondFrame {
+        // Becomes true the moment any branch of this {$IFDEF}/{$ELSEIF}/
+        // {$ELSE} chain is live (including the opening {$IFDEF}/{$IFNDEF}
+        // itself, if its own condition holds).  Once true, no later
+        // {$ELSEIF} in the same chain is ever evaluated -- only checked for
+        // directive-syntax validity -- since only one branch of a chain can
+        // ever run, no matter what a later one tests.
+        bool AnyBranchTaken;
+        // Becomes true once {$ELSE} has been seen for this chain, so a
+        // further {$ELSEIF} or a second {$ELSE} is reported rather than
+        // silently accepted.
+        bool SeenElse = false;
+        // Where the opening {$IFDEF}/{$IFNDEF} is, for
+        // err_directive_unterminated_conditional if end of file is reached
+        // with this frame still open.
+        SourceLocation OpenLoc;
+        // "IFDEF" or "IFNDEF", exactly as spelled at OpenLoc (case
+        // preserved), reported as %0 of that same diagnostic.
+        std::string OpenName;
+    };
+    std::vector<CondFrame> CondStack;
+
+    // The symbols currently defined for `{$IFDEF}`/`{$IFNDEF}`/`{$ELSEIF}`.
+    // Seeded from Opts.Defines at construction (folded through toLower again
+    // regardless of whether Opts.Defines already was, since nothing enforces
+    // that on every caller) and then mutated in place by `{$DEFINE}`/
+    // `{$UNDEF}` as they are scanned.  See LangOptions::Defines's own
+    // comment for why this lives only here, as plain mutable Scanner state,
+    // rather than in a SwitchTable-style position-indexed table: nothing
+    // downstream of the Scanner ever asks "was X defined at location L".
+    std::set<std::string> CurrentDefines;
+
+    // Tries the conditional-compilation directive family against Name,
+    // called from dispatchDirective before the unknown-directive fallback,
+    // in dispatchMessageDirective's own (Name, Argument, Loc) -> bool shape.
+    // Unlike that one, this can consume far more source than the directive
+    // it was handed: a false {$IFDEF}/{$IFNDEF}, or reaching {$ELSE}/
+    // {$ELSEIF} after a branch that was live, hands off to
+    // skipToNextConditionalMarker, which advances Pos raw through however
+    // much dead source separates here from the next branch this chain can
+    // still take, or its {$ENDIF}.
+    bool dispatchConditionalDirective(std::string_view Name, std::string_view Argument,
+                                      SourceLocation Loc);
+
+    // Raw-skips forward from Pos -- already positioned just past the
+    // directive that closed off the branch being left, a false {$IFDEF}/
+    // {$IFNDEF} or an {$ELSE}/{$ELSEIF} reached after the branch before it
+    // was live -- through however much source belongs to Frame's dead
+    // remainder.  Frame must be CondStack.back() at the time of the call;
+    // this never pushes to CondStack itself (a nested {$IFDEF}/{$IFNDEF}
+    // found while skipping is tracked with a plain local depth counter, not
+    // a new frame), so the reference stays valid for the whole call.
+    //
+    // Stops one of three ways: a live {$ELSEIF}/{$ELSE} is found (Frame
+    // stays on CondStack, Pos left just after that directive's own closer,
+    // ordinary scanning resumes there); Frame's own {$ENDIF} is found (Frame
+    // is popped, Pos left just after it); or end of file is reached first,
+    // including a directive that never finds its own closing delimiter --
+    // reports err_directive_unterminated_conditional at Frame.OpenLoc, pops
+    // Frame, and leaves Pos at end of file.
+    //
+    // No directive found while skipping -- {$DEFINE}, {$MESSAGE}, an
+    // unknown name, anything but {$IFDEF}/{$IFNDEF}/{$ELSE}/{$ELSEIF}/
+    // {$ENDIF} -- is ever dispatched, or even inspected past its own Name:
+    // real Turbo/FPC never evaluate a directive inside a branch that was
+    // never taken, and this does not either.  The same is true of a plain
+    // syntax error nested in the dead source (an unterminated string, a
+    // mismatched comment delimiter, an unexpected character): none of it is
+    // ever tokenized, so none of it is ever diagnosed.
+    void skipToNextConditionalMarker(CondFrame& Frame);
+
+    // Scans a directive body the same way skipDirective does -- same opener
+    // width, same same-kind-terminator rule -- for
+    // skipToNextConditionalMarker's use inside dead source: never
+    // dispatches, and never diagnoses a missing terminator (an unterminated
+    // or mismatched directive found while skipping dead source is exactly
+    // the "genuine syntax error nobody will ever compile" this whole
+    // mechanism exists not to report). On success returns the raw body text
+    // with Pos left just past the closer; on failure -- ran off the end of
+    // the buffer first -- returns std::nullopt with Pos left at Text.size().
+    // Already positioned at the opening delimiter's first character, same
+    // contract as skipDirective.
+    std::optional<std::string_view> rawDirectiveBody(bool Braced);
+
+    // Called from next() right before it would return Eof: reports
+    // err_directive_unterminated_conditional for every frame still on
+    // CondStack (a live {$IFDEF}/{$IFNDEF} whose own {$ENDIF} was never
+    // reached because the file simply ended) and clears CondStack, so a
+    // second next() call after Eof -- which next()'s own contract
+    // guarantees stays Eof -- does not report the same thing twice.  A
+    // no-op, as it must be for ISO 7185/Extended Pascal, whenever CondStack
+    // is already empty, which it always is under those dialects.
+    void reportUnterminatedConditionals();
 
     Token scanIdentifierOrKeyword(size_t TokenStart);
     Token scanNumber(size_t TokenStart);

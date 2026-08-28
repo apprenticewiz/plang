@@ -76,6 +76,12 @@ OPTION("-std=", "-std=<dialect>", Joined, Both,
        "                       fpc       Free Pascal extensions     [not yet implemented]")
 OPTION("-I", "-I<dir>", JoinedOrSeparate, Both,
        "Add <dir> to the module (.pmi) search path")
+OPTION("-d", "-d<symbol>", Joined, Both,
+       "Define <symbol> for -std=turbo's {$IFDEF}/{$IFNDEF}\n"
+       "                     (same as {$DEFINE <symbol>} from the start of the file)")
+OPTION("-u", "-u<symbol>", Joined, Both,
+       "Undefine <symbol> for -std=turbo's {$IFDEF}/{$IFNDEF}\n"
+       "                     (same as {$UNDEF <symbol>} from the start of the file)")
 OPTION("-fdiagnostics-language=", "-fdiagnostics-language=<tag>", Joined, Both,
        "Language for diagnostic messages, e.g. fr or es_MX; 'C' or 'en'\n"
        "                     for the built-in English.  Without it LC_ALL, LC_MESSAGES\n"

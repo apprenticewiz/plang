@@ -92,6 +92,40 @@ void usagePC1() {
         "{}", opts::helpText(opts::Consumer::Frontend));
 }
 
+// Symbols -std=turbo predefines automatically for `{$IFDEF}`, matching the
+// target being compiled for -- Opts.TargetTriple, or the host default when
+// it is empty, the same triple Opts.PointerWidthBits above was just derived
+// from and CodeGen's own DataLayout is about to use.  Deliberately minimal:
+// just enough for `{$IFDEF UNIX}`/`{$IFDEF LINUX}`-style idioms to work on
+// the platforms/architectures this project actually supports (see
+// README.md) -- Linux and macOS, x86_64 or aarch64.  Names match FPC's own
+// spelling of the same OS/CPU facts, since these are facts about the target
+// machine rather than about which compiler is running, so real-world source
+// that already tests them ports unmodified.
+//
+// FPC itself is deliberately NOT predefined: source guarded by
+// `{$IFDEF FPC}` takes branches written against FPC-only features this
+// Turbo milestone does not implement, and plang predefining that name would
+// let such a branch compile as if it did, which is worse than the branch
+// simply not being taken.  If a real need for more predefined symbols shows
+// up later, this is where they get added.
+void addPredefinedConditionalSymbols(LangOptions &Opts) {
+    const llvm::Triple T(Opts.TargetTriple.empty()
+                              ? llvm::sys::getDefaultTargetTriple()
+                              : llvm::Triple::normalize(Opts.TargetTriple));
+    if (T.isOSLinux()) {
+        Opts.Defines.insert("linux");
+        Opts.Defines.insert("unix");
+    }
+    if (T.isMacOSX()) {
+        Opts.Defines.insert("darwin");
+        Opts.Defines.insert("unix");
+    }
+    Opts.Defines.insert(Opts.PointerWidthBits == 32 ? "cpu32" : "cpu64");
+    if (T.getArch() == llvm::Triple::x86_64)  Opts.Defines.insert("cpux86_64");
+    if (T.getArch() == llvm::Triple::aarch64) Opts.Defines.insert("cpuaarch64");
+}
+
 // ---------------------------------------------------------------------------
 // PMI writer — serialize a module's exported declarations to Pascal text
 // ---------------------------------------------------------------------------
@@ -909,6 +943,13 @@ int frontendPC1Main(int Argc, char *Argv[]) {
     bool                      DumpTokens    = false;
     bool                      DumpParseTree = false;
     std::vector<std::string>  ModuleSearchPaths;
+    // -d<symbol>/-u<symbol>, in the order given on the command line: true
+    // for a -d (define), false for a -u (undefine).  Applied in order onto
+    // Opts.Defines below, after addPredefinedConditionalSymbols has set the
+    // starting baseline, so a later -u can undo an earlier -d (or a
+    // predefined symbol) and vice versa -- see LangOptions::Defines's own
+    // comment for why this is the right order.
+    std::vector<std::pair<bool, std::string>> DefineOps;
 
     // Options start at Argv[2]; Argv[0]="plang", Argv[1]="-pc1".
     for (int I = 2; I < Argc; ++I) {
@@ -983,6 +1024,15 @@ int frontendPC1Main(int Argc, char *Argv[]) {
             DumpParseTree = true;
         } else if (Arg == "-g") {
             Debug = true;
+        // Must come after the "-dump-ast"/"-dump-tokens"/"-dump-parse-tree"
+        // exact-match arms above: those also start with "-d", and an
+        // else-if chain resolves on the first match, unlike the driver's
+        // own opts::lookup (which picks the longest spelling regardless of
+        // arm order) -- see Options.def's -d entry.
+        } else if (Arg.starts_with("-d") && Arg.size() > 2) {
+            DefineOps.emplace_back(true, Arg.substr(2));
+        } else if (Arg.starts_with("-u") && Arg.size() > 2) {
+            DefineOps.emplace_back(false, Arg.substr(2));
         } else if (Arg.starts_with("-I") && Arg.size() > 2) {
             ModuleSearchPaths.push_back(Arg.substr(2));
         } else if (Arg == "-I") {
@@ -1077,6 +1127,28 @@ int frontendPC1Main(int Argc, char *Argv[]) {
         Opts.PointerWidthBits = T.isArch32Bit() ? 32 : 64;
     }
     Opts.ModuleSearchPaths = std::move(ModuleSearchPaths);
+
+    // Opts.Defines: the predefined platform symbols first (the baseline),
+    // then -d/-u in the order given on the command line, so a later -u can
+    // undo an earlier -d or a predefined symbol and vice versa -- see
+    // LangOptions::Defines's own comment.  Gated on Opts.turbo(): a
+    // `{$IFDEF}` cannot appear at all in any other dialect (see
+    // Directives.cpp), so building this set for one would be pure waste,
+    // and -dSYMBOL under -std=iso7185 silently defining nothing is the
+    // right answer, not a diagnostic -- the same way -Wno-<name> is
+    // accepted, just inert, under a dialect that never raises that warning.
+    if (Opts.turbo()) {
+        addPredefinedConditionalSymbols(Opts);
+        for (const auto &[Define, Symbol] : DefineOps) {
+            if (!looksLikeIdentifier(Symbol)) {
+                report(diag::warn_invalid_define_symbol, {Symbol});
+                continue;
+            }
+            const std::string Folded = toLower(Symbol);
+            if (Define) Opts.Defines.insert(Folded);
+            else        Opts.Defines.erase(Folded);
+        }
+    }
 
     // Route output: a dump mode or LLVM IR, to stdout or a named file.  Moved
     // above the Scanner/Parser/Sema pipeline so -dump-tokens (Scanner-only)
