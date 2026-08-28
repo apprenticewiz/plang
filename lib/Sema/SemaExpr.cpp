@@ -6,6 +6,7 @@
 
 #include "llvm/Support/Casting.h"
 
+#include <algorithm>
 #include <format>
 #include <ranges>
 #include <span>
@@ -254,6 +255,7 @@ std::shared_ptr<Type> Sema::checkIdent(const IdentExpr& E) {
 
     Symbol* Sym = Symtab.lookup(E.Name);
     if (!Sym) {
+        if (checkRealModeDosName(E.Name, E.Loc)) return TyErr;
         error(E.Loc, diag::err_undefined_identifier, {E.Name});
         return TyErr;
     }
@@ -868,6 +870,58 @@ bool Sema::checkBuiltinArity(BuiltinID ID, const std::string& LowerName,
     return false;
 }
 
+namespace {
+/// Turbo Pascal 7's real-mode DOS surface: segment/offset pointer
+/// manipulation, raw memory/port access, heap-internals variables, and
+/// low-level DOS/BIOS interrupt calls.  None of it has any meaning on
+/// plang's flat-address-space, 64-bit Linux/macOS target.  Spellings verified
+/// against the Turbo Pascal 7.0 Language Guide / Programmer's Reference and
+/// (for the modern-FPC survivors: Seg, Ofs, CSeg, DSeg, SSeg, SPtr, Ptr)
+/// the Free Pascal RTL's System-unit reference.
+///
+/// Deliberately excluded (see DiagnosticSemaKinds.def's comment and the
+/// callers of checkRealModeDosName): SwapVectors, GetCBreak, SetCBreak,
+/// GetVerify, SetVerify -- real TP code calls these unconditionally around
+/// Exec, so rejecting them would break programs that would otherwise run
+/// fine.  A later task makes the Dos unit accept-and-no-op them; this one
+/// must not touch them at all, in either direction.
+///
+/// The Overlay unit's manager routines and its OvrResult status variable are
+/// included as "a handful of overlay-related names" per the task that added
+/// this list; OvrCodeList/OvrDebugPtr (obscure internal-use variables) and
+/// the ovrOk/ovrError/... integer error-code constants were deliberately
+/// left off -- lower-risk to leave as ordinary undefined identifiers, and
+/// less certain from available references.
+constexpr std::string_view RealModeDosNames[] = {
+    // Segment/offset pointers.
+    "seg", "ofs", "cseg", "dseg", "sseg", "sptr", "ptr",
+    // Raw memory and I/O-port arrays.
+    "mem", "memw", "meml", "port", "portw",
+    // CPU/FPU identification and the program-segment-prefix segment.
+    "test8086", "test8087", "prefixseg",
+    // Heap internals.
+    "heaporg", "heapptr", "heapend", "freelist",
+    "mark", "release", "memavail", "maxavail",
+    // DOS/BIOS interrupt calls.
+    "intr", "msdos", "getintvec", "setintvec", "keep",
+    // Overlay manager (unit Overlay).
+    "ovrinit", "ovrinitems", "ovrclearbuf", "ovrgetbuf", "ovrsetbuf",
+    "ovrgetretry", "ovrsetretry", "ovrresult",
+};
+
+bool isRealModeDosName(const std::string& Name) {
+    const std::string Lo = toLower(Name);
+    return std::ranges::find(RealModeDosNames, Lo) != std::ranges::end(RealModeDosNames);
+}
+} // namespace
+
+bool Sema::checkRealModeDosName(const std::string& Name, SourceLocation Loc) {
+    if (!Opts.turbo()) return false;
+    if (!isRealModeDosName(Name)) return false;
+    error(Loc, diag::err_turbo_real_mode_facility, {Name});
+    return true;
+}
+
 bool Sema::checkEPOnly(const Symbol& Sym, SourceLocation Loc) {
     // The dialect test already happened, at registration, against the mask in
     // Builtins.def.  Asking extendedPascal()/turbo() again here would be a
@@ -894,6 +948,11 @@ bool Sema::checkEPOnly(const Symbol& Sym, SourceLocation Loc) {
 std::shared_ptr<Type> Sema::checkCallExpr(const CallExpr& E) {
     Symbol* Sym = Symtab.lookup(E.Name);
     if (!Sym) {
+        // Seg(x), Ofs(x) and the two-argument Ptr(seg, ofs) all require
+        // parens, so they parse as a CallExpr and reach here rather than
+        // checkIdent -- an expression-context use just as much as `Mem[...]`
+        // is, only spelled with a call instead of an index.
+        if (checkRealModeDosName(E.Name, E.Loc)) return TyErr;
         error(E.Loc, diag::err_undefined_function, {E.Name});
         return TyErr;
     }
