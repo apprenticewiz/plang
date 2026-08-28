@@ -38,6 +38,22 @@ public:
     /// anything about the call is emitted -- unlike every guard below, which
     /// always evaluates its operands and only branches around the failure.
     [[nodiscard]] bool assertionsAt(plang::SourceLocation Loc) const;
+    /// Whether Turbo's BoolEval switch ({$B+}/{$B-}, CompilerSwitches.def) is
+    /// ON at \p Loc -- i.e. whether `and`/`or` on two Boolean operands take
+    /// ISO §6.7.2.1's full evaluation (both operands always run) rather than
+    /// Turbo's own default, `{$B-}`, short-circuit evaluation.  Same
+    /// position-keyed Opts.switchOn query as rangeChecksAt/assertionsAt, but
+    /// -- unlike those two -- this alone is not the whole answer for whether
+    /// to short-circuit: BoolEval's SwitchTable default (TurboDefault=false
+    /// in CompilerSwitches.def) is false for EVERY dialect, ISO 7185 and
+    /// Extended Pascal included, since defaultSwitches() derives it from
+    /// CompilerState::turboDefaults() unconditionally.  Read literally for
+    /// those two dialects that would mean "short-circuit", which is exactly
+    /// backwards: ISO §6.7.2.1 requires both operands evaluated, always, and
+    /// neither dialect has a `{$B}` directive to say otherwise.  So every
+    /// caller of this must gate on isTurbo() first (CGBinaryOps::emitBinary's
+    /// And/Or arm does) rather than trusting this answer on its own.
+    [[nodiscard]] bool boolEvalAt(plang::SourceLocation Loc) const;
     /// Whether the active dialect is Turbo -- read both internally (every
     /// guard below routes its failure through the plang_tp_* reporter
     /// family instead of the shared ISO/EP plang_err_* one when this is

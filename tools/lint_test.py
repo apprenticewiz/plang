@@ -122,6 +122,25 @@ BRACE_CHECK_EXEMPT = {
     "test/Driver/Turbo/range-checks-default-off-under-turbo-lets-an-out-of-range-write-through.pas",
     "test/Driver/Turbo/explicit-r-plus-under-turbo-aborts-with-exit-201-not-the-shared-status.pas",
     "test/Driver/Turbo/explicit-frange-checks-through-the-driver-overrides-turbos-off-default.pas",
+    # Same reasoning again (only ever compiles under -std=turbo -- see each
+    # file's own RUN: line -- so the matched-delimiter rule this check
+    # doesn't model is the one that actually applies), for the BoolEval
+    # ({$B+}/{$B-}) short-circuit tests: their header prose discusses
+    # '{$B+}'/'{$B-}'/'{$R+}' syntax in English the same way the
+    # switch-directive files above already do.  Not a hazard to fix.
+    #
+    # Note the two dialect-comparison siblings of these files --
+    # iso7185-and-extended-pascal-always-evaluate-both-boolean-operands.pas
+    # (Driver/Turbo) and EP/AndThenOrElse/short-circuit-runtime-behavior-is-
+    # unaffected-by-the-turbo-refactor.pas -- deliberately do NOT appear
+    # here: those two also compile under -std=iso7185/-std=iso10206, where
+    # this check's ISO-rule simulation is the one that actually applies, so
+    # their header prose spells the switch in English words ("dollar-B")
+    # instead of literal braces rather than being exempted.
+    "test/Driver/Turbo/boolean-and-under-b-minus-does-not-evaluate-the-right-operand.pas",
+    "test/Driver/Turbo/b-plus-restores-full-boolean-evaluation-partway-through-the-file.pas",
+    "test/Driver/Turbo/while-and-array-index-idiom-relies-on-short-circuit-under-b-minus.pas",
+    "test/Driver/Turbo/b-plus-breaks-the-short-circuit-idiom-with-a-range-check-error.pas",
 }
 
 

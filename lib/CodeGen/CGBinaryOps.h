@@ -70,6 +70,25 @@ private:
     /// True if the expression's resolved type is a set.
     static bool exprIsSet(const plang::ExprNode& e);
 
+    /// The two-block-plus-PHI CFG shape shared by every short-circuiting
+    /// Boolean binary operator this class lowers: evaluate the left operand;
+    /// branch straight to \c endBB without ever evaluating the right operand
+    /// when it cannot change the result (left is false for an and-shaped
+    /// operator, true for an or-shaped one); otherwise evaluate the right
+    /// operand and join the two possible outcomes with a PHI.  \p isAnd
+    /// selects and-shaped versus or-shaped short-circuiting -- it does not
+    /// distinguish EP's and_then from Turbo's `{$B-}` and, or EP's or_else
+    /// from Turbo's `{$B-}` or, since all four compile to this identical
+    /// shape.  Two callers: the EP AndThen/OrElse arm (always, regardless of
+    /// any switch -- EP has none) and the plain And/Or arm, conditionally,
+    /// once RangeGuards confirms Turbo's BoolEval switch says to.
+    ///
+    /// Calls EmitExpr for \p e's right operand from inside this function, so
+    /// per emitExpr's documented invariant (CGExprCore.h) the block that
+    /// call leaves current is re-fetched via B.GetInsertBlock() afterward
+    /// rather than assumed to still be the rhsBB this function created.
+    llvm::Value* emitShortCircuit(const plang::BinaryExpr& e, bool isAnd);
+
     llvm::Constant* i64c(int64_t v) const {
         return llvm::ConstantInt::get(I64Ty, static_cast<uint64_t>(v), true);
     }

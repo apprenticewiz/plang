@@ -19,39 +19,68 @@ bool CGBinaryOps::exprIsSet(const ExprNode& e) {
     return e.ResolvedType && e.ResolvedType->Kind == TypeKind::Set;
 }
 
+llvm::Value* CGBinaryOps::emitShortCircuit(const BinaryExpr& e, bool isAnd) {
+    auto* lv      = EnsureI1(EmitExpr(*e.Left));
+    auto* rhsBB   = llvm::BasicBlock::Create(Ctx, isAnd ? "sc.and.rhs"  : "sc.or.rhs",  CurFn);
+    auto* endBB   = llvm::BasicBlock::Create(Ctx, isAnd ? "sc.and.end"  : "sc.or.end",  CurFn);
+    auto* shortBB = llvm::BasicBlock::Create(Ctx, isAnd ? "sc.and.skip" : "sc.or.skip", CurFn);
+    // and-shaped: if left is false, skip right; or-shaped: if left is true, skip right.
+    B.CreateCondBr(lv, isAnd ? rhsBB : shortBB,
+                             isAnd ? shortBB : rhsBB);
+    B.SetInsertPoint(rhsBB);
+    auto* rv = EnsureI1(EmitExpr(*e.Right));
+    B.CreateBr(endBB);
+    // Re-fetched rather than reusing rhsBB: EmitExpr's right-operand call
+    // just above may itself have split blocks (e.g. a nested and_then, or a
+    // nested plain and/or that also takes this short-circuit path), which
+    // would leave the builder somewhere other than rhsBB by the time control
+    // reaches here.  See emitExpr's own documented invariant (CGExprCore.h).
+    auto* fromRhs = B.GetInsertBlock();
+    B.SetInsertPoint(shortBB);
+    B.CreateBr(endBB);
+    B.SetInsertPoint(endBB);
+    auto* phi = B.CreatePHI(I1Ty, 2, isAnd ? "sc.and" : "sc.or");
+    // and-shaped shortcut value: false; or-shaped shortcut value: true.
+    phi->addIncoming(llvm::ConstantInt::get(I1Ty, isAnd ? 0 : 1), shortBB);
+    phi->addIncoming(rv, fromRhs);
+    return phi;
+}
+
 llvm::Value* CGBinaryOps::emitBinary(const BinaryExpr& e) {
-    // Short-circuit boolean operators.
+    // Boolean and/or: ISO §6.7.2.1 requires BOTH operands evaluated, always
+    // -- no dialect-specific case here changes that for ISO 7185 or Extended
+    // Pascal.  Turbo Pascal's `{$B-}` (the default) short-circuits instead,
+    // the same shape EP's and_then/or_else always uses; `{$B+}` restores
+    // full evaluation from that point in the source forward.
+    //
+    // Bitwise and/or on Integer operands is a separate, later task, and it
+    // has to "agree the dispatch order" with this one: operand type checked
+    // FIRST, short-circuit dispatch second -- which is exactly the shape
+    // below, so that task can add its own operand-type arm alongside
+    // bothBoolean without restructuring this.  Short-circuiting only makes
+    // sense for a Boolean operand (EnsureI1 below assumes an i1-shaped
+    // value), so bothBoolean is checked before any switch is even asked.
     if (e.Op == TokenKind::And || e.Op == TokenKind::Or) {
+        const bool bothBoolean =
+            e.Left->ResolvedType  && e.Left->ResolvedType->Kind  == TypeKind::Boolean &&
+            e.Right->ResolvedType && e.Right->ResolvedType->Kind == TypeKind::Boolean;
+        const bool isAnd = e.Op == TokenKind::And;
+        // RangeGuards.boolEvalAt alone is not the whole answer -- see its own
+        // comment (RangeCheckGuards.h) for why isTurbo() has to gate it:
+        // SwitchTable's default answers "short-circuit" for every dialect,
+        // ISO 7185 and Extended Pascal included, and those two have no
+        // `{$B}` directive to ever say otherwise.
+        if (bothBoolean && RangeGuards.isTurbo() && !RangeGuards.boolEvalAt(e.Loc))
+            return emitShortCircuit(e, isAnd);
         auto* l = EnsureI1(EmitExpr(*e.Left));
         auto* r = EnsureI1(EmitExpr(*e.Right));
-        return (e.Op == TokenKind::And)
-            ? B.CreateAnd(l, r, "and")
-            : B.CreateOr(l, r, "or");
+        return isAnd ? B.CreateAnd(l, r, "and") : B.CreateOr(l, r, "or");
     }
 
-    // EP short-circuit: and_then / or_else
-    if (e.Op == TokenKind::AndThen || e.Op == TokenKind::OrElse) {
-        bool isAnd = e.Op == TokenKind::AndThen;
-        auto* lv     = EnsureI1(EmitExpr(*e.Left));
-        auto* rhsBB  = llvm::BasicBlock::Create(Ctx, isAnd ? "andthen.rhs" : "orelse.rhs",  CurFn);
-        auto* endBB  = llvm::BasicBlock::Create(Ctx, isAnd ? "andthen.end" : "orelse.end",  CurFn);
-        auto* shortBB= llvm::BasicBlock::Create(Ctx, isAnd ? "andthen.skip": "orelse.skip", CurFn);
-        // and_then: if left is false, skip right; or_else: if left is true, skip right.
-        B.CreateCondBr(lv, isAnd ? rhsBB : shortBB,
-                                 isAnd ? shortBB : rhsBB);
-        B.SetInsertPoint(rhsBB);
-        auto* rv = EnsureI1(EmitExpr(*e.Right));
-        B.CreateBr(endBB);
-        auto* fromRhs = B.GetInsertBlock();
-        B.SetInsertPoint(shortBB);
-        B.CreateBr(endBB);
-        B.SetInsertPoint(endBB);
-        auto* phi = B.CreatePHI(I1Ty, 2, isAnd ? "andthen" : "orelse");
-        // and_then shortcut value: false; or_else shortcut value: true
-        phi->addIncoming(llvm::ConstantInt::get(I1Ty, isAnd ? 0 : 1), shortBB);
-        phi->addIncoming(rv, fromRhs);
-        return phi;
-    }
+    // EP §6.8.3.3: and_then / or_else always short-circuit, regardless of
+    // any switch -- EP has no `{$B}` directive at all.
+    if (e.Op == TokenKind::AndThen || e.Op == TokenKind::OrElse)
+        return emitShortCircuit(e, /*isAnd=*/e.Op == TokenKind::AndThen);
 
     // EP exponentiation: ** and pow  → std::pow (result is real or complex)
     if (e.Op == TokenKind::StarStar || e.Op == TokenKind::Pow) {
