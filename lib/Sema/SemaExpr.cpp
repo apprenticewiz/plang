@@ -1101,7 +1101,15 @@ std::shared_ptr<Type> Sema::checkSetLit(const SetLiteralExpr& E, const std::shar
         if (auto* Rng = llvm::dyn_cast<SetRangeExpr>(Elem.get())) {
             auto Lo = checkExpr(*Rng->Low);
             auto Hi = checkExpr(*Rng->High);
-            Et = Lo->isOrdinal() ? Lo : Hi;
+            // ISO §6.7.1's member-range is the same `lo..hi` range ISO
+            // §6.4.2.2 covers for a subrange-type: both bounds must be
+            // constants of the SAME ordinal type.  Picking "whichever bound
+            // is ordinal" below, same as resolveTypeImpl did before issue
+            // #251, never asked whether the OTHER bound agreed, so
+            // `[1..'z']` (integer, char; each ordinal on its own) was
+            // silently accepted as a set of integer (issue #395).
+            if (!boundsShareOrdinalType(*Lo, *Rng->High, *Hi)) Et = TyErr;
+            else Et = Lo->isOrdinal() ? Lo : Hi;
         } else {
             Et = checkExpr(*Elem);
         }
