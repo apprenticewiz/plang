@@ -271,6 +271,42 @@ llvm::Value* CGFieldAccess::emitFieldLoad(const FieldExpr& e) {
             && e.Record->ResolvedType->Kind == TypeKind::SchemaInstance) {
         for (const auto& D : e.Record->ResolvedType->SchemaDiscs) {
             if (eqCI(D.Name, e.Field)) {
+                llvm::Type* want = D.Ty && !D.Ty->isError()
+                                       ? Types.llvmTypeOfSemaType(*D.Ty) : I64Ty;
+                // Issue #408: D.Value is a Sema-time placeholder (typically
+                // the probe pass's stand-in, e.g. the declared subrange's low
+                // bound) whenever this instantiation's own discriminant is a
+                // FORM over an ENCLOSING schema's discriminant --
+                // `outer(n) = record y: inner(n) end`, reading `q^.y.m` --
+                // rather than a genuine compile-time constant.  `inner`'s
+                // body here does not itself vary with m, so Sema still kinds
+                // `q^.y` SchemaInstance (it needs no run-time header of its
+                // own), but the discriminant's TRUE value is only known at
+                // run time, from the enclosing object's own n.
+                //
+                // descendIntoInstantiation (below in this file's sibling,
+                // SchemaAccess.cpp) already recomputes exactly this value --
+                // through emitExtentForm over the SchemaTypeNode's
+                // ActualForms -- for sizing/offset purposes; schemaPathOf
+                // reaches that same computation for e.Record's own
+                // instantiation, since e.Record IS the nested instance being
+                // read.  It resolves to nothing for a genuinely-constant
+                // instance -- one reached through neither a live schema
+                // object (schemaRefOf's IdentExpr/DerefExpr arms) nor a
+                // `with`-bound path -- such as #210's own `var x: t('a')`,
+                // so consulting it first cannot regress that fix: D.Value is
+                // still what is used whenever there is no live path to ask
+                // instead.
+                if (auto path = Schema.schemaPathOf(*e.Record); path && path->root.semaTy) {
+                    const auto& liveDiscs = path->root.semaTy->SchemaDiscs;
+                    for (size_t i = 0; i < liveDiscs.size() && i < path->root.discs.size(); ++i) {
+                        if (!eqCI(liveDiscs[i].Name, e.Field)) continue;
+                        llvm::Value* live = path->root.discs[i];
+                        return want->isIntegerTy() && want != I64Ty
+                                   ? B.CreateTrunc(live, want, "sch.disc.n")
+                                   : live;
+                    }
+                }
                 // D.Value is stored as int64_t; narrow to the declared ordinal
                 // type the same way the Schema arm below narrows its
                 // runtime-carried i64, so that a char or enum discriminant
@@ -282,8 +318,6 @@ llvm::Value* CGFieldAccess::emitFieldLoad(const FieldExpr& e) {
                 // (writeln, comparisons).
                 llvm::Value* full = llvm::ConstantInt::get(I64Ty,
                                          static_cast<uint64_t>(D.Value), /*isSigned=*/true);
-                llvm::Type* want = D.Ty && !D.Ty->isError()
-                                       ? Types.llvmTypeOfSemaType(*D.Ty) : I64Ty;
                 return want->isIntegerTy() && want != I64Ty
                            ? B.CreateTrunc(full, want, "sch.disc.n")
                            : full;

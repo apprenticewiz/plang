@@ -303,12 +303,18 @@ SchemaAccess::SchemaRef SchemaAccess::emitNewSchema(const ExprNode& ptrArg,
         // `new(p, 500)` for a discriminant declared `n: 1..10` -- is a
         // run-time question exactly as `x := 500` is for `var x: 1..10`,
         // and was going straight into the header with no check at all.
-        if (const auto& Ty = schema.SchemaDiscs[i].Ty;
-                Ty && Ty->Kind == TypeKind::Subrange && Ty->SubLo != Ty->SubHi)
-            RangeGuards.emitRangeCheck(v, Ty->SubLo, Ty->SubHi, /*isIndex=*/false,
-                                       discArgs[i]->Loc);
+        checkDiscRange(v, schema.SchemaDiscs[i], discArgs[i]->Loc);
         discs.push_back(v);
     }
+
+    // Issue #409: the check just above only covers discriminants passed
+    // DIRECTLY to this new() -- a nested schema-instantiation FIELD inside
+    // the object being allocated (`outer(n) = record x: inner(n) end`) has
+    // its own discriminant too, derived from these, and it was never
+    // checked at all: neither here nor anywhere else, since nothing else
+    // walks the body unconditionally the way new() itself must.
+    if (const TypeNode* body = SchemaTypes.schemaBodyNodeOf(schema))
+        rangeCheckNestedDiscs(body, discs, ptrArg.Loc);
 
     const uint64_t hdrBytes = SchemaLayout.schemaHeaderBytes(schema);
     auto* bytes = B.CreateAdd(llvm::ConstantInt::get(I64Ty, hdrBytes),
@@ -521,6 +527,92 @@ SchemaAccess::descendIntoInstantiation(const SchemaRef& root, llvm::Value* addr,
         d   = peel(body);
     }
     return {cur, d};
+}
+
+void SchemaAccess::checkDiscRange(llvm::Value* v, const plang::Type::SchemaDisc& disc,
+                                   plang::SourceLocation Loc) {
+    if (const auto& Ty = disc.Ty;
+            Ty && Ty->Kind == TypeKind::Subrange && Ty->SubLo != Ty->SubHi)
+        RangeGuards.emitRangeCheck(v, Ty->SubLo, Ty->SubHi, /*isIndex=*/false, Loc);
+}
+
+// Issue #409.  Unconditional sibling to descendIntoInstantiation: that one
+// only ever follows ONE access path already being read or written, so it
+// never runs at all for a nested schema-instantiation field new() never
+// touches -- exactly `outer(n) = record x: inner(n); k: integer end` in the
+// issue's own repro, where `new(q, 500)` never reads or writes q^.x at all.
+// This walks every field/element reachable from \p decl instead, so the
+// range check new()'s own top-level loop already applies to a literal
+// argument (see checkDiscRange, shared with it) also reaches a nested
+// instantiation's own discriminant -- one derived from \p discs the same
+// way descendIntoInstantiation computes it for sizing/offset purposes
+// (ActualForms non-empty), or a fixed literal read straight off the
+// instantiation's own resolved body when it needed no form at all
+// (ActualForms empty; see rtSizeOfTypeNode's #393 comment on why that
+// Value is already correct there, probe pass or not).
+void SchemaAccess::rangeCheckNestedDiscs(const TypeNode* decl,
+                                          const std::vector<llvm::Value*>& discs,
+                                          plang::SourceLocation Loc, int depth) {
+    if (!decl || depth > 16) return;
+    const TypeNode* d = peel(decl);
+
+    if (auto* sn = llvm::dyn_cast<SchemaTypeNode>(d)) {
+        if (!sn->ResolvedBody) return;
+        const auto& formals = sn->ResolvedBody->SchemaDiscs;
+        std::vector<llvm::Value*> inner;
+        inner.reserve(formals.size());
+        if (!sn->ActualForms.empty()) {
+            // R3: a form over the ENCLOSING discriminants, exactly as
+            // descendIntoInstantiation evaluates it -- `x: inner(n)` inside
+            // `outer(n)` genuinely needs re-evaluating against THIS
+            // allocation's own discs, not against whatever the probe pass
+            // stood in for it.
+            for (size_t i = 0; i < sn->ActualForms.size(); ++i) {
+                auto* v = SchemaLayout.emitExtentForm(sn->ActualForms[i], discs);
+                if (i < formals.size()) checkDiscRange(v, formals[i], Loc);
+                inner.push_back(v);
+            }
+        } else {
+            // #393's insight, reused rather than duplicated: no form at all
+            // means Sema needed none -- every one of this instantiation's
+            // actuals is already the correct, per-occurrence-invariant value
+            // sitting in ResolvedBody's own SchemaDiscs (`x: inner(50)`),
+            // not a probe-pass stand-in.  A range check against a
+            // ConstantInt built from it still runs as ordinary IR -- traps
+            // or not, correctly, whether or not the optimizer later folds
+            // the comparison away.
+            for (const auto& fd : formals) {
+                auto* v = llvm::ConstantInt::get(I64Ty,
+                              static_cast<uint64_t>(fd.Value), /*isSigned=*/true);
+                checkDiscRange(v, fd, Loc);
+                inner.push_back(v);
+            }
+        }
+        const TypeNode* body = SchemaTypes.schemaBodyNodeOf(*sn->ResolvedBody);
+        rangeCheckNestedDiscs(body, inner, Loc, depth + 1);
+        return;
+    }
+
+    // Not walkVariant's territory, matching emitSchemaInitialStateAt's own
+    // scope decision (CodeGenProcs.cpp): a variant field is exactly what
+    // that walk does not reach either, so this stays narrow rather than
+    // claim a case nothing has confirmed against this shape.
+    if (auto* rtn = llvm::dyn_cast_or_null<RecordTypeNode>(d)) {
+        for (const auto& fd : rtn->Fields)
+            rangeCheckNestedDiscs(fd.Type.get(), discs, Loc, depth + 1);
+        return;
+    }
+
+    if (auto* atn = llvm::dyn_cast_or_null<ArrayTypeNode>(d)) {
+        // One check for the whole array, not one per element: this
+        // instantiation's discriminant is arithmetic over the ENCLOSING
+        // discs, never over an element index, so every element shares one
+        // answer -- exactly why descendIntoInstantiation's own array arm
+        // (schemaPathOf's IndexExpr case) descends once per access rather
+        // than once per index too.
+        rangeCheckNestedDiscs(atn->Element.get(), discs, Loc, depth + 1);
+        return;
+    }
 }
 
 std::optional<SchemaAccess::SchemaPath>
