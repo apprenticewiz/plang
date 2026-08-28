@@ -139,7 +139,16 @@ std::unique_ptr<StmtNode> Parser::parseStatement() {
                     advance();
                     auto Node   = std::make_unique<LabeledStmt>();
                     Node->Loc   = IdentTok;
-                    Node->Label = Id->Name;
+                    // canonicalLabel, not Id->Name/IdentTok.Lexeme directly:
+                    // every other site that produces a label spelling (the
+                    // label-section declaration, a goto's target, an integer
+                    // labeled-statement) goes through it too, and it is what
+                    // lower-cases an identifier label so this one still
+                    // matches its declaration's spelling in
+                    // Sema's CurrentBlockLabels/LabelEnclosingStmt and
+                    // CodeGen's LabelGotoEngine, all of which key on this
+                    // string by plain equality.
+                    Node->Label = canonicalLabel(IdentTok.Lexeme);
                     Node->Stmt  = parseStatement();
                     return Node;
                 }

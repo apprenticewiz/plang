@@ -961,12 +961,17 @@ void Sema::checkBlock(const BlockNode& Block,
         const SourceLocation T = Block.Loc;
         // ISO §6.1.6: a label is a digit-sequence in the closed interval 0 to
         // 9999.  The parser has already reduced it to its apparent integral
-        // value, so the range is read off the digits that are left.
+        // value, so the range is read off the digits that are left.  Turbo
+        // Pascal additionally allows an ordinary identifier as a label (the
+        // parser's canonicalLabel has already lower-cased it), on top of --
+        // not instead of -- the digit-sequence form, whose 9999 cap still
+        // applies under Turbo exactly as it does under ISO 7185/EP.
         bool IsNumeric = !Lbl.empty();
         for (char C : Lbl) if (!std::isdigit(static_cast<unsigned char>(C))) { IsNumeric = false; break; }
-        if (!IsNumeric)
-            error(T, diag::err_label_must_be_integer, {Lbl});
-        else if (Lbl.size() > 4)
+        if (!IsNumeric) {
+            if (!Opts.turbo())
+                error(T, diag::err_label_must_be_integer, {Lbl});
+        } else if (Lbl.size() > 4)
             error(T, diag::err_label_out_of_range, {Lbl});
 
         Symbol S;

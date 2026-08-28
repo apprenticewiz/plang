@@ -1475,6 +1475,17 @@ void Sema::checkGoto(const GotoStmt& S) {
             error(S.Loc, diag::err_goto_outer_block, {S.Label});
             return;
         }
+        // -std=turbo (matching FPC): once the two structural checks above are
+        // past, ISO 7185/EP accept this unconditionally -- it is exactly what
+        // a non-local goto is, and LabelGotoEngine's setjmp/longjmp-shaped
+        // machinery is what makes leaving every activation between here and
+        // the block that declares the label actually work at run time.
+        // Turbo has no such machinery and does not allow this at all: a goto
+        // may only reach a label declared in the SAME routine's block.
+        if (Opts.turbo()) {
+            error(S.Loc, diag::err_goto_nonlocal_turbo, {S.Label});
+            return;
+        }
         Sym->LabelReferenced = true;
         return;
     }

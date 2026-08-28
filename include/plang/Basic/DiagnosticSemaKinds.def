@@ -317,6 +317,14 @@ DIAG(err_goto_into_structured, Error, "goto '%0' jumps into a structured stateme
 // non-local goto from one back into the module's own block could resume an
 // activation that has already ended.
 DIAG(err_goto_module_block, Error, "goto '%0' cannot reach a label of a module's block from one of the module's procedures")
+// -std=turbo (matching FPC): unlike ISO 7185/EP, a goto may never leave the
+// block of the procedure/function/program it appears in -- there is no
+// setjmp/longjmp-shaped non-local goto in Turbo Pascal at all, only a goto
+// within one routine's own block (which may still freely leave, though not
+// enter, a nested structured statement there; see err_goto_into_structured).
+DIAG(err_goto_nonlocal_turbo, Error,
+     "goto '%0' cannot leave this routine for a label of an enclosing one; "
+     "-std=turbo does not allow a non-local goto")
 DIAG(err_label_not_declared, Error, "label '%0' used as a statement but not declared in label section")
 DIAG(err_label_wrong_block, Error, "label '%0' is declared in an enclosing block, so the statement it labels must be in that block too")
 DIAG(err_case_selector_not_ordinal, Error, "case selector must be an ordinal type, got '%0'")

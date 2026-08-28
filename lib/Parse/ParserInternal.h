@@ -8,6 +8,8 @@
 
 #include <string>
 
+#include "plang/Basic/StringUtil.h"
+
 namespace plang {
 
 // ---------------------------------------------------------------------------
@@ -26,11 +28,20 @@ namespace plang {
 // declaring `003` and jumping to `3` had both an undefined label and a label
 // never defined.
 //
-// A label that is not all digits is not a label at all; Sema is where that is
-// said, so it passes through unchanged to be reported there.
+// A label that is not all digits is not a label at all under ISO 7185/EP;
+// Sema is where that is said, so those dialects see it unchanged and are
+// reported there.  Turbo Pascal instead allows an ORDINARY IDENTIFIER as a
+// label, and identifiers are case-insensitive -- `label Done;` and `goto
+// DONE` name the same label.  That has to be settled here too, and not left
+// to each downstream consumer to compare case-insensitively on its own:
+// unlike the symbol table (which lowercases its own lookup key internally),
+// Sema's CurrentBlockLabels/LabelEnclosingStmt and CodeGen's
+// LabelGotoEngine::LabelBlocks/declaresLabel/nonLocalTargets all key on this
+// string with plain, case-sensitive equality.  Lower-casing it once, here, is
+// what keeps every one of those agreeing without having to know that.
 inline std::string canonicalLabel(const std::string& Lexeme) {
     for (char C : Lexeme)
-        if (!std::isdigit(static_cast<unsigned char>(C))) return Lexeme;
+        if (!std::isdigit(static_cast<unsigned char>(C))) return toLower(Lexeme);
     const auto First = Lexeme.find_first_not_of('0');
     return First == std::string::npos ? "0" : Lexeme.substr(First);
 }
