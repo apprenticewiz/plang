@@ -793,6 +793,18 @@ private:
     /// declared with, and is still not a value that may be assigned to one.
     [[nodiscard]] bool isConformable(const Type& Formal,
                                      const Type& Actual) const;
+    /// ISO §6.7.3.8: reports whichever of isConformable's three conditions
+    /// (actual-is-an-array, packedness (d), index-type compatibility (a), or
+    /// finally element type) is the first -- in the same order, and at the
+    /// same nesting level -- to actually fail between Formal and Actual.
+    /// Mirrors isConformable's own recursion into inner dimensions exactly,
+    /// so a mismatch buried in an INNER dimension of a multi-dimensional
+    /// conformant-array parameter gets the same precise diagnostic an OUTER
+    /// one does, rather than always falling through to the generic
+    /// element-type message.  Only meaningful once isConformable(Formal,
+    /// Actual) is already known false.
+    void diagnoseConformMismatch(const std::string& ParamName, SourceLocation Loc,
+                                 const Type& Formal, const Type& Actual);
     /// EP §6.4.2.5: reports reaching into a value of a restricted type, and
     /// answers whether the attempt was made.
     bool rejectRestrictedComponent(const ExprNode& E, const Type& T);
