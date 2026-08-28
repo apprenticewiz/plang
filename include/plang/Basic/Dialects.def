@@ -27,6 +27,6 @@ DIALECT(ISO7185,  "iso7185",  true)   // ISO 7185 Standard Pascal, level 1
 DIALECT(ISO10206, "iso10206", true)   // ISO 10206 Extended Pascal
 DIALECT(FPC,      "fpc",      false)  // Free Pascal extensions
 DIALECT(Delphi,   "delphi",   false)  // Delphi / Object Pascal
-DIALECT(Turbo,    "turbo",    false)  // Turbo Pascal extensions
+DIALECT(Turbo,    "turbo",    true)   // Turbo Pascal extensions
 
 #undef DIALECT

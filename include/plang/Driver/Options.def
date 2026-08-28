@@ -71,7 +71,7 @@ OPTION("-std=", "-std=<dialect>", Joined, Both,
        "Pascal language standard\n"
        "                       iso7185   ISO 7185 Standard Pascal (default)\n"
        "                       iso10206  ISO 10206 Extended Pascal\n"
-       "                       turbo     Turbo Pascal extensions    [not yet implemented]\n"
+       "                       turbo     Turbo Pascal extensions    [in development]\n"
        "                       delphi    Delphi/Object Pascal       [not yet implemented]\n"
        "                       fpc       Free Pascal extensions     [not yet implemented]")
 OPTION("-I", "-I<dir>", JoinedOrSeparate, Both,

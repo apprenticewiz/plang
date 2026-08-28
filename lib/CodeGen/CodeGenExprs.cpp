@@ -26,7 +26,20 @@ llvm::Value* Codegen::Impl::toI64(llvm::Value* v) {
     if (v->getType()->isIntegerTy(64)) return v;
     if (v->getType()->isDoubleTy())
         return builder.CreateFPToSI(v, i64Ty, "to.i64");
-    return builder.CreateZExt(v, i64Ty, "to.i64");
+    // Char (i8) and Boolean (i1) are the only narrow ordinals that are
+    // genuinely non-negative; everything else narrower than i64 that reaches
+    // here today is Turbo's own Integer, which is signed (16-bit, IsSigned
+    // true -- see LangOptions::defaultIntWidth()).  Zero-extending it here
+    // silently turned a negative i16 into a huge positive i64 (this used to
+    // do exactly that, unconditionally, before Turbo's Integer existed to
+    // ever be negative at a narrower-than-64 width).  Tier 2's Byte/Word/etc.
+    // ladder will need this decided from the operand's actual Sema
+    // Type::IsSigned instead of LLVM width alone, since an unsigned Byte and
+    // a signed ShortInt will both be i8 -- not needed yet, since nothing
+    // narrower than i64 other than Integer/Char/Boolean exists today.
+    if (v->getType()->isIntegerTy(8) || v->getType()->isIntegerTy(1))
+        return builder.CreateZExt(v, i64Ty, "to.i64");
+    return builder.CreateSExt(v, i64Ty, "to.i64");
 }
 
 llvm::Value* Codegen::Impl::coerceToType(llvm::Value* v, llvm::Type* dst) {
@@ -36,10 +49,16 @@ llvm::Value* Codegen::Impl::coerceToType(llvm::Value* v, llvm::Type* dst) {
     if (dst->isIntegerTy() && v->getType()->isDoubleTy())
         return builder.CreateFPToSI(v, dst, "narrow");
     // Ordinals of different widths meet whenever a char or boolean is stored
-    // where an integer was computed, or the reverse.  Zero-extension is the
-    // right widening: the narrow ordinals all have non-negative values.
-    if (dst->isIntegerTy() && v->getType()->isIntegerTy())
-        return builder.CreateZExtOrTrunc(v, dst, "conv");
+    // where an integer was computed, or the reverse, or (under Turbo) a
+    // 16-bit Integer meets a 64-bit one.  Same signedness judgment as toI64
+    // above: char/boolean zero-extend, everything else (Turbo's signed
+    // Integer, the only other narrow ordinal that exists today) sign-extends.
+    // A narrowing truncation is exact either way, hence *OrTrunc.
+    if (dst->isIntegerTy() && v->getType()->isIntegerTy()) {
+        const bool srcNonNegative = v->getType()->isIntegerTy(8) || v->getType()->isIntegerTy(1);
+        return srcNonNegative ? builder.CreateZExtOrTrunc(v, dst, "conv")
+                               : builder.CreateSExtOrTrunc(v, dst, "conv");
+    }
     return v;
 }
 
