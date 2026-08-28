@@ -59,6 +59,53 @@ static constexpr unsigned keywordDialects(TokenKind K) {
     }
 }
 
+// True for a token kind that can only ever begin an expression, never a
+// type-denoter.  This is next()'s allow-list for when a fresh '^' may start
+// a Turbo `^ctrl` control-character literal instead of the existing Caret
+// token (PrevKind's comment in Scanner.h has the full rationale).
+//
+// Deliberately an allow-list rather than trying to block-list the tokens
+// that DO introduce a type -- Colon (var/field/parameter/result types),
+// Equal (only inside a `type X = ...` declaration, but indistinguishable
+// from `const X = ...`'s Equal by token kind alone) and Of (`array of T` /
+// `set of T` / `file of T`, but indistinguishable from a case-label's Of by
+// token kind alone) are each ambiguous with a legitimate expression-start
+// use of the very same token, so getting a block-list exactly right would
+// mean tracking which declaration section is currently open.  Restricting to
+// tokens that are NEVER followed by a type-denoter sidesteps that entirely,
+// at the cost of not recognizing `^X` immediately after `:`, `=`, or `of`
+// (e.g. `const CR = ^M;`, `case c of ^M: ...`) -- `#code` is unconditional
+// (see next()) and is the way to spell a control character in exactly those
+// positions instead.
+static constexpr bool startsExpression(TokenKind K) {
+    switch (K) {
+    case TokenKind::Assign:
+    case TokenKind::LeftParen:
+    case TokenKind::LeftBracket:
+    case TokenKind::Comma:
+    case TokenKind::Plus:
+    case TokenKind::Minus:
+    case TokenKind::Times:
+    case TokenKind::Divide:
+    case TokenKind::StarStar:
+    case TokenKind::LessThan:
+    case TokenKind::GreaterThan:
+    case TokenKind::LessThanOrEqual:
+    case TokenKind::GreaterThanOrEqual:
+    case TokenKind::NotEqual:
+    case TokenKind::SymDiff:
+    case TokenKind::And:
+    case TokenKind::Or:
+    case TokenKind::Not:
+    case TokenKind::Div:
+    case TokenKind::Mod:
+    case TokenKind::In:
+        return true;
+    default:
+        return false;
+    }
+}
+
 Scanner::Scanner(SourceManager& SM, std::string Filename,
                  DiagnosticsEngine& Diags, LangOptions Opts)
     : Opts(Opts), SM(&SM), Diags(Diags), Pos(0) {
@@ -109,11 +156,33 @@ Token Scanner::next() {
             Tok = scanNumber(TokenStart);
         else if (C == '\'')
             Tok = scanString(TokenStart);
+        // Turbo `#code` control-character literal: '#' claims no existing
+        // grammar in any dialect (EP's own '#' -- 16#FF -- only ever appears
+        // *after* scanNumber has already consumed a leading digit run, a
+        // disjoint code path), so this needs no further disambiguation.
+        else if (Opts.turbo() && C == '#')
+            Tok = scanString(TokenStart);
+        // Turbo `$FF` hexadecimal integer literal: likewise unclaimed by any
+        // dialect ('$' has no dispatch arm at all outside -std=turbo).
+        else if (Opts.turbo() && C == '$')
+            Tok = scanHexLiteral(TokenStart);
+        // Turbo `^ctrl` control-character literal.  Unlike '#' and '$', '^'
+        // is already Caret, so this is only the start of a new literal when
+        // it has the right shape (see caretLooksLikeControlChar()) AND the
+        // token just before it is one that can only begin an expression --
+        // see PrevKind's comment in Scanner.h for why that second condition
+        // is what keeps `type PM = ^Integer` a pointer type. Anywhere this
+        // doesn't hold, '^' falls through to scanSymbol exactly as before.
+        else if (Opts.turbo() && caretLooksLikeControlChar() && startsExpression(PrevKind))
+            Tok = scanString(TokenStart);
         else
             Tok = scanSymbol(TokenStart);
 
         // Skip Error tokens so the Parser never sees them.
-        if (Tok.Kind != TokenKind::Error) return Tok;
+        if (Tok.Kind != TokenKind::Error) {
+            PrevKind = Tok.Kind;
+            return Tok;
+        }
     }
 }
 
@@ -361,12 +430,48 @@ Token Scanner::scanNumber(size_t TokenStart) {
 }
 
 Token Scanner::scanString(size_t TokenStart) {
-    ++Pos;
     std::string Lexeme;
+    for (;;) {
+        if (Pos < Text.size() && Text[Pos] == '\'') {
+            if (!scanQuotedFragment(Lexeme))
+                return make(TokenKind::StringLit, Lexeme, TokenStart);
+        } else if (Opts.turbo() && Pos < Text.size() && Text[Pos] == '#') {
+            if (!scanControlCodeFragment(Lexeme))
+                return make(TokenKind::Error, Lexeme, TokenStart);
+        } else if (Opts.turbo() && caretLooksLikeControlChar()) {
+            scanCaretFragment(Lexeme);
+        } else {
+            // Only reachable if scanString is ever entered on something
+            // other than the three fragment starts next() already checked;
+            // defensive, not a real path today.
+            break;
+        }
+        // Turbo only: glue straight into the next fragment when it starts
+        // with no gap at all -- 'AB'#13#10'CD' is one 6-character StringLit.
+        // Once a literal is already under way there is no pointer-type
+        // ambiguity left to worry about (a type-denoter can never follow a
+        // string/code/control fragment), so unlike next()'s fresh-token
+        // dispatch this needs no startsExpression(PrevKind) check.
+        if (!Opts.turbo() || Pos >= Text.size())
+            break;
+        if (Text[Pos] != '\'' && Text[Pos] != '#' && !caretLooksLikeControlChar())
+            break;
+    }
+    return make(TokenKind::StringLit, Lexeme, TokenStart);
+}
+
+// Scans one '...'-delimited fragment (the doubled '' escape included),
+// appending its decoded content to Lexeme.  This is exactly the body the
+// single-fragment scanString used to have; factored out so a glued run can
+// call it once per quoted piece.  Returns false, having already emitted
+// err_unterminated_string, if the quote never closes (a bare newline or
+// EOF) -- the caller stops gluing immediately in that case, same as before.
+bool Scanner::scanQuotedFragment(std::string& Lexeme) {
+    ++Pos; // opening quote
     while (Pos < Text.size()) {
         if (Text[Pos] == '\n') {
             emitError(locAt(Pos), diag::err_unterminated_string);
-            break;
+            return false;
         }
         if (Text[Pos] == '\'') {
             ++Pos;
@@ -374,16 +479,105 @@ Token Scanner::scanString(size_t TokenStart) {
                 ++Pos;
                 Lexeme += '\'';
             } else {
-                return make(TokenKind::StringLit, Lexeme, TokenStart);
+                return true;
             }
         } else {
             Lexeme += Text[Pos++];
         }
     }
-    // Unterminated (hit EOF or newline) — emit error and return the partial content.
-    if (Pos >= Text.size())
-        emitError(locAt(Pos), diag::err_unterminated_string);
-    return make(TokenKind::StringLit, Lexeme, TokenStart);
+    emitError(locAt(Pos), diag::err_unterminated_string);
+    return false;
+}
+
+// Scans one Turbo `#code` fragment: '#' followed by decimal digits, or
+// '#$' followed by hex digits, appending the one character it names to
+// Lexeme.  Returns false, having already emitted a diagnostic, if there
+// were no digits at all or the value named doesn't fit a Char (0..255,
+// Sema.cpp's `maxchar`) -- the caller returns an Error token in that case,
+// same as EP's own no-digits/out-of-range nondecimal-literal errors in
+// scanNumber above.
+bool Scanner::scanControlCodeFragment(std::string& Lexeme) {
+    const size_t FragStart = Pos;
+    ++Pos; // '#'
+    bool Hex = Pos < Text.size() && Text[Pos] == '$';
+    if (Hex) ++Pos;
+    size_t DigStart = Pos;
+    while (Pos < Text.size() &&
+           (Hex ? bool(std::isxdigit(static_cast<unsigned char>(Text[Pos])))
+                : bool(std::isdigit(static_cast<unsigned char>(Text[Pos])))))
+        ++Pos;
+    if (Pos == DigStart) {
+        emitError(locAt(FragStart), diag::err_control_code_no_digits);
+        return false;
+    }
+    int64_t Value = 0;
+    for (size_t I = DigStart; I < Pos; ++I) {
+        char C = Text[I];
+        int  D = std::isdigit(static_cast<unsigned char>(C)) ? C - '0'
+                   : std::tolower(static_cast<unsigned char>(C)) - 'a' + 10;
+        // Bailing out the moment Value exceeds 255 (rather than after
+        // accumulating the whole run) is what keeps this safe from
+        // overflowing Value itself: the multiply below only ever runs
+        // against a Value already known to be <= 255.
+        Value = Value * (Hex ? 16 : 10) + D;
+        if (Value > 255) {
+            std::string Digits(Text.substr(DigStart, Pos - DigStart));
+            emitError(locAt(FragStart), diag::err_control_code_out_of_range,
+                      {std::string_view(Digits)});
+            return false;
+        }
+    }
+    Lexeme += static_cast<char>(static_cast<unsigned char>(Value));
+    return true;
+}
+
+// Scans one Turbo `^ctrl` fragment.  Only ever called once the shape has
+// already been confirmed by caretLooksLikeControlChar(), so this cannot
+// fail.  ASCII's C0 control convention: the letter's position in the
+// alphabet is the code, `^A` = 1 through `^Z` = 26, the same either case.
+void Scanner::scanCaretFragment(std::string& Lexeme) {
+    ++Pos; // '^'
+    char C = Text[Pos++];
+    Lexeme += static_cast<char>(std::toupper(static_cast<unsigned char>(C)) - 'A' + 1);
+}
+
+bool Scanner::caretLooksLikeControlChar() const {
+    return Pos < Text.size() && Text[Pos] == '^' &&
+           Pos + 1 < Text.size() &&
+           std::isalpha(static_cast<unsigned char>(Text[Pos + 1]));
+}
+
+// Turbo `$FF` hexadecimal integer literal.  Converts to a decimal Lexeme
+// (like EP's own nondecimal literal above) so every IntLit downstream --
+// Parser::parseFactor's std::from_chars call -- can keep assuming base 10
+// regardless of which dialect's spelling produced the token.
+Token Scanner::scanHexLiteral(size_t TokenStart) {
+    ++Pos; // '$'
+    size_t DigStart = Pos;
+    while (Pos < Text.size() && std::isxdigit(static_cast<unsigned char>(Text[Pos])))
+        ++Pos;
+    if (Pos == DigStart) {
+        emitError(locAt(TokenStart), diag::err_hex_literal_no_digits);
+        return make(TokenKind::Error, "$", TokenStart);
+    }
+    int64_t Value = 0;
+    for (size_t I = DigStart; I < Pos; ++I) {
+        char C = Text[I];
+        int  D = std::isdigit(static_cast<unsigned char>(C)) ? C - '0'
+                   : std::tolower(static_cast<unsigned char>(C)) - 'a' + 10;
+        // Checked before the multiply, matching the overflow guard EP's own
+        // nondecimal literal uses in scanNumber above, and for the same
+        // reason: once Value has wrapped there is no recovering the true
+        // magnitude from it.
+        if (Value > (INT64_MAX - D) / 16) {
+            emitError(locAt(TokenStart), diag::err_hex_literal_out_of_range);
+            return make(TokenKind::Error,
+                        std::string(Text.substr(DigStart, Pos - DigStart)),
+                        TokenStart);
+        }
+        Value = Value * 16 + D;
+    }
+    return make(TokenKind::IntLit, std::to_string(Value), TokenStart);
 }
 
 Token Scanner::scanSymbol(size_t TokenStart) {
