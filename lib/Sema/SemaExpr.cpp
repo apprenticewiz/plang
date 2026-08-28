@@ -450,6 +450,14 @@ std::shared_ptr<Type> Sema::checkDeref(const DerefExpr& E) {
     return TyErr;
 }
 
+namespace {
+// Full definition, with its rationale, is below with the other schema-
+// identity helpers (checkUserDefinedCall's neighborhood); forward-declared
+// here so Sema::checkBinary's pointer-equality check (issue #407) can reach
+// it without moving that comment block up past everything it documents.
+bool schemaInstMatch(const Type& A, const Type& B);
+} // anonymous namespace
+
 std::shared_ptr<Type> Sema::checkBinary(const BinaryExpr& E) {
     auto Lt = checkExpr(*E.Left);
     auto Rt = checkExpr(*E.Right);
@@ -657,7 +665,17 @@ std::shared_ptr<Type> Sema::checkBinary(const BinaryExpr& E) {
                 else if (E.Op != TokenKind::Equal && E.Op != TokenKind::NotEqual)
                     error(E.Loc, diag::err_op_pointer_ordering, {opSpelling(E.Op)});
                 else if (Lt->Kind == TypeKind::Pointer
-                         && Rt->Kind == TypeKind::Pointer && Lt != Rt)
+                         && Rt->Kind == TypeKind::Pointer && Lt != Rt
+                         // Pointer types are interned by pointee identity
+                         // (TypeContext::getPointer), so Lt != Rt ordinarily
+                         // does mean the two domains differ -- except a
+                         // SchemaInstance pointee is deliberately never
+                         // interned (see schemaInstMatch), so two aliases
+                         // naming the identical schema instantiation mint two
+                         // distinct Pointer objects here too.  Issue #407.
+                         && !(Lt->PointeeType && Rt->PointeeType
+                              && (isIdenticalType(Lt->PointeeType, Rt->PointeeType)
+                                  || schemaInstMatch(*Lt->PointeeType, *Rt->PointeeType))))
                     error(E.Loc, diag::err_cannot_compare, {Lt->Name, Rt->Name});
                 return TyBool;
             }
@@ -1764,8 +1782,24 @@ void Sema::checkCallArgs(const Symbol& Sym, SourceLocation CallLoc,
             // an assignment writes to it, so a protected one may not be passed.
             // EP §6.7.3.1.
             checkNotProtected(ArgNode, ArgNode.Loc);
+            // A pointer-to-schema-instance formal (e.g. `var x: VecPtrA`)
+            // is itself Pointer-kind, not SchemaInstance, so the
+            // schemaInstMatch disjunct just above never fires for it --
+            // it only ever sees the two Pointer objects, never their
+            // pointees.  Two independently-declared aliases of `^Vec(4)`
+            // are two distinct Pointer objects (their pointees are two
+            // distinct, un-interned SchemaInstance objects; see
+            // schemaInstMatch's comment), so isIdenticalType(At, Param.Ty)
+            // fails too, and a var parameter typed with one alias wrongly
+            // refused an actual of the other.  Issue #407.
             bool typeOk = isIdenticalType(At, Param.Ty)
                        || (At && Param.Ty && schemaInstMatch(*At, *Param.Ty))
+                       || (At && Param.Ty
+                           && At->Kind == TypeKind::Pointer
+                           && Param.Ty->Kind == TypeKind::Pointer
+                           && At->PointeeType && Param.Ty->PointeeType
+                           && (isIdenticalType(At->PointeeType, Param.Ty->PointeeType)
+                               || schemaInstMatch(*At->PointeeType, *Param.Ty->PointeeType)))
                        || (At && At->isRestricted()
                            && isIdenticalType(At->RestrictedOf, Param.Ty))
                        || (Param.Ty && Param.Ty->isRestricted()
@@ -2153,9 +2187,24 @@ bool Sema::isAssignCompatible(const Type& Dst, const Type& Src,
             // the same canonical-identity test ISO §6.6.3.3 uses for a var
             // parameter -- is what settles it, not the general assignability
             // relation.
+            //
+            // EP §6.4.7 is the one deliberate exception: a SchemaInstance
+            // pointee is NEVER interned (TypeContext::getPointer above
+            // notwithstanding -- see its own comment), so two independently
+            // written `^Vec(4)` aliases mint two distinct pointee Type
+            // objects for the identical instantiation, and isIdenticalType
+            // alone wrongly calls them different domains (issue #407, a
+            // regression from this very fix). schemaInstMatch is the same
+            // declaration+discriminant-value identity check the var-parameter
+            // call site above (checkCallArgs) already falls back to for
+            // exactly this reason; it returns false outright for any pointee
+            // kind other than SchemaInstance, so it adds this one carve-out
+            // without loosening isIdenticalType's identity requirement for
+            // Subrange or any other pointee kind.
             case TypeKind::Pointer:
                 if (!Dst.PointeeType || !Src.PointeeType) return false;
-                return isIdenticalType(Dst.PointeeType, Src.PointeeType);
+                return isIdenticalType(Dst.PointeeType, Src.PointeeType)
+                    || schemaInstMatch(*Dst.PointeeType, *Src.PointeeType);
 
             default:
                 return Dst.Name == Src.Name;
