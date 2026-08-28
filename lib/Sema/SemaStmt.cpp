@@ -1153,6 +1153,14 @@ void Sema::checkCallStmt(const CallStmt& S) {
         // nothing here for them to be checked against.
         if (Lo == "dispose" && !S.Args.empty()) {
             auto PtrTy = checkExpr(*S.Args[0]);
+            // Mirrors new's own check just above (issue #206): every check
+            // below is keyed off Pointee, which only a genuine Pointer arg0
+            // computes -- anything else left it null and silently no-opped
+            // rather than rejecting the call, so `dispose(i)` for a
+            // non-pointer i reached CodeGen with no pointee to size and hit
+            // an LLVM IR verifier abort instead of a clean diagnostic.
+            if (!PtrTy->isError() && PtrTy->Kind != TypeKind::Pointer)
+                error(S.Args[0]->Loc, diag::err_dispose_arg_not_pointer, {PtrTy->Name});
             const Type* Pointee = PtrTy->Kind == TypeKind::Pointer
                                       ? PtrTy->PointeeType.get() : nullptr;
             const bool ToVariant = Pointee && Pointee->Kind == TypeKind::Record
@@ -1177,6 +1185,38 @@ void Sema::checkCallStmt(const CallStmt& S) {
         // argument to the variable itself, so what it may be is fixed.
         if (Lo == "bind" || Lo == "unbind") {
             checkBindingCall(Lo, S.Loc, S.Args);
+            return;
+        }
+
+        // EP §6.7.5.5: readstr(e, v1,...,vn) reads e and assigns every v;
+        // writestr(e, ...) is the mirror, assigning only e.  Neither had a
+        // dedicated arm before this -- both fell through to the generic
+        // "evaluate for side effects only" fallback below, so a non-variable
+        // target reached codegen with no address to assign into and hit the
+        // same class of abort #224 fixed for read/readln's targets (a
+        // codegenICE, or, for writestr, "destination is not a string
+        // variable").  Mirrors read/readln's isLValue check above; the
+        // read/write split is the same one checkForBody's isWriteArg lambda
+        // already uses for the for-loop threat scan (issue #265).
+        if ((Lo == "readstr" || Lo == "writestr") && !S.Args.empty()) {
+            std::vector<std::shared_ptr<Type>> Ts;
+            Ts.reserve(S.Args.size());
+            for (const auto& Arg : S.Args) Ts.push_back(checkExpr(*Arg));
+
+            const bool IsReadstr = Lo == "readstr";
+            for (size_t I = 0; I < Ts.size(); ++I) {
+                // readstr's targets are v1..vn (everything past the source
+                // string at index 0); writestr's destination is its lone
+                // arg 0, the rest being ordinary write-parameters.
+                const bool IsTarget = IsReadstr ? I >= 1 : I == 0;
+                if (!IsTarget) continue;
+                const auto& T = *Ts[I];
+                if (!T.isError() && !isLValue(*S.Args[I]))
+                    error(S.Args[I]->Loc,
+                          IsReadstr ? diag::err_readstr_not_variable
+                                    : diag::err_writestr_not_variable,
+                          {T.Name});
+            }
             return;
         }
 
@@ -1536,6 +1576,14 @@ void Sema::checkForIn(const ForInStmt& S) {
     LoopSym.DeclLoc = S.Loc;
     if (!Symtab.define(LoopSym))
         error(S.Loc, diag::err_for_in_var_scope, {S.Var});
+
+    // ISO §6.8.3.9's control-variable restrictions (no reassignment,
+    // var-parameter aliasing, or use as a read/readln/readstr/writestr
+    // target within the loop body) are the same for `for v in set do` as
+    // for `to`/`downto` -- #265/#291 (PR #342) wired checkForBody up for
+    // the latter but never for this form, leaving every one of those
+    // threats silently unchecked here.
+    checkForBody(S.Body.get(), S.Var, S.Loc);
     checkStmt(S.Body.get());
     Symtab.popScope();
 }
