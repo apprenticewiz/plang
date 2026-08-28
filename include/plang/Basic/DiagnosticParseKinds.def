@@ -46,6 +46,14 @@ DIAG(err_turbo_required_name, Error,
 DIAG(err_ep_two_arg_form, Error,
      "the two-argument form of '%0' is an Extended Pascal extension and is "
      "not available under -std=iso7185")
+// EP §6.6: 'function F(...) = result: T' names the result variable instead
+// of leaving it as F itself.  Parsed unconditionally until now (issue found
+// during a review of the {$X} declaration-parsing area): a program compiled
+// under -std=iso7185 with a named result variable was silently accepted,
+// though §6.6.1's own grammar has no '=' in a function-heading at all.
+DIAG(err_ep_named_result, Error,
+     "a named result variable ('function name(...) = result: type') is an "
+     "Extended Pascal extension and is not available under -std=iso7185")
 
 // Distinct from err_ep_underscore_in_identifier above: this fires even where
 // underscores ARE allowed (EP), because ISO 10206 §6.1.3's grammar --

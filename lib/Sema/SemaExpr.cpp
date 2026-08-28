@@ -228,9 +228,37 @@ std::shared_ptr<Type> Sema::checkIdent(const IdentExpr& E) {
     // a nearer declaration of the name denotes something else.  It is what
     // isFunctionResultTarget uses to accept the assignment; this is the same
     // question asked one step later, for the type.
+    //
+    // ISO §6.8.2.2's own grammar only ever admits a bare function-identifier
+    // in ONE place: the assignment-statement production, "(variable-access |
+    // function-identifier) ':=' expression".  Nowhere else -- not this same
+    // statement's own RHS, not an argument, not a plain read three lines
+    // later -- does a bare function-identifier mean the result; everywhere
+    // else it is §6.7.3's function-designator, i.e. a (possibly recursive)
+    // call.  This project's own history read it as the result EVERYWHERE
+    // inside the function, target or not, which is Turbo Pascal's actual,
+    // simpler-but-not-ISO-correct behaviour -- kept exactly as before for
+    // ISO 7185/Extended Pascal (CurAssignTargetRoot_ stays unconsulted:
+    // !Opts.turbo() alone decides it), restored to the ISO reading under
+    // -std=turbo only, per this task's own scoping.  CurAssignTargetRoot_
+    // is checkAssign's own bookkeeping (pointer identity, not a name
+    // match): see its declaration in Sema.h.
     if (!FuncStack.empty()) {
-        if (const FuncFrame* F = resultFrameFor(E.Name))
-            return F->RetType ? F->RetType : TyErr;
+        if (const FuncFrame* F = resultFrameFor(E.Name)) {
+            if (!Opts.turbo() || &E == CurAssignTargetRoot_) {
+                E.Resolution = IdentExpr::IdentResolution::ResultVariable;
+                return F->RetType ? F->RetType : TyErr;
+            }
+            // Recursive call: fall through to the ordinary Symbol-based
+            // resolution below, which already treats a bare (zero actual
+            // parameters) required-or-declared function name as a call --
+            // exactly what is needed to call this same function again, with
+            // no special-casing of its own.  (If Fib takes parameters, that
+            // same generic path reports err_function_requires_args: a bare
+            // 'Fib' with no argument list cannot supply them, recursive or
+            // not.)
+            E.Resolution = IdentExpr::IdentResolution::RecursiveCall;
+        }
     }
 
     // EP §6.4.7: active schema discriminant bindings.  Most contexts that
@@ -1673,7 +1701,19 @@ Sema::checkUserDefinedCall(const Symbol& Sym, SourceLocation CallLoc,
         for (const auto& A : Args) (void)checkExpr(*A);
         return TyErr;
     }
-    if (!ExpectFunction && Sym.IsFunction) {
+    if (!ExpectFunction && Sym.IsFunction
+            && !(Opts.turbo() && Opts.switchOn(Switch::ExtendedSyntax, CallLoc))) {
+        // ISO §6.8.2.2 requires a function's result be used.  Turbo's
+        // `{$X+}` (its default -- CompilerSwitches.def's TurboDefault
+        // column) lifts that requirement and lets the result be discarded
+        // like an ordinary procedure call's absence of one; `{$X-}` puts
+        // ISO 7185/Extended Pascal's own rule back in force.
+        //
+        // Opts.turbo() is not redundant with switchOn: SwitchTable's default
+        // answers "extended syntax allowed" for every dialect, ISO 7185 and
+        // Extended Pascal included, and those two have no `{$X}` directive
+        // to ever say otherwise -- the same gap CGBinaryOps::emitBinary's
+        // isTurbo()-guarded boolEvalAt already works around for `{$B}`.
         error(CallLoc, diag::err_func_as_statement, {Sym.Name});
         for (const auto& A : Args) (void)checkExpr(*A);
         return TyErr;

@@ -141,6 +141,16 @@ BRACE_CHECK_EXEMPT = {
     "test/Driver/Turbo/b-plus-restores-full-boolean-evaluation-partway-through-the-file.pas",
     "test/Driver/Turbo/while-and-array-index-idiom-relies-on-short-circuit-under-b-minus.pas",
     "test/Driver/Turbo/b-plus-breaks-the-short-circuit-idiom-with-a-range-check-error.pas",
+    # Same reasoning again (only ever compiles under -std=turbo -- see each
+    # file's own RUN: line -- so the matched-delimiter rule this check
+    # doesn't model is the one that actually applies), for the three files
+    # added with {$X}/ExtendedSyntax (a function called as a statement):
+    # their header prose discusses '{$X+}'/'{$X-}' syntax in English the
+    # same way the switch-directive files above already do.  Not a hazard
+    # to fix.
+    "test/Driver/Turbo/x-plus-lets-a-function-be-called-as-a-statement-discarding-its-result.pas",
+    "test/Driver/Turbo/x-minus-rejects-a-function-called-as-a-statement-with-isos-own-diagnostic.pas",
+    "test/Driver/Turbo/a-builtin-function-called-as-a-statement-under-x-plus-compiles-and-runs.pas",
 }
 
 

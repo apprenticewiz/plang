@@ -15,8 +15,6 @@
 using namespace plang;
 
 llvm::Value* CGFuncCall::emitCallExpr(const CallExpr& e) {
-    std::string lo = toLower(e.Name);
-
     // ISO §6.2.2.10: a required function identifier may be redeclared, and
     // then it denotes what the program declared and not the required one.  The
     // chain below dispatches on spelling alone, so without this a program that
@@ -26,11 +24,18 @@ llvm::Value* CGFuncCall::emitCallExpr(const CallExpr& e) {
     // functional parameter named after a required function, which the check at
     // the head of emitUserFuncCall would otherwise not be reached to make.
     if (e.ResolvedBuiltin == BuiltinID::None) return emitUserFuncCall(e);
+    if (auto* v = emitBuiltinCall(e.Name, e.Args, e.Loc)) return v;
+    return emitUserFuncCall(e);
+}
+
+llvm::Value* CGFuncCall::emitBuiltinCall(const std::string& Name,
+        std::span<const std::unique_ptr<ExprNode>> Args, SourceLocation Loc) {
+    std::string lo = toLower(Name);
 
     // ---- Math built-ins routed through plang_math.c ----
     if (lo == "sqrt" || lo == "sin" || lo == "cos" || lo == "exp"
         || lo == "ln"  || lo == "arctan") {
-        auto* arg = EmitExpr(*e.Args[0]);
+        auto* arg = EmitExpr(*Args[0]);
         // EP §6.7.6.2: dispatch to complex variant when argument is complex.
         if (arg->getType() == Complex.complexTy()) {
             // e.g. "sqrt" → "plang_csqrt_out"
@@ -41,7 +46,7 @@ llvm::Value* CGFuncCall::emitCallExpr(const CallExpr& e) {
         return B.CreateCall(RtFns.getRTMathRR("plang_" + lo), {darg}, lo);
     }
     if (lo == "abs") {
-        auto* v = EmitExpr(*e.Args[0]);
+        auto* v = EmitExpr(*Args[0]);
         // EP §6.7.6.2: abs(complex) → real = sqrt(re² + im²)
         if (v->getType() == Complex.complexTy()) {
             auto* re = B.CreateExtractValue(v, 0, "z.re");
@@ -55,7 +60,7 @@ llvm::Value* CGFuncCall::emitCallExpr(const CallExpr& e) {
         return B.CreateCall(RtFns.getRTMathII("plang_abs_int"), {ToI64(v)}, "abs");
     }
     if (lo == "sqr") {
-        auto* v = EmitExpr(*e.Args[0]);
+        auto* v = EmitExpr(*Args[0]);
         // EP §6.7.6.2: sqr(complex) → complex = z * z
         if (v->getType() == Complex.complexTy())
             return Complex.emitComplexMul(v, v);
@@ -65,14 +70,14 @@ llvm::Value* CGFuncCall::emitCallExpr(const CallExpr& e) {
     }
     // EP §6.7.6.3: cmplx(x, y) constructor
     if (lo == "cmplx") {
-        auto* re = ToDouble(EmitExpr(*e.Args[0]));
-        auto* im = ToDouble(EmitExpr(*e.Args[1]));
+        auto* re = ToDouble(EmitExpr(*Args[0]));
+        auto* im = ToDouble(EmitExpr(*Args[1]));
         return Complex.makeComplex(re, im);
     }
     // EP §6.7.6.3: polar(r, t) = r*cos(t) + i*r*sin(t)
     if (lo == "polar") {
-        auto* r = ToDouble(EmitExpr(*e.Args[0]));
-        auto* t = ToDouble(EmitExpr(*e.Args[1]));
+        auto* r = ToDouble(EmitExpr(*Args[0]));
+        auto* t = ToDouble(EmitExpr(*Args[1]));
         auto* cosTh = B.CreateCall(RtFns.getRTMathRR("plang_cos"), {t}, "cos_t");
         auto* sinTh = B.CreateCall(RtFns.getRTMathRR("plang_sin"), {t}, "sin_t");
         auto* re = B.CreateFMul(r, cosTh, "polar_re");
@@ -81,19 +86,19 @@ llvm::Value* CGFuncCall::emitCallExpr(const CallExpr& e) {
     }
     // EP §6.7.6.2: re(z), im(z), arg(z)
     if (lo == "re") {
-        auto* z = EmitExpr(*e.Args[0]);
+        auto* z = EmitExpr(*Args[0]);
         if (z->getType() == Complex.complexTy())
             return B.CreateExtractValue(z, 0, "re");
         return ToDouble(z);
     }
     if (lo == "im") {
-        auto* z = EmitExpr(*e.Args[0]);
+        auto* z = EmitExpr(*Args[0]);
         if (z->getType() == Complex.complexTy())
             return B.CreateExtractValue(z, 1, "im");
         return llvm::ConstantFP::get(DblTy, 0.0);
     }
     if (lo == "arg") {
-        auto* z = EmitExpr(*e.Args[0]);
+        auto* z = EmitExpr(*Args[0]);
         if (z->getType() == Complex.complexTy()) {
             auto* re = B.CreateExtractValue(z, 0, "z.re");
             auto* im = B.CreateExtractValue(z, 1, "z.im");
@@ -106,17 +111,17 @@ llvm::Value* CGFuncCall::emitCallExpr(const CallExpr& e) {
             llvm::ConstantFP::get(DblTy, 0.0)}, "arg");
     }
     if (lo == "trunc") {
-        auto* arg = ToDouble(EmitExpr(*e.Args[0]));
+        auto* arg = ToDouble(EmitExpr(*Args[0]));
         return B.CreateCall(RtFns.getRTMathRI("plang_trunc"), {arg}, "trunc");
     }
     if (lo == "round") {
-        auto* arg = ToDouble(EmitExpr(*e.Args[0]));
+        auto* arg = ToDouble(EmitExpr(*Args[0]));
         return B.CreateCall(RtFns.getRTMathRI("plang_round"), {arg}, "round");
     }
     // ---- Boolean file-status built-ins ----
     if (lo == "eof") {
-        if (!e.Args.empty() && FileVars.isFileVar(*e.Args[0])) {
-            auto* fp  = FileVars.fileVarPtr(*e.Args[0]);
+        if (!Args.empty() && FileVars.isFileVar(*Args[0])) {
+            auto* fp  = FileVars.fileVarPtr(*Args[0]);
             auto* raw = B.CreateCall(
                 RtFns.getExternFnN("plang_eof_file", I8Ty, {PtrTy}), {fp}, "eof.raw");
             return EnsureI1(raw);
@@ -126,8 +131,8 @@ llvm::Value* CGFuncCall::emitCallExpr(const CallExpr& e) {
         return EnsureI1(raw);
     }
     if (lo == "eoln") {
-        if (!e.Args.empty() && FileVars.isFileVar(*e.Args[0])) {
-            auto* fp  = FileVars.fileVarPtr(*e.Args[0]);
+        if (!Args.empty() && FileVars.isFileVar(*Args[0])) {
+            auto* fp  = FileVars.fileVarPtr(*Args[0]);
             auto* raw = B.CreateCall(
                 RtFns.getExternFnN("plang_eoln_file", I8Ty, {PtrTy}), {fp}, "eoln.raw");
             return EnsureI1(raw);
@@ -137,8 +142,8 @@ llvm::Value* CGFuncCall::emitCallExpr(const CallExpr& e) {
         return EnsureI1(raw);
     }
     // EP §6.7.6.8: binding(f) → BindingType record
-    if (lo == "binding" && !e.Args.empty()) {
-        auto* fp  = FileVars.fileVarPtr(*e.Args[0]);
+    if (lo == "binding" && !Args.empty()) {
+        auto* fp  = FileVars.fileVarPtr(*Args[0]);
         auto* out = CreateEntryAlloca(Types.bindingStructType(), "binding.out");
         B.CreateStore(llvm::Constant::getNullValue(Types.bindingStructType()), out);
         auto* fn  = RtFns.getExternFnN("plang_binding",
@@ -148,8 +153,8 @@ llvm::Value* CGFuncCall::emitCallExpr(const CallExpr& e) {
     }
 
     // EP §6.7.6.9: date(t) / time(t) — format TimeStamp to string
-    if ((lo == "date" || lo == "time") && !e.Args.empty()) {
-        auto* tPtr = EmitLValue(*e.Args[0]);
+    if ((lo == "date" || lo == "time") && !Args.empty()) {
+        auto* tPtr = EmitLValue(*Args[0]);
         // 'time' maps to plang_time_ts to avoid clashing with the POSIX time() symbol.
         std::string fnName = (lo == "time") ? "plang_time_ts" : "plang_date";
         auto* fn = RtFns.getExternFnN(fnName, PtrTy, {PtrTy});
@@ -160,7 +165,7 @@ llvm::Value* CGFuncCall::emitCallExpr(const CallExpr& e) {
     // the file's declared INDEX TYPE -- "position(f) = succ(a, ...)", a
     // being the index type's smallest value -- not a 0-based component
     // count, so a `file[1..5]` fully written reports 4, not 3.
-    if ((lo == "position" || lo == "lastposition") && !e.Args.empty()) {
+    if ((lo == "position" || lo == "lastposition") && !Args.empty()) {
         // Sema now refuses a non-file argument here (issue #417), the same
         // way it already refuses one for eof/eoln above -- this guard is
         // defense in depth, unreachable for a program that passed Sema.
@@ -168,23 +173,23 @@ llvm::Value* CGFuncCall::emitCallExpr(const CallExpr& e) {
         // returns the wrong-typed variable's own storage address with no
         // check at all, and that reached plang_position/plang_lastposition
         // as a PascalFile*, segfaulting with no diagnostic.
-        if (!FileVars.isFileVar(*e.Args[0]))
+        if (!FileVars.isFileVar(*Args[0]))
             return llvm::ConstantInt::get(I64Ty, 0);
-        auto* fp  = FileVars.fileVarPtr(*e.Args[0]);
-        int64_t esz = FileVars.getFileElemSize(*e.Args[0]);
-        int64_t ilo = FileVars.getFileIndexLow(*e.Args[0]);
+        auto* fp  = FileVars.fileVarPtr(*Args[0]);
+        int64_t esz = FileVars.getFileElemSize(*Args[0]);
+        int64_t ilo = FileVars.getFileIndexLow(*Args[0]);
         auto* fn  = RtFns.getExternFnN("plang_" + lo, I64Ty, {PtrTy, I64Ty, I64Ty});
         return B.CreateCall(fn, {fp, llvm::ConstantInt::get(I64Ty, esz),
                                        llvm::ConstantInt::get(I64Ty, ilo)}, lo);
     }
     // EP §6.7.6.5: empty(f)
-    if (lo == "empty" && !e.Args.empty()) {
+    if (lo == "empty" && !Args.empty()) {
         // Same defense-in-depth guard as position/lastposition just above
         // (issue #417).
-        if (!FileVars.isFileVar(*e.Args[0]))
+        if (!FileVars.isFileVar(*Args[0]))
             return llvm::ConstantInt::getFalse(Ctx);
-        auto* fp  = FileVars.fileVarPtr(*e.Args[0]);
-        int64_t esz = FileVars.getFileElemSize(*e.Args[0]);
+        auto* fp  = FileVars.fileVarPtr(*Args[0]);
+        int64_t esz = FileVars.getFileElemSize(*Args[0]);
         auto* fn  = RtFns.getExternFnN("plang_empty", I8Ty, {PtrTy, I64Ty});
         auto* raw = B.CreateCall(fn, {fp, llvm::ConstantInt::get(I64Ty, esz)}, "empty.raw");
         return B.CreateICmpNE(raw, llvm::ConstantInt::get(I8Ty, 0), "empty");
@@ -192,7 +197,7 @@ llvm::Value* CGFuncCall::emitCallExpr(const CallExpr& e) {
 
     // ---- Ordinal built-ins — simple enough to keep inline ----
     if (lo == "ord") {
-        auto* v = EmitExpr(*e.Args[0]);
+        auto* v = EmitExpr(*Args[0]);
         if (v->getType()->isIntegerTy(64)) return v;
         return B.CreateZExt(v, I64Ty, "ord");
     }
@@ -205,20 +210,20 @@ llvm::Value* CGFuncCall::emitCallExpr(const CallExpr& e) {
         // value before it is narrowed.  Char's range is the fixed 0..255
         // ordinalRange gives it, not a lookup on the argument's type -- the
         // argument is whatever ordinal expression was passed, not a char.
-        auto* v = ToI64(EmitExpr(*e.Args[0]));
-        RangeGuards.emitRangeCheck(v, 0, 255, /*isIndex=*/false, e.Loc);
+        auto* v = ToI64(EmitExpr(*Args[0]));
+        RangeGuards.emitRangeCheck(v, 0, 255, /*isIndex=*/false, Loc);
         return B.CreateTrunc(v, I8Ty, "chr");
     }
     if (lo == "odd") {
-        auto* v   = ToI64(EmitExpr(*e.Args[0]));
+        auto* v   = ToI64(EmitExpr(*Args[0]));
         auto* bit = B.CreateAnd(v, llvm::ConstantInt::get(I64Ty, 1), "odd.bit");
         return B.CreateICmpNE(bit, llvm::ConstantInt::get(I64Ty, 0), "odd");
     }
     if (lo == "succ" || lo == "pred") {
-        auto* arg = EmitExpr(*e.Args[0]);
+        auto* arg = EmitExpr(*Args[0]);
         auto* v = ToI64(arg);
-        auto* k = e.Args.size() > 1
-            ? ToI64(EmitExpr(*e.Args[1]))
+        auto* k = Args.size() > 1
+            ? ToI64(EmitExpr(*Args[1]))
             : llvm::ConstantInt::get(I64Ty, 1);
         auto* r = lo == "succ" ? B.CreateAdd(v, k, "succ")
                                : B.CreateSub(v, k, "pred");
@@ -229,10 +234,10 @@ llvm::Value* CGFuncCall::emitCallExpr(const CallExpr& e) {
         // wrapped into 3, an ordinal no value of the type has.  integer is
         // deliberately excluded (ordinalRange's own rule): it has no bounded
         // range to have walked off the end of.
-        if (const auto& argTy = e.Args[0]->ResolvedType; argTy && !argTy->isError())
+        if (const auto& argTy = Args[0]->ResolvedType; argTy && !argTy->isError())
             if (auto range = ordinalRange(*argTy))
                 RangeGuards.emitRangeCheck(r, range->first, range->second, /*isIndex=*/false,
-                              e.Loc);
+                              Loc);
         // ISO §6.6.6.4: the result is of the argument's type.  The arithmetic
         // is done wide, so it has to come back in the width that type is held
         // in, or a boolean result is an i64 that write puts out as 1 and 0.
@@ -242,7 +247,7 @@ llvm::Value* CGFuncCall::emitCallExpr(const CallExpr& e) {
     }
     if (lo == "card") {
         // Cardinality of a set (bit population count).
-        auto* v   = Sets.toSetWidth(EmitExpr(*e.Args[0]));
+        auto* v   = Sets.toSetWidth(EmitExpr(*Args[0]));
         auto* fn  = llvm::Intrinsic::getOrInsertDeclaration(
                         &Mod, llvm::Intrinsic::ctpop, {Sets.setTy()});
         auto* n   = B.CreateCall(fn, {v}, "card");
@@ -252,8 +257,8 @@ llvm::Value* CGFuncCall::emitCallExpr(const CallExpr& e) {
     // ---- EP string functions (§6.7.6.7) ----
     // Return (ptr, cap) for a string argument using Sema-annotated type.
     auto getStrArgPtr = [&](int idx) -> std::pair<llvm::Value*, llvm::Value*> {
-        if (e.Args.size() <= (size_t)idx) return {nullptr, nullptr};
-        const auto& arg = *e.Args[idx];
+        if (Args.size() <= (size_t)idx) return {nullptr, nullptr};
+        const auto& arg = *Args[idx];
         if (ExprIsVarStr(arg)) return Schema.strAddrAndCap(arg);
         // ISO §6.4.3.2's other string shape — a packed array[1..n] of char —
         // is the sibling comparison already widens for (exprIsStringLike,
@@ -289,8 +294,8 @@ llvm::Value* CGFuncCall::emitCallExpr(const CallExpr& e) {
     };
     // For sizing a temporary, which needs a constant; see exprStrCapStatic.
     auto strArgCapStatic = [&](int idx) -> int64_t {
-        if (e.Args.size() <= (size_t)idx) return 0;
-        const auto& arg = *e.Args[idx];
+        if (Args.size() <= (size_t)idx) return 0;
+        const auto& arg = *Args[idx];
         if (ExprIsVarStr(arg)) return ExprStrCapStatic(arg);
         if (ExprIsCharStr(arg)) return ExprCharStrLen(arg);
         if (auto* sl = llvm::dyn_cast<StringLitExpr>(&arg))
@@ -304,7 +309,7 @@ llvm::Value* CGFuncCall::emitCallExpr(const CallExpr& e) {
     /// so sizing by it cut substr and trim of a 400-capacity string to 255.
     auto strResultTemp = [&](int idx, llvm::Value* capV, const char* name)
             -> std::pair<llvm::Value*, llvm::Value*> {
-        if (const auto& arg = *e.Args[idx];
+        if (const auto& arg = *Args[idx];
                 ExprIsVarStr(arg) && arg.ResolvedType->ExtentVaries)
             return {CreateDynStrAlloca(capV, name), capV};
         const int64_t c = strArgCapStatic(idx);
@@ -317,7 +322,7 @@ llvm::Value* CGFuncCall::emitCallExpr(const CallExpr& e) {
             return B.CreateCall(fn, {ptr, cap}, "length");
         }
         // Fallback: strlen on a char*
-        auto* s  = EmitExpr(*e.Args[0]);
+        auto* s  = EmitExpr(*Args[0]);
         auto* fn = RtFns.getExternFnN("strlen", I64Ty, {PtrTy});
         return B.CreateCall(fn, {s}, "length");
     }
@@ -335,9 +340,9 @@ llvm::Value* CGFuncCall::emitCallExpr(const CallExpr& e) {
         if (sp) {
             // EP §6.7.5.4: the third argument is how many characters to take,
             // not where to stop.  Omitting it means the rest of the string.
-            auto* i = ToI64(EmitExpr(*e.Args[1]));
-            auto* n = e.Args.size() > 2
-                ? ToI64(EmitExpr(*e.Args[2]))
+            auto* i = ToI64(EmitExpr(*Args[1]));
+            auto* n = Args.size() > 2
+                ? ToI64(EmitExpr(*Args[2]))
                 : B.CreateAdd(
                       B.CreateSub(Strings.strLoadLen(sp), i, "substr.rest"),
                       llvm::ConstantInt::get(I64Ty, 1), "substr.len");
@@ -365,7 +370,7 @@ llvm::Value* CGFuncCall::emitCallExpr(const CallExpr& e) {
             {"gt","plang_str_gt"},{"le","plang_str_le"},{"ge","plang_str_ge"},
         };
         auto it = strCmpFns.find(lo);
-        if (it != strCmpFns.end() && e.Args.size() >= 2) {
+        if (it != strCmpFns.end() && Args.size() >= 2) {
             auto [lp, lc] = getStrArgPtr(0);
             auto [rp, rc] = getStrArgPtr(1);
             if (lp && rp) {
@@ -376,7 +381,13 @@ llvm::Value* CGFuncCall::emitCallExpr(const CallExpr& e) {
         }
     }
 
-    return emitUserFuncCall(e);
+    // Every Func-kind row in Builtins.def has a named arm above; reaching
+    // here means ResolvedBuiltin was set to a spelling none of them matched,
+    // which should not happen.  nullptr, not codegenICE: emitCallExpr's own
+    // caller still has emitUserFuncCall(e) to fall back to (the ORIGINAL
+    // behaviour, preserved exactly), and CGProcCall's caller -- with no
+    // CallExpr of its own to fall back through -- reports the ICE instead.
+    return nullptr;
 }
 
 llvm::Value* CGFuncCall::emitUserFuncCall(const CallExpr& e) {

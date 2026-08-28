@@ -352,7 +352,17 @@ void Codegen::Impl::init(const std::string& progName) {
         [this]() -> std::shared_ptr<Type> { return curRetSemaType; },
         [this](){ return currentContinueTarget(); },
         [this](){ return currentBreakTarget(); },
-        [this](){ return exitBlock(); });
+        [this](){ return exitBlock(); },
+        // Turbo `{$X+}`: a required FUNCTION called as a statement lands in
+        // emitCallStmt with no arm of its own to match, and needs
+        // funcCall_'s builtin dispatch chain -- built below, after procCall_,
+        // so this is a lazily-invoked closure rather than a direct
+        // reference, exactly like BuildStaticLinkFrame just above.
+        [this](const std::string& name,
+               std::span<const std::unique_ptr<ExprNode>> args,
+               SourceLocation loc) {
+            return funcCall_->emitBuiltinCall(name, args, loc);
+        });
     // Record field access and pointer dereference.  EmitLValue/EmitExpr
     // are narrow closures into methods not yet extracted (both still in
     // CodeGenExprs.cpp -- emitExpr/emitLValue themselves).
