@@ -51,6 +51,22 @@ TEST_ROOT = os.path.join(REPO_ROOT, "test")
 BRACE_CHECK_EXEMPT = {
     "test/Lex/ScannerLexicalAlternatives/either-terminator-closes-either-comment.pas",
     "test/Conformance/Error/prt1622.pas",
+    # -std=turbo has the OPPOSITE rule (Scanner.cpp's skipCommentTurbo): a
+    # comment must be closed by its own kind, and mixing them is
+    # err_comment_delim_mismatch, not an accepted alternative. This file's
+    # two split-file chunks deliberately mix them to exercise that error,
+    # which is exactly what this check -- written for the ISO rule, with no
+    # dialect awareness -- flags as a hazard. Working as intended, not a
+    # hazard to fix, same as the two entries above for the opposite rule.
+    "test/Lex/ScannerTurbo/mismatched-comment-delimiter-is-an-error-under-turbo.pas",
+    # Same -std=turbo rule, the other side of it: a '*)' embedded inside a
+    # brace comment that DOES go on to close correctly (a real '}' follows
+    # it) is inert under Turbo -- just comment text, not a terminator, so
+    # the whole thing compiles clean. This check's ISO-only simulation
+    # instead treats that embedded '*)' as closing the comment right there,
+    # which is exactly the (Turbo-only) case this file exists to prove
+    # doesn't happen. Working as intended, not a hazard to fix.
+    "test/Lex/ScannerTurbo/embedded-wrong-kind-closer-is-inert-when-comment-closes-correctly.pas",
 }
 
 

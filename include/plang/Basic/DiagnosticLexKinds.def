@@ -4,6 +4,7 @@
 DIAG(err_file_not_found, Error, "no such file or directory: '%0'")
 DIAG(err_source_too_large, Error, "source file '%0' is too large to compile")
 DIAG(err_unterminated_comment, Error, "unterminated comment")
+DIAG(err_comment_delim_mismatch, Error, "comment opened with '%0' must be closed with '%1' in Turbo Pascal mode")
 DIAG(err_nondecimal_base_range, Error, "nondecimal literal base must be 2–36")
 DIAG(err_nondecimal_no_digits, Error, "nondecimal literal has no digits")
 DIAG(err_nondecimal_bad_digit, Error, "digit '%0' is out of range for base %1")
