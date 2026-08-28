@@ -31,7 +31,7 @@ static bool isRelop(TokenKind K) {
     }
 }
 
-// Returns true for the additive operators: + - or or_else >< (EP)
+// Returns true for the additive operators: + - or or_else >< (EP) xor (TP)
 static bool isAddop(TokenKind K) {
     switch (K) {
         case TokenKind::Plus:
@@ -39,13 +39,22 @@ static bool isAddop(TokenKind K) {
         case TokenKind::Or:
         case TokenKind::OrElse:   // EP §6.8.3.3
         case TokenKind::SymDiff:  // EP §6.8.3.4
+        // Turbo Pascal's own operator table puts 'xor' at the same
+        // precedence tier as 'or': both ADDOPs.  No explicit dialect check
+        // is needed here -- Xor is a DIALECT_KEYWORD gated to D_Turbo alone
+        // (TokenKinds.def), so the scanner hands 'xor' back as a plain
+        // Identifier under every other dialect and this case is simply
+        // never reached there (the same reasoning AndThen/OrElse below rely
+        // on for their own EP-only gating).
+        case TokenKind::Xor:      // TP7 operator table
             return true;
         default:
             return false;
     }
 }
 
-// Returns true for the multiplicative operators: * / div mod and and_then (EP)
+// Returns true for the multiplicative operators: * / div mod and and_then
+// (EP) shl shr (TP)
 static bool isMulop(TokenKind K) {
     switch (K) {
         case TokenKind::Times:
@@ -54,6 +63,12 @@ static bool isMulop(TokenKind K) {
         case TokenKind::Mod:
         case TokenKind::And:
         case TokenKind::AndThen:  // EP §6.8.3.3
+        // Turbo Pascal's own operator table puts 'shl'/'shr' at the same
+        // precedence tier as '*': both MULOPs.  Same scanner-gate reasoning
+        // as 'xor' in isAddop above -- Shl/Shr are D_Turbo-only keywords, so
+        // no explicit dialect check belongs here either.
+        case TokenKind::Shl:      // TP7 operator table
+        case TokenKind::Shr:      // TP7 operator table
             return true;
         default:
             return false;
