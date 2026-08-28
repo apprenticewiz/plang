@@ -773,6 +773,18 @@ std::shared_ptr<Type> Sema::checkUnary(const UnaryExpr& E) {
                 return TyErr;
             }
             return TyBool;
+        case TokenKind::At:
+            // Turbo `@x`: only ever reached under -std=turbo -- the scanner
+            // is the sole gate on the At token (see its '@' dispatch), the
+            // same way an EP-only keyword never reaches Sema under ISO 7185.
+            // The operand has to be an addressable variable, the same
+            // requirement checkExpr's 'var'-parameter check (isLValue) makes
+            // of a call argument; '@(1+1)' or '@f(x)' has no address to take.
+            if (!isLValue(*E.Operand)) {
+                error(E.Loc, diag::err_addrof_requires_variable, {T->Name});
+                return TyErr;
+            }
+            return Ctx_.getPointer(T);
         default:
             error(E.Loc, diag::err_unknown_unop);
             return TyErr;

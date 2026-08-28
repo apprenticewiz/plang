@@ -33,6 +33,7 @@ public:
                 llvm::IntegerType* I1Ty, llvm::IntegerType* I64Ty, llvm::IntegerType* I8Ty,
                 llvm::Type* DblTy, llvm::PointerType* PtrTy,
                 std::function<llvm::Value*(const plang::ExprNode&)> EmitExpr,
+                std::function<llvm::Value*(const plang::ExprNode&)> EmitLValue,
                 std::function<llvm::Value*(llvm::Value*)> EnsureI1,
                 std::function<llvm::Value*(llvm::Value*)> ToDouble,
                 std::function<llvm::Value*(llvm::Value*)> ToI64,
@@ -47,7 +48,8 @@ public:
         : Ctx(Ctx), B(B), CurFn(CurFn), Complex(Complex), Schema(Schema), StrCall(StrCall),
           Strings(Strings), Types(Types), Sets(Sets), RangeGuards(RangeGuards), RtFns(RtFns),
           I1Ty(I1Ty), I64Ty(I64Ty), I8Ty(I8Ty), DblTy(DblTy), PtrTy(PtrTy),
-          EmitExpr(std::move(EmitExpr)), EnsureI1(std::move(EnsureI1)),
+          EmitExpr(std::move(EmitExpr)), EmitLValue(std::move(EmitLValue)),
+          EnsureI1(std::move(EnsureI1)),
           ToDouble(std::move(ToDouble)), ToI64(std::move(ToI64)),
           CoerceToType(std::move(CoerceToType)),
           CreateEntryAlloca(std::move(CreateEntryAlloca)),
@@ -89,6 +91,7 @@ private:
     llvm::Type* DblTy;
     llvm::PointerType* PtrTy;
     std::function<llvm::Value*(const plang::ExprNode&)> EmitExpr;
+    std::function<llvm::Value*(const plang::ExprNode&)> EmitLValue;
     std::function<llvm::Value*(llvm::Value*)> EnsureI1;
     std::function<llvm::Value*(llvm::Value*)> ToDouble;
     std::function<llvm::Value*(llvm::Value*)> ToI64;
