@@ -82,6 +82,23 @@ DIAG(err_program_exec_failed, Error, "failed to execute '%0': %1")
 DIAG(err_program_crashed, Error, "'%0' crashed: %1")
 DIAG(err_cannot_create_temp_file, Error, "cannot create temporary file: %0")
 
+// buildPMIContent (lib/Frontend/Frontend.cpp) turns each declaration in a
+// module's interface part back into Pascal source text for the .pmi another
+// compile later imports.  A handful of expression and type forms have no
+// case in that writer -- e.g. indexing into a constant imported from another
+// module, which is reachable in a const initializer but which
+// canSerializeExpr has no IndexExpr case for.  Before this diagnostic, a
+// declaration the writer could not turn back into text was simply left out
+// of the file, with nothing said in the compile that did the leaving out --
+// even one the module's own export-list named.  The interface then read back
+// as though the name had never been declared at all, and the failure
+// surfaced only in whichever later, unrelated compile tried to import that
+// name, as a plain "undefined identifier" with nothing to connect it back to
+// its real cause.  Issue #397.
+DIAG(err_pmi_cannot_serialize_export, Error,
+     "exported %0 '%1' of module '%2' cannot be represented in its module "
+     "interface (.pmi) file")
+
 // An argument beginning with '-' that no option in Options.def matches.  A
 // warning rather than an error because it costs nothing to carry on without
 // it, and because a build system passing a flag plang does not know is a

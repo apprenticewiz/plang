@@ -511,9 +511,15 @@ static std::string importPartText(const std::vector<ImportClause>& Imports) {
 /// list of declarations could carry.
 ///
 /// \p Iface is the matching interface module, or null when there is none, in
-/// which case everything the body declares is exported.
+/// which case everything the body declares is exported.  Reports
+/// err_pmi_cannot_serialize_export through \p Diags for each declaration
+/// that had to be left out because it could not be turned back into Pascal
+/// text (issue #397) -- callers must not publish the returned text under
+/// those diagnostics, since it is then missing something the module's own
+/// interface promised.
 static std::string buildPMIContent(const ModuleNode& Mod,
-                                    const ModuleNode* Iface) {
+                                    const ModuleNode* Iface,
+                                    DiagnosticsEngine& Diags) {
     if (!Mod.Body) return "";
 
     // What an interface says is what a .pmi has to say, and the interface is
@@ -558,8 +564,19 @@ static std::string buildPMIContent(const ModuleNode& Mod,
     auto isStructured = [](const ConstDef& Cd) {
         return llvm::isa<StructuredValueExpr>(Cd.Value.get());
     };
+    // A declaration this function is about to leave out of the .pmi: says so
+    // through Diags rather than doing it quietly (issue #397).  Every site
+    // below that used to just "continue"/"return" without writing anything
+    // calls this instead.
+    auto reportDropped = [&](std::string_view Kind, const std::string& Name) {
+        Diags.report(SourceLocation(), diag::err_pmi_cannot_serialize_export,
+                     {Kind, Name, Mod.Name});
+    };
     auto writeConst = [&](const ConstDef& Cd) {
-        if (!Cd.Value || !canSerializeExpr(*Cd.Value)) return;
+        if (!Cd.Value || !canSerializeExpr(*Cd.Value)) {
+            reportDropped("constant", Cd.Name);
+            return;
+        }
         PMI += "const " + Cd.Name + " = " + exprToString(*Cd.Value) + ";\n";
     };
     for (const auto& Cd : Decls.Consts)
@@ -568,7 +585,7 @@ static std::string buildPMIContent(const ModuleNode& Mod,
     // Type definitions next (so procs that reference them can resolve them).
     for (const auto& Td : Decls.Types) {
         std::string T = Td.Type ? typeNodeToString(*Td.Type) : std::string();
-        if (T.empty()) continue;
+        if (T.empty()) { reportDropped("type", Td.Name); continue; }
         PMI += "type ";
         PMI += Td.Name;
         // EP §6.4.7: a schema is a type with discriminants, and an importer
@@ -603,7 +620,10 @@ static std::string buildPMIContent(const ModuleNode& Mod,
             if (exported(Nm)) ExportedNames.push_back(Nm);
         if (ExportedNames.empty()) continue;
         std::string T = Vg.Type ? typeNodeToString(*Vg.Type) : std::string();
-        if (T.empty()) continue;
+        if (T.empty()) {
+            for (const auto& Nm : ExportedNames) reportDropped("variable", Nm);
+            continue;
+        }
         PMI += "var ";
         for (size_t I = 0; I < ExportedNames.size(); ++I) {
             if (I) PMI += ", ";
@@ -635,7 +655,7 @@ static std::string buildPMIContent(const ModuleNode& Mod,
         }
         // A heading written with a type the writer had to guess at would be a
         // heading for some other routine than the one compiled.
-        if (!Ok) continue;
+        if (!Ok) { reportDropped("routine", Proc->Name); continue; }
         PMI += Heading + ";\n";
     }
 
@@ -645,12 +665,15 @@ static std::string buildPMIContent(const ModuleNode& Mod,
 
 /// Write PMI files for all module bodies in the program.
 /// PMI files are written to the same directory as the input source file.
-/// Returns false, having reported a diagnostic to stderr, if any interface
-/// could not be published -- the caller then fails the whole compilation
-/// rather than let it succeed without a usable interface for something that
+/// Returns false if any interface could not be published -- either an I/O
+/// failure (reported directly to stderr below) or a declaration that could
+/// not be serialized (reported through \p Diags by buildPMIContent, issue
+/// #397).  Either way, the caller then fails the whole compilation rather
+/// than let it succeed without a usable interface for something that
 /// imports this module later.
 static bool writePMIFiles(const ProgramNode& Program,
-                           const std::string& InputFile) {
+                           const std::string& InputFile,
+                           DiagnosticsEngine& Diags) {
     // Determine directory from input file path.
     std::string PmiDir = ".";
     {
@@ -671,7 +694,16 @@ static bool writePMIFiles(const ProgramNode& Program,
                 break;
             }
 
-        std::string Content = buildPMIContent(*Mod, Iface);
+        const unsigned ErrorsBefore = Diags.numErrors();
+        std::string Content = buildPMIContent(*Mod, Iface, Diags);
+        // A declaration buildPMIContent could not serialize has already been
+        // diagnosed (issue #397); publishing the rest of the interface
+        // anyway would report a clean compile for a module some later import
+        // of the missing name is guaranteed to fail against, with nothing
+        // to connect that failure back to here.  Skip writing it -- the
+        // error already reported fails the whole compile once this loop
+        // returns, same as an I/O failure below.
+        if (Diags.numErrors() != ErrorsBefore) continue;
         if (Content.empty()) continue;
 
         // Canonicalized (lowercased): Pascal identifiers are case-insensitive,
@@ -722,7 +754,12 @@ static bool writePMIFiles(const ProgramNode& Program,
             return false;
         }
     }
-    return true;
+    // Every module's own interface published cleanly, unless one of them had
+    // a declaration buildPMIContent could not serialize (issue #397): that
+    // module's .pmi was skipped above, but the loop still ran to completion
+    // over the rest, so this checks Diags rather than the loop itself having
+    // already returned false.
+    return !Diags.hasErrors();
 }
 
 /// Diagnoses and reports whether Os is in a fail state after its writer has
@@ -1078,10 +1115,17 @@ int frontendPC1Main(int Argc, char *Argv[]) {
 
     // Write .pmi files for any module bodies found in this compilation unit.
     // This is a no-op for pure-program files (no OwnedModules). A failure
-    // here has already been diagnosed to stderr; let it fail the compile
-    // rather than report success for a module nothing can now import.
-    if (!Program->OwnedModules.empty() && !writePMIFiles(*Program, InputFile))
-        return 1;
+    // here has either already been diagnosed to stderr directly (an I/O
+    // failure) or reported through Diags (a declaration that could not be
+    // serialized into the interface, issue #397 -- emitAll below prints it);
+    // either way, let it fail the compile rather than report success for a
+    // module nothing can now import, or that some later, unrelated compile
+    // will fail importing with no clue why.
+    if (!Program->OwnedModules.empty()) {
+        const bool PmiOk = writePMIFiles(*Program, InputFile, Diags);
+        emitAll();
+        if (!PmiOk) return 1;
+    }
 
     // withOutput opens the file then calls the action; we need emit's bool result.
     Codegen Cg(Opts);
