@@ -57,9 +57,12 @@ void Sema::checkStmt(const StmtNode* Stmt) {
 // Reachability
 //
 // Only two things in Pascal leave a statement without coming back: a goto, and
-// the halt that Extended Pascal adds.  Everything else completes, so a
-// statement following one of those is reached by nothing — unless it carries a
-// label, which puts it back within reach of any goto that names it.
+// the halt that Extended Pascal adds.  Turbo adds four more of the same shape
+// -- Exit, Break, Continue, RunError -- each a required procedure the same
+// way Halt is, so a call to one is recognized the same way (see
+// callsTransferBuiltin).  Everything else completes, so a statement following
+// one of those is reached by nothing — unless it carries a label, which puts
+// it back within reach of any goto that names it.
 //
 // The analysis errs one way on purpose.  Treating a statement as completing
 // when it does not costs a warning that was not given; the opposite would call
@@ -72,23 +75,27 @@ namespace {
 bool sequenceTransfers(const std::vector<std::unique_ptr<StmtNode>>& Stmts,
                         const SymbolTable& Symtab);
 
-// Whether S calls the real halt builtin -- resolved to the symbol it names,
-// not matched on how that name is spelled.  A program is free to declare its
-// own procedure called `halt`, which shadows the builtin (ISO §6.2.2.10) and
-// returns like any other call; only the builtin itself never does.  `exit`
-// gets no such check at all: Builtins.def has no entry for it, so a call
-// spelled `exit` can only ever resolve to a declaration the program wrote,
-// never to a required procedure that leaves for good.
-bool callsHaltBuiltin(const CallStmt& C, const SymbolTable& Symtab) {
+// Whether S calls one of the required procedures that never returns to what
+// follows it -- resolved to the symbol it names, not matched on how that
+// name is spelled.  A program is free to declare its own procedure called
+// `halt` or `exit`, which shadows the builtin (ISO §6.2.2.10) and returns
+// like any other call; only the builtin itself never does.  Under a dialect
+// that does not require a given one of these (Halt is EP|TP; Exit/Break/
+// Continue/RunError are TP-only), Symtab still resolves the name to the same
+// Symbol -- registerBuiltins declares every name in every dialect and only
+// flags NotInDialect -- so a call the parser accepted at all is already one
+// Sema either approved or already reported an error on; this check does not
+// need to ask the dialect question again.
+bool callsTransferBuiltin(const CallStmt& C, const SymbolTable& Symtab) {
     const Symbol* Callee = Symtab.lookup(C.Name);
     return Callee && Callee->Kind == SymbolKind::Builtin
-                   && Callee->BuiltinKind == BuiltinID::Halt;
+                   && builtinAlwaysTransfers(Callee->BuiltinKind);
 }
 
 bool alwaysTransfers(const StmtNode* S, const SymbolTable& Symtab) {
     if (!S) return false;
     if (llvm::isa<GotoStmt>(S)) return true;
-    if (auto* C = llvm::dyn_cast<CallStmt>(S)) return callsHaltBuiltin(*C, Symtab);
+    if (auto* C = llvm::dyn_cast<CallStmt>(S)) return callsTransferBuiltin(*C, Symtab);
     if (auto* C = llvm::dyn_cast<CompoundStmt>(S)) return sequenceTransfers(C->Stmts, Symtab);
     if (auto* W = llvm::dyn_cast<WithStmt>(S))     return alwaysTransfers(W->Body.get(), Symtab);
     // An if reaches past itself unless neither arm does, which needs both arms

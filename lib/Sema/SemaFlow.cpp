@@ -171,9 +171,18 @@ std::set<std::string> unite(const std::set<std::string>& A,
 } // namespace
 
 void Sema::FlowState::mergeWith(const FlowState& Other) {
+    // A dead side was never actually going to reach this join, so it must
+    // not get a vote: adopting the live side whole, rather than folding the
+    // dead side's Assigned/UndefAfterFor/ResultAssigned into the ordinary
+    // merge below, is what keeps `if C then begin F := 1; Exit end; F := 2`
+    // from being told F might not always be set -- the branch that does not
+    // set it also never survives to the statement after the if.
+    if (Dead && !Other.Dead) { *this = Other; return; }
+    if (Other.Dead && !Dead) { return; }
     Assigned       = intersect(Assigned, Other.Assigned);
     UndefAfterFor  = unite(UndefAfterFor, Other.UndefAfterFor);
     ResultAssigned = ResultAssigned && Other.ResultAssigned;
+    Dead           = Dead && Other.Dead;
 }
 
 // ---------------------------------------------------------------------------
@@ -278,6 +287,25 @@ void Sema::flowStmt(const StmtNode* S, FlowState& St) {
         const Symbol* Callee = Symtab.lookup(N->Name);
         const bool IsBuiltin = Callee && Callee->Kind == SymbolKind::Builtin;
 
+        // TP's exit(value) (Builtins.def) is FPC's shorthand for "assign
+        // value to the function's result, then leave" -- checkCallStmt's own
+        // arm (SemaStmt.cpp) already treats it that way for err_assign_mismatch
+        // and for FuncStack's HasResult (the "assigned somewhere at all" check
+        // behind err_function_no_result), but this flow-sensitive walk is a
+        // separate mechanism (behind warn_result_not_always_set) that arm does
+        // not feed.  Handled up front, ahead of the builtinAssigns loop below:
+        // value is a VALUE to read, not a variable the callee writes into, so
+        // it does not fit that loop's byref/read shape -- read as one left it
+        // an ordinary expression with no effect on ResultAssigned, so
+        // `if C then Exit(1); Result := 2` looked like only one path (the
+        // explicit assignment) ever set the result.
+        if (IsBuiltin && Callee->BuiltinKind == BuiltinID::Exit && !N->Args.empty()) {
+            flowRead(N->Args[0].get(), St);
+            St.ResultAssigned = true;
+            St.Dead = true;
+            return;
+        }
+
         // The standard procedures are declared without parameter lists, since
         // most of them are variadic, so the ones that give a variable a value
         // have to be named.  read and readln do it to everything they are
@@ -305,6 +333,36 @@ void Sema::flowStmt(const StmtNode* S, FlowState& St) {
             if (ByRef) flowWrite(N->Args[I].get(), St);
             else       flowRead (N->Args[I].get(), St);
         }
+
+        // Halt/RunError end the program, plain Exit ends the function or
+        // procedure (a value-carrying Exit already returned above), and
+        // Break/Continue end the loop iteration -- see BuiltinID's own
+        // comment for why this one call answers for all five.
+        if (IsBuiltin && builtinAlwaysTransfers(Callee->BuiltinKind)) {
+            St.Dead = true;
+            switch (Callee->BuiltinKind) {
+            case BuiltinID::Break:
+                // Marks the innermost loop currently being walked (see
+                // FlowLoopBroke_'s own comment, Sema.h) so ForStmt can tell a
+                // path that left this way from one that fell off the body's
+                // natural end.
+                FlowLoopBroke_ = true;
+                break;
+            case BuiltinID::Halt:
+            case BuiltinID::RunError:
+            case BuiltinID::Exit:
+                // Unlike Break/Continue, these end the function/procedure (or
+                // the program) right here -- see FlowResultMaybeUnset_'s own
+                // comment, Sema.h, for why that is checked at this point
+                // rather than only where mergeWith folds (or drops) this
+                // path into a later one.
+                if (!FlowResultNames_.empty() && !St.ResultAssigned)
+                    FlowResultMaybeUnset_ = true;
+                break;
+            default:
+                break;
+            }
+        }
         return;
     }
 
@@ -312,16 +370,23 @@ void Sema::flowStmt(const StmtNode* S, FlowState& St) {
         flowRead(N->Cond.get(), St);
         FlowState Then = St;
         flowStmt(N->Then.get(), Then);
-        if (N->Else) {
-            FlowState Else = St;
-            flowStmt(N->Else.get(), Else);
-            Then.mergeWith(Else);
-            St = std::move(Then);
-        } else {
-            // Without an else the other path is the one that does nothing, and
-            // it assigns nothing, so nothing new is known.
-            St.UndefAfterFor = unite(St.UndefAfterFor, Then.UndefAfterFor);
-        }
+        // Without an else the other path is the implicit empty statement --
+        // a copy of St, untouched, which flowStmt(nullptr, ...) leaves that
+        // way.  mergeWith already knows what to do with that: if Then turned
+        // out dead (it left through Halt/Exit/Break/Continue/RunError before
+        // reaching here), the merge adopts this copy of St whole, which is
+        // the same "the other path did nothing, so nothing new is known"
+        // reasoning this arm used to hand-rewrite as touching UndefAfterFor
+        // alone -- that shortcut was only sound because nothing could
+        // previously mark a branch dead, so Then's Assigned/ResultAssigned
+        // were always safe to leave out of it.  Now that one can be dead,
+        // folding through the general merge is what keeps `if C then begin
+        // F := 1; Exit end; F := 2` from being told F might not be set: the
+        // branch that never sets it also never survives to be asked.
+        FlowState Else = St;
+        flowStmt(N->Else.get(), Else);
+        Then.mergeWith(Else);
+        St = std::move(Then);
         return;
     }
 
@@ -332,7 +397,16 @@ void Sema::flowStmt(const StmtNode* S, FlowState& St) {
         // variable nothing has assigned yet.  It may run no times, so what it
         // assigns is not known afterwards.
         FlowState Body = St;
+        // FlowLoopBroke_ is scoped to the body of the innermost loop being
+        // walked (see its own comment, Sema.h) so a Break in here is not
+        // mistaken for one in a loop this while is nested inside.  Nothing
+        // in this arm reads it back -- while has no control variable for it
+        // to answer for -- but every loop arm resets and restores it so the
+        // one that does (ForStmt) sees only Breaks that are really its own.
+        const bool SavedBroke = FlowLoopBroke_;
+        FlowLoopBroke_ = false;
         flowStmt(N->Body.get(), Body);
+        FlowLoopBroke_ = SavedBroke;
         St.UndefAfterFor = unite(St.UndefAfterFor, Body.UndefAfterFor);
         return;
     }
@@ -340,8 +414,20 @@ void Sema::flowStmt(const StmtNode* S, FlowState& St) {
     if (auto* N = llvm::dyn_cast<RepeatStmt>(S)) {
         // A repeat runs its body at least once, so what the body assigns is
         // assigned afterwards, and the condition is read after the body.
+        // Dead is saved and restored around it regardless: this is the one
+        // loop arm that mutates St directly rather than merging a separate
+        // Body copy back in, and a Break/Continue in the body ends the
+        // repeat-statement itself (the same as it would for any other loop),
+        // not whatever encloses it -- without this, St.Dead would come out
+        // of a repeat containing an unconditional Break still set, as though
+        // the repeat-statement were what left for good.
+        const bool SavedDead  = St.Dead;
+        const bool SavedBroke = FlowLoopBroke_;
+        FlowLoopBroke_ = false;
         flowSeq(N->Stmts, St);
         flowRead(N->Cond.get(), St);
+        St.Dead        = SavedDead;
+        FlowLoopBroke_ = SavedBroke;
         return;
     }
 
@@ -353,13 +439,38 @@ void Sema::flowStmt(const StmtNode* S, FlowState& St) {
         FlowState Body = St;
         Body.Assigned.insert(Key);          // the control variable has a value inside
         Body.UndefAfterFor.erase(Key);
+        const bool SavedBroke = FlowLoopBroke_;
+        FlowLoopBroke_ = false;
         flowStmt(N->Body.get(), Body);
+        const bool Broke = FlowLoopBroke_;
+        FlowLoopBroke_  = SavedBroke;
 
         // The loop may run no times, so nothing the body assigned is known.
-        // §6.8.3.9: and the control variable is undefined once it finishes.
+        // §6.8.3.9: and the control variable is undefined once it finishes --
+        // by exhausting its range, which is what falling off the body's
+        // natural end means here.  TP's Break (FlowLoopBroke_, set by
+        // flowStmt's CallStmt arm) is the one way to leave that is not that:
+        // it does not exhaust the range, so the control variable keeps
+        // whatever value it had, which is exactly the TP idiom `for i := 1
+        // to n do if a[i] = x then break; if i <= n then {found at i}`
+        // relies on.  A one-way carve-out in the same direction as the rest
+        // of this file's bias -- a loop whose only Break is itself
+        // unreachable still gets the benefit of the doubt, which costs a
+        // missed warning rather than a wrong one.
         St.UndefAfterFor = unite(St.UndefAfterFor, Body.UndefAfterFor);
-        St.Assigned.erase(Key);
-        if (FlowTracked_.contains(Key)) St.UndefAfterFor.insert(Key);
+        if (Broke && FlowTracked_.contains(Key)) {
+            // Treated as genuinely assigned, not merely "not known to be
+            // undefined" -- flowRead reports EITHER an UndefAfterFor member
+            // or (failing that) a plain FlowTracked_ one that Assigned does
+            // not contain, so leaving Key out of both here would still get
+            // `if i <= n` reported as reading i before it was ever given a
+            // value, the same false alarm from the opposite diagnosis.
+            St.Assigned.insert(Key);
+            St.UndefAfterFor.erase(Key);
+        } else {
+            St.Assigned.erase(Key);
+            if (FlowTracked_.contains(Key)) St.UndefAfterFor.insert(Key);
+        }
         return;
     }
 
@@ -383,7 +494,14 @@ void Sema::flowStmt(const StmtNode* S, FlowState& St) {
         FlowState Body = St;
         Body.Assigned.insert(Key);
         Body.UndefAfterFor.erase(Key);
+        // See WhileStmt above: for-in has no control-variable question a
+        // Break here would answer (its own control variable never survives
+        // the loop either way, break or no), but the scope is still reset so
+        // one does not leak to an enclosing for-loop's.
+        const bool SavedBroke = FlowLoopBroke_;
+        FlowLoopBroke_ = false;
         flowStmt(N->Body.get(), Body);
+        FlowLoopBroke_ = SavedBroke;
 
         St.UndefAfterFor = unite(St.UndefAfterFor, Body.UndefAfterFor);
         if (!OuterAssigned) St.Assigned.erase(Key);
@@ -396,6 +514,17 @@ void Sema::flowStmt(const StmtNode* S, FlowState& St) {
         // §6.8.3.5: a selector matching no arm is an error, and plang reports
         // it when the program runs.  So every path that carries on past the
         // case went through an arm, and what all the arms assign is assigned.
+        //
+        // Turbo is the one exception (checkCase's own Opts.turbo() gate,
+        // SemaStmt.cpp, just above the exhaustiveness warning that reasoning
+        // feeds; CGControlFlow::emitCase lowers it the same way): with no
+        // else/otherwise part, an unmatched selector falls through instead of
+        // trapping, so a path that matches nothing DOES survive to whatever
+        // follows the case, having gone through none of the arms.  That is
+        // exactly what an unmodified copy of the incoming state stands for,
+        // so under Turbo it is folded into the merge as one more branch --
+        // `case i of 1: x := 1 end; writeln(x)` must still warn that x might
+        // not be assigned, since i might not be 1.
         std::optional<FlowState> Merged;
         auto takeBranch = [&](const StmtNode* Body) {
             FlowState Br = St;
@@ -404,7 +533,8 @@ void Sema::flowStmt(const StmtNode* S, FlowState& St) {
             else        Merged = std::move(Br);
         };
         for (const auto& Arm : N->Arms) takeBranch(Arm.Body.get());
-        if (N->HasElse) takeBranch(N->Else.get());
+        if (N->HasElse)         takeBranch(N->Else.get());
+        else if (Opts.turbo())  takeBranch(nullptr);
         if (Merged) St = std::move(*Merged);
         return;
     }
@@ -443,9 +573,11 @@ void Sema::checkDefiniteAssignment(const BlockNode& Block) {
     auto SavedTracked  = std::move(FlowTracked_);
     auto SavedResults  = std::move(FlowResultNames_);
     auto SavedReported = std::move(FlowReported_);
+    const bool SavedResultMaybeUnset = FlowResultMaybeUnset_;
     FlowTracked_.clear();
     FlowResultNames_.clear();
     FlowReported_.clear();
+    FlowResultMaybeUnset_ = false;
 
     // EP §6.4.1: a 'value' clause -- on the declaration itself (`var x: T
     // value E;`) or on the type it declares x with (`type t = T value E;`)
@@ -498,13 +630,19 @@ void Sema::checkDefiniteAssignment(const BlockNode& Block) {
 
         // A function that assigns its result nowhere at all is already an
         // error, reported against the declaration; saying it again here as a
-        // warning would be two messages for one mistake.
-        if (IsFunc && !St.ResultAssigned && !FuncStack.empty()
-            && FuncStack.back().HasResult)
+        // warning would be two messages for one mistake.  FlowResultMaybeUnset_
+        // covers a path this final St cannot speak for: one that left through
+        // a bare Halt/Exit/RunError with the result still unassigned, which
+        // mergeWith may since have dropped from every later join (see its own
+        // comment) -- St.ResultAssigned answers for the paths that reached
+        // the end of the block, not for one that never did.
+        if (IsFunc && (!St.ResultAssigned || FlowResultMaybeUnset_)
+            && !FuncStack.empty() && FuncStack.back().HasResult)
             warning(Owner->Loc, diag::warn_result_not_always_set, {Owner->Name});
     }
 
-    FlowTracked_     = std::move(SavedTracked);
-    FlowResultNames_ = std::move(SavedResults);
-    FlowReported_    = std::move(SavedReported);
+    FlowTracked_          = std::move(SavedTracked);
+    FlowResultNames_      = std::move(SavedResults);
+    FlowReported_         = std::move(SavedReported);
+    FlowResultMaybeUnset_ = SavedResultMaybeUnset;
 }

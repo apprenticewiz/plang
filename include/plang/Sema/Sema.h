@@ -584,9 +584,29 @@ private:
         std::set<std::string> UndefAfterFor;
         /// Whether the enclosing function's result has been assigned.
         bool ResultAssigned = false;
+        /// Whether this path has already left for good -- a call to Halt,
+        /// RunError, Exit, Break, or Continue (builtinAlwaysTransfers,
+        /// BuiltinIDs.h), the same set alwaysTransfers (SemaStmt.cpp) treats
+        /// as leaving unreachable code behind.  Set by flowStmt's CallStmt
+        /// arm and read only by mergeWith: nothing downstream of this walk
+        /// stops processing a dead path (the same as SemaStmt.cpp's own
+        /// unreachable-code check does not stop checkStmt), so a redundant
+        /// warning inside genuinely dead code is possible and not new -- it
+        /// is Halt's existing behavior extended to four more builtins, not a
+        /// change to it.  What Dead changes is only what a path contributes
+        /// at the join with a live sibling: nothing, since it was never
+        /// going to arrive there.
+        bool Dead = false;
 
         /// Combines this with what another branch leaves behind, giving what
-        /// is still known where the two meet.
+        /// is still known where the two meet.  A dead side (one that left via
+        /// Halt/Exit/Break/Continue/RunError before reaching this point)
+        /// contributes nothing: the merged state is simply the live side's,
+        /// unchanged, since the dead side was never actually going to arrive
+        /// here to disagree with it.  Only when both sides are dead -- so
+        /// that neither disagreement nor agreement about what reaches this
+        /// point actually matters -- does this fall back to the ordinary
+        /// intersect/unite merge below.
         void mergeWith(const FlowState& Other);
     };
 
@@ -610,6 +630,37 @@ private:
     /// Warned about already, so that a variable read in a loop is reported
     /// once rather than once for each place the walk passes the read.
     std::set<std::string> FlowReported_;
+
+    /// Whether a Break (TP-only) has been seen in the body of the innermost
+    /// while/for/for-in/repeat statement currently being walked -- the same
+    /// nesting LoopDepth_ (Sema.h, checkFor et al.) tracks for a different
+    /// question, kept separately because this one is scoped and consumed by
+    /// the flow walk alone.  Saved, reset to false, and restored by each of
+    /// flowStmt's four loop arms around walking their own body, so a Break
+    /// belongs only to its own innermost loop and does not leak to one it is
+    /// nested inside.  Only the ForStmt arm reads it back out: unlike falling
+    /// off the end of the body, TP's Break leaves the control variable
+    /// holding whatever value it had, not undefined (§6.8.3.9's rule is about
+    /// a for-statement finishing by exhausting its range, which a Break
+    /// preempts), so a for-loop that can be left this way must not mark its
+    /// control variable UndefAfterFor on that account.  While/Repeat/For-in
+    /// still reset and restore it, purely to keep a Break inside THEIR body
+    /// from being mistaken for one in an enclosing for-loop's.
+    bool FlowLoopBroke_ = false;
+
+    /// Set when a path being walked reaches a bare Halt, Exit, or RunError
+    /// (never Break/Continue, which end a loop iteration rather than the
+    /// function) with the result not yet assigned on THAT path.  mergeWith's
+    /// dead-side rule means a path like this may never be folded into a
+    /// later join at all -- it is exactly the kind of path the rule exists
+    /// to drop, since nothing after the join can be reached along it -- so
+    /// checking only the final FlowState at the end of the walk, the way
+    /// warn_result_not_always_set otherwise does, would miss it.  This is
+    /// the site where that check is made instead, kept outside the
+    /// FlowState algebra on purpose so a dead path's own answer survives
+    /// being dropped from every later merge.  Reset per checkDefiniteAssignment
+    /// call, the same as FlowTracked_/FlowResultNames_/FlowReported_.
+    bool FlowResultMaybeUnset_ = false;
 
     /// Warns when a constant assigned to a subrange variable lies outside it,
     /// which the run-time check is certain to catch wherever it is reached.
