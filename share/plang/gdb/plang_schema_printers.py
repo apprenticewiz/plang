@@ -183,6 +183,31 @@ def _iso_mod(a, b):
     return r
 
 
+def _iso_div(a, b):
+    """Truncating integer division matching LLVM's `sdiv` (and C's `/`,
+    and ISO 7185's `div` -- unlike `mod`, `div`'s rounding direction is
+    the same under both conventions, so there is no sign adjustment to
+    make here the way `_iso_mod` above makes one for `mod`).
+
+    This used to be `int(a / b)`: a Python float round-trip, the same
+    class of bug issue #394 already fixed for the sibling `mod` branch
+    in this function (see _iso_mod's own docstring, which flags this
+    exact `div` line as carrying the identical risk) -- for a
+    discriminant-derived operand past 2**53, converting it to a float
+    loses precision, so the truncated result can come out different
+    from emitExtentForm's exact 64-bit `CreateSDiv` (SchemaLayoutEngine.
+    cpp), which never goes through a float at all.
+
+    Computed as two exact integer steps -- floor-divide the absolute
+    values (exact, and floor equals truncation once both operands are
+    non-negative), then negate if exactly one of the two operands was
+    negative -- rather than `int(a / b)`."""
+    q = abs(a) // abs(b)
+    if (a < 0) != (b < 0):
+        q = -q
+    return q
+
+
 def _eval_form(form, discs, depth=0):
     """form: a JSON-decoded ["op", ...] list, per CGDebugInfo::jsonEncodeExtentForm.
     discs: a list of already-read discriminant int values, by index."""
@@ -213,7 +238,7 @@ def _eval_form(form, discs, depth=0):
     if op == "add": return a + b
     if op == "sub": return a - b
     if op == "mul": return a * b
-    if op == "div": return int(a / b) if b != 0 else 0
+    if op == "div": return _iso_div(a, b) if b != 0 else 0
     if op == "mod": return _iso_mod(a, b) if b != 0 else 0
     if op == "pow": return a ** b
     raise _SchemaDataError("unknown extent form op %r" % (op,))
