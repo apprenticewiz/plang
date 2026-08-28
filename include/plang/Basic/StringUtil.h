@@ -26,6 +26,21 @@ namespace plang {
     return true;
 }
 
+/// True if S has the shape of a Pascal identifier: a letter or underscore,
+/// followed by zero or more letters, digits, or underscores -- nothing else,
+/// front to back.  Shared by lib/Lex/Directives.cpp (validating a `{$DEFINE
+/// name}`/`{$UNDEF name}`/`{$IFDEF name}`/`{$IFNDEF name}`/`{$ELSEIF name}`
+/// argument) and lib/Frontend/Frontend.cpp (validating -d<name>/-u<name>'s
+/// glued-on value) so the two accept exactly the same symbol shapes.
+[[nodiscard]] inline bool looksLikeIdentifier(std::string_view S) {
+    if (S.empty()) return false;
+    const unsigned char First = static_cast<unsigned char>(S.front());
+    if (!std::isalpha(First) && First != '_') return false;
+    for (const unsigned char C : S)
+        if (!std::isalnum(C) && C != '_') return false;
+    return true;
+}
+
 /// Return a copy of S with every C0 control byte and DEL rendered as a
 /// visible \xHH escape instead of passed through as itself.
 ///

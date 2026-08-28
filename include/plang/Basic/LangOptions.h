@@ -4,6 +4,7 @@
 
 #include <memory>
 #include <optional>
+#include <set>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -229,6 +230,29 @@ struct LangOptions {
 
     /// Directories to search for .pmi module interface files (from -I flags).
     std::vector<std::string> ModuleSearchPaths;
+
+    /// Symbols defined for -std=turbo's `{$IFDEF}`/`{$IFNDEF}`/`{$ELSEIF}`
+    /// conditional compilation: the command line's `-d<symbol>`/`-u<symbol>`
+    /// (applied in the order given, so a later -u undoes an earlier -d for
+    /// the same symbol and vice versa), plus whatever the front end
+    /// predefines for the compilation's target (see Frontend.cpp's
+    /// addPredefinedConditionalSymbols).  Names are lower case, matching
+    /// Pascal's case-insensitive identifiers.
+    ///
+    /// This is the STARTING set only -- the same role RangeChecks/IOChecks
+    /// play for defaultSwitches() above.  `{$DEFINE}`/`{$UNDEF}` are
+    /// positional, like a `{$R+}`-style switch: they take effect from that
+    /// point in the source forward.  But unlike a switch, nothing downstream
+    /// ever needs to ask "was X defined at source location L" the way
+    /// `{$IFOPT}` needs SwitchTable's position-indexed table: once the
+    /// Scanner decides a conditional branch is dead, that source is skipped
+    /// raw and never becomes a token, so nothing later (Parser, Sema,
+    /// CodeGen) ever sees it or asks about it again. That is what keeps this
+    /// simpler than Switches above -- the Scanner just keeps its own mutable
+    /// working copy, seeded from this field, and updates it in place as
+    /// `{$DEFINE}`/`{$UNDEF}` are scanned, the same way it already tracks
+    /// Pos and PrevKind, instead of building a second position-indexed table.
+    std::set<std::string> Defines;
 };
 
 } // namespace plang

@@ -133,3 +133,14 @@ DIAG(warn_linker_input_unused, Warning,
 // naming an unknown one to the front end, so it is not said twice (see
 // Driver::configureDiagnostics).
 DIAG(warn_unknown_warning_name, Warning, "unknown warning '%0'")
+
+// -d<symbol>/-u<symbol>'s glued-on value was empty or not a plain Pascal
+// identifier (letters, digits, underscore, not starting with a digit) --
+// there is no fixed vocabulary to check it against the way -W<name> checks
+// against getWarningNamed, since a program may {$IFDEF} any name it likes,
+// but it still has to be a name a `{$IFDEF}`/`{$IFNDEF}` could ever match.
+// A warning, not an error, for the same reason warn_unknown_warning_name is
+// one: -Werror is there for anyone who wants it fatal, and simply not
+// defining/undefining anything for this one flag costs nothing.
+DIAG(warn_invalid_define_symbol, Warning,
+     "'%0' is not a valid symbol name for -d/-u")
