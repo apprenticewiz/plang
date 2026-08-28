@@ -18,11 +18,12 @@ void RangeCheckGuards::emitGuard(llvm::Value* failCond, const char* name,
     B.SetInsertPoint(contBB);
 }
 
-void RangeCheckGuards::emitDivZeroCheck(llvm::Value* divisor, const char* op) {
+void RangeCheckGuards::emitDivZeroCheck(llvm::Value* divisor, const char* op,
+                                         unsigned Width) {
     // Without this the hardware raises SIGFPE, which surfaces as a bare
     // "Floating point exception" with no source context.
     auto* isZero = B.CreateICmpEQ(divisor,
-        llvm::ConstantInt::get(i64Ty(), 0), "divzero");
+        llvm::ConstantInt::get(intTy(Width), 0), "divzero");
     emitGuard(isZero, "divzero", [&] {
         B.CreateCall(
             RtFns.getExternFnN("plang_err_div_zero", llvm::Type::getVoidTy(Ctx), {ptrTy()}),
@@ -31,18 +32,20 @@ void RangeCheckGuards::emitDivZeroCheck(llvm::Value* divisor, const char* op) {
 }
 
 void RangeCheckGuards::emitDivOverflowCheck(llvm::Value* dividend,
-                                             llvm::Value* divisor) {
-    // -2^63 (minint) has no positive int64_t counterpart at +2^63, so div
-    // overflows for this one dividend/divisor pair despite the divisor being
-    // nonzero.  Unguarded, SDiv here is signed-overflow UB: in practice
-    // either a hardware SIGFPE (x86 idiv traps on overflow, same as it does
-    // on a zero divisor) or a value the optimizer is free to fold away,
-    // which is exactly the SIGFPE-vs-wrong-answer split this guard closes.
+                                             llvm::Value* divisor,
+                                             unsigned Width) {
+    // -2^(Width-1) (minint at this width) has no positive counterpart
+    // representable at the same width, so div overflows for this one
+    // dividend/divisor pair despite the divisor being nonzero.  Unguarded,
+    // SDiv here is signed-overflow UB: in practice either a hardware SIGFPE
+    // (x86 idiv traps on overflow, same as it does on a zero divisor) or a
+    // value the optimizer is free to fold away, which is exactly the
+    // SIGFPE-vs-wrong-answer split this guard closes.
     auto* isMinInt = B.CreateICmpEQ(dividend,
-        llvm::ConstantInt::get(i64Ty(), llvm::APInt::getSignedMinValue(64)),
+        llvm::ConstantInt::get(intTy(Width), llvm::APInt::getSignedMinValue(Width)),
         "div.ismin");
     auto* isNegOne = B.CreateICmpEQ(divisor,
-        llvm::ConstantInt::getSigned(i64Ty(), -1), "div.isnegone");
+        llvm::ConstantInt::getSigned(intTy(Width), -1), "div.isnegone");
     auto* bad = B.CreateAnd(isMinInt, isNegOne, "div.overflow");
     emitGuard(bad, "divoverflow", [&] {
         B.CreateCall(
@@ -52,16 +55,17 @@ void RangeCheckGuards::emitDivOverflowCheck(llvm::Value* dividend,
     });
 }
 
-void RangeCheckGuards::emitModDivisorCheck(llvm::Value* divisor) {
+void RangeCheckGuards::emitModDivisorCheck(llvm::Value* divisor,
+                                            unsigned Width) {
     // ISO §6.7.2.2 defines mod only for a positive divisor, so this subsumes
     // the div-by-zero test rather than sitting alongside it.
     auto* bad = B.CreateICmpSLE(divisor,
-        llvm::ConstantInt::get(i64Ty(), 0), "mod.baddiv");
+        llvm::ConstantInt::get(intTy(Width), 0), "mod.baddiv");
     emitGuard(bad, "mod.baddiv", [&] {
         B.CreateCall(
             RtFns.getExternFnN("plang_err_mod_divisor", llvm::Type::getVoidTy(Ctx),
                          {i64Ty()}),
-            {divisor});
+            {ToI64(divisor)});
     });
 }
 

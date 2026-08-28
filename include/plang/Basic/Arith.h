@@ -11,6 +11,7 @@
 
 #include <cstdint>
 #include <optional>
+#include <utility>
 
 namespace plang {
 
@@ -36,52 +37,103 @@ namespace plang {
     return J == -1 && I == INT64_MIN;
 }
 
-/// Checked 64-bit +, -, *: nullopt on signed overflow, rather than the UB a
-/// plain `+`/`-`/`*` would be there (a sanitizer abort during development, a
+/// The bounds of a Width-bit ordinal, signed or not, as int64_t -- every
+/// width this compiler stamps (8/16/32/64, see Type::Width) fits its full
+/// range in an int64_t, so the checked-arithmetic helpers below can compare
+/// an int64_t-domain result against these directly instead of working in a
+/// narrower machine type.  Width == 64 signed is deliberately exact-fit
+/// (Lo == INT64_MIN, Hi == INT64_MAX): shifting `1LL << 63` is itself signed
+/// overflow, so that case is special-cased rather than run through the same
+/// shift as the others.
+[[nodiscard]] constexpr std::pair<int64_t, int64_t> narrowIntBounds(unsigned Width, bool Signed) {
+    if (!Signed) return {0, Width >= 64 ? INT64_MAX : (int64_t{1} << Width) - 1};
+    if (Width >= 64) return {INT64_MIN, INT64_MAX};
+    const int64_t Half = int64_t{1} << (Width - 1);
+    return {-Half, Half - 1};
+}
+
+/// Checked +, -, *: nullopt on overflow, rather than the UB a plain
+/// `+`/`-`/`*` would be there (a sanitizer abort during development, a
 /// silently wrapped value in a release build otherwise).  A constant folder
 /// that overflows must decline the fold and hand nothing back, not the
 /// wrapped value, as though it were the constant the source actually named.
-[[nodiscard]] inline std::optional<int64_t> checkedAdd(int64_t L, int64_t R) {
+///
+/// \p Width and \p Signed are the result's Type::Width/IsSigned.  Both
+/// default to what ISO 7185 and Extended Pascal's one Integer type always
+/// is -- 64-bit signed -- so every call site written before Turbo (there is
+/// no other kind yet) keeps computing exactly the int64_t-overflow check it
+/// always has.  Turbo's narrower Integer/Byte/Word/etc. additionally have to
+/// fail where a plang::Type of that width could not hold the mathematically
+/// exact result even though it fits in int64_t -- 30000 + 30000 does not
+/// overflow int64_t, but it does overflow Turbo's 16-bit Integer, and a
+/// constant folder that let it through would agree with neither Turbo Pascal
+/// nor with what codegen's checked arithmetic (once it exists for div/mod)
+/// does to the same expression at run time.
+[[nodiscard]] inline std::optional<int64_t> checkedAdd(int64_t L, int64_t R,
+                                                         unsigned Width = 64,
+                                                         bool Signed = true) {
     int64_t Result;
     if (__builtin_add_overflow(L, R, &Result)) return std::nullopt;
+    if (Width < 64) {
+        const auto [Lo, Hi] = narrowIntBounds(Width, Signed);
+        if (Result < Lo || Result > Hi) return std::nullopt;
+    }
     return Result;
 }
-[[nodiscard]] inline std::optional<int64_t> checkedSub(int64_t L, int64_t R) {
+[[nodiscard]] inline std::optional<int64_t> checkedSub(int64_t L, int64_t R,
+                                                         unsigned Width = 64,
+                                                         bool Signed = true) {
     int64_t Result;
     if (__builtin_sub_overflow(L, R, &Result)) return std::nullopt;
+    if (Width < 64) {
+        const auto [Lo, Hi] = narrowIntBounds(Width, Signed);
+        if (Result < Lo || Result > Hi) return std::nullopt;
+    }
     return Result;
 }
-[[nodiscard]] inline std::optional<int64_t> checkedMul(int64_t L, int64_t R) {
+[[nodiscard]] inline std::optional<int64_t> checkedMul(int64_t L, int64_t R,
+                                                         unsigned Width = 64,
+                                                         bool Signed = true) {
     int64_t Result;
     if (__builtin_mul_overflow(L, R, &Result)) return std::nullopt;
+    if (Width < 64) {
+        const auto [Lo, Hi] = narrowIntBounds(Width, Signed);
+        if (Result < Lo || Result > Hi) return std::nullopt;
+    }
     return Result;
 }
-/// -minint is the one int64_t negation with no representable result (its
-/// magnitude is 2^63, one past maxint).  Routed through checkedSub so the one
-/// special case lives in a single place instead of a second copy of it here.
-[[nodiscard]] inline std::optional<int64_t> checkedNeg(int64_t V) {
-    return checkedSub(0, V);
+/// -minint is the one negation with no representable result at any width
+/// (its magnitude is one past maxint, same shape whether Width is 64 or
+/// narrower).  Routed through checkedSub so the one special case lives in a
+/// single place instead of a second copy of it here.
+[[nodiscard]] inline std::optional<int64_t> checkedNeg(int64_t V,
+                                                         unsigned Width = 64,
+                                                         bool Signed = true) {
+    return checkedSub(0, V, Width, Signed);
 }
 
 /// EP §6.8.3.2 `i pow j` for an integer base, whose result is an integer.  Going
 /// through std::pow would round anything past 2^53, so the constant folder and
 /// the runtime both square-and-multiply instead.  The caller is responsible for
 /// j >= 0, for which the standard defines no integer result.  nullopt on
-/// overflow, same as checkedMul above (which this is built from): squaring
+/// overflow, same as checkedMul above (which this is built from, and from
+/// which \p Width/\p Signed take their meaning and default): squaring
 /// the base can overflow a step before the final multiply into Result would
 /// have, so every multiplication in the loop is checked, not only the ones
 /// that reach Result.
-[[nodiscard]] inline std::optional<int64_t> isoPow(int64_t Base, int64_t Exp) {
+[[nodiscard]] inline std::optional<int64_t> isoPow(int64_t Base, int64_t Exp,
+                                                     unsigned Width = 64,
+                                                     bool Signed = true) {
     int64_t Result = 1;
     while (Exp > 0) {
         if (Exp & 1) {
-            const auto Next = checkedMul(Result, Base);
+            const auto Next = checkedMul(Result, Base, Width, Signed);
             if (!Next) return std::nullopt;
             Result = *Next;
         }
         Exp >>= 1;
         if (Exp) {
-            const auto Next = checkedMul(Base, Base);
+            const auto Next = checkedMul(Base, Base, Width, Signed);
             if (!Next) return std::nullopt;
             Base = *Next;
         }
