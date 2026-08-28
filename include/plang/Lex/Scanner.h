@@ -96,6 +96,66 @@ private:
     // first '/'), stopping before the newline that ends it (or at EOF).
     void skipLineComment();
 
+    // Advances past a Turbo compiler directive -- '{$' or '(*$', a '{' or
+    // '(*' immediately followed by '$' with no gap, confirmed by the caller
+    // (skipWhitespaceAndComments) before Pos is at the opening delimiter's
+    // first character, exactly skipComment's own contract.  Only ever
+    // called under Opts.turbo(): ISO 7185 and Extended Pascal have no
+    // directives, and a `{$anything}` there stays an ordinary comment,
+    // handled by skipComment exactly as before this existed.
+    //
+    // Closes the same way skipCommentTurbo closes an ordinary Turbo
+    // comment -- a same-kind terminator only ('}' for '{', '*)' for '(*')
+    // -- since a directive is still a comment syntactically, just one this
+    // scanner parses instead of discarding.  On success, hands the text
+    // between '$' and the closing delimiter to dispatchDirective(); on an
+    // unterminated or mismatched-delimiter directive, reports the same
+    // diagnostics skipCommentTurbo would and gives up on it entirely
+    // (nothing to dispatch).  Defined in Directives.cpp, not Scanner.cpp:
+    // this is genuinely new machinery -- nothing recognized '{$...}' at all
+    // before this -- not an extension of the ordinary-comment scanning
+    // above it.
+    void skipDirective(bool Braced);
+
+    // Splits a directive's body (already isolated by skipDirective: the raw
+    // text between '$' and the closing delimiter) into a name -- the
+    // longest run of letters at the front, folded for lookup the same way
+    // an identifier is -- and an argument -- everything after it, trimmed
+    // of leading/trailing whitespace but otherwise passed through verbatim.
+    // Dispatches by name to the one category implemented so far
+    // (dispatchMessageDirective); an unrecognized name is reported rather
+    // than silently ignored or treated as a plain comment.
+    //
+    // This is the extension point Cluster B's later items plug into: a
+    // conditional-compilation handler ({$IFDEF}/{$IFNDEF}/{$ENDIF}/{$ELSE}/
+    // {$ELSEIF}), an {$I file} include handler, and a {$R+}-style switch
+    // handler (CompilerSwitches.def's SwitchTable already exists and is
+    // only waiting for this) each add their own "try this category" call
+    // here, in dispatchMessageDirective's own shape -- (Name, Argument,
+    // Loc) -> bool handled -- tried in turn before the final
+    // warn_directive_unknown fallback.  None of those three exist yet.
+    void dispatchDirective(std::string_view Body, SourceLocation Loc);
+
+    // The {$MESSAGE}/{$INFO}/{$NOTE}/{$HINT}/{$WARNING}/{$ERROR}/{$FATAL}
+    // family: Name (already folded to lower case is not assumed -- this
+    // folds it itself) looked up in a small table pairing each keyword with
+    // the DiagID its Argument is reported through as %0.  Returns false,
+    // having done nothing, when Name names none of the seven -- the cue for
+    // dispatchDirective to try the next category, or give up.
+    //
+    // A real Turbo Pascal compiler's {$FATAL} aborts the compilation right
+    // there instead of {$ERROR}'s report-and-keep-going (confirmed against
+    // `fpc -Mtp`); plang approximates this only as far as its diagnostic
+    // model allows -- {$FATAL} gets its own DiagID so its message reads
+    // distinctly, but scanning continues, same as {$ERROR}.  Both still
+    // fail the compilation once Sema/Frontend check hasErrors(); stopping
+    // the scanner mid-buffer was tried and produces nothing but a cascade
+    // of unrelated "expected X, got end of file" parser noise once that has
+    // already happened, since plang has no immediate-unwind mechanism to
+    // hook a real abort into (and is built -fno-exceptions besides).
+    bool dispatchMessageDirective(std::string_view Name, std::string_view Argument,
+                                  SourceLocation Loc);
+
     Token scanIdentifierOrKeyword(size_t TokenStart);
     Token scanNumber(size_t TokenStart);
 

@@ -67,6 +67,28 @@ BRACE_CHECK_EXEMPT = {
     # which is exactly the (Turbo-only) case this file exists to prove
     # doesn't happen. Working as intended, not a hazard to fix.
     "test/Lex/ScannerTurbo/embedded-wrong-kind-closer-is-inert-when-comment-closes-correctly.pas",
+    # A directive is still a comment syntactically (skipDirective in
+    # lib/Lex/Directives.cpp), so under -std=turbo it closes by the same
+    # matched-delimiter rule an ordinary Turbo comment does. This file's two
+    # split-file chunks deliberately mix '{'/'*)' and '(*'/'}' to exercise
+    # that error on the directive path specifically (not just the plain
+    # comment path the two entries above already cover) -- working as
+    # intended, not a hazard to fix.
+    "test/Lex/ScannerTurbo/mismatched-directive-delimiter-is-an-error-too.pas",
+    # These three files' own header comments (a leading '(* ... *)' block,
+    # this project's usual per-file explanation) describe '{$...}' directive
+    # syntax IN ENGLISH PROSE, e.g. "a `{$name}` naming no category..." --
+    # literal '{'/'}' characters as text, not real nested comment syntax.
+    # This check has no dialect awareness and simulates the header comment
+    # under ISO 7185's either-terminator-closes-either rule, where a bare
+    # '}' inside the prose would end the '(* *)' header early -- a real
+    # hazard for a file ISO/EP might compile, but these three only ever
+    # compile under -std=turbo (see each file's own RUN: line), where the
+    # matched-delimiter rule this check doesn't model means the '(* *)'
+    # header safely contains its own literal braces. Not a hazard to fix.
+    "test/Driver/Turbo/an-unrecognized-directive-is-a-clear-diagnostic-not-silence.pas",
+    "test/Driver/Turbo/message-directives-are-informational-and-still-compile.pas",
+    "test/Driver/Turbo/warning-directives-warn-and-still-compile.pas",
 }
 
 

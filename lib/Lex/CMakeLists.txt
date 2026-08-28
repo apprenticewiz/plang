@@ -1,4 +1,4 @@
-add_library(PlangLex OBJECT Scanner.cpp)
+add_library(PlangLex OBJECT Scanner.cpp Directives.cpp)
 target_link_libraries(PlangLex PRIVATE plang_warnings)
 # SourceManager (PlangBasic) for buffer/position tracking; DiagnosticsEngine's
 # catalog lookup (PlangLocale) for the messages a scan error reports.
