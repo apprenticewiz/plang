@@ -144,6 +144,25 @@ BUILTIN(Binding,      "binding",      Func, EP, 1, 1, R_BindingType)
 // alone cannot express.
 BUILTIN(Assert,       "assert",       Proc, TP, 1, 2, R_None)
 
+// -std=turbo only: Exit/Break/Continue, TP's three statement-level
+// control-transfer builtins -- no ISO 7185/EP §6.6.5 or §6.7.5 equivalent.
+// Reached through CallStmt exactly like Halt/Assert above (CGProcCall::
+// emitCallStmt dispatches all three on spelling, the same mechanism), never
+// through CallExpr: Exit's optional value is FPC's accepted extension to
+// strict Delphi's argument-less form (Kind Proc despite taking a value --
+// it is a statement, not an expression, and 0/1 here is only the ARITY
+// Builtins.def can express; whether a given call's argument is legal at all
+// depends on whether the enclosing block is a function, which only
+// checkCallStmt's own arm can decide, the same way Assert's {$C-} gating
+// could not be expressed here either).  Break/Continue take no argument and
+// are refused outside a loop; Exit's value is refused outside a function.
+// Both restrictions are new diagnostics (err_break_outside_loop /
+// err_continue_outside_loop / err_exit_value_outside_function,
+// DiagnosticSemaKinds.def), not Builtins.def's arity/dialect gate alone.
+BUILTIN(Exit,         "exit",         Proc, TP, 0, 1, R_None)
+BUILTIN(Break,        "break",        Proc, TP, 0, 0, R_None)
+BUILTIN(Continue,     "continue",     Proc, TP, 0, 0, R_None)
+
 #undef ALL
 #undef TP
 #undef EP

@@ -1504,6 +1504,14 @@ void Sema::checkProcBody(const ProcDecl& Proc) {
     const ProcDecl* Outer = CurrentProc;
     CurrentProc = &Proc;
 
+    // TP-only: a nested procedure's own body starts with no loop context of
+    // its own, whatever loop textually encloses ITS caller -- see
+    // LoopDepth_'s own comment for why this is guaranteed by Phase
+    // ordering alone and saved/restored here anyway, matching
+    // CurrentRetType/EnclosingParamNames_ just below.
+    const int SavedLoopDepth = LoopDepth_;
+    LoopDepth_ = 0;
+
     // ISO §6.6.1: for the defining occurrence of a forward-declared procedure
     // this is the declaration's heading — the parameters the body names were
     // written there.
@@ -1691,6 +1699,7 @@ void Sema::checkProcBody(const ProcDecl& Proc) {
     Symtab.popScope();
     CurrentProc    = Outer;
     CurrentRetType = SavedRetType;
+    LoopDepth_     = SavedLoopDepth;
 
     // Every call in the body has been resolved by now, so the callees'
     // signatures are available to say which arguments travel by reference.

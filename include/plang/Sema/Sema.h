@@ -361,6 +361,38 @@ private:
     // a goto would jump INTO a structured statement from outside it.
     std::vector<const StmtNode*> StructStack;
 
+    // --- TP-only: Break/Continue loop-nesting (no ISO/EP equivalent) ---
+
+    /// Depth of while/for/for-in/repeat nesting around the statement
+    /// currently being checked.  Break/Continue (checkCallStmt's own arm)
+    /// are refused with err_break_outside_loop/err_continue_outside_loop
+    /// wherever this is zero.  Incremented/decremented by LoopScope, held
+    /// for the extent of each loop's own body check
+    /// (checkWhile/checkFor/checkForIn/checkRepeat).
+    ///
+    /// Saved at 0 and restored around a nested procedure's own body
+    /// (checkProcBody, alongside CurrentRetType/CurrentProc/
+    /// EnclosingParamNames_, which are already scoped there the same way) --
+    /// a Pascal nested procedure's declaration can only appear in its
+    /// enclosing block's DECLARATION part, never inside a loop's STATEMENT
+    /// body, so checkProcBody's Phase 5b (nested procedure bodies) always
+    /// runs before its own block's Phase 6 (where a loop could ever push
+    /// this) reaches any loop -- LoopDepth_ is already guaranteed 0 there by
+    /// that ordering alone, but is saved/restored explicitly anyway rather
+    /// than relying on it, the same defensive-not-implicit stance
+    /// EnclosingParamNames_ already takes for a fact its own comment could
+    /// have leaned on instead.
+    int LoopDepth_{0};
+
+    /// RAII: ++LoopDepth_ for the extent of one loop's own body check.
+    struct LoopScope {
+        int& Depth;
+        explicit LoopScope(int& D) : Depth(D) { ++Depth; }
+        ~LoopScope() { --Depth; }
+        LoopScope(const LoopScope&)            = delete;
+        LoopScope& operator=(const LoopScope&) = delete;
+    };
+
     // Maps label name → innermost enclosing structured-statement pointer for labels
     // that are placed inside a structured statement in the current block's body.
     // Populated by a pre-scan (Phase 5.5) before Phase 6; saved/restored across

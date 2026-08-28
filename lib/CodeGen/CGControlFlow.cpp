@@ -54,7 +54,14 @@ void CGControlFlow::emitWhile(const WhileStmt& s) {
     B.CreateCondBr(cond, bodyBB, endBB);
 
     B.SetInsertPoint(bodyBB);
+    // TP-only: `while`'s continue-target is its own condition-test block --
+    // a Continue here re-evaluates cond exactly the way falling off the end
+    // of the body already does, which is also why `break`'s target is
+    // simply endBB, the same block the condition already branches to on
+    // false.
+    PushLoopTargets(condBB, endBB);
     EmitStmt(s.Body.get());
+    PopLoopTargets();
     BrIfNeeded(condBB);
 
     B.SetInsertPoint(endBB);
@@ -93,7 +100,16 @@ void CGControlFlow::emitFor(const ForStmt& s) {
     B.CreateCondBr(cmp, bodyBB, endBB);
 
     B.SetInsertPoint(bodyBB);
+    // TP-only: `for`'s continue-target is its INCREMENT block (incBB), not
+    // condBB -- incBB tests whether the control variable is already AT the
+    // limit before advancing it (see below), which is what makes `to
+    // maxint` terminate correctly instead of wrapping.  Landing a Continue
+    // on condBB instead would re-test the CURRENT (unincremented) value
+    // against the limit, find it still in range, and re-enter the body
+    // without ever advancing -- an infinite loop on the same iteration.
+    PushLoopTargets(incBB, endBB);
     EmitStmt(s.Body.get());
+    PopLoopTargets();
     BrIfNeeded(incBB);
 
     // ISO §6.8.3.9: the control variable is never advanced past the final
@@ -212,7 +228,13 @@ void CGControlFlow::emitForIn(const ForInStmt& s) {
         bit3 = B.CreateAdd(bit3, llvm::ConstantInt::get(I64Ty, base, true),
                                  "forin.rebase");
     B.CreateStore(B.CreateZExtOrTrunc(bit3, loopVarTy, "forin.ord"), loopVar);
+    // TP-only: same reasoning as emitFor's own -- the increment-equivalent
+    // block (incBB) is the continue-target, not condBB, so a Continue
+    // actually advances the bit counter instead of re-testing membership at
+    // the same position forever.
+    PushLoopTargets(incBB, endBB);
     EmitStmt(s.Body.get());
+    PopLoopTargets();
     if (pushedForInScope) SymTab.popScope();
     BrIfNeeded(incBB);
 
@@ -234,10 +256,17 @@ void CGControlFlow::emitRepeat(const RepeatStmt& s) {
     B.CreateBr(bodyBB);
 
     B.SetInsertPoint(bodyBB);
+    // TP-only: `repeat`'s continue-target is ALSO its condition-test block,
+    // same as `while` -- the until-test is genuinely re-evaluated on a
+    // Continue, unlike some other Pascals' `repeat`, because that test is
+    // the loop's only exit and skipping it would make Continue loop forever
+    // rather than ever re-checking whether to stop.
+    PushLoopTargets(condBB, endBB);
     for (const auto& st : s.Stmts) {
         if (IsTerminated()) ResumeAfterTerminator();
         EmitStmt(st.get());
     }
+    PopLoopTargets();
     BrIfNeeded(condBB);
 
     B.SetInsertPoint(condBB);

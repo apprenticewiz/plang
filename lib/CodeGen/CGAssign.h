@@ -11,6 +11,8 @@
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/Support/Alignment.h"
 
+#include "plang/Basic/SourceLocation.h"
+
 #include "CGSymbolTable.h"
 #include "CGTypes.h"
 #include "ComplexOps.h"
@@ -54,6 +56,24 @@ public:
           ExprStrCapStatic(std::move(ExprStrCapStatic)) {}
 
     void emitAssign(const plang::AssignStmt& s);
+
+    /// The guts of emitAssign, taking Target/Value/Loc directly instead of
+    /// reading them off an AssignStmt -- emitAssign(s) is now a one-line
+    /// forward to this.  TP-only: Exit(value) means exactly what an ordinary
+    /// `FuncName := value` assignment to the enclosing function's result
+    /// does (Sema's checkCallStmt Exit arm checks the value the same way
+    /// checkAssign checks an ordinary target), and CGProcCall's own Exit
+    /// handling calls this directly with a synthesized Target -- an IdentExpr
+    /// naming the function, which emitLValue already resolves straight to
+    /// CurRetAlloca via its own fast path -- rather than needing a real
+    /// AssignStmt AST node whose Target and Value are siblings owned by one
+    /// parent: Exit's value expression is already owned by the CallStmt, and
+    /// synthesizing a second owner for it would be a lifetime hazard for no
+    /// reason, since this only ever reads through Target/Value and never
+    /// needs to own either.
+    void emitAssignValue(const plang::ExprNode& Target,
+                          const plang::ExprNode& Value,
+                          plang::SourceLocation Loc);
 
 private:
     llvm::LLVMContext& Ctx;
