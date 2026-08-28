@@ -20,8 +20,12 @@ DIAG(err_control_code_out_of_range, Error, "control-character code '%0' is out o
 // directive family -- {$MESSAGE}/{$INFO}/{$NOTE}/{$HINT}/{$WARNING}/
 // {$ERROR}/{$FATAL} -- each just echoes its own free-text argument as %0, at
 // the severity Borland/FPC give that keyword ({$ERROR} and {$FATAL} both
-// fail compilation like any other error; {$FATAL} additionally stops the
-// scanner right where it stands, verified against `fpc -Mtp`).
+// fail compilation like any other error). Real `fpc -Mtp` additionally
+// aborts its OWN scan right where {$FATAL} stands; plang deliberately does
+// not reproduce that half -- see Directives.cpp's header comment for why
+// (no immediate-unwind mechanism, and truncating the buffer here was tried
+// and just produces parser-cascade noise once the compile has already
+// failed either way).
 DIAG(note_directive_message, Info, "%0")
 DIAG(note_directive_info, Info, "%0")
 DIAG(note_directive_note, Info, "%0")
