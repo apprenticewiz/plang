@@ -161,6 +161,15 @@ llvm::Value* CGFuncCall::emitCallExpr(const CallExpr& e) {
     // being the index type's smallest value -- not a 0-based component
     // count, so a `file[1..5]` fully written reports 4, not 3.
     if ((lo == "position" || lo == "lastposition") && !e.Args.empty()) {
+        // Sema now refuses a non-file argument here (issue #417), the same
+        // way it already refuses one for eof/eoln above -- this guard is
+        // defense in depth, unreachable for a program that passed Sema.
+        // Without it, FileVarHelpers::fileVarPtr's IdentExpr fast path
+        // returns the wrong-typed variable's own storage address with no
+        // check at all, and that reached plang_position/plang_lastposition
+        // as a PascalFile*, segfaulting with no diagnostic.
+        if (!FileVars.isFileVar(*e.Args[0]))
+            return llvm::ConstantInt::get(I64Ty, 0);
         auto* fp  = FileVars.fileVarPtr(*e.Args[0]);
         int64_t esz = FileVars.getFileElemSize(*e.Args[0]);
         int64_t ilo = FileVars.getFileIndexLow(*e.Args[0]);
@@ -170,6 +179,10 @@ llvm::Value* CGFuncCall::emitCallExpr(const CallExpr& e) {
     }
     // EP §6.7.6.5: empty(f)
     if (lo == "empty" && !e.Args.empty()) {
+        // Same defense-in-depth guard as position/lastposition just above
+        // (issue #417).
+        if (!FileVars.isFileVar(*e.Args[0]))
+            return llvm::ConstantInt::getFalse(Ctx);
         auto* fp  = FileVars.fileVarPtr(*e.Args[0]);
         int64_t esz = FileVars.getFileElemSize(*e.Args[0]);
         auto* fn  = RtFns.getExternFnN("plang_empty", I8Ty, {PtrTy, I64Ty});

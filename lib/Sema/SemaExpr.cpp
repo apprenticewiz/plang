@@ -857,6 +857,24 @@ std::shared_ptr<Type> Sema::checkCallExpr(const CallExpr& E) {
                       {Lo, ArgTy->ElemType->Name});
             return TyBool;
         }
+        // EP §6.7.6.6: position(f) and lastposition(f) report a value of f's
+        // declared index type, and §6.7.6.5's empty(f) reports whether f
+        // holds no components -- all three take a file argument the same
+        // way eof/eoln do, just above, and had no check of their own at
+        // all, so an ordinary variable sailed through unrejected.
+        // CodeGen's lowering (FileVars.fileVarPtr) has no non-file fallback
+        // the way eof/eoln's stdin fallback does: it handed the
+        // wrong-typed variable's own address to the runtime as a
+        // PascalFile*, segfaulting with no diagnostic (issue #417).
+        if ((Lo == "position" || Lo == "lastposition" || Lo == "empty")
+                && !E.Args.empty()) {
+            auto ArgTy = checkExpr(*E.Args[0]);
+            if (!ArgTy->isError() && ArgTy->Kind != TypeKind::File) {
+                error(E.Args[0]->Loc, diag::err_file_argument, {Lo, ArgTy->Name});
+                return TyErr;
+            }
+            return Sym->ReturnType ? Sym->ReturnType : TyErr;
+        }
         // abs/sqr are polymorphic: return the argument's type.
         if ((Lo == "abs" || Lo == "sqr") && !E.Args.empty()) {
             auto ArgTy = checkExpr(*E.Args[0]);
