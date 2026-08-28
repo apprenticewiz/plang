@@ -357,6 +357,44 @@ llvm::Value* SchemaLayoutEngine::rtSizeOfTypeNode(const TypeNode* tn) {
             return rtSizeOfTypeNode(body);
         }
     }
+    // R3, sibling to the branch just above: a nested instantiation whose
+    // actuals needed no closed form AT ALL, rather than one this walk
+    // could not build.  Sema only builds ActualForms when an actual
+    // argument expression reads a discriminant binding (SchemaBindingUsed_,
+    // set by constBound/checkIdent) -- `inner(4)` never touches one, so
+    // there is nothing there to be a form over: 4 means 4 everywhere this
+    // instantiation is ever reached, probe pass or real one alike, and the
+    // Body Sema resolved for it is already correct for every occurrence,
+    // not a stand-in that has to be recomputed per instance the way
+    // `vector(n)` above is.
+    //
+    // Issue #393: that Body can still carry ExtentVaries=true here, and
+    // nodeExtentVaries(d) below trusts it blindly.  `array[1..n] of
+    // inner(4)` inside a varying `outer(n)`'s body resolves `inner(4)`
+    // while OUTER's own probe pass is resolving OUTER's body -- and the
+    // probe machinery (ProbeBindingsActive_) that marks an extent
+    // "varies" whenever it reads ANY active discriminant binding does not
+    // turn itself off for the nested instantiation's own body, even though
+    // `inner`'s discriminant is bound to the literal 4 and not to a probe
+    // stand-in. `array[1..m] of real` inside inner's body (with m bound to
+    // that 4) then looks exactly like a probe-dependent extent, and
+    // inner(4) comes out stamped ExtentVaries=true for a body that cannot
+    // actually vary. Sema's stamp is what is wrong, not this instance's
+    // size -- so it is not asked for a SchemaTypeNode whose ActualForms
+    // already answered "nothing here depends on anything the enclosing
+    // walk carries".
+    //
+    // Falling to the same static answer nodeExtentVaries(d) being accurate
+    // would have fallen to two lines down is safe rather than merely
+    // convenient: llvmTypeOfNode's own SchemaTypeNode case (CGTypes.cpp)
+    // builds this exact type from the same Sema-resolved, already
+    // constant-folded body and consults no ExtentVaries flag of its own --
+    // so this and the static layout read one answer, not two independently
+    // computed ones that happen to agree.
+    if (auto* sn2 = llvm::dyn_cast<SchemaTypeNode>(d);
+            sn2 && sn2->ActualForms.empty() && sn2->ResolvedBody)
+        return i64c(static_cast<int64_t>(
+            Mod.getDataLayout().getTypeAllocSize(LlvmTypeOfNode(*d))));
     if (nodeExtentVaries(d))
         codegenICE("a schema body denoter with no run-time layout");
     return i64c(static_cast<int64_t>(
