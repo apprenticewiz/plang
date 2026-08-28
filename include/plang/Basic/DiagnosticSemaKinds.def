@@ -69,6 +69,27 @@ DIAG(err_global_var_too_large, Error,
 DIAG(err_local_var_too_large, Error,
      "'%0' is too large to be a local variable (%1 bytes; the limit is %2 "
      "bytes) -- declare it on the heap (New/GetMem) instead")
+// A by-value parameter is a variable of its own (ISO §6.6.3.2): the actual
+// is copied into it, so it gets exactly the same fixed-size stack `alloca`
+// in CodeGen as a local (#223), and hits the same LLVM-backend hang/abort
+// lowering it if nothing catches the size first (#410). A `var` parameter
+// is deliberately not gated here -- it aliases the caller's own storage
+// instead of copying into one of its own, so no oversized local is ever
+// materialized for it. Same threshold and remedy shape as
+// err_local_var_too_large; "pass it by reference" names the one actually
+// available beyond it (the heap is not addressable through a parameter's
+// declaration the way New/GetMem addresses a local's).
+DIAG(err_param_too_large, Error,
+     "'%0' is too large to be a value parameter (%1 bytes; the limit is %2 "
+     "bytes) -- pass it by reference ('var') instead")
+// A function result -- named or the bare function identifier -- gets its own
+// fixed-size stack `alloca` in CodeGen (curRetAlloca), populated on every
+// return path exactly like a by-value parameter's copy-in. Same size gate,
+// same reasoning, and the same 'var' remedy: a result this large is passed
+// back through a `var` parameter instead of the function's own return slot.
+DIAG(err_return_type_too_large, Error,
+     "return type of '%0' is too large to be a function result (%1 bytes; "
+     "the limit is %2 bytes) -- return it through a 'var' parameter instead")
 DIAG(err_field_on_non_record, Error, "field access '.%0' on non-record type '%1'")
 DIAG(err_no_such_field, Error, "record type '%0' has no field '%1'")
 DIAG(err_deref_non_pointer, Error, "dereference operator '^' applied to non-pointer type '%0'")
