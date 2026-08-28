@@ -20,6 +20,25 @@ void Codegen::Impl::emitFileParams(const std::vector<std::string>& names) {
     }
 }
 
+// -std=turbo only: see this method's own declaration (CodeGenImpl.h) and
+// Sema::registerBuiltins' comment on the ExitCode Symbol for the whole
+// design.  Declares, rather than defines: the actual storage is the
+// runtime's own plang_tp_exitcode (runtime/plang_sys.cpp), one definition
+// shared by every object a Turbo compilation produces -- the main file and
+// any extraInputFiles, each compiled by its own Codegen::emit() call.
+// Passing no Initializer to GlobalVariable's constructor is what keeps this
+// a declaration rather than a second definition that would collide with
+// the runtime's at link time; registerInterfaceTypes, just above, declares
+// a module's own externally-defined global the same way.
+void Codegen::Impl::emitPredefinedGlobals() {
+    if (!langOpts.turbo()) return;
+    auto* ty = llvm::Type::getIntNTy(ctx, langOpts.defaultIntWidth());
+    auto* gv = new llvm::GlobalVariable(*mod, ty, /*isConst=*/false,
+                                         llvm::GlobalValue::ExternalLinkage,
+                                         /*Initializer=*/nullptr, "plang_tp_exitcode");
+    defVar("ExitCode", gv, ty, /*typeNode=*/nullptr);
+}
+
 // Attaches 'input' and 'output' to the standard streams.  Any other
 // file-parameter is left closed, so rewrite/reset give it temporary storage
 // like an internal file.
@@ -1742,7 +1761,23 @@ void Codegen::Impl::emitMain(const BlockNode& block,
     builder.CreateCall(getExternFnN("plang_module_finals_run",
                                      llvm::Type::getVoidTy(ctx), {}), {});
 
-    builder.CreateRet(llvm::ConstantInt::get(i32Ty, 0));
+    if (!isTerminated()) {
+        // -std=turbo only: the process's exit status is whatever the
+        // program last assigned to ExitCode (0 if it never did -- see
+        // plang_tp_exitcode's own zero-initializer, runtime/plang_sys.cpp).
+        // ISO 7185 and Extended Pascal have no such variable and keep
+        // returning the fixed 0 they always have; emitPredefinedGlobals
+        // only ever registers ExitCode under Turbo, so this findVar is
+        // guaranteed to succeed exactly when this branch is taken.
+        if (langOpts.turbo()) {
+            auto* ev = findVar("ExitCode");
+            if (!ev) codegenICE("main: ExitCode has no storage under -std=turbo");
+            auto* val = builder.CreateLoad(ev->type, ev->ptr, "exitcode");
+            builder.CreateRet(builder.CreateSExtOrTrunc(val, i32Ty, "exitcode.i32"));
+        } else {
+            builder.CreateRet(llvm::ConstantInt::get(i32Ty, 0));
+        }
+    }
 
     popScope();
 

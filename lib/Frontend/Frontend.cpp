@@ -935,7 +935,13 @@ int frontendPC1Main(int Argc, char *Argv[]) {
     std::string               OutputFile;
     std::string               Std;
     std::string               Target;
-    bool                      RangeChecks   = true;
+    // Unset (neither -frange-checks nor -fno-range-checks given) means "the
+    // active dialect's own default" -- ISO 7185/Extended Pascal on, Turbo
+    // off ({$R-}, matching real Turbo Pascal) -- resolved below, once Std
+    // is known, since -std= and these two flags may arrive in either order
+    // on the command line.  See LangOptions::RangeChecks's own default,
+    // which this feeds.
+    std::optional<bool>      RangeChecks;
     bool                      NilChecks     = true;
     unsigned                  OptLevel      = 0;
     bool                      Debug         = false;
@@ -1126,7 +1132,12 @@ int frontendPC1Main(int Argc, char *Argv[]) {
     // and said nothing -- harmless only for as long as the check above rejects
     // turbo before this is reached, which is exactly what Tier 1 removes.
     if (const auto D = LangOptions::parseDialect(Std)) Opts.Std = *D;
-    Opts.RangeChecks       = RangeChecks;
+    // Real Turbo Pascal ships with {$R-}: range checking off by default.
+    // ISO 7185 and Extended Pascal keep plang's long-standing default of on.
+    // value_or, not a plain assignment, so an explicit -frange-checks /
+    // -fno-range-checks (RangeChecks already holding true/false) still wins
+    // over the dialect's own starting point.
+    Opts.RangeChecks       = RangeChecks.value_or(!Opts.turbo());
     Opts.NilChecks         = NilChecks;
     Opts.OptLevel          = OptLevel;
     Opts.Debug             = Debug;

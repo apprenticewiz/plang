@@ -1391,6 +1391,16 @@ struct Codegen::Impl {
     void emitInheritedGlobals(const BlockNode& iface, const BlockNode& own);
     void emitFileParams(const std::vector<std::string>& names);
     void emitFileParamBinds(const std::vector<std::string>& names);
+    /// -std=turbo only: storage for the predefined identifiers Sema
+    /// registers as a mutable Var with a LinkName rather than a Const or
+    /// Builtin -- today just ExitCode (Sema::registerBuiltins).  Declares
+    /// (no initializer, so this object does not define it) an LLVM global
+    /// per such identifier, named after its LinkName, and binds the
+    /// Pascal-visible name to it the same way emitFileParams binds "input"/
+    /// "output".  Called once, in the outermost (global) scope, before any
+    /// module or the program's own body is emitted, so that a module
+    /// procedure can reference ExitCode exactly as the program body can.
+    void emitPredefinedGlobals();
 
     // ====================================================================
     // Procedures and functions

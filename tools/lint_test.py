@@ -112,6 +112,16 @@ BRACE_CHECK_EXEMPT = {
     "test/Driver/Turbo/switch-directive-r-minus-turns-range-checks-back-off.pas",
     "test/Driver/Turbo/switch-directive-r-plus-turns-range-checks-on-partway-through-the-file.pas",
     "test/Lex/ScannerTurbo/switch-directives-every-spelling-scans-cleanly.pas",
+    # Same reasoning again (only ever compiles under -std=turbo -- see each
+    # file's own RUN: line -- so the matched-delimiter rule this check
+    # doesn't model is the one that actually applies), for the three files
+    # added with Turbo's numbered run-time errors (RunError,
+    # plang_tp_runerror) and the RangeChecks default flip: their header
+    # prose discusses '{$R+}'/'{$R-}' syntax in English the same way the
+    # switch-directive files above already do.  Not a hazard to fix.
+    "test/Driver/Turbo/range-checks-default-off-under-turbo-lets-an-out-of-range-write-through.pas",
+    "test/Driver/Turbo/explicit-r-plus-under-turbo-aborts-with-exit-201-not-the-shared-status.pas",
+    "test/Driver/Turbo/explicit-frange-checks-through-the-driver-overrides-turbos-off-default.pas",
 }
 
 

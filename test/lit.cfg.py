@@ -114,6 +114,20 @@ config.substitutions.insert(0,
     ("%kill_during_compile",
      "bash " + os.path.join(config.plang_source_dir, "test", "tools", "kill-during-compile.sh")))
 
+# %checkexit: the one case this suite's own %t/%run idiom can't express
+# directly -- pinning a RUN line's exit status to a SPECIFIC number rather
+# than just "zero" (a bare RUN: line) or "nonzero" (`not`).  Turbo's
+# numbered run-time errors (RangeCheckGuards.cpp's plang_tp_runerror,
+# CGProcCall.cpp's RunError builtin) are exactly this: 200 has to stay
+# distinct from 201/215/216, not just "some failure". Needs a real,
+# external script for the same reason %hold_stdin_open/%kill_during_compile
+# (just below) do -- see check-exit-code.sh's own comment for what lit's
+# internal shell cannot do here (no `$?`, and `not` has no equivalent of
+# `--exit-code=<n>`).
+config.substitutions.insert(0,
+    ("%checkexit",
+     "bash " + os.path.join(config.plang_source_dir, "test", "tools", "check-exit-code.sh")))
+
 # Issue #130's gdb pretty-printer -- referenced straight from the source
 # tree (share/plang/gdb/), not the installed copy, same as every other
 # %substitution here points at the just-built binary rather than anything

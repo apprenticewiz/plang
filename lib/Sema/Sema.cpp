@@ -202,6 +202,46 @@ void Sema::registerBuiltins() {
         (void)Symtab.define(std::move(Pi));
     }
 
+    // -std=turbo only: ExitCode -- the value emitMain (CodeGenProcs.cpp)
+    // returns to the OS when the program block ends normally, rather than
+    // through Halt(n) (which takes its own status and never touches this).
+    // The FIRST predefined identifier this project registers as a mutable
+    // Var rather than a Const/Builtin: every other required name above is
+    // read-only from the program's point of view (a constant) or callable
+    // (a builtin), and neither SymbolKind fits something a program is meant
+    // to assign to, like `ExitCode := 5;`, before falling off the end of
+    // its block.
+    //
+    // LinkName -- otherwise EP §6.11.2's cross-module rename field, unused
+    // outside that -- is repurposed here to record which external symbol
+    // this identifier is bound to: "plang_tp_exitcode", whose one real
+    // definition lives in the runtime (runtime/plang_sys.cpp -- see that
+    // definition's own comment for why the storage has to live there rather
+    // than in each compiled object).  CodeGen has no access to this table
+    // (it walks the AST, not Sema's Symbols -- ResolvedType/ResolvedBuiltin
+    // annotations on the AST nodes are the only bridge between the two), so
+    // Codegen::Impl::emitPredefinedGlobals (CodeGenProcs.cpp) does not
+    // actually read this field back out; it independently declares (never
+    // defines) an LLVM global under the identical literal name.  The two
+    // sides staying in agreement is hand-kept, the same way every other
+    // plang_err_*/plang_tp_* runtime entry point's name already is between
+    // its RtFns.getExternFnN(...) call site and its extern "C" definition in
+    // runtime/*.cpp -- there is no single source of truth to fall out of
+    // sync FROM.  LinkName is set here anyway because Symbol is the
+    // authoritative record of what this identifier actually is, and a later
+    // Tier 3 (FileMode, RandSeed, DosError, TextAttr) is expected to follow
+    // the same pattern: a Symbol with a LinkName here, and its own literal
+    // string match in a codegen-side emitPredefinedGlobals entry.
+    if (Opts.turbo()) {
+        Symbol ExitCodeSym;
+        ExitCodeSym.Kind     = SymbolKind::Var;
+        ExitCodeSym.Name     = "ExitCode";
+        ExitCodeSym.Ty       = TyInt;
+        ExitCodeSym.LinkName = "plang_tp_exitcode";
+        ExitCodeSym.IsRequiredIdentifier = true;
+        (void)Symtab.define(std::move(ExitCodeSym));
+    }
+
     // EP §6.4.2.2: predefined constants
     if (Opts.extendedPascal()) {
         auto makeConst = [](const char* Name, std::shared_ptr<Type> Ty,
