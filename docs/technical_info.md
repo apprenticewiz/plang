@@ -43,8 +43,8 @@ is written in those same files and compiled in; a translation of it is read at
 run time from a `.po` file.  See "Translations" below.
 
 Token kinds are likewise one list, `Basic/TokenKinds.def`, from which the
-enumeration, the spellings, the scanner's keyword table and the set of words
-only Extended Pascal reserves are all generated.  The command-line options are
+enumeration, the spellings, the scanner's keyword table and which dialects
+reserve which words are all generated.  The command-line options are
 one list in the same way, `Driver/Options.def`, read by both the driver and the
 front end so that the two cannot drift apart in what they accept or in what
 they say they accept.
