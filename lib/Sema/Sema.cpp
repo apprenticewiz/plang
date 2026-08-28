@@ -1514,6 +1514,25 @@ void Sema::checkProcBody(const ProcDecl& Proc) {
     // Define parameters in the function's own scope.
     for (const auto& Pg : H.Params) {
         auto T = resolveParamType(*Pg.Type, Pg.IsVar);
+
+        // ISO §6.6.3.2: a by-value parameter is a variable of its own that
+        // the actual is copied into, so CodeGen gives it exactly the same
+        // fixed-size stack `alloca` as a local variable (createEntryAlloca,
+        // CodeGenProcs.cpp) -- same 1 GiB gate as checkBlock's Phase 4
+        // (#223), extended here for the identical reason (#410). A 'var'
+        // parameter is deliberately excluded: it aliases the caller's own
+        // storage rather than copying into one of its own, so no oversized
+        // local is ever materialized for it.
+        if (!Pg.IsVar && T && !T->isError()) {
+            constexpr uint64_t ParamByteLimit = 1ull << 30; // 1 GiB
+            if (auto Sz = byteSizeOf(*T); Sz && *Sz > ParamByteLimit) {
+                for (const auto& Nm : Pg.Names)
+                    error(Pg.Type->Loc, diag::err_param_too_large,
+                          {Nm, std::to_string(*Sz),
+                           std::to_string(ParamByteLimit)});
+            }
+        }
+
         for (size_t Idx = 0; Idx < Pg.Names.size(); ++Idx) {
             const auto& Nm = Pg.Names[Idx];
             // Each name in a multi-name group ("a, b: integer") gets
@@ -1588,6 +1607,21 @@ void Sema::checkProcBody(const ProcDecl& Proc) {
     const bool IsFunc   = H.IsFunction && H.ReturnType;
     if (IsFunc) {
         CurrentRetType = resolveType(*H.ReturnType);
+
+        // A function's result -- named or the bare function identifier -- is
+        // materialized as its own fixed-size stack `alloca` in CodeGen
+        // (curRetAlloca, CodeGenProcs.cpp), copied into on every return path
+        // exactly like a by-value parameter's copy-in above. Same 1 GiB gate
+        // (#223, #410) and for the same reason.
+        if (CurrentRetType && !CurrentRetType->isError()) {
+            constexpr uint64_t RetByteLimit = 1ull << 30; // 1 GiB
+            if (auto Sz = byteSizeOf(*CurrentRetType); Sz && *Sz > RetByteLimit) {
+                error(H.ReturnType->Loc, diag::err_return_type_too_large,
+                      {Proc.Name, std::to_string(*Sz),
+                       std::to_string(RetByteLimit)});
+            }
+        }
+
         // The frame stays on the stack for as long as this function's block is
         // being checked, so a function declared inside it can find this result.
         FuncStack.push_back({&Proc, CurrentRetType, /*HasResult=*/false});
