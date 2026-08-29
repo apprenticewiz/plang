@@ -58,6 +58,18 @@ inline constexpr int PlangRealMinWidth = PlangExpDigits + 6;
 /// seventeenth of a double are not the value's own anyway.
 inline constexpr std::size_t PlangRealMaxChars = 512;
 
+/// Turbo's Single (32-bit IEEE-754 binary32) is promoted to double in CodeGen
+/// before it ever reaches this formatter -- the runtime only ever sees a
+/// double, and there is only one formatter for it -- but a binary32's own
+/// precision is nine significant decimal digits (Steele & White's round-trip
+/// count for the format), not a double's seventeen.  Formatting a promoted
+/// Single with DecPlaces=16 the way a genuine double gets does not print MORE
+/// of the value; it prints the double-promotion's own zero-padding-turned-
+/// nonzero tail, bits the original binary32 never had an opinion about, as if
+/// they were significant.  Eight decimal places (one leading digit + eight)
+/// is what plangFormatReal's MaxDecPlaces caps a Single write to.
+inline constexpr int PlangSingleMaxDecPlaces = 8;
+
 /// What varies between a dialect's default real-write shape.  ISO 7185 and
 /// Extended Pascal share one profile; Turbo's is a second, DIFFERENT default
 /// -- CodeGen picks which one to pass based on LangOptions.turbo(), never a
@@ -96,7 +108,19 @@ inline constexpr PlangRealProfile PlangRealProfileTurbo{PlangRealWidth, PlangExp
 /// continues to build the identical shape it always did without being
 /// touched: the profile parameterization is additive, not a rewrite of the
 /// ISO path.  A Turbo call site passes PlangRealProfileTurbo explicitly.
+///
+/// \p MaxDecPlaces caps how many decimal digits a wide field is allowed to
+/// grow DecPlaces to -- see PlangSingleMaxDecPlaces's own comment for why a
+/// promoted Single needs this and a genuine double (every call site before
+/// Single existed) does not.  Its DEFAULT ARGUMENT is -1 ("no cap") for the
+/// identical reason \p Profile's is PlangRealProfileISO: every pre-Single call
+/// site keeps building the exact shape it always did.  When the cap applies
+/// and leaves the rendered value narrower than ActWidth, the shortfall is
+/// filled with LEADING SPACES rather than more digits -- checked against
+/// `fpc -Mtp`'s own Single formatting, which pads the same way rather than
+/// ever inventing precision a binary32 does not have.
 std::size_t plangFormatReal(char* Buf, double V, int64_t TotalWidth,
-                             const PlangRealProfile& Profile = PlangRealProfileISO);
+                             const PlangRealProfile& Profile = PlangRealProfileISO,
+                             int MaxDecPlaces = -1);
 
 } // namespace plang

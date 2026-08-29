@@ -449,8 +449,15 @@ static std::string typeDenoterToString(const TypeNode& TN) {
         return R;
     }
     if (auto* StrT = llvm::dyn_cast<StringTypeNode>(&TN)) {
+        // Turbo's string[N] (ShortString) and EP's string(N) (VarString) are
+        // different types with different binary layouts -- see
+        // StringTypeNode::IsShortString's own comment -- so which bracket
+        // gets written back has to track the flag, not default to EP's, or a
+        // re-imported interface would resolve the wrong one.
         if (StrT->Capacity)
-            return "string(" + exprToString(*StrT->Capacity) + ")";
+            return StrT->IsShortString
+                ? "string[" + exprToString(*StrT->Capacity) + "]"
+                : "string(" + exprToString(*StrT->Capacity) + ")";
         return "string";
     }
     if (auto* PkT = llvm::dyn_cast<PackedTypeNode>(&TN))

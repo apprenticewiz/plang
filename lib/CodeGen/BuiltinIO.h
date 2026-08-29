@@ -71,7 +71,7 @@ private:
     void emitWriteValueFormatted(llvm::Value* val, llvm::Value* w, llvm::Value* d,
                                   bool newline, llvm::Value* fp,
                                   const plang::Type* semaTy = nullptr);
-    static std::string readFnSuffix(llvm::Type* ty);
+    static std::string readFnSuffix(llvm::Type* ty, const plang::Type* semaTy);
     void emitReadArg(const plang::ExprNode& arg, llvm::Value* fp);
     void emitSkipLine(llvm::Value* fp);
 
@@ -98,6 +98,10 @@ private:
     /// i8, but a subrange of char is held in an integer-width slot, and at
     /// that width only the Pascal type says it is not a number.
     static bool writesAsChar(const llvm::Type* ty, const plang::Type* semaTy);
+    /// Whether an i64-wide value must be formatted as unsigned decimal
+    /// (Turbo's QWord) rather than the ordinary signed i64 writer every other
+    /// ordinal that reaches an isIntegerTy(64) dispatch site uses.
+    static bool writesAsUnsigned64(const plang::Type* semaTy);
 
     llvm::Constant* i64c(int64_t v) const {
         return llvm::ConstantInt::get(I64Ty, static_cast<uint64_t>(v), true);

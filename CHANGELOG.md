@@ -59,6 +59,75 @@ version numbers follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html
   Turbo's `Integer` range. It is now a compile-time error; `30000 + 2000`
   (in range) still folds cleanly. ISO 7185 and Extended Pascal, whose one
   `Integer` type is always 64-bit, are unaffected.
+- `write`/`writeln` of a `QWord` past `Int64`'s own range printed as
+  negative (`plang_write_i64`/`plang_write_file_i64` format with `%PRId64`
+  unconditionally, and CodeGen never consulted the value's signedness at the
+  write-dispatch site), and `read`/`readln` of one rejected it outright
+  (`plang_read_i64`'s `strtoll` reports the same range error a malformed
+  token gets). Every narrower unsigned rung (`Byte`/`Word`/`Cardinal`/
+  `LongWord`) is zero-extended to i64 before reaching a writer and so never
+  disagreed with the signed formatter; `QWord` is the one rung wide enough
+  to. New `%PRIu64`/`strtoull`-based entry points
+  (`plang_write_u64`/`plang_read_u64` and their `_w`/`_file`/`_turbo`
+  variants) now back a `QWord` destination end to end, including its full
+  `18446744073709551615` maximum.
+- `read`/`readln` of a `ShortInt` or `Byte` variable read exactly one raw
+  character and used its ASCII code as the value (`read(b)` on `"200"` read
+  `'2'` and stored 50), rather than parsing the token as a number:
+  `BuiltinIO::readFnSuffix` picked the reader from the LLVM type alone, and
+  an 8-bit ordinal was indistinguishable from a `Char` at that level --
+  unreachable before the sized-integer ladder, the read-side counterpart of
+  the `writesAsChar` write-side bug fixed above. Now checked against the
+  Sema type's own `Kind`, the same fix already applied to the write side.
+- `Single`'s default (no field-width) `write`/`writeln` showed double-
+  precision noise past its own ~9 significant digits: `3.14159265358979`
+  stored in a `Single` printed as `3.1415927410125732E+000` instead of a
+  value capped to what a 32-bit float actually holds. CodeGen promotes a
+  `Single` to `double` before formatting (there is only one formatter), which
+  is exact for the bits the double already has, but showing all seventeen of
+  a double's default significant digits also shows the promotion's own
+  zero-padding-turned-nonzero tail as if it were part of the original value.
+  A field-width write with no decimals clause (`s:24`) had the identical
+  problem, growing into the same noise instead of padding. Both now cap at
+  nine significant digits and pad a wide field with leading spaces instead of
+  inventing precision, matching `fpc -Mtp` field practice; a fixed-decimals
+  write (`s:0:8`) is unaffected, since the requested decimal count already
+  bounds the output.
+- `write`/`writeln`/`read`/`readln` of a Turbo `string[N]` (`ShortString`) to
+  or from a file variable reached an explicit internal-error abort
+  ("ShortString file I/O is not implemented yet") instead of working the way
+  every other string kind's file I/O already does. New PascalFile-aware
+  `plang_sstr_write_file`/`plang_sstr_write_file_w`/`plang_sstr_read_file`
+  runtime entry points (mirroring `string(N)`'s own `plang_str_write_file`
+  family, minus its eight-byte length header) now back it.
+- `write`/`writeln` of a `PChar`/`PAnsiChar` value was rejected outright
+  ("`'PChar' cannot be written`"), even though CodeGen's write dispatch
+  already handles a bare pointer value correctly by treating it as a
+  null-terminated C string -- `Sema::checkCallStmt`'s write-parameter
+  whitelist never grew a case for it. Now accepted (gated to `-std=turbo`,
+  matching `isCharPointerType`'s other call sites), printing the bytes a
+  `PChar` points to up to its terminator, confirmed against `fpc -Mtp`.
+  `read`/`readln` of a `PChar` remains rejected, matching `fpc -Mtp` (a
+  pointer alone carries no buffer capacity for a reader to respect).
+- The parser's typecast-target pre-seeding (`Parser::Parser`, added for the
+  sized-integer ladder) never covered the Boolean-family variants or
+  `Single`, registered by the very next `Opts.turbo()` block in
+  `Sema::registerBuiltins`: `ByteBool(x)`/`WordBool(x)`/`LongBool(x)`/
+  `Single(x)` all failed to parse as a cast at all ("`'ByteBool' is not
+  callable`"). Since a loose Boolean's whole point is holding a
+  non-canonical nonzero value, and assigning a plain integer to one is
+  itself rejected, a working cast was the *only* way to construct one --
+  this was not merely a convenience gap.
+- `lib/Frontend/Frontend.cpp`'s `typeDenoterToString` (used by the `.pmi`
+  module-interface writer) always serialized a bounded string type as
+  `string(N)` (EP's `VarString` syntax) regardless of `IsShortString`,
+  silently mis-serializing Turbo's `string[N]` as if it were EP's
+  `string(N)` -- a different type with a different binary layout. Now checks
+  `IsShortString` and emits `string[N]`, matching `AstPrinter.cpp`'s existing
+  convention. `-std=turbo` and EP's module system are structurally mutually
+  exclusive today, so this had no live call path to reach, but is fixed on
+  the same "do not leave a silently-wrong serialization in place" grounds as
+  the rest of this project's AST/type-denoter printing.
 
 ## [0.3.5] - 2026-08-27
 

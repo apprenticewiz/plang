@@ -718,6 +718,24 @@ void plang_read_file_i64(PascalFile *F, int64_t *P) {
     *P = static_cast<int64_t>(V);
 }
 
+// The file-runtime twin of plang_io.cpp's plang_read_u64; see its own comment
+// for why QWord (and only QWord) needs this instead of plang_read_file_i64.
+void plang_read_file_u64(PascalFile *F, uint64_t *P) {
+    abortIfClosed(F, "read");
+    trapOnWrongDirection(F, "read", 0);
+    bool SawAny = false;
+    char *Tok = scanNumberFile(F, /*Real=*/false, SawAny);
+    unloadComponent(F);
+    if (!SawAny) { *P = 0; return; }                                // issue #284
+    if (Tok && Tok[0] == '-') plang_err_read_format("read");
+    char *End = Tok;
+    errno = 0;
+    const unsigned long long V = Tok ? std::strtoull(Tok, &End, 10) : 0;
+    if (!Tok || End == Tok) plang_err_read_format("read");          // issue #236
+    if (errno == ERANGE) plang_err_read_int_range("read", Tok);     // issue #240
+    *P = static_cast<uint64_t>(V);
+}
+
 void plang_read_file_f64(PascalFile *F, double *P) {
     abortIfClosed(F, "read");
     trapOnWrongDirection(F, "read", 0);
@@ -770,6 +788,25 @@ void plang_read_file_i64_turbo(PascalFile *F, int64_t *P) {
     // overflows Turbo's own 16-bit Integer is not checked here at all.
     if (!*Digits || *End != '\0' || errno == ERANGE) plang_tp_runerror(106);
     *P = static_cast<int64_t>(V);
+}
+
+// The file-runtime twin of plang_io.cpp's plang_read_u64_turbo; see its own
+// comment for the QWord-only reason and the leading-'-' rejection.
+void plang_read_file_u64_turbo(PascalFile *F, uint64_t *P) {
+    abortIfClosed(F, "read");
+    trapOnWrongDirection(F, "read", 0);
+    bool SawAny = false;
+    char *Tok = scanTokenTurboFile(F, SawAny);
+    unloadComponent(F);
+    if (!SawAny) { *P = 0; return; }                                // issue #284
+    const char *Digits = Tok ? Tok : "";
+    if (*Digits == '-') plang_tp_runerror(106);
+    const int Radix = turboRadixPrefixFile(Digits);
+    char *End = const_cast<char *>(Digits);
+    errno = 0;
+    const unsigned long long V = *Digits ? std::strtoull(Digits, &End, Radix) : 0;
+    if (!*Digits || *End != '\0' || errno == ERANGE) plang_tp_runerror(106);
+    *P = static_cast<uint64_t>(V);
 }
 
 void plang_read_file_f64_turbo(PascalFile *F, double *P) {
@@ -866,18 +903,94 @@ void plang_str_write_file_w(PascalFile *F, const void *S, int64_t /*Cap*/,
     trapOnStreamError(F, "write");
 }
 
+// ---- Turbo string[N] (ShortString) file I/O ------------------------------
+//
+// plang_sstr.cpp's own comment gives the layout: a ONE-byte length prefix
+// (byte 0), not string(N)'s eight, and the data starting right after it --
+// so these are NOT plang_str_write_file/plang_str_read_file with a different
+// header width spliced in, they read that one byte directly.  Mirrors
+// plang_sstr.cpp's stdout/stdin shape (plang_sstr_write(_w)/plang_sstr_read)
+// exactly, the same "file destination is a second family of writers, a
+// generic plang_writeln_file(fp) adds the newline" convention every other
+// typed write in this file already follows -- see BuiltinIO.cpp's
+// emitWriteArgs ShortString branch for the CodeGen side this backs.
+
+/// Writes the string[N] at S (a ShortString's one-byte length prefix,
+/// followed by its data -- NOT null-terminated).
+void plang_sstr_write_file(PascalFile *F, const void *S, int64_t /*Cap*/) {
+    abortIfClosed(F, "write");
+    const auto*   Base = static_cast<const char*>(S);
+    const uint8_t Len  = static_cast<uint8_t>(Base[0]);
+    if (Len > 0) {
+        trapOnWrongDirection(F, "write", 1);
+        std::fwrite(Base + 1, 1, static_cast<size_t>(Len), F->Fp);
+        trapOnStreamError(F, "write");
+    }
+}
+
+/// The same, in a field of W characters -- see plang_str_write_file_w's own
+/// comment for the truncate/pad/negative-W rules this mirrors exactly.
+void plang_sstr_write_file_w(PascalFile *F, const void *S, int64_t /*Cap*/,
+                              int64_t W) {
+    abortIfClosed(F, "write");
+    if (W == 0) return;
+    trapOnWrongDirection(F, "write", 1);
+    const auto*   Base = static_cast<const char*>(S);
+    int64_t       Len  = static_cast<uint8_t>(Base[0]);
+    if (W < 0) {
+        if (Len > 0)
+            std::fwrite(Base + 1, 1, static_cast<size_t>(Len), F->Fp);
+        trapOnStreamError(F, "write");
+        return;
+    }
+    checkedWidth(W);
+    for (int64_t I = Len; I < W; ++I) std::fputc(' ', F->Fp);
+    if (Len > W) Len = W;
+    if (Len > 0)
+        std::fwrite(Base + 1, 1, static_cast<size_t>(Len), F->Fp);
+    trapOnStreamError(F, "write");
+}
+
+/// Fills the string[N] at S with the rest of the current line, clamped to
+/// the (255-ceiling'd) capacity Cap -- the file-runtime twin of
+/// plang_sstr_read (plang_sstr.cpp).  The terminator is left in the
+/// lookahead, matching plang_str_read_file's own convention, so a following
+/// readln consumes exactly one line.
+void plang_sstr_read_file(PascalFile *F, void *S, int64_t Cap) {
+    abortIfClosed(F, "read");
+    auto*   Base = static_cast<char*>(S);
+    char*   Data = Base + 1;
+    int64_t Len  = 0;
+    const int64_t ECap = Cap < 255 ? Cap : 255;
+    trapOnWrongDirection(F, "read", 0);
+    ensurePrimed(F);
+    while (F->Buf != EOF && F->Buf != '\n') {
+        const int C = advance(F);
+        trapOnStreamError(F, "read");
+        if (Len < ECap) Data[Len++] = static_cast<char>(C);
+    }
+    Base[0] = static_cast<char>(static_cast<uint8_t>(Len));
+}
+
 // ---- typed write (text file) ----
 
 // Defined below with the rest of the field-width forms; the real writer with no
 // width is the same one with the default.
 void plang_write_file_f64_e(PascalFile *F, double V, int64_t W, int8_t Upper);
 void plang_write_file_f64_f(PascalFile *F, double V, int64_t W, int64_t D, int8_t Upper);
+void plang_write_file_f32_e(PascalFile *F, double V, int64_t W, int8_t Upper);
 
 // Upper: see plang_io.cpp's plang_write_bool for the convention -- CodeGen
 // resolves Turbo's TRUE/FALSE vs ISO/EP's true/false from LangOptions.turbo()
 // once, at the call site, and passes the answer in as this plain i8 flag.
 void plang_write_file_i64 (PascalFile *F, int64_t     V) { abortIfClosed(F,"write"); trapOnWrongDirection(F, "write", 1); std::fprintf(F->Fp, "%" PRId64, V); trapOnStreamError(F, "write"); }
+// See plang_io.cpp's plang_write_u64 for why QWord (and only QWord) needs its
+// own, unsigned-formatting entry point rather than reusing plang_write_file_i64.
+void plang_write_file_u64 (PascalFile *F, uint64_t    V) { abortIfClosed(F,"write"); trapOnWrongDirection(F, "write", 1); std::fprintf(F->Fp, "%" PRIu64, V); trapOnStreamError(F, "write"); }
 void plang_write_file_f64 (PascalFile *F, double      V, int8_t Upper) { plang_write_file_f64_e(F, V, PlangRealWidth, Upper); }
+// See plang_io.cpp's plang_write_f32 for why a promoted Single needs its own
+// significant-digit-capped entry point rather than reusing plang_write_file_f64.
+void plang_write_file_f32 (PascalFile *F, double      V, int8_t Upper) { plang_write_file_f32_e(F, V, PlangRealWidth, Upper); }
 void plang_write_file_bool(PascalFile *F, int8_t      V, int8_t Upper) {
     abortIfClosed(F,"write"); trapOnWrongDirection(F, "write", 1);
     std::fputs(Upper ? (V ? "TRUE" : "FALSE") : (V ? "true" : "false"), F->Fp);
@@ -919,11 +1032,30 @@ void plang_write_file_i64_w (PascalFile *F, int64_t V, int64_t W) {
     std::fprintf(F->Fp, "%*" PRId64, checkedWidth(W), V);
     trapOnStreamError(F, "write");
 }
+// See plang_io.cpp's plang_write_u64_w for why QWord needs its own,
+// unsigned-formatting field-width entry point.
+void plang_write_file_u64_w (PascalFile *F, uint64_t V, int64_t W) {
+    abortIfClosed(F,"write");
+    trapOnWrongDirection(F, "write", 1);
+    std::fprintf(F->Fp, "%*" PRIu64, checkedWidth(W), V);
+    trapOnStreamError(F, "write");
+}
 void plang_write_file_f64_e (PascalFile *F, double V, int64_t W, int8_t Upper) {
     abortIfClosed(F, "write");
     trapOnWrongDirection(F, "write", 1);
     char Buf[PlangRealMaxChars];
     const std::size_t N = plangFormatReal(Buf, V, W, Upper ? PlangRealProfileTurbo : PlangRealProfileISO);
+    std::fwrite(Buf, 1, N, F->Fp);
+    trapOnStreamError(F, "write");
+}
+// See plang_io.cpp's plang_write_f32_e for why a promoted Single needs its
+// own significant-digit-capped field-width entry point.
+void plang_write_file_f32_e (PascalFile *F, double V, int64_t W, int8_t Upper) {
+    abortIfClosed(F, "write");
+    trapOnWrongDirection(F, "write", 1);
+    char Buf[PlangRealMaxChars];
+    const std::size_t N = plangFormatReal(Buf, V, W, Upper ? PlangRealProfileTurbo : PlangRealProfileISO,
+                                           PlangSingleMaxDecPlaces);
     std::fwrite(Buf, 1, N, F->Fp);
     trapOnStreamError(F, "write");
 }

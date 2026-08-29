@@ -990,6 +990,21 @@ void Sema::checkCallStmt(const CallStmt& S) {
                     // ISO §6.4.3.2: a packed array[1..n] of char is a string
                     // value, and §6.9.3.1 admits string values.
                     if (isCharStringType(*T)) break;
+                    // Turbo PChar/PAnsiChar (and any `^Char`-pointee type
+                    // under -std=turbo, isCharPointerType's own structural
+                    // rule): a null-terminated C string, written the same
+                    // way a var-string is.  Checked directly against
+                    // `fpc -Mtp`: `writeln(p)`/`write(p:w)` print the bytes p
+                    // points to up to the terminator, exactly what CodeGen's
+                    // emitWriteValue already does for any bare pointer value
+                    // that reaches its string-writer fallback -- this was
+                    // the only thing standing between a PChar and codegen
+                    // already handling it.  Gated on Opts.turbo() the same
+                    // way every other isCharPointerType caller is: an ISO/EP
+                    // `^char` is an ordinary pointer, not a C string, and
+                    // must not become writable just because its pointee
+                    // happens to be Char.
+                    if (Opts.turbo() && isCharPointerType(*T)) break;
                     // EP §6.4.3.3 makes `string` a schema, so a schema whose
                     // BODY is a string denotes a string value as surely as
                     // `string(10)` does: `type s(n: integer) = string(n);
