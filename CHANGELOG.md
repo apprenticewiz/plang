@@ -25,9 +25,29 @@ version numbers follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html
   `Sema::isAssignCompatible`). ISO §6.4.3.2's canonical `array[1..n] of
   char` string-type is untouched and does not decay: only a 0-based array
   does, matching fpc's own refusal of the 1-based case.
+- `-std=turbo` now declares the sized-integer ladder (`ShortInt`, `Byte`,
+  `SmallInt`, `Word`, `LongInt`, `Cardinal`, `LongWord`, `Int64`, `QWord`),
+  `AnsiChar` and the untyped `Pointer` type -- the foundation the rest of
+  Tier 2 is written against. `SmallInt`/`Integer` and `LongWord`/`Cardinal`
+  are literally the same interned type (`TypeContext::getInt` keys on width
+  and signedness alone), which a diagnostic now reflects accurately instead
+  of always saying "integer" for every one of them: `getInt` names each
+  freshly-minted width/signedness pair from the ladder unless it is the
+  dialect's own unqualified `integer`, which keeps its plain name unchanged.
+  `Pointer` is assignment- and comparison-compatible with any other pointer
+  type, in either direction, matching real Turbo Pascal's untyped pointer.
+  None of the eleven names are available under `-std=iso7185` or
+  `-std=iso10206`.
 
 ### Fixed
 
+- `writeln`/`write` treated any 8-bit integer as a `Char` (`BuiltinIO::
+  writesAsChar` matched on LLVM width alone before consulting the Sema
+  type), which was unreachable before the sized-integer ladder above since
+  no `Integer`-kind type was ever 8 bits wide -- `ShortInt` and `Byte` are,
+  and were printed as raw (usually unprintable) bytes instead of their
+  decimal value. Now checked against the Sema type's own `Kind` whenever
+  one is available.
 - Turbo constant-expression folding now bounds-checks against the expression's
   own (possibly narrow) resolved type instead of always assuming 64-bit
   `Integer`: Tier 1 shipped `checkedAdd`/`checkedSub`/`checkedMul`/

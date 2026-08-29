@@ -289,6 +289,42 @@ void Sema::registerBuiltins() {
         (void)Symtab.define(std::move(ExitCodeSym));
     }
 
+    // -std=turbo only: the sized-integer ladder, AnsiChar, and the untyped
+    // Pointer type -- the type names the rest of Tier 2 is written against.
+    //
+    // TypeContext::getInt interns by {Bits, Signed} alone, so SmallInt (16,
+    // signed) and LongWord (32, unsigned) below are literally the same Type
+    // object as Integer and Cardinal respectively -- see getInt's own
+    // comment for why that is fine and how a diagnostic still names them
+    // sensibly rather than always saying "integer".
+    //
+    // AnsiChar is Turbo's 8-bit character type, which is exactly plang's one
+    // and only Char: ISO 7185/EP have never had a second, wider character
+    // type for it to need distinguishing from, so it is registered as an
+    // alias of TyChar rather than a new Type, the same way SmallInt/LongWord
+    // above alias an existing integer Type rather than mint their own.
+    if (Opts.turbo()) {
+        auto declareTypeAlias = [&](const char* Name, std::shared_ptr<Type> Ty) {
+            Symbol S;
+            S.Kind = SymbolKind::TypeAlias;
+            S.Name = Name;
+            S.Ty   = std::move(Ty);
+            S.IsRequiredIdentifier = true;
+            (void)Symtab.define(std::move(S));
+        };
+        declareTypeAlias("ShortInt", Ctx_.getInt(8,  /*Signed=*/true));
+        declareTypeAlias("Byte",     Ctx_.getInt(8,  /*Signed=*/false));
+        declareTypeAlias("SmallInt", Ctx_.getInt(16, /*Signed=*/true));
+        declareTypeAlias("Word",     Ctx_.getInt(16, /*Signed=*/false));
+        declareTypeAlias("LongInt",  Ctx_.getInt(32, /*Signed=*/true));
+        declareTypeAlias("Cardinal", Ctx_.getInt(32, /*Signed=*/false));
+        declareTypeAlias("LongWord", Ctx_.getInt(32, /*Signed=*/false));
+        declareTypeAlias("Int64",    Ctx_.getInt(64, /*Signed=*/true));
+        declareTypeAlias("QWord",    Ctx_.getInt(64, /*Signed=*/false));
+        declareTypeAlias("AnsiChar", TyChar);
+        declareTypeAlias("Pointer",  Ctx_.getGenericPointer());
+    }
+
     // EP §6.4.2.2: predefined constants
     if (Opts.extendedPascal()) {
         auto makeConst = [](const char* Name, std::shared_ptr<Type> Ty,
