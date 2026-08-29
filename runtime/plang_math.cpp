@@ -15,6 +15,7 @@
 #include <cmath>
 #include <complex>
 #include <cstdint>
+#include <ctime>
 
 namespace plang {
 
@@ -29,6 +30,13 @@ extern "C" {
 [[noreturn]] void plang_err_sqrt_domain(double X);
 [[noreturn]] void plang_err_ln_domain(double X);
 [[noreturn]] void plang_err_arg_domain(void);
+
+// -std=turbo only: RandSeed's one shared definition lives in plang_sys.cpp,
+// alongside plang_tp_exitcode -- see that variable's own comment for why.
+// Declared here (not defined) so plang_tp_random_real/_range/
+// plang_tp_randomize, below, can read and update the SAME storage every
+// compiled object shares.
+extern uint32_t plang_tp_randseed;
 
 // ---- Floating-point math (double → double) ----
 
@@ -147,6 +155,90 @@ int64_t plang_round(double X) {
     double R = std::round(X);
     if (!fitsInt64(R)) plang_err_real_to_int_range("round", X);
     return static_cast<int64_t>(R);
+}
+
+// ====================================================================
+// -std=turbo only: Int/Frac (real-to-real, unlike Trunc/Round above) and
+// Random/Randomize (plang's own hand-rolled PRNG -- the runtime has no
+// <random>, so this is a small, explicit, self-contained linear-congruential
+// generator instead).  Neither claims to reproduce any real implementation's
+// output: not real Borland Turbo Pascal 7's own 32-bit LCG, and not Free
+// Pascal's Mersenne Twister -- the two do not agree with each other either,
+// and matching either bit-for-bit is not a goal here.
+// ====================================================================
+
+/// TP Int(x) -- x's integer part, toward zero (the same direction as
+/// plang_trunc/Trunc), but a REAL result, not an ordinal one.  Deliberately
+/// NOT plang_trunc reused-and-cast-back: plang_trunc is range-checked
+/// against int64_t because ITS result is the ordinal Integer Trunc returns,
+/// a check Int's own Real result has no need of and must not inherit --
+/// Int(1e30) is simply 1e30, not the runtime error Trunc(1e30) correctly is
+/// (there is no int64_t for 1e30 to round-trip through in the first place).
+/// std::trunc alone, with no range check of any kind, is the whole function.
+double plang_tp_int(double X) { return std::trunc(X); }
+
+/// TP Frac(x) = x - Int(x) -- x's fractional part, keeping x's own sign
+/// (Frac(-3.7) is -0.7, not 0.3: there is no floor here, only the same
+/// toward-zero Int just above).
+double plang_tp_frac(double X) { return X - std::trunc(X); }
+
+/// Advances plang_tp_randseed (runtime/plang_sys.cpp) one step and returns
+/// the new state.  A 32-bit linear congruential generator with the
+/// "Numerical Recipes" constants (a = 1664525, c = 1013904223): full period
+/// 2^32, good enough statistical behavior for a general-purpose Random, and
+/// simple enough to stay in plain unsigned integer arithmetic -- unsigned
+/// overflow is well-defined modular wraparound in C++, exactly the
+/// arithmetic an LCG wants, so this needs no overflow checking the way this
+/// file's signed integer math (plang_ipow, plang_sqr_int, ...) does.
+static inline uint32_t plangTpAdvanceRandSeed() {
+    plang_tp_randseed = plang_tp_randseed * 1664525u + 1013904223u;
+    return plang_tp_randseed;
+}
+
+/// TP Random() -- the ZERO-argument shape (Random(Range), the
+/// integer-result shape, is plang_tp_random_range just below; see
+/// Builtins.def's and Sema::checkCallExpr's own comments for why one source
+/// name needs two runtime entry points).  Scales the generator's new 32-bit
+/// state into [0, 1): 2^32 is exact in a double, so the division introduces
+/// no rounding surprises, and the numerator's own range (0 .. 2^32-1) keeps
+/// the result strictly below 1.0.
+double plang_tp_random_real(void) {
+    return static_cast<double>(plangTpAdvanceRandSeed()) / 4294967296.0; // 2^32
+}
+
+/// TP Random(Range) -- the ONE-argument shape.  Range <= 0 has no [0, Range)
+/// to answer from; plang's own choice (not a claim about real TP/FPC's own,
+/// inconsistent-with-each-other behavior here) is to answer 0 rather than
+/// abort, the same "always in range, never a crash" answer 0 already is for
+/// every genuinely in-range Range.  Otherwise: advance the generator once,
+/// then map its full 32-bit state down to [0, Range) with a widening
+/// multiply-and-shift (Range promoted to 64 bits first so the product can
+/// never overflow) rather than `% Range`, which would bias low results
+/// whenever Range does not evenly divide 2^32.
+int64_t plang_tp_random_range(int64_t Range) {
+    if (Range <= 0) return 0;
+    const uint32_t S = plangTpAdvanceRandSeed();
+    return static_cast<int64_t>(
+        (static_cast<uint64_t>(S) * static_cast<uint64_t>(Range)) >> 32);
+}
+
+/// TP Randomize -- reseeds RandSeed from wall-clock time, so successive RUNS
+/// of the same program get a different Random sequence.  clock_gettime
+/// (CLOCK_REALTIME), not plang_gettimestamp/time_t (plang_time.cpp): that
+/// pair's one-second resolution would make two runs started in the same
+/// second seed identically, which defeats the entire point of Randomize.
+/// clock_gettime is a POSIX C API available through <ctime> -- no <random>
+/// or other C++ stdlib facility needed, consistent with the rest of this
+/// runtime (see this file's own header comment).  tv_sec is spread with a
+/// Knuth multiplicative-hash constant before combining with tv_nsec, so nsec
+/// alone (which on some platforms/clocks advances in coarse steps) does not
+/// dominate the result.
+void plang_tp_randomize(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    const uint32_t Sec  = static_cast<uint32_t>(ts.tv_sec);
+    const uint32_t Nsec = static_cast<uint32_t>(ts.tv_nsec);
+    plang_tp_randseed = (Sec * 2654435761u) ^ Nsec;
 }
 
 // ====================================================================

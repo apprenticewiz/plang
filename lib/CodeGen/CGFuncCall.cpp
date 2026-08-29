@@ -128,6 +128,38 @@ llvm::Value* CGFuncCall::emitBuiltinCall(const std::string& Name,
         auto* arg = ToDouble(EmitExpr(*Args[0]));
         return B.CreateCall(RtFns.getRTMathRI("plang_round"), {arg}, "round");
     }
+    // TP-only: Int(x)/Frac(x) -- real-to-real, unlike Trunc/Round's
+    // real-to-i64 above, so getRTMathRR (double(double)) rather than
+    // getRTMathRI.  plang_tp_int/plang_tp_frac (runtime/plang_math.cpp) are
+    // deliberately NOT plang_trunc/plang_round reused: those are
+    // range-checked for an ordinal Integer RESULT, which Int/Frac's own Real
+    // result has no need of and must not inherit.
+    if (lo == "int" || lo == "frac") {
+        auto* arg = ToDouble(EmitExpr(*Args[0]));
+        return B.CreateCall(RtFns.getRTMathRR("plang_tp_" + lo), {arg}, lo);
+    }
+    // TP-only: Random()/Random(Range) -- see Sema::checkCallExpr's identical
+    // note (and Builtins.def's) on why one name needs two runtime entry
+    // points, chosen by ARITY rather than by the argument's type the way
+    // Abs/Sqr dispatch on it just above.  The bare (no-parens) spelling of
+    // the zero-argument form is handled separately, in CGExprCore::emitExpr
+    // 's IdentExpr case, next to eof/eoln's identical bare-call handling --
+    // it never reaches a CallExpr, so never reaches this function at all.
+    if (lo == "random") {
+        if (Args.empty()) {
+            auto* fn = RtFns.getExternFnN("plang_tp_random_real", DblTy, {});
+            return B.CreateCall(fn, {}, "random");
+        }
+        auto* arg = EmitExpr(*Args[0]);
+        auto* v   = ToI64(arg);
+        auto* fn  = RtFns.getExternFnN("plang_tp_random_range", I64Ty, {I64Ty});
+        auto* r   = B.CreateCall(fn, {v}, "random");
+        // Random(Range) stays in Range's own type (Sema's identical rule) --
+        // the runtime call is always done at i64 width, so narrow back down
+        // the same way succ/pred already do above.
+        return arg->getType() != I64Ty
+            ? B.CreateZExtOrTrunc(r, arg->getType(), "random") : r;
+    }
     // ---- Boolean file-status built-ins ----
     if (lo == "eof") {
         if (!Args.empty() && FileVars.isFileVar(*Args[0])) {

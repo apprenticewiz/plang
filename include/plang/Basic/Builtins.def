@@ -211,6 +211,38 @@ BUILTIN(Hi,           "hi",           Func, TP, 1, 1, R_Int)
 BUILTIN(Lo,           "lo",           Func, TP, 1, 1, R_Int)
 BUILTIN(Swap,         "swap",         Func, TP, 1, 1, R_Int)
 
+// -std=turbo only: Random()/Random(Range) -- the RTL's pseudo-random number
+// generator, sharing one name across TWO call shapes the way Hi/Lo/Swap just
+// above share their own R_Int placeholder: the zero-argument form answers a
+// REAL in [0, 1); the one-argument form advances the SAME generator state
+// (RandSeed, a predefined Var registered the same way ExitCode is --
+// Sema::registerBuiltins) and answers an INTEGER-kind value in [0, Range)
+// instead, in the ARGUMENT's own type -- the same "stays in the argument's
+// own type" rule Abs/Sqr/Succ/Pred/High/Low already follow.  Neither shape
+// is the single fixed Result this table alone can express; R_Real here is
+// only the zero-argument answer, and Sema::checkCallExpr's own dedicated arm
+// (mirroring Abs/Sqr's identical "argument decides" shape) overrides it for
+// the one-argument form.  This is plang's OWN generator (runtime/
+// plang_math.cpp's plang_tp_random_real/_range) -- no claim is made that its
+// sequence matches real Borland Turbo Pascal 7's (its own 32-bit LCG) or
+// Free Pascal's (a Mersenne Twister) -- the two do not match each other
+// either, and neither is worth chasing bit-for-bit.
+BUILTIN(Random,       "random",       Func, TP, 0,  1, R_Real)
+// Randomize -- reseeds RandSeed from a real source of entropy (wall-clock
+// time via clock_gettime(CLOCK_REALTIME)), so successive RUNS of the same
+// program get a different Random sequence; runtime/plang_math.cpp's
+// plang_tp_randomize.
+BUILTIN(Randomize,    "randomize",    Proc, TP, 0,  0, R_None)
+// Int(x)/Frac(x) -- x's integer part, toward zero like Trunc, but a REAL
+// result rather than an ordinal one, so -- unlike Trunc/Round -- there is no
+// int64 range to respect: Int(1e30) is simply 1e30, not the runtime error
+// Trunc(1e30) correctly is.  Frac(x) = x - Int(x), x's fractional part with
+// x's own sign (Frac(-3.7) is -0.7, not 0.3 -- there is no floor here).  See
+// runtime/plang_math.cpp's plang_tp_int/plang_tp_frac for why these are NOT
+// built on top of the existing, range-checked plang_trunc/plang_round.
+BUILTIN(Int,          "int",          Func, TP, 1,  1, R_Real)
+BUILTIN(Frac,         "frac",         Func, TP, 1,  1, R_Real)
+
 // -std=turbo only: Include(s, x) / Exclude(s, x) -- `s := s + [x]` and
 // `s := s - [x]` by another name, mutating the set variable in place.
 BUILTIN(Include,      "include",      Proc, TP, 2, 2, R_None)
