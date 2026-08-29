@@ -21,6 +21,26 @@ using namespace plang;
 
 Parser::Parser(Scanner Sc, DiagnosticsEngine& Diags, LangOptions Opts)
     : Opts(Opts), Lex(std::move(Sc)), Diags(Diags) {
+    // TypeNames_ is normally populated only as a `type` section's own
+    // definitions are parsed (parseTypeDef), since ordinary user types don't
+    // exist until declared. The Turbo sized-integer ladder (Sema::
+    // registerBuiltins, gated Opts.turbo()) is different: those eleven names
+    // (ShortInt/Byte/SmallInt/Word/Cardinal/LongInt/LongWord/Int64/QWord/
+    // AnsiChar/Pointer) are predefined Sema symbols the PARSER never sees
+    // declared anywhere, so without seeding them here `Byte(SomeWord)` -- an
+    // ordinary, common Turbo typecast idiom -- would silently fail to parse
+    // as a cast at all (TypeNames_.count("byte") == 0) and fall through to
+    // the ordinary CallExpr path, where Sema (which does know about these
+    // names) would then reject it as "not callable" instead of accepting the
+    // cast. Pre-seeding costs nothing for ISO 7185/Extended Pascal programs,
+    // which never reach this branch (every check reading TypeNames_ for cast
+    // purposes is itself gated on Opts.turbo()).
+    if (Opts.turbo()) {
+        static constexpr const char* SizedIntegerLadder[] = {
+            "shortint", "byte", "smallint", "word", "cardinal",
+            "longint",  "longword", "int64", "qword", "ansichar", "pointer"};
+        for (const char* Name : SizedIntegerLadder) TypeNames_.insert(Name);
+    }
     advance(); // prime Current with the first token
 }
 
