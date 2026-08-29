@@ -389,6 +389,68 @@ BUILTIN(IOResult,     "ioresult",     Func, TP, 0, 0, R_Int)
 BUILTIN(Assign,       "assign",       Proc, TP, 2, 2, R_None)
 BUILTIN(Append,       "append",       Proc, TP, 1, 1, R_None)
 
+// -std=turbo only: FilePos(f) / FileSize(f) -- current / total record
+// position, in units of f's own RecSize (Cluster A item 4's RecSize
+// wiring: SizeOf(element) for a typed file, the Reset/Rewrite-given or
+// default-128 record size for an untyped one), NOT bytes.  R_Int is only
+// the placeholder Builtins.def's own convention uses for a result whose
+// real type is worked out elsewhere (the comment on Abs/Sqr, above, is the
+// original example) -- checkCallExpr overrides it to a genuine 64-bit
+// Int64 here, wide enough that a >2GB file's FileSize does not wrap the
+// way Turbo's own 32-bit LongInt eventually would.  Both refuse a Text
+// argument (err_binary_file_required) -- confirmed against `fpc -Mtp`,
+// which refuses to call either with one at all.
+BUILTIN(FilePos,      "filepos",      Func, TP, 1, 1, R_Int)
+BUILTIN(FileSize,     "filesize",     Func, TP, 1, 1, R_Int)
+// -std=turbo only: SeekEof(f) / SeekEoln(f) -- the CONSUMING counterparts
+// of Eof/Eoln: SeekEof skips past any blanks, tabs and line markers ahead
+// of the current position before testing; SeekEoln skips only blanks and
+// tabs (a line marker is itself what Eoln tests for, so SeekEoln does not
+// cross one).  Text-only, the same restriction Eoln itself already has
+// (err_line_proc_not_text) -- confirmed against `fpc -Mtp`.
+BUILTIN(SeekEof,      "seekeof",      Func, TP, 1, 1, R_Bool)
+BUILTIN(SeekEoln,     "seekeoln",     Func, TP, 1, 1, R_Bool)
+
+// -std=turbo only: Seek(f, n) / Truncate(f) -- position f at record n
+// (0-relative, in units of RecSize) / truncate f at the current position.
+// Both refuse a Text argument (err_binary_file_required), the same as
+// FilePos/FileSize above.
+BUILTIN(Seek,         "seek",         Proc, TP, 2, 2, R_None)
+BUILTIN(Truncate,     "truncate",     Proc, TP, 1, 1, R_None)
+// -std=turbo only: BlockRead(f, var buf; count[; var result]) /
+// BlockWrite(f, var buf; count[; var result]) -- transfer count
+// RecSize-sized records between f and buf, an UNTYPED var parameter (any
+// variable at all, addressed directly, the same as FillChar/Move's own X/
+// Source/Dest above).  The optional 4th argument is not cosmetic: WITH a
+// result argument, a short transfer is not an error -- result simply
+// receives the actual count transferred; WITHOUT one, a short transfer
+// sets InOutRes to 100 (BlockRead)/101 (BlockWrite) -- Borland's own
+// documented distinction, confirmed against `fpc -Mtp`.  See
+// CGProcCall.cpp's own dispatch for exactly where that arity reads.
+BUILTIN(BlockRead,    "blockread",    Proc, TP, 3, 4, R_None)
+BUILTIN(BlockWrite,   "blockwrite",   Proc, TP, 3, 4, R_None)
+// -std=turbo only: Erase(f) / Rename(f, newname) -- delete / rename the
+// file f is bound to (by Assign), and (Rename only) update f's own bound
+// name to match.  Both require f to be fmClosed first -- confirmed against
+// `fpc -Mtp`: either call against a still-open f sets InOutRes to 102
+// ("file not assigned" -- FPC's own field practice reuses that code here
+// rather than a dedicated one) and performs nothing.
+BUILTIN(Erase,        "erase",        Proc, TP, 1, 1, R_None)
+BUILTIN(Rename,       "rename",       Proc, TP, 2, 2, R_None)
+// -std=turbo only: Flush(f) -- flush f's buffered output without closing
+// it.  No Text/binary restriction of its own (confirmed against
+// `fpc -Mtp`: both accept it).
+BUILTIN(Flush,        "flush",        Proc, TP, 1, 1, R_None)
+// -std=turbo only: SetTextBuf(var f: Text; var buf[; size]) -- overrides
+// f's own internal I/O buffer with caller-supplied storage.  buf is an
+// UNTYPED var parameter like BlockRead/BlockWrite's own above; size
+// defaults to 1024 when omitted (real Borland's own default is
+// SizeOf(buf), which plang cannot know for an untyped actual with no
+// further help -- see CGProcCall.cpp's own comment for why a fixed default
+// is used instead).  Text-only (err_line_proc_not_text), the same
+// restriction Eoln/SeekEoln already have.
+BUILTIN(SetTextBuf,   "settextbuf",   Proc, TP, 2, 3, R_None)
+
 #undef ALL
 #undef TP
 #undef EP

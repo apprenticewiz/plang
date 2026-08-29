@@ -39,6 +39,7 @@
 #include <cstring>
 
 #include <sys/stat.h>
+#include <unistd.h> // ftruncate (plang_tp_truncate) -- no higher-level libc call exists
 
 namespace plang {
 
@@ -77,6 +78,14 @@ static int checkedWidth(int64_t W);
 /// name reopens that same external entity instead of diverting to fresh,
 /// unnamed internal storage.
 static void setBinding(PascalFile *F, const char *Name);
+
+/// Defined with SeekRead/SeekWrite/SeekUpdate further down; plang_tp_seek
+/// (Cluster C item 6) computes an identical N/ElemSize/IndexLow byte offset,
+/// with the identical overflow safety, and reuses this rather than
+/// duplicating it -- IndexLow is always 0 for plang_tp_seek's own call
+/// (Turbo's Seek is 0-relative, with no EP index-type origin to offset by).
+static bool seekOffset(int64_t N, int64_t ElemSize, int64_t IndexLow,
+                        long *Offset);
 
 /// Defined with the other runtime error reporters in plang_sys.cpp.
 [[noreturn]] void plang_err_bind_already_bound(void);
@@ -159,12 +168,16 @@ static void setInOutResIfClear(int64_t Code) {
 /// found"), ENFILE/EMFILE -> 4 ("too many open files"),
 /// EACCES/EROFS/EEXIST/ENOTEMPTY/EBUSY/ENOTDIR/EISDIR -> 5 ("file access
 /// denied" -- FPC folds all seven into the one code, not just EACCES), and
-/// EPIPE/EINTR/EIO/EAGAIN/ENOSPC -> 101 ("disk write error").  Real FPC's
-/// table also carries ENOMEM/EFAULT -> 217, EINVAL -> 218 and EBADF -> 6;
-/// left out here because nothing in this item calls this with an errno a
-/// POSIX fopen(3) can actually produce one of those three for, and adding
-/// them with no exercised call site to confirm them against would be
-/// guessing rather than matching field practice.  EPERM is deliberately
+/// EPIPE/EINTR/EIO/EAGAIN/ENOSPC -> 101 ("disk write error"), and (added by
+/// Cluster C item 6, BlockRead/BlockWrite/Seek/...: plang_tp_seek's own
+/// `Seek(f, -5)` on a fresh `Rewrite`-opened file is an exercised call site
+/// now, empirically confirmed with `fpc -Mtp` to report 218, not the raw
+/// EINVAL value) EINVAL -> 218.  Real FPC's table also carries ENOMEM/
+/// EFAULT -> 217 and EBADF -> 6; still left out here because nothing in
+/// this item calls this with an errno a POSIX fopen(3)/fseek(3) can
+/// actually produce either of those two for, and adding them with no
+/// exercised call site to confirm them against would be guessing rather
+/// than matching field practice.  EPERM is deliberately
 /// NOT folded into EACCES's 5, tempting as "both mean permission" looks --
 /// FPC's own `case` statement has no ESysEPERM arm either, so it falls to
 /// the same `else` every unlisted errno does below: passed through
@@ -195,6 +208,7 @@ int64_t plang_tp_posix_to_run_error(int PosixErrno) {
         case EIO:
         case EAGAIN:
         case ENOSPC:        return 101;
+        case EINVAL:        return 218;
         default:            return PosixErrno;
     }
 }
@@ -787,6 +801,199 @@ void plang_tp_close(PascalFile *F) {
     unloadComponent(F);
 }
 
+// ---- Cluster C item 6: FilePos/FileSize/Seek/Truncate/BlockRead/
+// BlockWrite/Erase/Rename/Flush/SetTextBuf ----
+//
+// The rest of TP's own file model, on top of Assign/Reset/Rewrite/Append/
+// Close just above.  Every one of these is Turbo-only and genuinely
+// separate from any ISO/EP entry point (this section's own top comment,
+// above plang_tp_assign, states the same P7 rule) -- none of them is
+// reachable except through CodeGen's own Turbo-only dispatch.
+
+/// TP FilePos(f): current record position, 0-relative, in units of
+/// F->RecSize -- NOT bytes.  Confirmed against `fpc -Mtp`: FilePos reads 0
+/// right after Reset on a fresh typed file, and 3 right after `Seek(f,
+/// 3)`.  Non-aborting (tpFileReady): a closed or errored f reports 0
+/// rather than crashing, consistent with every other Turbo entry point
+/// here.
+int64_t plang_tp_filepos(PascalFile *F) {
+    if (!tpFileReady(F, "FilePos")) return 0;
+    const long Pos = std::ftell(F->Fp);
+    if (Pos < 0 || F->RecSize <= 0) return 0;
+    return (int64_t)Pos / F->RecSize;
+}
+
+/// TP FileSize(f): total record count, in units of F->RecSize.  FLOORS
+/// when the file's byte length is not an exact multiple of RecSize --
+/// confirmed against `fpc -Mtp`: a 5-byte file reset with RecSize 2 reports
+/// FileSize 2, not 3 (rounded up) and not 2.5 (there being no fractional
+/// record). Saves and restores the current position around the SEEK_END
+/// probe, the same way plang_lastposition/plang_empty above already do.
+int64_t plang_tp_filesize(PascalFile *F) {
+    if (!tpFileReady(F, "FileSize")) return 0;
+    const long Saved = std::ftell(F->Fp);
+    std::fseek(F->Fp, 0, SEEK_END);
+    const long End = std::ftell(F->Fp);
+    if (Saved >= 0) std::fseek(F->Fp, Saved, SEEK_SET);
+    if (End < 0 || F->RecSize <= 0) return 0;
+    return (int64_t)End / F->RecSize;
+}
+
+/// TP Seek(f, n): position f at record n (0-relative), n*F->RecSize bytes
+/// from the start.  Seeking past the current end of file is legal and NOT
+/// an error -- confirmed against `fpc -Mtp`: a following FilePos reads
+/// back n exactly, with IOResult 0 -- real Turbo Pascal programs rely on
+/// this to extend a file (seek past the end, then Write/BlockWrite).  A
+/// negative n IS an error: confirmed `Seek(f, -5)` against `fpc -Mtp`
+/// reports IOResult 218 (EINVAL, plang_tp_posix_to_run_error's own table),
+/// which is what this reaches by capturing errno on fseek's own failure --
+/// unlike SeekRead/SeekWrite/SeekUpdate's plang_err_seek_failed (an
+/// unconditional abort), this goes through setInOutResIfClear, Turbo's own
+/// {$I+}/{$I-} contract.  seekOffset's overflow-safe multiply (defined with
+/// SeekRead/SeekWrite/SeekUpdate further down, forward-declared above) is
+/// reused rather than duplicated, with IndexLow fixed at 0 -- Turbo's Seek
+/// has no EP index-type origin to offset by.
+void plang_tp_seek(PascalFile *F, int64_t N) {
+    if (!tpFileReady(F, "Seek")) return;
+    long Offset;
+    const int64_t RecSize = F->RecSize > 0 ? F->RecSize : 1;
+    if (!seekOffset(N, RecSize, 0, &Offset)
+            || std::fseek(F->Fp, Offset, SEEK_SET) != 0) {
+        const int Err = errno;
+        setInOutResIfClear(plang_tp_posix_to_run_error(Err));
+        return;
+    }
+    F->Buf = PlangFileUninit;
+    unloadComponent(F);
+}
+
+/// TP Truncate(f): truncates f at the CURRENT position -- everything from
+/// here to the previous end of file is discarded, and nothing before it is
+/// touched.  ftruncate(2) on the underlying fd (fileno(F->Fp)), the same
+/// low-level POSIX call plang_tp_reset's own directory guard already uses
+/// fstat/fileno for -- no higher-level libc call for this exists.  Flushes
+/// first: stdio may be holding buffered bytes not yet visible to the fd
+/// truncate operates on, and truncating out from under an unflushed buffer
+/// would let a later flush write stale data back past the new end.
+void plang_tp_truncate(PascalFile *F) {
+    if (!tpFileReady(F, "Truncate")) return;
+    std::fflush(F->Fp);
+    const long Pos = std::ftell(F->Fp);
+    if (Pos < 0 || ftruncate(fileno(F->Fp), (off_t)Pos) != 0) {
+        const int Err = errno;
+        setInOutResIfClear(plang_tp_posix_to_run_error(Err));
+        return;
+    }
+    unloadComponent(F);
+}
+
+/// TP BlockRead(f, buf, count, hasResult): reads count F->RecSize-sized
+/// records from f into buf (an untyped, raw pointer -- CodeGen's own
+/// EmitLValue on the actual argument, no type-specific marshalling),
+/// returning the number of WHOLE records actually transferred (floor of
+/// bytes-read / RecSize, matching FileSize's own floor above -- a
+/// trailing partial record's bytes, if any, are read into buf but not
+/// counted).  hasResult is the arity flag CodeGen's own dispatch passes
+/// (CGProcCall.cpp): confirmed against `fpc -Mtp`, a short read WITHOUT a
+/// result argument sets InOutRes 100 ("disk read error"); WITH one, it does
+/// not -- the caller's own result variable (set by CodeGen after this
+/// returns, not here) silently receives the actual count instead.  Reading
+/// with Count <= 0 or F->RecSize <= 0 is a no-op that transfers zero
+/// records and is never itself an error (Count <= 0 legitimately means "read
+/// nothing"; RecSize <= 0 cannot happen after a real Reset -- Reset itself
+/// already refuses a zero RecSize -- so this is defense in depth only).
+int64_t plang_tp_blockread(PascalFile *F, void *Buf, int64_t Count, int8_t HasResult) {
+    if (!tpFileReady(F, "BlockRead")) return 0;
+    if (Count <= 0 || F->RecSize <= 0) return 0;
+    const std::size_t Want = (std::size_t)Count * (std::size_t)F->RecSize;
+    const std::size_t Got  = std::fread(Buf, 1, Want, F->Fp);
+    const int64_t Actual = (int64_t)(Got / (std::size_t)F->RecSize);
+    F->Buf = PlangFileUninit;
+    unloadComponent(F);
+    if (!HasResult && Actual < Count) setInOutResIfClear(100);
+    return Actual;
+}
+
+/// TP BlockWrite(f, buf, count, hasResult): the write-side twin of
+/// BlockRead just above -- see its own comment for the shared shape.  A
+/// short write without a result argument sets InOutRes 101 ("disk write
+/// error") instead of 100.
+int64_t plang_tp_blockwrite(PascalFile *F, const void *Buf, int64_t Count, int8_t HasResult) {
+    if (!tpFileReady(F, "BlockWrite")) return 0;
+    if (Count <= 0 || F->RecSize <= 0) return 0;
+    const std::size_t Want = (std::size_t)Count * (std::size_t)F->RecSize;
+    const std::size_t Got  = std::fwrite(Buf, 1, Want, F->Fp);
+    const int64_t Actual = (int64_t)(Got / (std::size_t)F->RecSize);
+    unloadComponent(F);
+    if (!HasResult && Actual < Count) setInOutResIfClear(101);
+    return Actual;
+}
+
+/// TP Erase(f) / Rename(f, newname): act on F->Name (the name Assign bound
+/// f to), requiring f be fmClosed first -- confirmed against `fpc -Mtp`:
+/// calling either against a still-open f (or one never Assigned at all,
+/// F->Mode's zero-init default, itself outside fmClosed..fmInOut) sets
+/// InOutRes 102 ("file not assigned" -- FPC's own field practice reuses
+/// that code here rather than a dedicated one) and performs nothing.
+void plang_tp_erase(PascalFile *F) {
+    if (F->Mode != PlangFmClosed) { setInOutResIfClear(102); return; }
+    if (std::remove(F->Name) != 0) {
+        const int Err = errno;
+        setInOutResIfClear(plang_tp_posix_to_run_error(Err));
+    }
+}
+
+/// TP Rename(f, newname): see plang_tp_erase's own comment for the shared
+/// fmClosed requirement.  On success, updates F->Name to NewName -- real
+/// Turbo Pascal's own documented behavior (confirmed against `fpc -Mtp`: a
+/// Reset(f) with no intervening Assign, right after a successful Rename,
+/// opens the NEW name) -- so a following Reset/Rewrite/Append on f reaches
+/// the renamed file, not the one that no longer exists under the old name.
+void plang_tp_rename(PascalFile *F, const char *NewName) {
+    if (F->Mode != PlangFmClosed) { setInOutResIfClear(102); return; }
+    if (std::rename(F->Name, NewName) != 0) {
+        const int Err = errno;
+        setInOutResIfClear(plang_tp_posix_to_run_error(Err));
+        return;
+    }
+    const std::size_t Cap = static_cast<std::size_t>(PlangFileNameCap) - 1;
+    const std::size_t Len = NewName ? std::strlen(NewName) : 0;
+    const std::size_t N   = Len < Cap ? Len : Cap;
+    if (N) std::memcpy(F->Name, NewName, N);
+    F->Name[N] = '\0';
+}
+
+/// TP Flush(f): flushes f's buffered output without closing it.  No InOutRes
+/// distinction of its own beyond tpFileReady's ordinary 103 -- confirmed
+/// against `fpc -Mtp`: Flush on a valid, open file always reports IOResult
+/// 0.
+void plang_tp_flush(PascalFile *F) {
+    if (!tpFileReady(F, "Flush")) return;
+    std::fflush(F->Fp);
+}
+
+/// TP SetTextBuf(f, buf, size): overrides f's own internal I/O buffering
+/// with caller-supplied storage, real Turbo Pascal's own documented
+/// pre-open idiom.  plang's file model is a thin wrapper over C stdio, not
+/// Borland's own hand-rolled TextRec buffering layer, and PascalFile (see
+/// PascalFileLayout.h) carries no "pending buffer, not yet attached to a
+/// stream" slot the way TextRec does -- so this is a DELIBERATE, DOCUMENTED
+/// deviation from real Turbo Pascal's exact contract: called before f is
+/// opened (F->Fp still null, the ordinary TP idiom -- confirmed working
+/// against `fpc -Mtp`, this item's own manual test), there is no stream yet
+/// for setvbuf(3) to attach to, so this is a silent no-op; called AFTER f
+/// is opened, it takes effect immediately via setvbuf(3) (glibc allows
+/// setvbuf at any point before the first real I/O, which an immediately
+/// following Reset/Rewrite/Append never contradicts here since Reset/
+/// Rewrite/Append always reopen the stream, discarding any buffer already
+/// attached to it). A plang program wanting SetTextBuf to take effect must
+/// therefore call it AFTER Reset/Rewrite/Append, the reverse of real Turbo
+/// Pascal's own ordering -- a real, exercised limitation, not a guess.
+void plang_tp_settextbuf(PascalFile *F, void *Buf, int64_t Size) {
+    if (!F || !F->Fp || !Buf || Size <= 0) return;
+    std::setvbuf(F->Fp, static_cast<char*>(Buf), _IOFBF, (std::size_t)Size);
+}
+
 // ---- status ----
 
 int8_t plang_eof_file(PascalFile *F) {
@@ -837,6 +1044,47 @@ int8_t plang_eoln_file_turbo(PascalFile *F) {
     if (plang_tp_inoutres != 0) return 1;
     if (!tpFileReady(F, "eoln")) return 1;
     ensurePrimed(F);
+    return (F->Buf == EOF || F->Buf == '\n') ? 1 : 0;
+}
+
+// -std=turbo only: SeekEof(f) / SeekEoln(f) -- Cluster C item 6.  Real
+// Turbo Pascal / Free Pascal field practice (confirmed against `fpc -Mtp`):
+// SeekEof skips past any blanks, tabs, carriage returns and line-feeds
+// immediately ahead of the current position, actually CONSUMING them
+// (unlike plain Eof, which only peeks through the one-character lookahead
+// window), before testing eof -- deliberately NOT the same operation as
+// plang_eof_file_turbo just above, which must not be aliased here: a
+// following Eof/Eoln call has to see the position SeekEof actually left the
+// stream at, not merely report what SeekEof itself computed. SeekEoln skips
+// only blanks and tabs -- a line marker is what Eoln itself tests for, so
+// SeekEoln stops there rather than crossing it (confirmed: a following
+// Eoln right after SeekEoln is still true, and the newline itself is still
+// there to be read next).  Neither is InOutRes-pending-aware the way Eof/
+// Eoln's own `_turbo` siblings are -- Borland's own manual documents no
+// such behavior for either, and there is no local `fpc -Mtp` field-practice
+// evidence either way to match instead.
+static void skipTurboWhitespace(PascalFile *F, bool CrossLines) {
+    ensurePrimed(F);
+    for (;;) {
+        const int C = F->Buf;
+        if (C == EOF) return;
+        if (C == ' ' || C == '\t') { advance(F); continue; }
+        if (CrossLines && (C == '\n' || C == '\r')) { advance(F); continue; }
+        return;
+    }
+}
+
+int8_t plang_tp_seekeof(PascalFile *F) {
+    if (!tpFileReady(F, "SeekEof")) return 1;
+    if (!F->Readable) return 1;
+    skipTurboWhitespace(F, /*CrossLines=*/true);
+    return (F->Buf == EOF) ? 1 : 0;
+}
+
+int8_t plang_tp_seekeoln(PascalFile *F) {
+    if (!tpFileReady(F, "SeekEoln")) return 1;
+    if (!F->Readable) return 1;
+    skipTurboWhitespace(F, /*CrossLines=*/false);
     return (F->Buf == EOF || F->Buf == '\n') ? 1 : 0;
 }
 
