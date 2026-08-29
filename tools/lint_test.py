@@ -157,6 +157,25 @@ BRACE_CHECK_EXEMPT = {
     # syntax in English the same way the switch-directive files above already
     # do.  Not a hazard to fix.
     "test/Driver/Turbo/minint-div-negative-one-on-a-16-bit-integer-aborts-with-runtime-error-215.pas",
+    # Same reasoning again (only ever compiles under -std=turbo -- see each
+    # file's own RUN: line -- so the matched-delimiter rule this check
+    # doesn't model is the one that actually applies), for the automatic
+    # {$I+}/{$I-} check (Tier 3 Cluster A item 2, RangeCheckGuards::
+    # ioChecksAt/plang_iocheck): their header prose and/or in-code comments
+    # discuss '{$I+}'/'{$I-}' syntax in English the same way dollar-i-plus-
+    # and-minus-are-not-mistaken-for-an-include.pas already does above.  Not
+    # a hazard to fix.
+    "test/CodeGen/Turbo/a-pending-inoutres-is-not-overwritten-by-a-later-failing-operation.pas",
+    "test/CodeGen/Turbo/checked-close-catches-a-pending-error-from-an-earlier-deferred-reset-failure.pas",
+    "test/CodeGen/Turbo/eof-and-eoln-report-true-while-an-io-error-is-pending.pas",
+    "test/CodeGen/Turbo/io-minus-suppresses-the-automatic-check-and-abort.pas",
+    "test/CodeGen/Turbo/io-plus-aborts-at-the-next-checked-operation-not-the-failing-one.pas",
+    "test/CodeGen/Turbo/io-plus-console-writeln-with-no-file-argument-still-catches-a-pending-error.pas",
+    "test/CodeGen/Turbo/io-plus-is-the-turbo-default-and-aborts-on-the-first-checked-failure.pas",
+    "test/CodeGen/Turbo/ioresult-reads-and-clears-inoutres.pas",
+    "test/CodeGen/Turbo/reset-on-a-nonexistent-file-sets-ioresult-instead-of-crashing.pas",
+    "test/CodeGen/Turbo/reset-on-a-permission-denied-file-sets-ioresult-instead-of-crashing.pas",
+    "test/CodeGen/Turbo/write-to-a-never-opened-file-is-a-silent-no-op-and-sets-ioresult-103.pas",
 }
 
 

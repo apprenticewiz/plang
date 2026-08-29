@@ -16,6 +16,14 @@ EEXIST/ENOTEMPTY/EBUSY/ENOTDIR/EISDIR all collapse to in the real `fpc`
 3.2.2 table this item's plang_tp_posix_to_run_error matches (see that
 function's own comment) -- not a code unique to EACCES alone.
 
+`{$I-}` around the Reset: this file is about the fileReady choke point, not
+about the automatic `{$I+}` check a later part of this same item adds --
+under that check's real default (`{$I+}` ON unless a program says
+otherwise), Reset's own failure would abort the process right there,
+before either CHECK line's writeln ever ran.  See io-plus-aborts-at-the-
+next-checked-operation-not-the-failing-one.pas for the check's own
+dedicated coverage.
+
 RUN: rm -rf %t.dir && mkdir -p %t.dir/locked
 RUN: printf 'secret\n' > %t.dir/locked/inner.txt
 RUN: chmod 000 %t.dir/locked
@@ -32,6 +40,7 @@ CHECK-NEXT:did not crash
 var f: text;
 begin
   assign(f, ParamStr(1));
+  {$I-}
   reset(f);
   writeln('ioresult=', IOResult);
   writeln('did not crash');

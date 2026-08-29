@@ -1046,6 +1046,42 @@ int64_t plang_tp_ioresult(void) {
     return Result;
 }
 
+/// -std=turbo only: the automatic `{$I+}` check CodeGen (RangeCheckGuards::
+/// ioChecksAt, CGProcCall.cpp) emits a call to after a write/writeln/read/
+/// readln/Reset/Rewrite/Append/Close statement whose own source location has
+/// IOChecks ON.  This is TEXTUAL/POSITIONAL, matching every other switch in
+/// CompilerSwitches.def: whether to EMIT the call at all is decided purely at
+/// compile time from the STATEMENT's own position, never at run time from
+/// which dialect is active or which operation actually ran -- so this
+/// function itself has no "is this Turbo" branch of its own to make, the
+/// same way plang_tp_runerror above it does not.
+///
+/// Reads AND CLEARS InOutRes through plang_tp_ioresult itself, rather than
+/// duplicating that read-and-clear pair here -- there is exactly one place
+/// in this file that clears InOutRes, and this reuses it instead of growing
+/// a second, potentially-divergent copy of the same two lines.  A pending
+/// error read this way is consumed exactly as if a Pascal-level IOResult had
+/// read it: a later explicit `IOResult` call after a checked failure aborted
+/// here would see 0, not the code that was just reported and exited on --
+/// consistent with the fact that the process is about to exit anyway, and
+/// with real Turbo Pascal's own read-and-clear IOResult contract applying no
+/// differently when the read happens to be the compiler-inserted kind.
+///
+/// On a zero read (no error pending) this simply returns -- a no-op, the
+/// overwhelmingly common case for every checked I/O statement that actually
+/// succeeded.  On a nonzero read it reports through the same
+/// plang_tp_runerror(Code) every other Turbo runtime check already routes
+/// through (RangeCheckGuards.cpp's emitTpRunError, CGProcCall.cpp's
+/// `runerror` arm): prints "Runtime error <Code> at $<addr>", runs the exit
+/// chain (plang_module_finals_run), and exits with status Code -- so a
+/// checked I/O failure's exit status is always the InOutRes code itself, the
+/// same contract every other numbered Turbo runtime check already
+/// guarantees.
+void plang_iocheck(void) {
+    const int64_t Code = plang_tp_ioresult();
+    if (Code != 0) plang_tp_runerror(Code);
+}
+
 } // extern "C"
 
 } // namespace plang

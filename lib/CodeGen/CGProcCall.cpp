@@ -13,6 +13,12 @@
 
 using namespace plang;
 
+void CGProcCall::emitIoCheckIfNeeded(plang::SourceLocation Loc) {
+    if (!RangeGuards.isTurbo() || !RangeGuards.ioChecksAt(Loc)) return;
+    auto* fn = RtFns.getExternFnN("plang_iocheck", llvm::Type::getVoidTy(Ctx), {});
+    B.CreateCall(fn, {});
+}
+
 void CGProcCall::emitCallStmt(const CallStmt& s) {
     std::string lo = toLower(s.Name);
 
@@ -69,14 +75,17 @@ void CGProcCall::emitCallStmt(const CallStmt& s) {
 
     if (lo == "write" || lo == "writeln") {
         Builtins.emitBuiltinWrite(s.Args, lo == "writeln");
+        emitIoCheckIfNeeded(s.Loc);
         return;
     }
     if (lo == "read") {
         Builtins.emitBuiltinRead(s.Args);
+        emitIoCheckIfNeeded(s.Loc);
         return;
     }
     if (lo == "readln") {
         Builtins.emitBuiltinReadln(s.Args);
+        emitIoCheckIfNeeded(s.Loc);
         return;
     }
     // EP §6.7.5.5: both require a destination/source plus at least one value.
@@ -152,6 +161,7 @@ void CGProcCall::emitCallStmt(const CallStmt& s) {
         auto* fn = RtFns.getExternFnN("plang_tp_" + lo,
             llvm::Type::getVoidTy(Ctx), {PtrTy});
         B.CreateCall(fn, {fp});
+        emitIoCheckIfNeeded(s.Loc);
         return;
     }
     if ((lo == "reset" || lo == "rewrite") && !s.Args.empty()) {
@@ -192,6 +202,7 @@ void CGProcCall::emitCallStmt(const CallStmt& s) {
         auto* fn = RtFns.getExternFnN("plang_tp_close",
             llvm::Type::getVoidTy(Ctx), {PtrTy});
         B.CreateCall(fn, {fp});
+        emitIoCheckIfNeeded(s.Loc);
         return;
     }
     if (lo == "close" && !s.Args.empty()) {

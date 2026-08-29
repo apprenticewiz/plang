@@ -101,6 +101,18 @@ public:
     void emitUserProcCall(const plang::CallStmt& s);
 
 private:
+    /// -std=turbo only: emits `call void @plang_iocheck()` right after a
+    /// write/writeln/read/readln/Reset/Rewrite/Append/Close statement's own
+    /// call sequence, but ONLY when RangeGuards.isTurbo() && RangeGuards.
+    /// ioChecksAt(Loc) -- \p Loc is the STATEMENT's own s.Loc, not any
+    /// failing operation's, which is what makes `{$I-}` genuinely
+    /// positional/deferred rather than eager-at-the-failing-call (see
+    /// RangeCheckGuards::ioChecksAt's own doc comment).  A no-op call site
+    /// for ISO/EP -- RangeGuards.isTurbo() is false there, so nothing is
+    /// ever emitted and those dialects' write/writeln/read/readln/Reset/
+    /// Rewrite codegen is byte-for-byte unchanged.
+    void emitIoCheckIfNeeded(plang::SourceLocation Loc);
+
     llvm::LLVMContext& Ctx;
     llvm::Module& Mod;
     llvm::IRBuilder<>& B;

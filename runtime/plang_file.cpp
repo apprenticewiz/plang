@@ -106,6 +106,51 @@ static void setBinding(PascalFile *F, const char *Name);
 /// int64_t -- deliberately NOT Borland's 16-bit Word.
 extern int64_t plang_tp_inoutres;
 
+/// -std=turbo only: sets InOutRes to \p Code, but ONLY when InOutRes does
+/// not already hold a pending, unread error.  Every site in this file that
+/// sets InOutRes on a failure goes through this (tpFileReady itself, and
+/// Reset/Rewrite/Append's own fopen-failure and EISDIR arms) rather than
+/// assigning the global directly, so this rule cannot be accidentally
+/// reintroduced by a future call site that assigns bypassing it.
+///
+/// This is not a defensive nicety -- it is REQUIRED for this item's own
+/// "deferred, position-keyed checking" to match real Borland/FPC field
+/// practice, and was FOUND, not guessed at, by testing the local `fpc
+/// -Mtp` install against this item's own manual-testing requirement:
+/// `{$I-} Reset(f); {$I+} Read(f, x);` with Reset failing on a file that
+/// does not exist (InOutRes 2).  Naively, Read's own tpFileReady call would
+/// find F still closed and set 103 ("file not open"), and the checked
+/// position right after Read would then report 103 -- plausible-sounding,
+/// but empirically WRONG: `fpc -Mtp` reports 2, Reset's own original code,
+/// at that checkpoint, not 103.  Confirmed with several further probes
+/// (`fpc -Mtp`, this file's own test fixtures, not this project's Pascal):
+/// a second, differently-failing Reset does not overwrite a pending code
+/// with its own either (still the first code); a `Write` against the same
+/// still-closed file behaves identically to `Read`.  Only an explicit
+/// `IOResult` call (which clears InOutRes as it reads it -- plang_tp_
+/// ioresult, runtime/plang_sys.cpp) lets the NEXT failure's own code start
+/// being recorded again.  Getting this backwards is not merely
+/// differently-worded -- since a checked I/O failure's exit status IS the
+/// InOutRes code itself (plang_iocheck, runtime/plang_sys.cpp), the WRONG
+/// exit status would ship.
+///
+/// Real field practice goes further still: `fpc -Mtp` shows an unrelated,
+/// otherwise-successful operation (even a plain console `Writeln`, or a
+/// SECOND Reset against a perfectly valid, different file) is ALSO
+/// silently skipped for as long as an error remains pending and unread --
+/// not merely prevented from overwriting InOutRes's CODE, but seemingly not
+/// attempted at all.  Reproducing that full latch is a considerably larger
+/// change than this one helper gives for free (Reset/Rewrite/Append's own
+/// fopen calls, guarded by this same helper just below, still ATTEMPT the
+/// open rather than skip it outright, so a Reset against a valid file can
+/// still genuinely succeed even while an earlier failure sits unread) --
+/// this fix's own scope is "do not misreport which error is pending", not
+/// "suppress every operation while one is"; the latter is future work this
+/// item deliberately leaves for whoever next touches this area to pick up.
+static void setInOutResIfClear(int64_t Code) {
+    if (plang_tp_inoutres == 0) plang_tp_inoutres = Code;
+}
+
 /// -std=turbo only: maps a POSIX errno to the InOutRes code real Turbo
 /// Pascal / Free Pascal field practice actually reports for it -- confirmed
 /// against the locally installed `fpc` 3.2.2's own
@@ -231,17 +276,22 @@ static void abortIfClosed(PascalFile *F, const char *Op) {
 /// failure: sets InOutRes to 103 ("file not open", Borland/FPC's own
 /// documented code for exactly this condition -- see plang_tp_
 /// posix_to_run_error's own comment for why this is a literal here and not
-/// something that function computes) and returns false.  Every caller below
-/// is written to immediately `return` (or, for a Func, return a harmless
-/// default) when this comes back false, performing NONE of its own I/O --
-/// so a closed file's operation becomes a silent no-op instead of a crash.
-/// \p Op is accepted only for symmetry with abortIfClosed's own signature
-/// (every call site already has one to hand); nothing here prints it, since
-/// there is nothing to print -- the failure is recorded in InOutRes, not on
-/// stderr.
+/// something that function computes) THROUGH setInOutResIfClear, not a
+/// direct assignment -- see that function's own comment for why a pending,
+/// unread InOutRes must survive a later failing operation unchanged (this
+/// item's own manual-testing requirement, `{$I-} Reset(f); {$I+} Read(f,
+/// x);` with Reset failing, is exactly the case that would misreport 103
+/// instead of Reset's own original code without this) -- and returns
+/// false.  Every caller below is written to immediately `return` (or, for a
+/// Func, return a harmless default) when this comes back false, performing
+/// NONE of its own I/O -- so a closed file's operation becomes a silent
+/// no-op instead of a crash.  \p Op is accepted only for symmetry with
+/// abortIfClosed's own signature (every call site already has one to
+/// hand); nothing here prints it, since there is nothing to print -- the
+/// failure is recorded in InOutRes, not on stderr.
 static bool tpFileReady(PascalFile *F, const char * /*Op*/) {
     if (!F || !F->Fp) {
-        plang_tp_inoutres = 103;
+        setInOutResIfClear(103);
         return false;
     }
     std::clearerr(F->Fp);
@@ -613,7 +663,7 @@ void plang_tp_reset(PascalFile *F) {
         F->Fp = std::fopen(F->Name, "r");
         if (!F->Fp) {
             const int Err = errno; // captured before anything else can clobber it
-            plang_tp_inoutres = plang_tp_posix_to_run_error(Err);
+            setInOutResIfClear(plang_tp_posix_to_run_error(Err));
             return;
         }
         // Issue #287's directory guard, reproduced here for the identical
@@ -628,7 +678,7 @@ void plang_tp_reset(PascalFile *F) {
         if (fstat(fileno(F->Fp), &St) == 0 && S_ISDIR(St.st_mode)) {
             std::fclose(F->Fp);
             F->Fp = nullptr;
-            plang_tp_inoutres = 5;
+            setInOutResIfClear(5);
             return;
         }
     }
@@ -649,7 +699,7 @@ void plang_tp_rewrite(PascalFile *F) {
         F->Fp = std::fopen(F->Name, "w");
         if (!F->Fp) {
             const int Err = errno;
-            plang_tp_inoutres = plang_tp_posix_to_run_error(Err);
+            setInOutResIfClear(plang_tp_posix_to_run_error(Err));
             return;
         }
     }
@@ -673,7 +723,7 @@ void plang_tp_append(PascalFile *F) {
         F->Fp = std::fopen(F->Name, "a");
         if (!F->Fp) {
             const int Err = errno;
-            plang_tp_inoutres = plang_tp_posix_to_run_error(Err);
+            setInOutResIfClear(plang_tp_posix_to_run_error(Err));
             return;
         }
     }

@@ -14,6 +14,14 @@ instead do nothing at all -- no crash, no output written to the file, and
 InOutRes left readable afterward -- which is exactly this item's own
 non-negotiable P7 split between the two dialects sharing plang_write_file_str.
 
+`{$I-}`: this file is about tpFileReady's own choke point, not about the
+automatic `{$I+}` check a later part of this same item adds -- under that
+check's real default (`{$I+}` ON unless a program says otherwise), the
+Writeln below would itself abort the process the moment it found the file
+not open, never reaching the CHECK lines this file depends on.  See
+io-plus-aborts-at-the-next-checked-operation-not-the-failing-one.pas for
+the check's own dedicated coverage.
+
 RUN: %plang -std=turbo %s -o %t
 RUN: %run %t | FileCheck --strict-whitespace --match-full-lines %s
 *)
@@ -25,6 +33,7 @@ CHECK-NEXT:did not crash
 
 var f: text;
 begin
+  {$I-}
   writeln(f, 'this must never be written anywhere');
   writeln('ioresult=', IOResult);
   writeln('did not crash');

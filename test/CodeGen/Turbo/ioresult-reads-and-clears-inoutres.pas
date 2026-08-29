@@ -18,6 +18,14 @@ InOutRes rather than crashing" requirement, exercised concretely.  Reset is
 called TWICE, to prove the SAME failure can set InOutRes again after a
 prior IOResult call already cleared it -- InOutRes is not a one-shot latch.
 
+`{$I-}` throughout: this file is about IOResult's own read-and-clear
+contract, not about the automatic `{$I+}` check a later part of this same
+item adds -- under that check's real default (`{$I+}` ON unless a program
+says otherwise), the first failing Reset would itself abort the process
+before either `writeln(IOResult...)` line ran.  See io-plus-aborts-at-the-
+next-checked-operation-not-the-failing-one.pas for the check's own
+dedicated coverage.
+
 RUN: %plang -std=turbo %s -o %t
 RUN: %run %t | FileCheck %s
 *)
@@ -31,6 +39,7 @@ CHECK-NEXT:0
 
 var f: text;
 begin
+  {$I-}
   assign(f, 'ioresult-reads-and-clears-inoutres-this-file-does-not-exist.txt');
   reset(f);
   writeln(IOResult());

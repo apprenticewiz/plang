@@ -54,6 +54,20 @@ public:
     /// caller of this must gate on isTurbo() first (CGBinaryOps::emitBinary's
     /// And/Or arm does) rather than trusting this answer on its own.
     [[nodiscard]] bool boolEvalAt(plang::SourceLocation Loc) const;
+    /// Whether Turbo's IOChecks switch ({$I+}/{$I-}, CompilerSwitches.def) is
+    /// ON at \p Loc -- the same position-keyed Opts.switchOn query as
+    /// rangeChecksAt/assertionsAt/boolEvalAt, just a different Switch.
+    /// TurboDefault=true (checks ON unless a program explicitly writes
+    /// `{$I-}`), matching real Turbo Pascal's own default.  Callers
+    /// (CGProcCall.cpp's write/writeln/read/readln and Reset/Rewrite/
+    /// Append/Close arms) query this at the CHECKED STATEMENT's own
+    /// location -- not the failing operation's -- to decide whether to
+    /// emit a call to the runtime's plang_iocheck(), which is what makes
+    /// `{$I-}`'s suppression genuinely positional rather than eager-at-
+    /// the-failing-call: a Reset that fails under `{$I-}` leaves InOutRes
+    /// set but does not abort, and the abort (if any) happens at the NEXT
+    /// checked I/O statement's own checkpoint instead.
+    [[nodiscard]] bool ioChecksAt(plang::SourceLocation Loc) const;
     /// Whether the active dialect is Turbo -- read both internally (every
     /// guard below routes its failure through the plang_tp_* reporter
     /// family instead of the shared ISO/EP plang_err_* one when this is
