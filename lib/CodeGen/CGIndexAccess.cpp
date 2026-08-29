@@ -147,6 +147,25 @@ llvm::Value* CGIndexAccess::emitConformantElemPtr(const IndexExpr& e) {
 }
 
 llvm::Value* CGIndexAccess::emitIndexGEP(const IndexExpr& e) {
+    // Turbo: `p[i]` on a PChar-like pointer -- Sema::checkIndex's own
+    // Pointer arm (SemaExpr.cpp) is the only thing that resolves an
+    // IndexExpr's Array to a Pointer type at all, and only under -std=turbo
+    // for a pointer whose pointee is Char (isCharPointerType, Type.h), so no
+    // further gating is needed here: reaching this branch already means
+    // Sema accepted it.  Zero-based, no range check -- there is no declared
+    // extent on the pointee to check against, matching real fpc.
+    //
+    // This is also what makes `p[0] := 'H'` a write: EmitLValue's IndexExpr
+    // case (CGExprCore.cpp) calls straight through to this same function for
+    // the address, with no load, so CGAssign's generic store path handles
+    // the write with no changes of its own.
+    if (e.Array->ResolvedType && e.Array->ResolvedType->Kind == TypeKind::Pointer
+            && e.Array->ResolvedType->PointeeType
+            && e.Array->ResolvedType->PointeeType->Kind == TypeKind::Char) {
+        auto* base = EmitExpr(*e.Array); // the pointer VALUE, not its address
+        auto* idx  = ToI64(EmitExpr(*e.Index));
+        return B.CreateGEP(I8Ty, base, {idx}, "pchar.elem.ptr");
+    }
     // EP §6.4.7: an array FIELD of a run-time-laid-out body has bounds the
     // discriminants fix, so they are re-emitted here rather than read off the
     // type -- which holds the probe's, and would check `q^.d[2]` against 1..1.
@@ -317,6 +336,13 @@ llvm::Value* CGIndexAccess::emitIndexLoad(const IndexExpr& e) {
     // EP §6.5.3.2: a string component is a char.
     if (ExprIsVarStr(*e.Array))
         return B.CreateLoad(I8Ty, ptr, "str.elem");
+    // Turbo: `p[i]` on a PChar-like pointer -- see emitIndexGEP's identical
+    // guard just above for why no further gating belongs here.  The pointee
+    // is Char, one byte, the same as a string component.
+    if (e.Array->ResolvedType && e.Array->ResolvedType->Kind == TypeKind::Pointer
+            && e.Array->ResolvedType->PointeeType
+            && e.Array->ResolvedType->PointeeType->Kind == TypeKind::Char)
+        return B.CreateLoad(I8Ty, ptr, "pchar.elem");
     llvm::Type* elemTy = I64Ty;
     // EP §6.4.7: the element type of a schematic array comes from Sema; the
     // variable entry holds only the untyped body pointer.

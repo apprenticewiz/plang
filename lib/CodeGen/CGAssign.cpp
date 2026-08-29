@@ -221,6 +221,31 @@ void CGAssign::emitAssignValue(const ExprNode& Target, const ExprNode& Value,
         return;
     }
 
+    // Turbo: `p := buf` decays a zero-based array of Char to its ADDRESS when
+    // the target is a PChar-like pointer.  Sema::isAssignCompatible
+    // (SemaExpr.cpp) is the only thing that accepts this pairing at all, and
+    // only under -std=turbo -- see its own comment for why this stays clear
+    // of isCharStringType's 1-based ISO/EP string-type rule entirely -- so
+    // reaching here already means Sema approved it.
+    //
+    // This has to be its own case: falling through to the generic path below
+    // would EmitExpr(Value), which for a plain array-typed IdentExpr LOADS
+    // the whole array by VALUE (the ordinary array-to-array assignment path,
+    // an LLVM aggregate) and then tries to store that aggregate into a
+    // pointer-typed slot -- wrong in kind, not just wrong in value.  What a
+    // pointer destination needs is the array's base ADDRESS, which is
+    // exactly what EmitLValue already gives every other addressable operand
+    // in this function.
+    if (Target.ResolvedType && Target.ResolvedType->Kind == TypeKind::Pointer
+            && Target.ResolvedType->PointeeType
+            && Target.ResolvedType->PointeeType->Kind == TypeKind::Char
+            && Value.ResolvedType && Value.ResolvedType->Kind == TypeKind::Array) {
+        auto* arrAddr = EmitLValue(Value);
+        if (!arrAddr) codegenICE("array-to-PChar decay from a non-addressable array");
+        B.CreateStore(arrAddr, addr);
+        return;
+    }
+
     auto* rhs = EmitExpr(Value);
     if (!rhs) codegenICE("assignment from an unlowerable expression");
 

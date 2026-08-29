@@ -441,6 +441,35 @@ ordinalRange(const Type& T) {
     return isCharStringType(T) ? T.IndexType->SubHi : 0;
 }
 
+/// Turbo `PChar`/`PAnsiChar`-*like*: a Pointer whose pointee is specifically
+/// Char.  Structural, not an identity check against TypeContext::getPChar()'s
+/// singleton -- every caller of this (Sema::checkBinary's pointer-arithmetic
+/// case, Sema::checkIndex's `p[i]`, Sema::isAssignCompatible's array-decay
+/// rule; see each of their own comments) additionally requires Opts.turbo(),
+/// since this predicate alone says nothing about dialect and a plain ISO/EP
+/// `^char` must not gain arithmetic just because ISO §6.4.4 lets one be
+/// declared.
+///
+/// This is deliberately structural rather than "is this Type* identical to
+/// the PChar singleton" because real `fpc -Mtp` field practice is: pointer
+/// arithmetic, `p[i]` indexing, and array-to-pointer decay all key off the
+/// pointee being Char, not off the pointer's own declared name.  Verified
+/// empirically (fpc 3.2.2, `-Mtp` and `-Mobjfpc`, with `{$pointermath off}`
+/// and `{$T+}` both tried explicitly to rule out either one being the real
+/// gate): `type MyCharPtr = ^Char; var p, q: MyCharPtr;` accepts `q := p + 1`,
+/// `p[0] := 'Z'`, and `p := buf` (buf a zero-based char array) exactly the
+/// same as `PChar` does, and an anonymous `var p: ^Char` does too -- while
+/// the identical program with `^Byte` or `^Integer` in MyCharPtr's place is
+/// refused ("Operation \"+\" not supported").  So the real rule is "pointee
+/// is Char", independent of what the pointer type itself is named; a gate
+/// keyed on identity to one particular Pointer object would reject
+/// `MyCharPtr` arithmetic that every mainstream Turbo/Delphi/FPC compiler
+/// accepts.
+[[nodiscard]] inline bool isCharPointerType(const Type& T) {
+    return T.Kind == TypeKind::Pointer && T.PointeeType
+        && T.PointeeType->Kind == TypeKind::Char;
+}
+
 /// True for the type of a procedural or functional parameter (ISO §6.6.3.1).
 [[nodiscard]] inline bool isCallable(const Type& T) {
     return T.Kind == TypeKind::Procedure || T.Kind == TypeKind::Function;
