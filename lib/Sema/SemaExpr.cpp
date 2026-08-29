@@ -336,8 +336,30 @@ std::shared_ptr<Type> Sema::checkIdent(const IdentExpr& E) {
             error(E.Loc, diag::err_proc_as_value, {E.Name});
             return TyErr;
         case SymbolKind::Builtin:
-            if (Sym->IsFunction)
+            if (Sym->IsFunction) {
+                // Every OTHER dialect-restricted builtin either requires at
+                // least one argument (so a bare, parenthesis-less use of it
+                // can only ever be a plain undefined-identifier, since
+                // Symtab.lookup still finds the always-registered Builtin
+                // Symbol here and this arm is reached regardless) or, like
+                // eof/eoln, is registered in every dialect and so has no
+                // gating to skip.  Random -- Builtins.def, -std=turbo only
+                // -- is the first EXCEPTION to both: it is dialect-
+                // restricted AND takes zero arguments, so `x := Random;`
+                // under -std=iso7185/-std=iso10206 reached this generic
+                // path with nothing here to reject it, silently returning
+                // Sym->ReturnType (TyReal) and letting CodeGen's own bare-
+                // Random case (CGExprCore.cpp, right beside eof/eoln's
+                // identical bare-call handling) actually emit the call --
+                // a silent miscompile, not a diagnostic, for a name the
+                // parenthesized CallExpr path (checkCallExpr's own
+                // checkEPOnly call) already correctly refuses.  Same check,
+                // reused here rather than reinvented, closes it for Random
+                // and for any future dialect-restricted, zero-argument Func
+                // this table gains.
+                if (!checkEPOnly(*Sym, E.Loc)) return TyErr;
                 return Sym->ReturnType ? Sym->ReturnType : TyErr;
+            }
             error(E.Loc, diag::err_builtin_proc_as_value, {E.Name});
             return TyErr;
         case SymbolKind::TypeAlias:
@@ -1396,7 +1418,15 @@ std::shared_ptr<Type> Sema::checkCallExpr(const CallExpr& E) {
         // non-scalar type such as a string or record, and turns a char or
         // boolean's raw ordinal value into a number nobody asked for instead
         // of being rejected (issue #261).
-        if ((Lo == "trunc" || Lo == "round") && !E.Args.empty()) {
+        // TP-only: Int and Frac share this exact argument check with
+        // trunc/round -- numeric, non-complex -- and need nothing more of
+        // their own: unlike trunc/round (an ordinal Result, R_Int), each is
+        // declared R_Real in Builtins.def, so the SAME
+        // `Sym->ReturnType ? ... : TyErr` fallback just below already
+        // answers TyReal for them without a dedicated arm the way Random's
+        // does above.
+        if ((Lo == "trunc" || Lo == "round" || Lo == "int" || Lo == "frac")
+                && !E.Args.empty()) {
             auto ArgTy = checkExpr(*E.Args[0]);
             if (ArgTy->isError()) return TyErr;
             if (!ArgTy->isNumeric() || ArgTy->Kind == TypeKind::Complex) {
@@ -1558,6 +1588,25 @@ std::shared_ptr<Type> Sema::checkCallExpr(const CallExpr& E) {
             // against fpc -Mtp's System unit: Hi/Lo(Word) -> Byte,
             // Hi/Lo(LongInt) -> Word, Hi/Lo(Int64) -> LongWord).
             return Ctx_.getInt(ArgTy->Width / 2, /*Signed=*/false);
+        }
+        // TP-only: Random is polymorphic on ARITY, not on its argument's
+        // type the way Abs/Sqr (above) are: Random() -- no argument, this
+        // arm's own `!E.Args.empty()` guard skips it -- falls through to the
+        // generic `return Sym->ReturnType ...` at the very end of this Func
+        // block, i.e. Builtins.def's R_Real, exactly the zero-argument
+        // shape wants.  Random(Range), the one-argument form, is a
+        // genuinely different result KIND (an integer, in the argument's
+        // own type -- the same "stays in the argument's own type" rule
+        // Hi/Lo/Swap just above and Abs/Sqr/Succ/Pred all follow) that only
+        // this dedicated arm can express.
+        if (Lo == "random" && !E.Args.empty()) {
+            auto ArgTy = checkExpr(*E.Args[0]);
+            if (ArgTy->isError()) return TyErr;
+            if (!ArgTy->isIntegral()) {
+                error(E.Args[0]->Loc, diag::err_numeric_argument, {Lo, ArgTy->Name});
+                return TyErr;
+            }
+            return ArgTy;
         }
         // EP §6.7.6.2: math functions extended to complex — return complex when
         // the argument is complex, real otherwise.

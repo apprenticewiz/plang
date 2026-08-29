@@ -736,6 +736,28 @@ static void escapeCC(const char *S, std::FILE *Stream) {
 /// expected to reuse this exact mechanism rather than invent another one.
 int16_t plang_tp_exitcode = 0;
 
+/// TP `RandSeed: LongInt` (Sema::registerBuiltins, -std=turbo only) -- the
+/// current internal state of plang's own pseudo-random generator (see
+/// plang_math.cpp's plang_tp_random_real/plang_tp_random_range, which are
+/// its only readers/writers besides an explicit program assignment like
+/// `RandSeed := 1;`).  Registered, shared, and declared-not-defined by every
+/// compiled object exactly the way plang_tp_exitcode is just above -- see
+/// that variable's own comment for the whole mechanism, reused rather than
+/// reinvented (its own "later Tier 3" remark names RandSeed as the next one
+/// to follow it).  uint32_t, not int16_t like ExitCode: real Turbo Pascal's
+/// own RandSeed is a LongInt (32 bits), fixed regardless of Integer's own
+/// dialect width, so Sema::registerBuiltins gives its Symbol
+/// Ctx_.getInt(32, /*Signed=*/true) rather than TyInt, and
+/// Codegen::Impl::emitPredefinedGlobals declares a fixed i32 rather than
+/// langOpts.defaultIntWidth() -- both sides have to agree on 32 bits the
+/// same way ExitCode's two sides agree on Integer's own width.  Unsigned
+/// here purely because the generator's own update (a linear-congruential
+/// step, plang_math.cpp) is naturally unsigned modular arithmetic; a plang
+/// program still reads and assigns it as a signed LongInt, which is only a
+/// difference in how the SAME 32 bits are interpreted, not a second,
+/// disagreeing width.
+uint32_t plang_tp_randseed = 0;
+
 } // extern "C"
 
 } // namespace plang

@@ -56,9 +56,46 @@ version numbers follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html
   type, in either direction, matching real Turbo Pascal's untyped pointer.
   None of the eleven names are available under `-std=iso7185` or
   `-std=iso10206`.
+- **`-std=turbo`: `Random`, `Random(Range)`, `Randomize`, `RandSeed`, `Int`,
+  and `Frac`.** `Random` alone answers a `Real` in `[0, 1)`; `Random(Range)`
+  answers an integer-kind value in `[0, Range)`, staying in `Range`'s own
+  type the same way `Abs`/`Sqr`/`Succ`/`Pred`/`High`/`Low` already do --
+  `Sema::checkCallExpr` special-cases the dual arity/dual-result shape the
+  same way it already does for `Abs`/`Sqr`. Both the bare, no-parens
+  spelling (`x := Random;`) and the parenthesized zero-argument one
+  (`Random()`) are supported. `RandSeed` is a new predefined, settable
+  32-bit (`LongInt`-width, matching real Turbo Pascal's own declaration,
+  independent of `Integer`'s own dialect width) global holding the
+  generator's state, registered the same predefined-mutable-`Var` way
+  `ExitCode` already is. `Randomize` reseeds it from wall-clock time
+  (`clock_gettime(CLOCK_REALTIME)`). The generator itself is a small,
+  self-contained 32-bit linear-congruential generator, hand-rolled because
+  the runtime is built without the C++ standard library's `<random>` --
+  it is plang's own sequence, matching neither real Borland Turbo Pascal
+  7's own LCG nor Free Pascal's Mersenne Twister, and no claim is made that
+  it does. `Int(x)`/`Frac(x)` take and return a `Real`: `Int` is `x`'s
+  integer part toward zero (like `Trunc`, but with no `int64` range to
+  respect, since the result is a `Real`), and `Frac` is `x - Int(x)`. Built
+  as new, wholly unrestricted `std::trunc`-based runtime functions rather
+  than reusing the existing, range-checked `Trunc`/`Round` primitives (which
+  would have silently reintroduced their `int64` range check, aborting for
+  any `Int`/`Frac` argument with `|x| >= 2^63`).
 
 ### Fixed
 
+- `Sema::checkIdent`'s generic `SymbolKind::Builtin` case never checked
+  whether the current dialect actually has the name in question -- only
+  `checkCallExpr`'s `checkEPOnly` call, reached only through the
+  parenthesized-call grammar, did. This was latent (every other
+  dialect-restricted builtin function either takes at least one required
+  argument, so a bare, parenthesis-less use of it was already just an
+  ordinary undefined-identifier or link failure, or, like `eof`/`eoln`, is
+  declared in every dialect and has no gating to skip) until `Random`
+  above became the first dialect-restricted, *zero-argument* `Func`
+  builtin: `x := Random;` under `-std=iso7185`/`-std=iso10206` silently
+  compiled and ran `Random`'s own generator instead of being refused the
+  way the parenthesized `Random(5)` already correctly was. `checkIdent`
+  now calls `checkEPOnly` too.
 - `writeln`/`write` treated any 8-bit integer as a `Char` (`BuiltinIO::
   writesAsChar` matched on LLVM width alone before consulting the Sema
   type), which was unreachable before the sized-integer ladder above since

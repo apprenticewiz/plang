@@ -195,6 +195,18 @@ void CGProcCall::emitCallStmt(const CallStmt& s) {
         return;
     }
 
+    // TP-only: Randomize -- reseeds RandSeed from wall-clock time, so
+    // successive RUNS of the same program get a different Random sequence;
+    // see runtime/plang_math.cpp's plang_tp_randomize for what "wall-clock
+    // time" means here (clock_gettime(CLOCK_REALTIME), not plang_gettimestamp
+    // /time_t's one-second resolution -- two runs started in the same second
+    // would otherwise collide).
+    if (lo == "randomize") {
+        B.CreateCall(RtFns.getExternFnN("plang_tp_randomize",
+            llvm::Type::getVoidTy(Ctx), {}), {});
+        return;
+    }
+
     // EP §6.7.5.8: GetTimeStamp(t) — fill t with current date/time
     if (lo == "gettimestamp" && !s.Args.empty()) {
         auto* tPtr = EmitLValue(*s.Args[0]);

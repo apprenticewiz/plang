@@ -289,6 +289,29 @@ void Sema::registerBuiltins() {
         (void)Symtab.define(std::move(ExitCodeSym));
     }
 
+    // -std=turbo only: RandSeed -- the first of the "later Tier 3" names
+    // ExitCode's own comment, just above, said would reuse its exact
+    // mechanism, and this does: a predefined mutable Var, LinkName bound to
+    // a runtime global (runtime/plang_sys.cpp's plang_tp_randseed) that
+    // every compiled object only DECLARES (Codegen::Impl::
+    // emitPredefinedGlobals), so a multi-file program shares one generator
+    // state no matter how many objects it links from.  Unlike ExitCode,
+    // whose width follows Integer's own dialect width (TyInt), RandSeed is
+    // fixed at 32 bits regardless: real Turbo Pascal's own RandSeed is
+    // declared LongInt, not Integer, so Ctx_.getInt(32, /*Signed=*/true) is
+    // used directly here rather than TyInt -- both sides (this Symbol and
+    // emitPredefinedGlobals's LLVM global) have to agree on 32 bits the same
+    // way ExitCode's two sides agree on Integer's own width.
+    if (Opts.turbo()) {
+        Symbol RandSeedSym;
+        RandSeedSym.Kind     = SymbolKind::Var;
+        RandSeedSym.Name     = "RandSeed";
+        RandSeedSym.Ty       = Ctx_.getInt(32, /*Signed=*/true);
+        RandSeedSym.LinkName = "plang_tp_randseed";
+        RandSeedSym.IsRequiredIdentifier = true;
+        (void)Symtab.define(std::move(RandSeedSym));
+    }
+
     // -std=turbo only: the sized-integer ladder, AnsiChar, and the untyped
     // Pointer type -- the type names the rest of Tier 2 is written against.
     //

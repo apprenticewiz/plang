@@ -95,6 +95,24 @@ llvm::Value* CGExprCore::emitExpr(const ExprNode& e) {
                                                  : "plang_eoln_stdin"), {}, lo);
                 return EnsureI1(r);
             }
+            // -std=turbo only: Random, called bare with no parens
+            // (`x := Random;`), is TP's own idiomatic zero-argument spelling
+            // -- the same "no parentheses" shape eof/eoln get just above.
+            // checkIdent's generic SymbolKind::Builtin case (Sema.cpp) has
+            // nothing to say about arity (only checkCallExpr's
+            // checkBuiltinArity does, and that only ever runs for the
+            // parenthesized CallExpr form), so a bare use type-checks fine
+            // with nothing here to route it to a call: without this case, it
+            // fell through to the ordinary variable lookup below, found no
+            // VarEntry for a name that was never one, and hit the "Sema
+            // missed an undefined-identifier error" ICE.  A user's own
+            // parameterless function named Random (UserDeclared) is excluded
+            // the same way eof/eoln's is, so it is still resolved as an
+            // ordinary call further down instead.
+            if (lo == "random" && !n->UserDeclared) {
+                auto* fn = RtFns.getExternFnN("plang_tp_random_real", DblTy, {});
+                return B.CreateCall(fn, {}, "random");
+            }
         }
         // Function result pseudo-variable (Pascal: assign to function name).
         // n->Resolution == ResultVariable alone is NOT enough: it only says

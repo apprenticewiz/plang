@@ -37,6 +37,19 @@ void Codegen::Impl::emitPredefinedGlobals() {
                                          llvm::GlobalValue::ExternalLinkage,
                                          /*Initializer=*/nullptr, "plang_tp_exitcode");
     defVar("ExitCode", gv, ty, /*typeNode=*/nullptr);
+
+    // RandSeed -- declared (never defined) exactly like ExitCode just above;
+    // see Sema::registerBuiltins' RandSeed comment for the whole mechanism.
+    // Fixed i32, NOT langOpts.defaultIntWidth(): real Turbo Pascal's own
+    // RandSeed is a LongInt regardless of Integer's own dialect width, and
+    // Sema::registerBuiltins gives the RandSeed Symbol Ctx_.getInt(32, true)
+    // rather than TyInt for the identical reason -- both sides have to agree
+    // on 32 bits the same way ExitCode's two sides agree on Integer's width.
+    auto* seedTy = llvm::Type::getInt32Ty(ctx);
+    auto* seedGv = new llvm::GlobalVariable(*mod, seedTy, /*isConst=*/false,
+                                         llvm::GlobalValue::ExternalLinkage,
+                                         /*Initializer=*/nullptr, "plang_tp_randseed");
+    defVar("RandSeed", seedGv, seedTy, /*typeNode=*/nullptr);
 }
 
 // Attaches 'input' and 'output' to the standard streams.  Any other
