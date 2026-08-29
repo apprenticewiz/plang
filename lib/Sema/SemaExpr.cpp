@@ -743,7 +743,11 @@ std::shared_ptr<Type> Sema::checkBinary(const BinaryExpr& E) {
             }
             if (auto R = constBound(*E.Right); R && *R == 0)
                 warning(E.Loc, diag::warn_const_div_zero, {opSpelling(E.Op)});
-            return TyInt;
+            // Both operands genuinely participate in a div/mod result (unlike
+            // shl/shr's shift count, see below) -- confirmed against real
+            // `fpc -Mtp`: `Int64Var div ByteVar` computes and answers at
+            // Int64's own width, not Byte's or the dialect default's.
+            return commonIntType(*Lt, *Rt);
 
         case TokenKind::And:
         case TokenKind::Or:
@@ -755,7 +759,7 @@ std::shared_ptr<Type> Sema::checkBinary(const BinaryExpr& E) {
             // Boolean here in Sema the same way it decides bitwise vs.
             // short-circuit there in CodeGen.
             if (Opts.turbo() && Lt->isIntegral() && Rt->isIntegral())
-                return TyInt;
+                return commonIntType(*Lt, *Rt);
             [[fallthrough]];
         case TokenKind::AndThen:  // EP §6.8.3.3
         case TokenKind::OrElse:   // EP §6.8.3.3
@@ -785,7 +789,7 @@ std::shared_ptr<Type> Sema::checkBinary(const BinaryExpr& E) {
         // agree with -- so there is no AndThen/OrElse-shaped sibling case.
         case TokenKind::Xor:
             if (Lt->isIntegral() && Rt->isIntegral())
-                return TyInt;
+                return commonIntType(*Lt, *Rt);
             if (Lt->Kind != TypeKind::Boolean || Rt->Kind != TypeKind::Boolean) {
                 error(E.Loc, diag::err_op_boolean_or_integer,
                       {opSpelling(E.Op), Lt->Name, Rt->Name});
@@ -803,7 +807,25 @@ std::shared_ptr<Type> Sema::checkBinary(const BinaryExpr& E) {
                       {opSpelling(E.Op), Lt->Name, Rt->Name});
                 return TyErr;
             }
-            return TyInt;
+            // Unlike Div/Mod/Xor/And/Or just above, the RIGHT operand here is
+            // a shift COUNT, not a value that shares in the result the way
+            // both operands of a div or xor do -- confirmed against real
+            // `fpc -Mtp`: `Int64Var shl ByteCount` answers at Int64's own
+            // width regardless of the count's own (narrower) type, and
+            // `ByteVar shl ByteCount` answers WIDER than Byte's own 8 bits
+            // (`fpc`'s own native int width; here, the dialect's own default
+            // Integer width) rather than masking the shift down to 8 bits --
+            // i.e. a narrow left operand is promoted UP to at least the
+            // dialect default the same way a narrower-than-int C operand is,
+            // while a left operand already at or above that default keeps
+            // its own width exactly (an Int64 never narrows to 16 here).
+            // Signedness travels with the LEFT operand alone, not
+            // Lt.IsSigned && Rt.IsSigned the way commonIntType's equal-width
+            // tie-break works: `ByteVar shl N` stays unsigned even though a
+            // literal shift count is the dialect's own signed default int,
+            // confirmed the same way (`fpc -Mtp`'s Byte shl Byte(31) prints
+            // as unsigned, not as a negative promoted int).
+            return Ctx_.getInt(std::max(Lt->Width, TyInt->Width), Lt->IsSigned);
 
         case TokenKind::StarStar: // EP §6.8.3.2: ** — always a real result
         case TokenKind::Pow:      // EP §6.8.3.2: pow — result follows the base
@@ -1019,8 +1041,27 @@ std::shared_ptr<Type> Sema::checkUnary(const UnaryExpr& E) {
             // two's-complement negation on an Integer operand, logical
             // negation on a Boolean one.  ISO/EP have no bitwise 'not' --
             // an Integer operand there is the same error it always was.
+            //
+            // A plain Integer at T's own Width/IsSigned, not unconditionally
+            // TyInt and not T itself: unlike shl/shr, 'not' does not promote
+            // a narrow operand up to the dialect default -- confirmed
+            // against real `fpc -Mtp`, `not Byte(1)` stays an 8-bit
+            // complement (254), not a promoted-then-negated -2 -- and
+            // CGBinaryOps::emitUnary's Not case already computes it that way
+            // (CreateNot at the operand's own LLVM width, no
+            // e.ResolvedType->Width re-coercion the way Shl/Shr's codegen
+            // needs); only the Sema-reported result TYPE was wrong, the same
+            // "unconditionally TyInt regardless of the operand's actual
+            // Width/IsSigned" bug the sized-integer ladder exposed in
+            // checkBinary's own arms (see commonIntType's comment).  Not T
+            // itself, so a computed result never carries a SUBRANGE's own
+            // narrower bounds the way the source variable's declared type
+            // might (`not` of a `1..100` subrange is not itself `1..100`) --
+            // commonIntType(*T, *T) is the same "mint a plain Integer at
+            // this Width/IsSigned" primitive commonIntType's own equal-width
+            // branch already is, just applied to one operand twice.
             if (T->Kind == TypeKind::Boolean) return TyBool;
-            if (Opts.turbo() && T->isIntegral()) return TyInt;
+            if (Opts.turbo() && T->isIntegral()) return commonIntType(*T, *T);
             if (Opts.turbo())
                 error(E.Loc, diag::err_not_requires_boolean_or_integer, {T->Name});
             else
@@ -3160,8 +3201,42 @@ bool Sema::isAssignCompatible(const Type& Dst, const Type& Src,
     return false;
 }
 
-std::shared_ptr<Type> Sema::numericResult(const Type& L, const Type& R) const {
+std::shared_ptr<Type> Sema::numericResult(const Type& L, const Type& R) {
     if (L.Kind == TypeKind::Complex || R.Kind == TypeKind::Complex) return TyComplex;
     if (L.Kind == TypeKind::Real    || R.Kind == TypeKind::Real)    return TyReal;
-    return TyInt;
+    return commonIntType(L, R);
+}
+
+// See the declaration (Sema.h) for the contract.  Both L and R are already
+// known integral by every call site (isIntegral()/isNumeric() gates run
+// first), so each is either TypeKind::Integer or a Subrange whose SubBase
+// chain bottoms out at one -- both carry a real, meaningful Width/IsSigned
+// of their own (TypeContext::getSubrange stamps a subrange's from its host,
+// narrowed under Turbo; Type::Width's own comment). Reading L.Width/
+// R.Width/L.IsSigned/R.IsSigned directly, with no SubBase-peeling first, is
+// therefore already correct for both.
+//
+// ISO 7185 and Extended Pascal mint exactly one Integer type -- Width==64,
+// IsSigned==true, the DefaultIntWidth==64 case -- so for those two dialects
+// L and R are always that identical (Width,IsSigned) pair, LW==RW is always
+// true, and Ctx_.getInt(64, true) returns the exact same cached TyInt_
+// object (TypeContext::IntCache_ is keyed on {Width,Signed}, and TyInt_
+// itself was minted from that identical call) that plain `return TyInt`
+// used to hand back directly: a true no-op, not merely an equal-looking
+// type, for every ISO/EP program.
+//
+// Only Turbo's sized-integer ladder, where two Integer-kind operands can
+// genuinely differ in Width and/or IsSigned, ever takes the non-trivial
+// branch below.  The tie-break rules are checked against real `fpc -Mtp`
+// field practice, not assumed: the WIDER operand's own sign wins when
+// widths differ (`LongInt + Word` stays signed even though Word is
+// unsigned -- the signed 32-bit result can represent every Word value, so
+// nothing is lost going that way), and when widths are equal but signs
+// differ the result is unsigned (`Word + ShortInt` comes back unsigned),
+// matching C's/Delphi's usual-arithmetic-conversion rule.
+std::shared_ptr<Type> Sema::commonIntType(const Type& L, const Type& R) {
+    if (L.Width == R.Width)
+        return Ctx_.getInt(L.Width, L.IsSigned && R.IsSigned);
+    return L.Width > R.Width ? Ctx_.getInt(L.Width, L.IsSigned)
+                              : Ctx_.getInt(R.Width, R.IsSigned);
 }

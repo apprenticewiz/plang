@@ -1005,8 +1005,20 @@ private:
     /// than a variable, so the value goes to that activation's result.
     [[nodiscard]] bool isFunctionResultTarget(const ExprNode& Target) const;
 
-    // Result type of '+', '-', '*' given two numeric operand types.
-    [[nodiscard]] std::shared_ptr<Type> numericResult(const Type& L, const Type& R) const;
+    // Result type of '+', '-', '*' given two numeric operand types.  Not
+    // const: the Integer-kind fallback below mints through commonIntType,
+    // which -- like every other TypeContext factory (getInt, getSubrange,
+    // ...) -- caches what it mints in Ctx_ and so needs a mutable Ctx_.
+    [[nodiscard]] std::shared_ptr<Type> numericResult(const Type& L, const Type& R);
+
+    // Result type of an integer-kind binary operator ('+' '-' '*' 'div' 'mod'
+    // 'shl' 'shr' 'xor', and Turbo's bitwise 'and'/'or') given two operands
+    // Sema has already confirmed are integral: the WIDER of L/R's own
+    // Width, at that wider operand's own IsSigned, rather than
+    // unconditionally the dialect's default Integer (TyInt) regardless of
+    // what the operands actually are.  See the definition (SemaExpr.cpp) for
+    // why this is a true no-op for ISO 7185/Extended Pascal.
+    [[nodiscard]] std::shared_ptr<Type> commonIntType(const Type& L, const Type& R);
 
     // Check arity and argument types for a user-defined callable.
     void checkCallArgs(const Symbol& Sym, SourceLocation CallLoc,

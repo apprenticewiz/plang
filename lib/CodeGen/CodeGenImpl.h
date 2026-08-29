@@ -1690,6 +1690,21 @@ struct Codegen::Impl {
     const TypeNode* denoterOf(const TypeNode* tn) const;
     llvm::Value* ensureI1(llvm::Value* v);
     llvm::Value* toDouble(llvm::Value* v);
-    llvm::Value* toI64(llvm::Value* v);
-    llvm::Value* coerceToType(llvm::Value* v, llvm::Type* dst);
+    /// Widens/narrows \p v to i64.  \p srcSigned, when given, is the
+    /// operand's actual Sema-resolved Type::IsSigned and settles sign- vs.
+    /// zero-extension directly; omitted (the default), it falls back to the
+    /// old LLVM-bit-width-alone heuristic (see the definition,
+    /// CodeGenExprs.cpp) that every call site not yet threading a real
+    /// operand type through still relies on.  Passing it explicitly is
+    /// mandatory wherever the value being widened may be one of Turbo's
+    /// sized-integer ladder's UNSIGNED rungs at a width other than i8
+    /// (Word/Cardinal/LongWord/QWord) or its 8-bit SIGNED rung (ShortInt) --
+    /// the old heuristic only ever gets Char/Boolean/plain-Integer right.
+    llvm::Value* toI64(llvm::Value* v, std::optional<bool> srcSigned = std::nullopt);
+    /// Coerces \p v to \p dst.  \p srcSigned is \c toI64's identical
+    /// parameter, for the identical reason, consulted only on the
+    /// ordinal-to-ordinal widening path (the floating-point paths do not
+    /// need it).
+    llvm::Value* coerceToType(llvm::Value* v, llvm::Type* dst,
+                               std::optional<bool> srcSigned = std::nullopt);
 };
