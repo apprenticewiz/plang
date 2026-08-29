@@ -948,6 +948,28 @@ void Sema::checkCallStmt(const CallStmt& S) {
         // would just move the crash/silent-corruption to a different actual
         // rather than remove it.  Widening this accept-list is separate,
         // larger work (teaching emitCStrArg the missing cases), not this fix.
+        // -std=turbo: real Turbo Pascal's Reset/Rewrite second argument is an
+        // INTEGER RecSize for an untyped file (confirmed against `fpc -Mtp`:
+        // `reset(f, 'x.txt')` is REJECTED there with an incompatible-type
+        // error), the mirror image of EP's own reset(f, name) external-file-
+        // name form just below.  This project used to accept a string here
+        // under Turbo too (PR #475/#478, kept as an implicit Assign, purely a
+        // plang-only convenience) -- now that Assign exists as its own
+        // explicit builtin, that convenience contradicts real field practice
+        // and is retired: a genuine Turbo program writes
+        // `Assign(f, 'name'); Reset(f);`, never `Reset(f, 'name')`.  Extend/
+        // Update are EP-only builtins (Builtins.def), so they never reach
+        // this arm under Turbo and keep taking a filename unconditionally.
+        if (Opts.turbo() && (Lo == "reset" || Lo == "rewrite")
+                && S.Args.size() == 2) {
+            (void)checkExpr(*S.Args[0]);
+            auto SizeTy = checkExpr(*S.Args[1]);
+            if (!SizeTy->isError() && SizeTy->Kind != TypeKind::Integer)
+                error(S.Args[1]->Loc, diag::err_turbo_reset_rewrite_recsize_type,
+                      {Lo, SizeTy->Name});
+            return;
+        }
+
         if ((Lo == "reset" || Lo == "rewrite" || Lo == "extend" || Lo == "update")
                 && S.Args.size() == 2) {
             (void)checkExpr(*S.Args[0]);
