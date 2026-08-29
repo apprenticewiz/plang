@@ -189,16 +189,17 @@ void BuiltinIO::emitWriteValue(llvm::Value* val, bool newline, llvm::Value* fp,
         auto* re = B.CreateExtractValue(val, 0, "cplx.re");
         auto* im = B.CreateExtractValue(val, 1, "cplx.im");
         auto* voidT = llvm::Type::getVoidTy(Ctx);
+        auto* upper = turboFlag();
         if (fp) {
             B.CreateCall(RtFns.getExternFnN("plang_write_file_cplx", voidT,
-                                            {PtrTy, DblTy, DblTy}), {fp, re, im});
+                                            {PtrTy, DblTy, DblTy, I8Ty}), {fp, re, im, upper});
             if (newline)
                 B.CreateCall(
                     RtFns.getExternFnN("plang_writeln_file", voidT, {PtrTy}), {fp});
         } else {
             B.CreateCall(
                 RtFns.getExternFnN(newline ? "plang_writeln_cplx" : "plang_write_cplx",
-                             voidT, {DblTy, DblTy}), {re, im});
+                             voidT, {DblTy, DblTy, I8Ty}), {re, im, upper});
         }
         return;
     }
@@ -235,13 +236,28 @@ void BuiltinIO::emitWriteValue(llvm::Value* val, bool newline, llvm::Value* fp,
         fp ? callFile("plang_write_file_i64", I64Ty, val)
            : callStdout(std::string("plang_write") + (newline?"ln":"") + "_i64", I64Ty, val);
     } else if (ty->isDoubleTy()) {
-        fp ? callFile("plang_write_file_f64", DblTy, val)
-           : callStdout(std::string("plang_write") + (newline?"ln":"") + "_f64", DblTy, val);
+        // f64/bool both take an extra Upper flag now (the Turbo real-format
+        // profile / TRUE-FALSE spelling), so they go through getExternFnN's
+        // full parameter list directly rather than callFile/callStdout's
+        // one-value shape (getRuntimeFn, which callStdout wraps, only builds
+        // a single-argument signature).
+        auto* upper = turboFlag();
+        if (fp)
+            B.CreateCall(RtFns.getExternFnN("plang_write_file_f64", voidTy, {PtrTy, DblTy, I8Ty}),
+                         {fp, val, upper});
+        else
+            B.CreateCall(RtFns.getExternFnN(std::string("plang_write") + (newline?"ln":"") + "_f64",
+                             voidTy, {DblTy, I8Ty}), {val, upper});
     } else if (isBool) {
         auto* ext = ty->isIntegerTy(1)
             ? B.CreateZExt(val, I8Ty, "bool.ext") : val;
-        fp ? callFile("plang_write_file_bool", I8Ty, ext)
-           : callStdout(std::string("plang_write") + (newline?"ln":"") + "_bool", I8Ty, ext);
+        auto* upper = turboFlag();
+        if (fp)
+            B.CreateCall(RtFns.getExternFnN("plang_write_file_bool", voidTy, {PtrTy, I8Ty, I8Ty}),
+                         {fp, ext, upper});
+        else
+            B.CreateCall(RtFns.getExternFnN(std::string("plang_write") + (newline?"ln":"") + "_bool",
+                             voidTy, {I8Ty, I8Ty}), {ext, upper});
     } else if (ty->isIntegerTy(8)) {
         fp ? callFile("plang_write_file_char", I8Ty, val)
            : callStdout(std::string("plang_write") + (newline?"ln":"") + "_char", I8Ty, val);
@@ -266,19 +282,20 @@ void BuiltinIO::emitWriteValueFormatted(llvm::Value* val, llvm::Value* w, llvm::
         auto* re = B.CreateExtractValue(val, 0, "cplx.re");
         auto* im = B.CreateExtractValue(val, 1, "cplx.im");
         auto* dv = d ? d : llvm::ConstantInt::get(I64Ty, -1, true);
+        auto* upper = turboFlag();
         if (fp) {
             B.CreateCall(
                 RtFns.getExternFnN("plang_write_file_cplx_w", voidTy,
-                             {PtrTy, DblTy, DblTy, I64Ty, I64Ty}),
-                {fp, re, im, w, dv});
+                             {PtrTy, DblTy, DblTy, I64Ty, I64Ty, I8Ty}),
+                {fp, re, im, w, dv, upper});
             if (newline)
                 B.CreateCall(
                     RtFns.getExternFnN("plang_writeln_file", voidTy, {PtrTy}), {fp});
         } else {
             B.CreateCall(
                 RtFns.getExternFnN("plang_write" + nl + "_cplx_w", voidTy,
-                             {DblTy, DblTy, I64Ty, I64Ty}),
-                {re, im, w, dv});
+                             {DblTy, DblTy, I64Ty, I64Ty, I8Ty}),
+                {re, im, w, dv, upper});
         }
         return;
     }
@@ -310,46 +327,54 @@ void BuiltinIO::emitWriteValueFormatted(llvm::Value* val, llvm::Value* w, llvm::
             vs.insert(vs.end(), args);
             B.CreateCall(RtFns.getExternFnN(fn, voidTy, tys), vs);
         };
+        // Upper (f64/bool)/NoTrunc (bool/str)/AlwaysWrite (char): the same
+        // single CodeGen-resolved isTurbo() fact, threaded as a trailing
+        // extra argument per plang_io.cpp's convention -- see turboFlag()'s
+        // own comment.  One flag value serves every parameter slot below,
+        // since they are all exactly this one fact, just named for what
+        // each callee does with it.
+        auto* turbo = turboFlag();
         if (ty->isIntegerTy(64)) {
             callFile("plang_write_file_i64_w", {I64Ty, I64Ty}, {val, w});
         } else if (ty->isDoubleTy()) {
-            if (d) callFile("plang_write_file_f64_f", {DblTy, I64Ty, I64Ty}, {val, w, d});
-            else   callFile("plang_write_file_f64_e", {DblTy, I64Ty}, {val, w});
+            if (d) callFile("plang_write_file_f64_f", {DblTy, I64Ty, I64Ty, I8Ty}, {val, w, d, turbo});
+            else   callFile("plang_write_file_f64_e", {DblTy, I64Ty, I8Ty}, {val, w, turbo});
         } else if (isBool) {
             auto* ext = ty->isIntegerTy(1)
                 ? B.CreateZExt(val, I8Ty, "bool.ext") : val;
-            callFile("plang_write_file_bool_w", {I8Ty, I64Ty}, {ext, w});
+            callFile("plang_write_file_bool_w", {I8Ty, I64Ty, I8Ty, I8Ty}, {ext, w, turbo, turbo});
         } else if (ty->isIntegerTy(8)) {
-            callFile("plang_write_file_char_w", {I8Ty, I64Ty}, {val, w});
+            callFile("plang_write_file_char_w", {I8Ty, I64Ty, I8Ty}, {val, w, turbo});
         } else {
-            callFile("plang_write_file_str_w", {PtrTy, I64Ty}, {val, w});
+            callFile("plang_write_file_str_w", {PtrTy, I64Ty, I8Ty}, {val, w, turbo});
         }
         if (newline)
             B.CreateCall(RtFns.getExternFnN("plang_writeln_file", voidTy, {PtrTy}), {fp});
         return;
     }
 
+    auto* turbo = turboFlag();
     if (ty->isIntegerTy(64)) {
         B.CreateCall(RtFns.getExternFnN("plang_write" + nl + "_i64_w", voidTy, {I64Ty, I64Ty}),
                            {val, w});
     } else if (ty->isDoubleTy()) {
         if (d)
-            B.CreateCall(RtFns.getExternFnN("plang_write" + nl + "_f64_f", voidTy, {DblTy, I64Ty, I64Ty}),
-                               {val, w, d});
+            B.CreateCall(RtFns.getExternFnN("plang_write" + nl + "_f64_f", voidTy, {DblTy, I64Ty, I64Ty, I8Ty}),
+                               {val, w, d, turbo});
         else
-            B.CreateCall(RtFns.getExternFnN("plang_write" + nl + "_f64_e", voidTy, {DblTy, I64Ty}),
-                               {val, w});
+            B.CreateCall(RtFns.getExternFnN("plang_write" + nl + "_f64_e", voidTy, {DblTy, I64Ty, I8Ty}),
+                               {val, w, turbo});
     } else if (isBool) {
         auto* ext = ty->isIntegerTy(1)
             ? B.CreateZExt(val, I8Ty, "bool.ext") : val;
-        B.CreateCall(RtFns.getExternFnN("plang_write" + nl + "_bool_w", voidTy, {I8Ty, I64Ty}),
-                           {ext, w});
+        B.CreateCall(RtFns.getExternFnN("plang_write" + nl + "_bool_w", voidTy, {I8Ty, I64Ty, I8Ty, I8Ty}),
+                           {ext, w, turbo, turbo});
     } else if (ty->isIntegerTy(8)) {
-        B.CreateCall(RtFns.getExternFnN("plang_write" + nl + "_char_w", voidTy, {I8Ty, I64Ty}),
-                           {val, w});
+        B.CreateCall(RtFns.getExternFnN("plang_write" + nl + "_char_w", voidTy, {I8Ty, I64Ty, I8Ty}),
+                           {val, w, turbo});
     } else {
-        B.CreateCall(RtFns.getExternFnN("plang_write" + nl + "_str_w", voidTy, {PtrTy, I64Ty}),
-                           {val, w});
+        B.CreateCall(RtFns.getExternFnN("plang_write" + nl + "_str_w", voidTy, {PtrTy, I64Ty, I8Ty}),
+                           {val, w, turbo});
     }
 }
 
@@ -455,6 +480,19 @@ void BuiltinIO::emitReadArg(const ExprNode& arg, llvm::Value* fp) {
     llvm::Type* readTy  = I64Ty;
     if (base && base->Kind == TypeKind::Real)      { suffix = "_f64";  readTy = DblTy; }
     else if (base && base->Kind == TypeKind::Char) { suffix = "_char"; readTy = I8Ty;  }
+
+    // Turbo reverses the numeric scanners entirely (whole-token, the entire
+    // token must parse, $/0x/&/% radix prefixes -- plang_io.cpp's
+    // plang_read_i64_turbo/plang_read_f64_turbo and plang_file.cpp's file
+    // twins) rather than differing by one resolved value the ISO/EP entry
+    // point can absorb, so this picks a second, purpose-built entry point --
+    // the RangeCheckGuards precedent (plang_tp_runerror vs plang_err_div_zero)
+    // for when the two dialects' behavior is not just a parameter apart.
+    // Char reads are deliberately excluded: Turbo's raw-byte char read vs
+    // ISO/EP's line-marker-as-space substitution is a separate, already-
+    // settled design point (plang_file.cpp's plang_read_file_char, citing
+    // ISO §6.4.3.5) this task does not touch.
+    if (Opts.turbo() && (suffix == "_i64" || suffix == "_f64")) suffix += "_turbo";
 
     // The runtime stores through the pointer at the reader's own width, so a
     // variable of a different width is read into a temporary and converted --

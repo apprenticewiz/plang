@@ -14,6 +14,8 @@
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/LLVMContext.h"
 
+#include "plang/Basic/LangOptions.h"
+
 #include "CGSymbolTable.h"
 #include "CGTypes.h"
 #include "ComplexOps.h"
@@ -34,6 +36,7 @@ public:
               StringRuntime& Strings, SchemaAccess& Schema,
               StringCallMarshalling& StrCall, ComplexOps& Complex,
               CGSymbolTable& SymTab, RangeCheckGuards& RangeGuards, CGTypes& Types,
+              const plang::LangOptions& Opts,
               llvm::IntegerType* I8Ty, llvm::IntegerType* I64Ty,
               llvm::Type* DblTy, llvm::PointerType* PtrTy,
               std::function<llvm::Value*(const plang::ExprNode&)> EmitExpr,
@@ -46,7 +49,7 @@ public:
               std::function<int64_t(const plang::ExprNode&)> ExprCharStrLen)
         : Ctx(Ctx), Mod(Mod), B(B), FileVars(FileVars), RtFns(RtFns),
           Strings(Strings), Schema(Schema), StrCall(StrCall), Complex(Complex),
-          SymTab(SymTab), RangeGuards(RangeGuards), Types(Types),
+          SymTab(SymTab), RangeGuards(RangeGuards), Types(Types), Opts(Opts),
           I8Ty(I8Ty), I64Ty(I64Ty), DblTy(DblTy), PtrTy(PtrTy),
           EmitExpr(std::move(EmitExpr)), EmitLValue(std::move(EmitLValue)),
           ToI64(std::move(ToI64)), CoerceToType(std::move(CoerceToType)),
@@ -87,6 +90,22 @@ private:
         return llvm::ConstantInt::get(I64Ty, static_cast<uint64_t>(v), true);
     }
 
+    /// The single CodeGen-resolved fact every Turbo reversal in this file
+    /// reduces to (uppercase bool spelling, non-truncating field widths, a
+    /// zero-width char that still writes, the Turbo real-format profile):
+    /// whether the active dialect is Turbo, as a plain i8 constant threaded
+    /// into the runtime call as an extra argument -- never a runtime-side
+    /// dialect check (see RangeCheckGuards' own isTurbo()/emitTpRunError for
+    /// the established precedent this follows: the runtime cannot hold a
+    /// "which dialect" global, since an ISO object and a Turbo one can be
+    /// linked into the same program).  A fresh call returns the same pooled
+    /// llvm::Constant every time (LLVMContext interns ConstantInt by value),
+    /// so there is no cost to calling it at each of the several sites below
+    /// that need it instead of caching one Value*.
+    llvm::Constant* turboFlag() const {
+        return llvm::ConstantInt::get(I8Ty, Opts.turbo() ? 1 : 0);
+    }
+
     llvm::LLVMContext& Ctx;
     llvm::Module& Mod;
     llvm::IRBuilder<>& B;
@@ -99,6 +118,7 @@ private:
     CGSymbolTable& SymTab;
     RangeCheckGuards& RangeGuards;
     CGTypes& Types;
+    const plang::LangOptions& Opts;
     llvm::IntegerType* I8Ty;
     llvm::IntegerType* I64Ty;
     llvm::Type* DblTy;

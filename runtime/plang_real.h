@@ -38,6 +38,15 @@ inline constexpr int PlangExpDigits = 3;
 /// default.  Fewer digits (this used to be 15) lets a value near DBL_MAX
 /// round up past the representable range when printed, so reading it back
 /// produces +Infinity instead of the original value.
+///
+/// Turbo shares this exact value too (see PlangRealProfileTurbo below): a
+/// `real` variable's default write field, checked directly against
+/// `fpc -Mtp` (which maps Turbo's `real` onto Double, the same 8-byte type
+/// this runtime always uses -- Extended is a different, 10-byte type FPC
+/// gives only an explicitly-declared `extended`, never a bare literal's
+/// default write), comes out byte-for-byte identical to ISO's own down to
+/// the decimal-place count -- the two dialects disagree only on which
+/// letter the exponent uses, not on how wide the field is.
 inline constexpr int PlangRealWidth = 24;
 
 /// The smallest field the representation fits in: the sign, a digit, the point,
@@ -49,10 +58,45 @@ inline constexpr int PlangRealMinWidth = PlangExpDigits + 6;
 /// seventeenth of a double are not the value's own anyway.
 inline constexpr std::size_t PlangRealMaxChars = 512;
 
+/// What varies between a dialect's default real-write shape.  ISO 7185 and
+/// Extended Pascal share one profile; Turbo's is a second, DIFFERENT default
+/// -- CodeGen picks which one to pass based on LangOptions.turbo(), never a
+/// runtime-side dialect check (the runtime has no such thing to check: an
+/// ISO object file and a Turbo one can be linked into the same binary, so
+/// nothing here may depend on a process-global "which dialect" state).
+///
+/// Only ExpChar actually differs today (see PlangRealWidth's own comment for
+/// how that was confirmed against `fpc -Mtp`) -- Width/ExpDigits are broken
+/// out as their own fields anyway, rather than folding the whole profile
+/// down to a single bool, so that a future dialect whose default width or
+/// exponent-digit count genuinely differs has somewhere to say so without
+/// another parameter threaded through every call site again.
+struct PlangRealProfile {
+    int  Width;     // Default TotalWidth (PlangRealWidth's role, parameterized).
+    int  ExpDigits;  // Fixed exponent digit count (PlangExpDigits's role).
+    char ExpChar;    // 'e' (ISO 7185 / EP) or 'E' (Turbo).
+};
+
+/// ISO 7185 / EP: today's exact values, unchanged -- see plangFormatReal's
+/// own comment for why this one's shape is the load-bearing correctness
+/// property of the whole parameterization.
+inline constexpr PlangRealProfile PlangRealProfileISO{PlangRealWidth, PlangExpDigits, 'e'};
+/// Turbo: identical width and exponent-digit count to ISO's (see
+/// PlangRealWidth's comment), differing only in the exponent letter's case.
+inline constexpr PlangRealProfile PlangRealProfileTurbo{PlangRealWidth, PlangExpDigits, 'E'};
+
 /// Renders \p V into \p Buf in the floating-point representation of
 /// §6.9.3.4.1, in a field of \p TotalWidth characters, and returns how many
 /// were written.  \p Buf holds at least PlangRealMaxChars.  A TotalWidth below
 /// the minimum is raised to it, as the standard's ActWidth does.
-std::size_t plangFormatReal(char* Buf, double V, int64_t TotalWidth);
+///
+/// \p Profile's DEFAULT ARGUMENT is PlangRealProfileISO precisely so every
+/// call site this project had before Turbo existed -- there were no others,
+/// since plang had only one dialect family's real format until now --
+/// continues to build the identical shape it always did without being
+/// touched: the profile parameterization is additive, not a rewrite of the
+/// ISO path.  A Turbo call site passes PlangRealProfileTurbo explicitly.
+std::size_t plangFormatReal(char* Buf, double V, int64_t TotalWidth,
+                             const PlangRealProfile& Profile = PlangRealProfileISO);
 
 } // namespace plang

@@ -18,9 +18,9 @@ RUN: %run %t | FileCheck %s
 
 (*
 CHECK-NOT: SIDEEFFECT CALLED
-CHECK: before {$B+}: b=false
+CHECK: before {$B+}: b=FALSE
 CHECK-NEXT: SIDEEFFECT CALLED
-CHECK-NEXT: after {$B+}: b=false
+CHECK-NEXT: after {$B+}: b=FALSE
 *)
 
 program bplus_restores_full_eval;
