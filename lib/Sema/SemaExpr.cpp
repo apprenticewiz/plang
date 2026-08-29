@@ -558,8 +558,23 @@ std::shared_ptr<Type> Sema::checkDeref(const DerefExpr& E) {
         return Pointee;
     }
     if (PtrTy->Kind == TypeKind::File) {
-        // ISO §6.5.5: f^ for a file variable accesses the file buffer variable.
-        // Its type is the file's component type; for text files it is char.
+        // ISO §6.5.5: f^ for a file variable accesses the file buffer
+        // variable.  Its type is the file's component type; for text files
+        // it is char.  -std=turbo has no buffer variable at all -- it
+        // replaces the whole get/put/page file model (already refused by
+        // checkEPOnly, above the call sites that reach here) with
+        // Assign/Seek, and the parser places no dialect boundary of its own
+        // between an ordinary pointer's `p^` and a file's `f^`, so this is
+        // the one place actually able to tell the two apart before codegen
+        // sees a Turbo program dereference a file and finds no buffer to
+        // read.  Narrowly scoped to PtrTy->Kind == File: an ordinary
+        // Pointer, just above, and a Schema pointer's discriminant-header
+        // form, inside that same arm, both return before ever reaching here
+        // and so are completely unaffected by this check.
+        if (Opts.turbo()) {
+            error(E.Loc, diag::err_turbo_file_buffer_var);
+            return TyErr;
+        }
         return PtrTy->ElemType ? PtrTy->ElemType : TyChar;
     }
     error(E.Loc, diag::err_deref_non_pointer, {PtrTy->Name});
@@ -1191,16 +1206,36 @@ bool Sema::checkEPOnly(const Symbol& Sym, SourceLocation Loc) {
     // refused, never the name's, so it says nothing about which dialect
     // WOULD have accepted it.
     if (!Sym.NotInDialect) return true;
-    // Turbo-only (Assert, the first one, and the shape any future one takes)
-    // gets its own message: err_ep_required_name unconditionally claims "an
-    // Extended Pascal extension," which is not just imprecise but actively
-    // wrong for a name EP does not have either -- it reads as a promise that
-    // -std=iso10206 accepts it.
+    // Four shapes, all of Builtins.def's actual Dialects masks other than
+    // ALL (which never sets NotInDialect, so never reaches here).  Each picks
+    // the DIAG that names the dialect(s) the name DOES belong to, since that
+    // is a fact about Sym and is the same whichever dialect is active --
+    // unlike "not available under -std=X", which used to hardcode iso7185
+    // and was simply wrong once -std=turbo could refuse an Extended Pascal
+    // name too (`card` under -std=turbo previously read "not available under
+    // -std=iso7185", though iso7185 was never the dialect running it).
     const unsigned Dialects = builtinDialects(Sym.BuiltinKind);
-    if ((Dialects & LangOptions::D_Turbo) && !(Dialects & LangOptions::D_ISO10206)) {
+    // Turbo-only (Assert, the first one, and the shape any future one
+    // takes): only iso7185 or iso10206 can be active here.
+    if (Dialects == LangOptions::D_Turbo) {
         error(Loc, diag::err_turbo_required_name, {Sym.Name});
         return false;
     }
+    // ISO 7185's file-buffer model (get, put, page, pack, unpack): iso7185
+    // and iso10206 both declare these, so only -std=turbo can be active
+    // here, and turbo does not merely lack them -- it replaces them.
+    if (Dialects == (LangOptions::D_ISO7185 | LangOptions::D_ISO10206)) {
+        error(Loc, diag::err_turbo_file_model_name, {Sym.Name});
+        return false;
+    }
+    // Extended-Pascal-and-Turbo (Halt, Length): only -std=iso7185, the sole
+    // dialect missing from this two-bit mask, can be active here.
+    if (Dialects == (LangOptions::D_ISO10206 | LangOptions::D_Turbo)) {
+        error(Loc, diag::err_ep_turbo_required_name, {Sym.Name});
+        return false;
+    }
+    // Extended Pascal alone (Card, and most of the rest of the EP block):
+    // either iso7185 or turbo can be active here.
     error(Loc, diag::err_ep_required_name, {Sym.Name});
     return false;
 }

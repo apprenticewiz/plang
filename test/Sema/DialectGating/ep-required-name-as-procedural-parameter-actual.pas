@@ -10,5 +10,5 @@ begin writeln(f(['a'])) end;
 begin caller(card) end.
 
 (*
-CHECK: 'card' is an Extended Pascal extension and is not available under
+CHECK: 'card' is an Extended Pascal extension and is only available under -std=iso10206
 *)

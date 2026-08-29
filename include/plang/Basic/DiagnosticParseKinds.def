@@ -33,9 +33,18 @@ DIAG(err_ep_case_range, Error,
 DIAG(err_ep_type, Error,
      "the type '%0' is an Extended Pascal extension and is not available "
      "under -std=iso7185")
+// checkEPOnly names which dialect(s) actually declare the name, rather than
+// which one refused it: refused-by is Opts.Std, always known and never worth
+// saying twice, but declares-in is Sym's own Dialects mask, and a name
+// missing from the ACTIVE dialect can be missing from either of the other
+// two -- iso7185 (the only dialect these four DIAGs were ever written for
+// until -std=turbo existed) or turbo now as well.  "not available under
+// -std=iso7185" is not just imprecise but backwards when turbo is what is
+// active: it reads as a claim about the dialect in force, when the dialect
+// in force is exactly the one already named on the command line.
 DIAG(err_ep_required_name, Error,
-     "'%0' is an Extended Pascal extension and is not available under "
-     "-std=iso7185")
+     "'%0' is an Extended Pascal extension and is only available under "
+     "-std=iso10206")
 // Sema::checkEPOnly's other half, for a required name only -std=turbo
 // declares (Assert, the first one) -- err_ep_required_name's own wording
 // would be actively wrong here, not just imprecise: it reads as a promise
@@ -43,6 +52,32 @@ DIAG(err_ep_required_name, Error,
 DIAG(err_turbo_required_name, Error,
      "'%0' is a Turbo Pascal extension and is only available under "
      "-std=turbo")
+// A third shape checkEPOnly's Dialects switch has to name: Halt and Length
+// are both iso10206's and turbo's, so unlike the plain EP-only case above,
+// -std=iso10206 is not the only place this name works -- and unlike it,
+// this one only ever fires under -std=iso7185, the sole dialect missing
+// from a two-bit mask that already has the other two.
+DIAG(err_ep_turbo_required_name, Error,
+     "'%0' is available under -std=iso10206 and -std=turbo, but not under "
+     "-std=iso7185")
+// ISO 7185's file-buffer model -- get, put, page, pack and unpack -- is not
+// an Extended Pascal extension at all (iso7185 has all five); it is what
+// -std=turbo replaces rather than lacks, with Assign and Seek instead.
+// err_ep_required_name's frame ("is an Extended Pascal extension") would be
+// simply wrong for a name iso7185 itself declares, so this family gets its
+// own wording naming what actually happened to it under Turbo.
+DIAG(err_turbo_file_model_name, Error,
+     "'%0' is part of Pascal's file-buffer model, which -std=turbo "
+     "replaces with Assign and Seek")
+// Sema::checkDeref's File arm: ISO §6.5.5's buffer variable, `f^`, is the
+// other half of the same file-buffer model err_turbo_file_model_name refuses
+// get/put/page/pack/unpack for -- and is not a name at all, so it cannot
+// reuse that DIAG's '%0' the way those five do.  No argument: unlike a
+// builtin's own spelling, "f^" is generic Pascal notation for any file
+// variable's buffer, not literally this one's.
+DIAG(err_turbo_file_buffer_var, Error,
+     "the file buffer variable ('f^') is part of Pascal's file-buffer "
+     "model, which -std=turbo replaces with Assign and Seek")
 DIAG(err_ep_two_arg_form, Error,
      "the two-argument form of '%0' is an Extended Pascal extension and is "
      "not available under -std=iso7185")

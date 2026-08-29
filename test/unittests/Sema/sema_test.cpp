@@ -47,24 +47,32 @@ TEST(Builtins, ANameOfAnotherDialectIsDeclaredRatherThanUndefined) {
         return check(Src);
     };
     std::size_t Probed = 0;
-    // Assert (Dialects = TP) is the first name this loop meets that is not
-    // Extended Pascal's: Sema::checkEPOnly picks between err_ep_required_name
-    // and err_turbo_required_name by the same "has Turbo, does not have EP"
-    // test mirrored here, so a name declared only for Turbo has to be probed
-    // for the OTHER message -- asserting the EP one for it would be asserting
-    // the bug this same PR fixed (err_ep_required_name's wording promises
-    // -std=iso10206 accepts a name that, for a Turbo-only one, no dialect but
-    // Turbo does).
+    // This probes under default LangOptions{}, i.e. -std=iso7185, so the
+    // only Dialects_ shapes actually reachable below are TP (Assert, the
+    // first name this loop meets that is not Extended Pascal's), EP (Card,
+    // ...) and EP|TP (Halt, Length) -- ISO7185|ISO10206 (get/put/page/pack/
+    // unpack) is never "not in dialect" here, since iso7185 itself is one of
+    // its two dialects.  Sema::checkEPOnly picks among four DIAGs by exactly
+    // this same Dialects_ switch (mirrored here) because each names the
+    // dialect(s) the name DOES belong to, which is a fact about Spelling_
+    // alone and stays true whichever of the OTHER dialects asks -- unlike
+    // the wording each replaced, which hardcoded "not available under
+    // -std=iso7185" and so was simply wrong once -std=turbo could ask too.
 #define BUILTIN(Id_, Spelling_, Kind_, Dialects_, Min_, Max_, Result_)         \
     if (!LangOptions{}.inDialect(Dialects_)) {                                 \
         ++Probed;                                                              \
         const auto R = probe(Spelling_, builtinIsFunction(BuiltinID::Id_));    \
-        const bool TurboOnly = ((Dialects_) & LangOptions::D_Turbo)            \
-                             && !((Dialects_) & LangOptions::D_ISO10206);      \
-        EXPECT_TRUE(R.hasError(TurboOnly                                       \
-            ? "'" Spelling_ "' is a Turbo Pascal extension"                    \
-            : "'" Spelling_ "' is an Extended Pascal"))                        \
-            << Spelling_;                                                      \
+        const char* Expect = "'" Spelling_ "' is an Extended Pascal";          \
+        if ((Dialects_) == LangOptions::D_Turbo)                               \
+            Expect = "'" Spelling_ "' is a Turbo Pascal extension";            \
+        else if ((Dialects_) == (LangOptions::D_ISO7185                       \
+                                  | LangOptions::D_ISO10206))                  \
+            Expect = "'" Spelling_ "' is part of Pascal's file-buffer model";  \
+        else if ((Dialects_) == (LangOptions::D_ISO10206                      \
+                                  | LangOptions::D_Turbo))                     \
+            Expect = "'" Spelling_ "' is available under -std=iso10206 "       \
+                     "and -std=turbo";                                         \
+        EXPECT_TRUE(R.hasError(Expect)) << Spelling_;                          \
         EXPECT_FALSE(R.hasError("undefined")) << Spelling_;                    \
     }
 #include "plang/Basic/Builtins.def"
