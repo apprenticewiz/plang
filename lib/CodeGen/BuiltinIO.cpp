@@ -143,23 +143,37 @@ void BuiltinIO::emitWriteArgs(
             auto* addr = StrCall.emitStrAddr(*argExpr);
             if (!addr) continue;
             auto* capV = i64c(argExpr->ResolvedType->StrCapacity);
+            auto* voidTy = llvm::Type::getVoidTy(Ctx);
             if (fp) {
-                // File-var I/O of a ShortString is out of this item's scope
-                // (no PascalFile-aware plang_sstr_write_file exists yet) --
-                // an honest internal error here, not a silent misprint or an
-                // LLVM type-mismatch crash from falling through to the
-                // scalar path below with an aggregate value.
-                codegenICE("ShortString file I/O is not implemented yet "
-                           "(write/writeln to stdout is)");
+                // plang_sstr_write_file(_w) are PascalFile-aware, one-byte-
+                // header writers of their own -- see plang_file.cpp's own
+                // comment.  The newline is a separate plang_writeln_file(fp)
+                // call, the same convention every other typed file write in
+                // this function already follows (VarString/CharStr's branch
+                // just below, and the scalar path further down).
+                if (width)
+                    B.CreateCall(
+                        RtFns.getExternFnN("plang_sstr_write_file_w", voidTy,
+                                     {PtrTy, PtrTy, I64Ty, I64Ty}),
+                        {fp, addr, capV, width});
+                else
+                    B.CreateCall(
+                        RtFns.getExternFnN("plang_sstr_write_file", voidTy,
+                                     {PtrTy, PtrTy, I64Ty}),
+                        {fp, addr, capV});
+                if (addNl)
+                    B.CreateCall(
+                        RtFns.getExternFnN("plang_writeln_file", voidTy, {PtrTy}), {fp});
+                continue;
             }
             if (width) {
                 auto* fn = Strings.getStrFn(
                     addNl ? "plang_sstr_writeln_w" : "plang_sstr_write_w",
-                    llvm::Type::getVoidTy(Ctx), {PtrTy, I64Ty, I64Ty});
+                    voidTy, {PtrTy, I64Ty, I64Ty});
                 B.CreateCall(fn, {addr, capV, width});
             } else {
                 auto* fn = Strings.getStrFn(addNl ? "plang_sstr_writeln" : "plang_sstr_write",
-                    llvm::Type::getVoidTy(Ctx), {PtrTy, I64Ty});
+                    voidTy, {PtrTy, I64Ty});
                 B.CreateCall(fn, {addr, capV});
             }
             continue;
@@ -226,7 +240,13 @@ void BuiltinIO::emitWriteValue(llvm::Value* val, bool newline, llvm::Value* fp,
     // Turbo `Single` reuses the f64 writers Real (64-bit) already has,
     // promoted here rather than duplicating plang_real.cpp's formatting
     // logic for a second width -- the runtime never sees anything but a
-    // double.
+    // double.  wasSingle survives the promotion below so the f64 dispatch
+    // arm can still tell a Single from a genuine Real and route to the
+    // significant-digit-capped f32 writers (see plang_real.h's
+    // PlangSingleMaxDecPlaces) instead of double's own -- without it, a
+    // Single's default write showed the promotion's own double-precision
+    // noise past the 32-bit value's actual ~9 significant digits.
+    const bool wasSingle = ty->isFloatTy();
     if (ty->isFloatTy()) {
         val = B.CreateFPExt(val, DblTy, "single.widen");
         ty  = val->getType();
@@ -281,8 +301,14 @@ void BuiltinIO::emitWriteValue(llvm::Value* val, bool newline, llvm::Value* fp,
     };
 
     if (ty->isIntegerTy(64)) {
-        fp ? callFile("plang_write_file_i64", I64Ty, val)
-           : callStdout(std::string("plang_write") + (newline?"ln":"") + "_i64", I64Ty, val);
+        // QWord (64-bit unsigned) is the one ordinal a signed formatter gets
+        // wrong -- see plang_write_u64's own comment: every narrower
+        // unsigned rung was already zero-extended to i64 above, so it never
+        // sets the sign bit and the signed/unsigned writers agree; only a
+        // genuinely 64-bit-wide unsigned value can disagree.
+        const bool uns = writesAsUnsigned64(semaTy);
+        fp ? callFile(uns ? "plang_write_file_u64" : "plang_write_file_i64", I64Ty, val)
+           : callStdout(std::string("plang_write") + (newline?"ln":"") + (uns ? "_u64" : "_i64"), I64Ty, val);
     } else if (ty->isDoubleTy()) {
         // f64/bool both take an extra Upper flag now (the Turbo real-format
         // profile / TRUE-FALSE spelling), so they go through getExternFnN's
@@ -290,11 +316,12 @@ void BuiltinIO::emitWriteValue(llvm::Value* val, bool newline, llvm::Value* fp,
         // one-value shape (getRuntimeFn, which callStdout wraps, only builds
         // a single-argument signature).
         auto* upper = turboFlag();
+        const char* fam = wasSingle ? "f32" : "f64";
         if (fp)
-            B.CreateCall(RtFns.getExternFnN("plang_write_file_f64", voidTy, {PtrTy, DblTy, I8Ty}),
-                         {fp, val, upper});
+            B.CreateCall(RtFns.getExternFnN(std::string("plang_write_file_") + fam, voidTy,
+                             {PtrTy, DblTy, I8Ty}), {fp, val, upper});
         else
-            B.CreateCall(RtFns.getExternFnN(std::string("plang_write") + (newline?"ln":"") + "_f64",
+            B.CreateCall(RtFns.getExternFnN(std::string("plang_write") + (newline?"ln":"") + "_" + fam,
                              voidTy, {DblTy, I8Ty}), {val, upper});
     } else if (isBool) {
         auto* ext = toBoolByte(val);
@@ -326,7 +353,11 @@ void BuiltinIO::emitWriteValueFormatted(llvm::Value* val, llvm::Value* w, llvm::
     std::string nl = newline ? "ln" : "";
     llvm::Type* ty = val->getType();
     // See the identical promotion in emitWriteValue: Single reuses Real's
-    // f64 writers rather than a dedicated f32 formatter.
+    // f64 writers for the fixed-decimals (:w:d) form, but the exponential
+    // (:w, no decimals) form needs to still tell a Single apart post-
+    // promotion -- see wasSingle's use below and emitWriteValue's identical
+    // comment on why.
+    const bool wasSingle = ty->isFloatTy();
     if (ty->isFloatTy()) {
         val = B.CreateFPExt(val, DblTy, "single.widen");
         ty  = val->getType();
@@ -388,10 +419,18 @@ void BuiltinIO::emitWriteValueFormatted(llvm::Value* val, llvm::Value* w, llvm::
         // each callee does with it.
         auto* turbo = turboFlag();
         if (ty->isIntegerTy(64)) {
-            callFile("plang_write_file_i64_w", {I64Ty, I64Ty}, {val, w});
+            // See emitWriteValue's identical QWord split.
+            callFile(writesAsUnsigned64(semaTy) ? "plang_write_file_u64_w" : "plang_write_file_i64_w",
+                     {I64Ty, I64Ty}, {val, w});
         } else if (ty->isDoubleTy()) {
+            // A fixed decimals clause (:w:d) is left on the shared f64
+            // formatter even for a Single -- the requested D already bounds
+            // how many decimal digits print, so there is no unbounded-noise
+            // case for it to cap the way the exponential (:w alone) form
+            // needs to.
             if (d) callFile("plang_write_file_f64_f", {DblTy, I64Ty, I64Ty, I8Ty}, {val, w, d, turbo});
-            else   callFile("plang_write_file_f64_e", {DblTy, I64Ty, I8Ty}, {val, w, turbo});
+            else   callFile(wasSingle ? "plang_write_file_f32_e" : "plang_write_file_f64_e",
+                             {DblTy, I64Ty, I8Ty}, {val, w, turbo});
         } else if (isBool) {
             auto* ext = toBoolByte(val);
             callFile("plang_write_file_bool_w", {I8Ty, I64Ty, I8Ty, I8Ty}, {ext, w, turbo, turbo});
@@ -407,15 +446,17 @@ void BuiltinIO::emitWriteValueFormatted(llvm::Value* val, llvm::Value* w, llvm::
 
     auto* turbo = turboFlag();
     if (ty->isIntegerTy(64)) {
-        B.CreateCall(RtFns.getExternFnN("plang_write" + nl + "_i64_w", voidTy, {I64Ty, I64Ty}),
+        // See emitWriteValue's identical QWord split.
+        const std::string suf = writesAsUnsigned64(semaTy) ? "_u64_w" : "_i64_w";
+        B.CreateCall(RtFns.getExternFnN("plang_write" + nl + suf, voidTy, {I64Ty, I64Ty}),
                            {val, w});
     } else if (ty->isDoubleTy()) {
         if (d)
             B.CreateCall(RtFns.getExternFnN("plang_write" + nl + "_f64_f", voidTy, {DblTy, I64Ty, I64Ty, I8Ty}),
                                {val, w, d, turbo});
         else
-            B.CreateCall(RtFns.getExternFnN("plang_write" + nl + "_f64_e", voidTy, {DblTy, I64Ty, I8Ty}),
-                               {val, w, turbo});
+            B.CreateCall(RtFns.getExternFnN("plang_write" + nl + (wasSingle ? "_f32_e" : "_f64_e"),
+                               voidTy, {DblTy, I64Ty, I8Ty}), {val, w, turbo});
     } else if (isBool) {
         auto* ext = toBoolByte(val);
         B.CreateCall(RtFns.getExternFnN("plang_write" + nl + "_bool_w", voidTy, {I8Ty, I64Ty, I8Ty, I8Ty}),
@@ -430,9 +471,24 @@ void BuiltinIO::emitWriteValueFormatted(llvm::Value* val, llvm::Value* w, llvm::
 }
 
 // Helper to determine read type for an argument.
-std::string BuiltinIO::readFnSuffix(llvm::Type* ty) {
-    if (ty->isDoubleTy())        return "_f64";
-    if (ty->isIntegerTy(8))      return "_char";
+//
+// Width alone used to decide the i8 case: any i8 destination was taken for a
+// Char, the same shortcut writesAsChar's own comment describes -- true before
+// Turbo's sized-integer ladder existed (ISO 7185/EP stamp Width=64 on every
+// Integer), false now that ShortInt/Byte also lower to i8.  A ShortInt/Byte
+// destination reaching plang_read_char read exactly one raw character and
+// used ITS ASCII CODE as the value ("200" read '2' == 50), rather than
+// parsing the token as a number -- semaTy's own Kind, peeled through a
+// subrange the same way the Real/Char overrides at this function's call site
+// already do, is what actually answers "is this a char".
+std::string BuiltinIO::readFnSuffix(llvm::Type* ty, const plang::Type* semaTy) {
+    if (ty->isDoubleTy()) return "_f64";
+    if (ty->isIntegerTy(8)) {
+        if (!semaTy) return "_char"; // no Sema type: keep the old guess
+        const plang::Type* t = semaTy;
+        while (t->Kind == TypeKind::Subrange && t->SubBase) t = t->SubBase.get();
+        return t->Kind == TypeKind::Char ? "_char" : "_i64";
+    }
     return "_i64";
 }
 
@@ -463,13 +519,17 @@ void BuiltinIO::emitReadArg(const ExprNode& arg, llvm::Value* fp) {
     if (arg.ResolvedType && arg.ResolvedType->Kind == TypeKind::ShortString) {
         auto* capV = i64c(arg.ResolvedType->StrCapacity);
         if (fp)
-            // File-var I/O of a ShortString is out of this item's scope; see
-            // the identical guard and its own comment in emitWriteArgs.
-            codegenICE("ShortString file I/O is not implemented yet "
-                       "(read/readln from stdin is)");
-        B.CreateCall(
-            Strings.getStrFn("plang_sstr_read", llvm::Type::getVoidTy(Ctx), {PtrTy, I64Ty}),
-            {addr, capV});
+            // plang_sstr_read_file is PascalFile-aware -- the read-side twin
+            // of emitWriteArgs's plang_sstr_write_file above; see
+            // plang_file.cpp's own comment.
+            B.CreateCall(
+                RtFns.getExternFnN("plang_sstr_read_file", llvm::Type::getVoidTy(Ctx),
+                             {PtrTy, PtrTy, I64Ty}),
+                {fp, addr, capV});
+        else
+            B.CreateCall(
+                Strings.getStrFn("plang_sstr_read", llvm::Type::getVoidTy(Ctx), {PtrTy, I64Ty}),
+                {addr, capV});
         return;
     }
 
@@ -525,10 +585,9 @@ void BuiltinIO::emitReadArg(const ExprNode& arg, llvm::Value* fp) {
         if (auto* ve = SymTab.findVar(id->Name)) ty = ve->type;
 
     // WHICH reader, from what the type IS rather than from how wide it happens
-    // to be stored.  readFnSuffix answers from the LLVM type alone, and a
-    // subrange of char is held in a full ordinal -- so `read(c)` on a
-    // `'a'..'z'` variable called the INTEGER reader, tried to parse a number
-    // out of "xy", found none and left the variable untouched.
+    // to be stored.  A subrange of char is held in a full ordinal -- so
+    // `read(c)` on a `'a'..'z'` variable called the INTEGER reader, tried to
+    // parse a number out of "xy", found none and left the variable untouched.
     const plang::Type* base = arg.ResolvedType.get();
     while (base && base->Kind == TypeKind::Subrange && base->SubBase)
         base = base->SubBase.get();
@@ -545,10 +604,21 @@ void BuiltinIO::emitReadArg(const ExprNode& arg, llvm::Value* fp) {
     // dialects stamp Integer/Subrange/Enum at Width=64), so this is
     // unreachable before Turbo, the same way the write-side widening above
     // was.
-    std::string suffix  = readFnSuffix(ty);
+    std::string suffix  = readFnSuffix(ty, base);
     llvm::Type* readTy  = I64Ty;
     if (base && base->Kind == TypeKind::Real)      { suffix = "_f64";  readTy = DblTy; }
     else if (base && base->Kind == TypeKind::Char) { suffix = "_char"; readTy = I8Ty;  }
+    // Turbo's QWord (Integer, Width 64, unsigned) is the one ordinal whose
+    // full range does not fit a signed 64-bit parse: reading
+    // "18446744073709551615" through plang_read_i64's strtoll ERANGEs.  Only
+    // Width 64 needs its own reader -- Word/Cardinal/LongWord's unsigned
+    // ranges all fit comfortably inside int64_t, so plang_read_i64's ordinary
+    // signed parse (followed by CoerceToType's truncation into the narrower
+    // destination below) already reads them correctly.  readTy stays I64Ty:
+    // plang_read_u64 stores through a uint64_t*, the same 8 bytes at the same
+    // address a plang_read_i64 destination would use.
+    else if (base && base->Kind == TypeKind::Integer && base->Width == 64 && !base->IsSigned)
+        suffix = "_u64";
 
     // Turbo reverses the numeric scanners entirely (whole-token, the entire
     // token must parse, $/0x/&/% radix prefixes -- plang_io.cpp's
@@ -560,8 +630,15 @@ void BuiltinIO::emitReadArg(const ExprNode& arg, llvm::Value* fp) {
     // Char reads are deliberately excluded: Turbo's raw-byte char read vs
     // ISO/EP's line-marker-as-space substitution is a separate, already-
     // settled design point (plang_file.cpp's plang_read_file_char, citing
-    // ISO §6.4.3.5) this task does not touch.
-    if (Opts.turbo() && (suffix == "_i64" || suffix == "_f64")) suffix += "_turbo";
+    // ISO §6.4.3.5) this task does not touch.  QWord ("_u64") is included --
+    // it only ever exists under -std=turbo (Sema.cpp registers the whole
+    // sized-integer ladder behind Opts.turbo()), so plang_read_u64_turbo is
+    // the only "_u64" entry point CodeGen ever actually needs, but the plain
+    // plang_read_u64 exists too, on the same "additive, never called back
+    // into" footing plang_read_i64/_f64 already have relative to their own
+    // _turbo twins.
+    if (Opts.turbo() && (suffix == "_i64" || suffix == "_f64" || suffix == "_u64"))
+        suffix += "_turbo";
 
     // The runtime stores through the pointer at the reader's own width, so a
     // variable of a different width is read into a temporary and converted --
@@ -796,4 +873,19 @@ bool BuiltinIO::writesAsChar(const llvm::Type* ty, const plang::Type* semaTy) {
     const plang::Type* t = semaTy;
     while (t->Kind == TypeKind::Subrange && t->SubBase) t = t->SubBase.get();
     return t->Kind == TypeKind::Char;
+}
+
+bool BuiltinIO::writesAsUnsigned64(const plang::Type* semaTy) {
+    // Every ordinal narrower than 64 bits is sign/zero-extended to i64 before
+    // reaching an isIntegerTy(64) dispatch site (the SExt/ZExt widening in
+    // both emitWriteValue and emitWriteValueFormatted, just above their own
+    // callers of this), so an unsigned value under 2^63 already prints
+    // identically through the signed writer -- only a genuinely 64-bit-wide
+    // unsigned ordinal (Turbo's QWord) can hold a value with the i64 sign bit
+    // set, which %PRId64 would print as negative.  Peeling Subrange matches
+    // CodeGenImpl::ordinalIsUnsigned's own precedent, for a subrange whose
+    // bounds happen to be declared against QWord.
+    const plang::Type* t = semaTy;
+    while (t && t->Kind == TypeKind::Subrange && t->SubBase) t = t->SubBase.get();
+    return t && t->Kind == TypeKind::Integer && t->Width == 64 && !t->IsSigned;
 }

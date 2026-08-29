@@ -8,7 +8,7 @@
 namespace plang {
 
 std::size_t plangFormatReal(char* Buf, double V, int64_t TotalWidth,
-                             const PlangRealProfile& Profile) {
+                             const PlangRealProfile& Profile, int MaxDecPlaces) {
     // §6.9.3.4.1: ActWidth is the width asked for, or the narrowest the
     // representation fits in when less was asked for.  DecPlaces is then
     // whatever is left once the fixed parts have taken their columns, which is
@@ -22,7 +22,12 @@ std::size_t plangFormatReal(char* Buf, double V, int64_t TotalWidth,
     int64_t ActWidth = TotalWidth >= MinWidth ? TotalWidth : MinWidth;
     if (ActWidth > static_cast<int64_t>(PlangRealMaxChars) - 2)
         ActWidth = static_cast<int64_t>(PlangRealMaxChars) - 2;
-    const int DecPlaces = static_cast<int>(ActWidth) - Profile.ExpDigits - 5;
+    int DecPlaces = static_cast<int>(ActWidth) - Profile.ExpDigits - 5;
+    // See MaxDecPlaces's own comment (plang_real.h): a promoted Single is
+    // capped here rather than getting more of ActWidth's fixed parts to grow
+    // into -- the field the value falls short of is made up with leading
+    // spaces below, once the digits themselves are known not to reach it.
+    if (MaxDecPlaces >= 0 && DecPlaces > MaxDecPlaces) DecPlaces = MaxDecPlaces;
 
     // printf's %e is the same shape with a different exponent convention: it
     // writes as many exponent digits as the value needs, with a minimum of two,
@@ -71,6 +76,17 @@ std::size_t plangFormatReal(char* Buf, double V, int64_t TotalWidth,
         Buf[P++] = '0';
     std::memcpy(Buf + P, Exp, ExpLen);
     P += ExpLen;
+    // Only the capped path (MaxDecPlaces >= 0) can leave P short of ActWidth --
+    // the uncapped arithmetic above sizes DecPlaces to exactly fill it, the
+    // same as it always has.  fpc -Mtp pads a Single's shortfall with leading
+    // spaces rather than growing digits past the type's own precision; do the
+    // same here rather than leaving the field narrower than what was asked.
+    if (MaxDecPlaces >= 0 && P < static_cast<std::size_t>(ActWidth)) {
+        const std::size_t Pad = static_cast<std::size_t>(ActWidth) - P;
+        std::memmove(Buf + Pad, Buf, P);
+        std::memset(Buf, ' ', Pad);
+        P += Pad;
+    }
     Buf[P] = '\0';
     return P;
 }

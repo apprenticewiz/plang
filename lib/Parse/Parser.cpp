@@ -35,11 +35,25 @@ Parser::Parser(Scanner Sc, DiagnosticsEngine& Diags, LangOptions Opts)
     // cast. Pre-seeding costs nothing for ISO 7185/Extended Pascal programs,
     // which never reach this branch (every check reading TypeNames_ for cast
     // purposes is itself gated on Opts.turbo()).
+    //
+    // The Boolean-family variants and Single (Sema::registerBuiltins' second
+    // Opts.turbo() block, right after the ladder above) are the identical
+    // situation: predefined Sema symbols with no declaration the parser ever
+    // sees, so they need the same seeding or `ByteBool(x)`/`Single(y)` fail
+    // to parse as casts too -- confirmed empirically: assigning a
+    // non-canonical value like 200 to a ByteBool variable is itself rejected
+    // ("cannot assign 'integer' to variable of type 'ByteBool'"), so a
+    // working cast is the ONLY way to construct one, not merely a
+    // convenience.  Extended/Comp are deliberately excluded: commit 359256e
+    // rejects both outright, so they name no type a cast could ever target.
     if (Opts.turbo()) {
         static constexpr const char* SizedIntegerLadder[] = {
             "shortint", "byte", "smallint", "word", "cardinal",
             "longint",  "longword", "int64", "qword", "ansichar", "pointer"};
         for (const char* Name : SizedIntegerLadder) TypeNames_.insert(Name);
+        static constexpr const char* BoolAndSingle[] = {
+            "bytebool", "wordbool", "longbool", "single"};
+        for (const char* Name : BoolAndSingle) TypeNames_.insert(Name);
     }
     advance(); // prime Current with the first token
 }

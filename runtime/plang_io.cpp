@@ -289,7 +289,26 @@ static int checkedWidth(int64_t W) {
 // real's format profile.  0 keeps every existing (pre-Turbo) call site's
 // output byte-for-byte unchanged.
 void plang_write_i64 (int64_t     V) { plangOutFmt("%" PRId64, V); }
+// Turbo's QWord (64-bit unsigned) is the one ordinal a signed formatter gets
+// wrong: every narrower unsigned rung (Byte/Word/Cardinal/LongWord) is
+// zero-extended to i64 before it ever reaches a write call (CodeGen's
+// widening in BuiltinIO.cpp), so its value never sets the i64 sign bit and
+// %PRId64/%PRIu64 agree byte for byte -- only a genuinely 64-bit-wide value
+// can disagree, and CodeGen routes exactly that one case here instead of
+// plang_write_i64.
+void plang_write_u64 (uint64_t    V) { plangOutFmt("%" PRIu64, V); }
 void plang_write_f64 (double      V, int8_t Upper) { plang_write_f64_e(V, PlangRealWidth, Upper); }
+// See PlangSingleMaxDecPlaces's own comment (plang_real.h): a Single is
+// promoted to double before it ever reaches this file, so the only thing
+// that distinguishes its default write from a genuine double's is the
+// significant-digit cap CodeGen selects by routing here instead of
+// plang_write_f64.
+void plang_write_f32 (double      V, int8_t Upper) {
+    char Buf[PlangRealMaxChars];
+    plangOutN(Buf, plangFormatReal(Buf, V, PlangRealWidth,
+                   Upper ? PlangRealProfileTurbo : PlangRealProfileISO,
+                   PlangSingleMaxDecPlaces));
+}
 void plang_write_bool(int8_t      V, int8_t Upper) {
     plangOutStr(Upper ? (V ? "TRUE" : "FALSE") : (V ? "true" : "false"));
 }
@@ -299,7 +318,9 @@ void plang_write_str (const char *S) { plangOutStr(S ? S : ""); }
 // ---- writeln (with trailing newline) ----
 
 void plang_writeln_i64 (int64_t     V) { plangOutFmt("%" PRId64, V); plangOutCh('\n'); }
+void plang_writeln_u64 (uint64_t    V) { plangOutFmt("%" PRIu64, V); plangOutCh('\n'); }
 void plang_writeln_f64 (double      V, int8_t Upper) { plang_write_f64(V, Upper); plangOutCh('\n'); }
+void plang_writeln_f32 (double      V, int8_t Upper) { plang_write_f32(V, Upper); plangOutCh('\n'); }
 void plang_writeln_bool(int8_t      V, int8_t Upper) { plang_write_bool(V, Upper); plangOutCh('\n'); }
 void plang_writeln_char(int8_t      V) { plangOutCh(static_cast<unsigned char>(V)); plangOutCh('\n'); }
 void plang_writeln_str (const char *S) { plangOutStr(S ? S : ""); plangOutCh('\n'); }
@@ -362,6 +383,30 @@ void plang_read_char(int8_t  *P) {
     *P = (C == EOF) ? 0 : static_cast<int8_t>(C);
 }
 
+// QWord (64-bit unsigned) is the one ordinal plang_read_i64's strtoll cannot
+// read in full: a value past INT64_MAX (say the QWord max,
+// 18446744073709551615) is a legitimate QWord value but ERANGEs a signed
+// parse.  Only Width 64 needs this -- Word/Cardinal/LongWord's ranges all fit
+// inside int64_t, so plang_read_i64 already reads them correctly and
+// CodeGen's emitReadArg only ever routes a QWord destination here.
+//
+// A leading '-' is rejected as a malformed token rather than handed to
+// strtoull, which would silently accept it and wrap (C's own unsigned-parse
+// rule): checked against `fpc -Mtp`, reading a negative token into a QWord
+// variable is runtime error 106, not a large wrapped value.
+void plang_read_u64 (uint64_t *P) {
+    bool SawAny = false;
+    scanNumber(/*Real=*/false, SawAny);
+    if (!SawAny) { *P = 0; return; }              // issue #284: past EOF is a defined, consistent zero
+    if (TokBuf && TokBuf[0] == '-') plang_err_read_format("read");
+    char* End = TokBuf;
+    errno = 0;
+    const unsigned long long V = TokBuf ? std::strtoull(TokBuf, &End, 10) : 0;
+    if (!TokBuf || End == TokBuf) plang_err_read_format("read");        // issue #236
+    if (errno == ERANGE) plang_err_read_int_range("read", TokBuf);      // issue #240
+    *P = static_cast<uint64_t>(V);
+}
+
 // ---- Turbo read: whole-token, entire-token-must-parse, with $/0x/&/% radix
 // prefixes (confirmed against `fpc -Mtp`; see scanTokenTurbo's own comment) --
 
@@ -388,6 +433,24 @@ void plang_read_i64_turbo(int64_t *P) {
     // emitReadArg) reproduces the wraparound on its own.
     if (!*Tok || *End != '\0' || errno == ERANGE) plang_tp_runerror(106);
     *P = static_cast<int64_t>(V);
+}
+
+// The Turbo twin of plang_read_u64 above, for the identical QWord-only
+// reason.  A leading '-' is rejected up front, before turboRadixPrefix ever
+// gets a chance to strip a following '$' -- checked against `fpc -Mtp`,
+// "-$FF" read into a QWord is runtime error 106, exactly as a plain "-5" is.
+void plang_read_u64_turbo(uint64_t *P) {
+    bool SawAny = false;
+    scanTokenTurbo(SawAny);
+    if (!SawAny) { *P = 0; return; }               // issue #284: past EOF is a defined, consistent zero
+    const char *Tok = TokBuf ? TokBuf : "";
+    if (*Tok == '-') plang_tp_runerror(106);
+    const int Radix = turboRadixPrefix(Tok);
+    char *End = const_cast<char *>(Tok);
+    errno = 0;
+    const unsigned long long V = *Tok ? std::strtoull(Tok, &End, Radix) : 0;
+    if (!*Tok || *End != '\0' || errno == ERANGE) plang_tp_runerror(106);
+    *P = static_cast<uint64_t>(V);
 }
 
 void plang_read_f64_turbo(double *P) {
@@ -451,9 +514,22 @@ void plang_page() { plangOutCh('\f'); }
 void plang_write_i64_w (int64_t V, int64_t W) {
     plangOutFmt("%*" PRId64, checkedWidth(W), V);
 }
+// See plang_write_u64's own comment: the field-width form needs the identical
+// unsigned/signed split, for the identical reason.
+void plang_write_u64_w (uint64_t V, int64_t W) {
+    plangOutFmt("%*" PRIu64, checkedWidth(W), V);
+}
 void plang_write_f64_e (double  V, int64_t W, int8_t Upper) {
     char Buf[PlangRealMaxChars];
     plangOutN(Buf, plangFormatReal(Buf, V, W, Upper ? PlangRealProfileTurbo : PlangRealProfileISO));
+}
+// See plang_write_f32's own comment: the field-width exponential form needs
+// the identical significant-digit cap, for the identical reason -- a wide
+// field asked for here must not grow into digits a binary32 never had.
+void plang_write_f32_e (double  V, int64_t W, int8_t Upper) {
+    char Buf[PlangRealMaxChars];
+    plangOutN(Buf, plangFormatReal(Buf, V, W, Upper ? PlangRealProfileTurbo : PlangRealProfileISO,
+                   PlangSingleMaxDecPlaces));
 }
 // A negative FracDigits falls back to the same exponential format omitting
 // the decimals clause entirely produces, exactly as plang_write_cplx_w's own
@@ -519,7 +595,9 @@ void plang_write_str_w (const char *S, int64_t W, int8_t NoTrunc) { plangOutPadd
 // ---- writeln with field-width ----
 
 void plang_writeln_i64_w (int64_t V, int64_t W) { plang_write_i64_w(V, W); plangOutCh('\n'); }
+void plang_writeln_u64_w (uint64_t V, int64_t W) { plang_write_u64_w(V, W); plangOutCh('\n'); }
 void plang_writeln_f64_e (double  V, int64_t W, int8_t Upper) { plang_write_f64_e(V, W, Upper); plangOutCh('\n'); }
+void plang_writeln_f32_e (double  V, int64_t W, int8_t Upper) { plang_write_f32_e(V, W, Upper); plangOutCh('\n'); }
 void plang_writeln_f64_f (double  V, int64_t W, int64_t D, int8_t Upper)
     { plang_write_f64_f(V, W, D, Upper); plangOutCh('\n'); }
 void plang_writeln_bool_w(int8_t V, int64_t W, int8_t Upper, int8_t NoTrunc)
