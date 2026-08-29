@@ -31,6 +31,18 @@ Both are reads set up by an earlier unchecked write (the same
 {$R+}/{$R-} switch tests use -- an out-of-range WRITE with checking off
 genuinely scribbles on whatever memory the index lands in, not something a
 lit test should depend on).
+
+"after"'s own unchecked write is wrapped in a record with a large trailing
+Buf field rather than a bare top-level array: record fields keep their
+declared relative order (unlike separate top-level locals, which a compiler
+may lay out however it likes), so the scribble is guaranteed to land in Buf
+-- still that same record's own storage -- rather than an unrelated local or
+a spilled register a later, CHECKED write's own error-reporting call depends
+on.  Confirmed necessary, not defensive: a bare `array[1..3] of integer`
+here let codegen changes elsewhere in the compiler perturb the stack layout
+enough that this exact scribble started corrupting the SECOND write's own
+runtime-error CODE argument under `-O2`/`-O3` (passing, misleadingly, under
+an unoptimized build) -- a real, reproduced failure, not a hypothetical one.
 *)
 
 (*
@@ -71,14 +83,18 @@ end.
 
 //--- after/main.pas
 program after_main;
-var a: array[1..3] of integer;
+type Frame = record
+       a: array[1..3] of integer;
+       Buf: array[1..256] of integer;
+     end;
+var f: Frame;
     i: integer;
 begin
   i := 10;
-  a[i] := 1;
+  f.a[i] := 1;
   writeln('before include: silently out of range, still running');
   {$I turnon.inc}
-  a[i] := 2;
+  f.a[i] := 2;
   writeln('unreachable: after-include write did not abort')
 end.
 
