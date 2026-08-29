@@ -406,7 +406,11 @@ std::unique_ptr<ExprNode> Parser::parseFactor() {
                 Node->Loc  = Loc;
                 Node->Name = Name;
                 if (!check(TokenKind::RightParen)) {
-                    Node->Args.push_back(parseExpression());
+                    // SizeOf/High/Low's FIRST argument only -- see
+                    // parseSizeHighLowArg's own comment; every other
+                    // argument to every other call keeps the ordinary
+                    // parseExpression() production.
+                    Node->Args.push_back(parseSizeHighLowArg(Name));
                     while (match(TokenKind::Comma)) {
                         Node->Args.push_back(parseExpression());
                     }
@@ -463,4 +467,33 @@ std::unique_ptr<ExprNode> Parser::parseCaseConstant() {
         return Node;
     }
     return parseFactor();
+}
+
+// See the declaration (Parser.h) for why this exists at all.  Only the five
+// primitive type-name KEYWORDS need a special production here: every other
+// type name -- Byte, Word, a user's own TMyRecord, ... -- is an ordinary
+// identifier, already parsed by the IdentExpr branch just above this call
+// site exactly like a variable reference would be, with the "is it really a
+// variable or really a type" question left to Sema (checkCallExpr's own
+// SizeOf/High/Low arm), not decided here.
+std::unique_ptr<ExprNode> Parser::parseSizeHighLowArg(const std::string& Callee) {
+    const std::string Lo = toLower(Callee);
+    if (Lo == "sizeof" || Lo == "high" || Lo == "low") {
+        switch (Current.Kind) {
+        case TokenKind::Integer:
+        case TokenKind::Real:
+        case TokenKind::Boolean:
+        case TokenKind::Char:
+        case TokenKind::String: {
+            auto Node   = std::make_unique<IdentExpr>();
+            Node->Loc   = Current;
+            Node->Name  = Current.Lexeme;
+            advance();
+            return Node;
+        }
+        default:
+            break;
+        }
+    }
+    return parseExpression();
 }

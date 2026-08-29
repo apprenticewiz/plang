@@ -183,6 +183,44 @@ BUILTIN(Continue,     "continue",     Proc, TP, 0, 0, R_None)
 // every other single-typed-argument builtin above (Card, Odd, ...) gets.
 BUILTIN(Assigned,     "assigned",     Func, TP, 1, 1, R_Bool)
 
+// -std=turbo only: SizeOf/High/Low take a TYPE NAME as well as (like real
+// FPC) an ordinary value expression -- the one argument SHAPE in this whole
+// file that is not a plain expression; see Parser::parseSizeHighLowArg and
+// Sema::resolveTypeArgOrValue (SemaExpr.cpp) for the two paths.  R_Int is a
+// placeholder the same way Abs/Sqr's is just above: SizeOf is always an
+// integer, but High/Low answer in the ARGUMENT's own type (High(Byte) is a
+// Byte), which only checkCallExpr's dedicated arm can work out.
+BUILTIN(SizeOf,       "sizeof",       Func, TP, 1, 1, R_Int)
+BUILTIN(High,         "high",         Func, TP, 1, 1, R_Int)
+BUILTIN(Low,          "low",          Func, TP, 1, 1, R_Int)
+// -std=turbo only: FPC's size-aware Hi/Lo/Swap -- deliberately NOT literal
+// Turbo Pascal 7's, which only ever worked on a 16-bit value; see
+// CGFuncCall::emitBuiltinCall's own comment for the field-practice
+// citation and Sema::checkCallExpr's Hi/Lo/Swap arm for the divergence
+// itself.  R_Int is a placeholder for the same reason High/Low's is: Hi and
+// Lo answer in half of the argument's own width, and Swap in the argument's
+// own type, none of which this table alone can express.
+BUILTIN(Hi,           "hi",           Func, TP, 1, 1, R_Int)
+BUILTIN(Lo,           "lo",           Func, TP, 1, 1, R_Int)
+BUILTIN(Swap,         "swap",         Func, TP, 1, 1, R_Int)
+
+// -std=turbo only: Include(s, x) / Exclude(s, x) -- `s := s + [x]` and
+// `s := s - [x]` by another name, mutating the set variable in place.
+BUILTIN(Include,      "include",      Proc, TP, 2, 2, R_None)
+BUILTIN(Exclude,      "exclude",      Proc, TP, 2, 2, R_None)
+// -std=turbo only: Inc(x[, n]) / Dec(x[, n]) -- mutate an ordinal variable
+// (or, for a PChar-like typed pointer, advance/retreat it the same way
+// `p + n`/`p - n` already do) in place by n, defaulting to 1.
+BUILTIN(Inc,          "inc",          Proc, TP, 1, 2, R_None)
+BUILTIN(Dec,          "dec",          Proc, TP, 1, 2, R_None)
+// -std=turbo only: FillChar(var X; Count: Integer; Value) and
+// Move(const Source; var Dest; Count: Integer) -- X/Source/Dest are
+// "untyped" the way real Turbo Pascal's are: any variable, addressed
+// directly, its own declared type not otherwise examined.  Count is a BYTE
+// count in both, matching FPC field practice.
+BUILTIN(FillChar,     "fillchar",     Proc, TP, 3, 3, R_None)
+BUILTIN(Move,         "move",         Proc, TP, 3, 3, R_None)
+
 #undef ALL
 #undef TP
 #undef EP

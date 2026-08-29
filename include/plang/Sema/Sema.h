@@ -834,6 +834,17 @@ private:
     [[nodiscard]] std::shared_ptr<Type> checkBinary  (const BinaryExpr& E);
     [[nodiscard]] std::shared_ptr<Type> checkUnary   (const UnaryExpr& E);
     [[nodiscard]] std::shared_ptr<Type> checkCallExpr(const CallExpr& E);
+    /// SizeOf/High/Low's sole argument: either a TYPE NAME -- one of the
+    /// five primitive keywords (parsed as a synthetic IdentExpr; see
+    /// Parser::parseSizeHighLowArg) or an ordinary user-defined type name
+    /// (an IdentExpr indistinguishable, syntactically, from a variable
+    /// reference) -- or, exactly like real FPC, an ordinary VALUE
+    /// expression, whose own type answers the question instead (SizeOf(x),
+    /// High(someArray)).  Returns the resolved Type this builtin should
+    /// answer about; TyErr on failure.  Every other builtin's arguments are
+    /// plain checkExpr() calls -- this is the one call site that has to
+    /// tell "a type" and "a value" apart before it knows which to ask for.
+    [[nodiscard]] std::shared_ptr<Type> resolveTypeArgOrValue(const ExprNode& Arg);
     /// Diagnoses a required function called with the wrong number of
     /// arguments.  Built-ins bypass the ordinary signature check, so without
     /// this an `abs()` reaches codegen and is indexed out of bounds there.

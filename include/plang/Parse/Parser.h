@@ -434,6 +434,21 @@ private:
     // Standard Pascal, not an extension.
     std::unique_ptr<ExprNode>     parseCaseConstant();
 
+    // -std=turbo: SizeOf/High/Low's sole argument, which -- uniquely among
+    // every builtin call this parser handles -- may be a TYPE NAME rather
+    // than a value expression.  A user-defined type name is an ordinary
+    // identifier already (parsed as an IdentExpr exactly like a variable
+    // reference; Sema tells the two apart by what the name resolves to),
+    // but the five PRIMITIVE type names -- integer, real, boolean, char,
+    // string -- are lexer KEYWORDS, not identifiers, and parseFactor's
+    // `default:` arm has no case for any of them: `SizeOf(Integer)` would
+    // otherwise fail to parse at all.  Deliberately scoped to exactly the
+    // first argument of these three spellings -- called only from the
+    // CallExpr argument-parsing site in parseFactor, and only for its FIRST
+    // argument -- so that a keyword type name is admitted nowhere else:
+    // `x := Integer + 1` must keep failing to parse.
+    std::unique_ptr<ExprNode>     parseSizeHighLowArg(const std::string& Callee);
+
     // Applies zero or more postfix operators to Expr: subscript ([]), field
     // access (.), or pointer dereference (^).
     std::unique_ptr<ExprNode>     parsePostfix(std::unique_ptr<ExprNode> Expr);

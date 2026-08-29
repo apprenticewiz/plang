@@ -10,7 +10,10 @@
 
 #include "plang/AST/Ast.h"
 #include "plang/Basic/StringUtil.h"
+#include "plang/Sema/Sema.h"
 #include "plang/Sema/Type.h"
+
+#include "CodegenICE.h"
 
 using namespace plang;
 
@@ -266,6 +269,74 @@ llvm::Value* CGFuncCall::emitBuiltinCall(const std::string& Name,
     if (lo == "assigned") {
         auto* v = EmitExpr(*Args[0]);
         return B.CreateICmpNE(v, llvm::ConstantPointerNull::get(PtrTy), "assigned");
+    }
+
+    // TP-only: SizeOf(T)/High(T)/Low(T).  Args[0]->ResolvedType is the type
+    // this call answers about -- Sema::resolveTypeArgOrValue set it either
+    // directly (Args[0] named a type) or via the ordinary checkExpr path
+    // (Args[0] was a value expression) -- so nothing here needs to re-derive
+    // "is this a type name or a value" a second time, and, since a Sema
+    // type's size/range never depends on anything computed at run time,
+    // EmitExpr(*Args[0]) is never called at all, for EITHER shape: a
+    // type-name argument has no value to evaluate in the first place, and a
+    // VALUE-expression argument (SizeOf(x), High(arr)) is only ever asked
+    // for its static TYPE -- exactly the same unevaluated-operand rule C's
+    // own sizeof follows.  This matters beyond just avoiding wasted work:
+    // were Args[0] instead emitted, `SizeOf(arr[F])` or `High(SomeFunc())`
+    // would run F/SomeFunc's side effects at run time for a question this
+    // compiler (like every other Pascal/C implementation) answers entirely
+    // at compile time.
+    if (lo == "sizeof") {
+        const auto& T = Args[0]->ResolvedType;
+        const auto Sz = T ? Sema::byteSizeOf(*T) : std::nullopt;
+        if (!Sz)
+            codegenICE("SizeOf reached codegen with no resolvable size for '"
+                       + (T ? T->Name : std::string("?")) + "'");
+        return llvm::ConstantInt::get(I64Ty, *Sz);
+    }
+    if (lo == "high" || lo == "low") {
+        std::shared_ptr<Type> RangeTy = Args[0]->ResolvedType;
+        if (RangeTy && RangeTy->Kind == TypeKind::Array) RangeTy = RangeTy->IndexType;
+        const auto Range = RangeTy ? ordinalRange(*RangeTy) : std::nullopt;
+        if (!Range)
+            codegenICE("High/Low reached codegen with no ordinal range for '"
+                       + (RangeTy ? RangeTy->Name : std::string("?")) + "'");
+        const int64_t V = (lo == "high") ? Range->second : Range->first;
+        auto* resTy = llvm::cast<llvm::IntegerType>(Types.llvmTypeOfSemaType(*RangeTy));
+        return llvm::ConstantInt::get(resTy, static_cast<uint64_t>(V), /*isSigned=*/true);
+    }
+    // FPC's size-aware Hi/Lo/Swap -- a DELIBERATE divergence from literal
+    // Turbo Pascal 7, whose Hi/Lo/Swap only ever worked on a 16-bit value:
+    // real TP7 code that Inc/Dec'd a 32-bit value and then called Hi/Lo/Swap
+    // on it got the OLD 16-bit-only answer, and this compiler -- following
+    // fpc -Mtp's own field practice, per this project's own "match field
+    // compilers on ambiguity" milestone decision -- gives the NEW,
+    // width-aware one instead.  See Sema::checkCallExpr's identical note.
+    //
+    // Sema has already required a real Integer-kind argument at least 16
+    // bits wide, so EmitExpr's own LLVM type IS the argument's own width
+    // (i16/i32/i64) with nothing further to coerce -- Turbo's Integer kind
+    // is lowered at its own declared Width throughout codegen, unlike
+    // ISO/EP's single always-64-bit integer, so no ToI64 round-trip is
+    // needed (or wanted: it would have to be undone again below).
+    if (lo == "hi" || lo == "lo" || lo == "swap") {
+        auto* v    = EmitExpr(*Args[0]);
+        auto* wTy  = llvm::cast<llvm::IntegerType>(v->getType());
+        const unsigned Half = wTy->getBitWidth() / 2;
+        if (lo == "swap") {
+            // A rotate by half the width: at 16 bits this is a byte swap,
+            // at 32 bits a word swap, at 64 bits a doubleword swap -- one
+            // formula covers every width the sized-integer ladder has,
+            // rather than a width-keyed byte-swap/word-swap branch.
+            auto* half = llvm::ConstantInt::get(wTy, Half);
+            auto* lo_  = B.CreateShl (v, half, "swap.lo");
+            auto* hi_  = B.CreateLShr(v, half, "swap.hi");
+            return B.CreateOr(lo_, hi_, "swap");
+        }
+        auto* halfTy = llvm::IntegerType::get(Ctx, Half);
+        llvm::Value* part = (lo == "hi")
+            ? B.CreateLShr(v, llvm::ConstantInt::get(wTy, Half), "hi.shr") : v;
+        return B.CreateTrunc(part, halfTy, lo);
     }
 
     // ---- EP string functions (§6.7.6.7) ----
