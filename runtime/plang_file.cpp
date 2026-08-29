@@ -427,6 +427,167 @@ void plang_close(PascalFile *F, int8_t IsText) {
     clearWritePath(F);
 }
 
+// ---- -std=turbo only: Assign / Reset / Rewrite / Append / Close ----
+//
+// TP's own file model, which REPLACES (not extends) everything above: real
+// Assign(f, name) records a filename on f itself (PascalFile.Name, added
+// for exactly this -- see PascalFileLayout.h), and Reset/Rewrite/Append
+// then open whatever that name says, with no filename argument of their
+// own.  This is deliberately a genuinely SEPARATE function family from
+// plang_reset/plang_rewrite/plang_close above, not those same functions
+// with a dialect flag -- CGProcCall.cpp's dispatch picks one family or the
+// other at the CALL SITE (this project's P7 rule), because an ISO object
+// file and a Turbo one can be linked into a single program and each must
+// keep its own file model.
+//
+// Three pieces of the ISO functions above are DELIBERATELY NOT carried
+// over here, each for its own reason:
+//  - closeFinalLine (ISO §6.4.3.5's "a written text file's last line is
+//    finished before it is turned around or closed"): not a TP rule at
+//    all -- confirmed against `fpc -Mtp`, which leaves a partial last line
+//    exactly as the program wrote it.
+//  - findBinding/setBinding (EP §6.7.5.6's separate bind() table, with its
+//    "retain an explicit name" fallback, issue #239): TP has no bind() and
+//    no such fallback -- the ONLY place a name comes from is F->Name,
+//    directly on the struct, set by Assign and nothing else.
+//  - prime(F)'s unconditional call at the end of plang_reset: §6.9.1 makes
+//    ISO's f^ defined immediately after reset, which forces that eager
+//    read.  TP has no such buffer-variable guarantee, and eagerly priming
+//    a console-bound Reset would block a program that never actually reads
+//    it waiting on a keystroke -- the same "`program count(input,output)`
+//    must not hang before its first writeln" concern plang_bind_std's own
+//    comment raises for ISO's file-parameter binding.  These functions
+//    leave F->Buf at PlangFileUninit and let ensurePrimed (used by every
+//    status/read entry point already, dialect-agnostically) prime lazily
+//    on the first real query instead.
+//
+// None of Assign/Reset/Rewrite/Append below sets any InOutRes-like error
+// state on failure -- that mechanism does not exist yet (a separate,
+// later item builds it).  Until it does, a failed open reports and exits
+// the same way the ISO functions above already do (plang_err_cannot_open),
+// clearly marked INTERIM at each call below: replacing that call is the
+// hook the later item is expected to use.
+
+/// TP Assign(f, name): binds F to an external filename (or, for an empty
+/// name, to "the console" -- see the Reset/Rewrite/Append functions below
+/// for what that means) with NO check of any kind on F's current state.
+/// This is deliberate and must stay true even once a later item adds an
+/// "is this file already in an error state" guard to Reset/Rewrite/Append:
+/// Assign is precisely the operation that has to work no matter what state
+/// F is in, or a program could never recover from one.
+void plang_tp_assign(PascalFile *F, const char *Name) {
+    const std::size_t Cap = static_cast<std::size_t>(PlangFileNameCap) - 1;
+    const std::size_t Len = Name ? std::strlen(Name) : 0;
+    const std::size_t N   = Len < Cap ? Len : Cap;
+    if (N) std::memcpy(F->Name, Name, N);
+    F->Name[N] = '\0';
+    F->Mode = PlangFmClosed;
+    // F->Fp is deliberately left untouched: real Assign on a file that is
+    // currently open is not a case this item builds any behavior for
+    // (Assign's own job is only to record a name and mark the file
+    // closed); a later {$I+}/InOutRes item is the natural place to decide
+    // whether that should itself be an error.
+}
+
+/// TP Reset(f): opens F->Name (as bound by an earlier Assign) for reading,
+/// or -- for an empty bound name -- attaches F to stdin.  See this
+/// section's own top comment for the three ISO behaviors deliberately not
+/// reproduced here.
+void plang_tp_reset(PascalFile *F) {
+    closeStream(F);
+    if (F->Name[0] == '\0') {
+        F->Fp      = stdin;
+        F->Binding = PlangBindStd;
+    } else {
+        F->Fp = std::fopen(F->Name, "r");
+        if (!F->Fp) {
+            char Msg[PlangFileNameCap + 64];
+            std::snprintf(Msg, sizeof(Msg), "cannot open '%s' for reading", F->Name);
+            plang_err_cannot_open(Msg); // INTERIM -- see this section's top comment
+        }
+        // Issue #287's directory guard, reproduced here for the identical
+        // reason plang_reset above has it: opening a directory read-only
+        // succeeds at the C level on POSIX with nothing ever readable back.
+        struct stat St;
+        if (fstat(fileno(F->Fp), &St) == 0 && S_ISDIR(St.st_mode)) {
+            std::fclose(F->Fp);
+            F->Fp = nullptr;
+            char Msg[PlangFileNameCap + 64];
+            std::snprintf(Msg, sizeof(Msg), "'%s' is a directory, not a file", F->Name);
+            plang_err_cannot_open(Msg); // INTERIM -- see this section's top comment
+        }
+    }
+    F->Buf      = PlangFileUninit; // left unprimed -- see this section's top comment
+    F->Readable = 1;
+    F->Mode     = PlangFmInput;
+    unloadComponent(F);
+}
+
+/// TP Rewrite(f): creates/truncates F->Name for writing, or -- for an empty
+/// bound name -- attaches F to stdout.
+void plang_tp_rewrite(PascalFile *F) {
+    closeStream(F);
+    if (F->Name[0] == '\0') {
+        F->Fp      = stdout;
+        F->Binding = PlangBindStd;
+    } else {
+        F->Fp = std::fopen(F->Name, "w");
+        if (!F->Fp) {
+            char Msg[PlangFileNameCap + 64];
+            std::snprintf(Msg, sizeof(Msg), "cannot open '%s' for writing", F->Name);
+            plang_err_cannot_open(Msg); // INTERIM -- see this section's top comment
+        }
+    }
+    F->Buf      = PlangFileUninit;
+    F->Readable = 0;
+    F->Mode     = PlangFmOutput;
+    unloadComponent(F);
+}
+
+/// TP Append(f): opens F->Name for writing at its current end (creating it
+/// if absent), or -- for an empty bound name -- attaches F to stdout.  Real
+/// Turbo Pascal sets Mode to fmOutput here too, the same as Rewrite --
+/// confirmed against `fpc -Mtp` (TextRec(f).Mode reads identically after
+/// either call) -- Append is not a fourth, distinct mode of its own.
+void plang_tp_append(PascalFile *F) {
+    closeStream(F);
+    if (F->Name[0] == '\0') {
+        F->Fp      = stdout;
+        F->Binding = PlangBindStd;
+    } else {
+        F->Fp = std::fopen(F->Name, "a");
+        if (!F->Fp) {
+            char Msg[PlangFileNameCap + 64];
+            std::snprintf(Msg, sizeof(Msg), "cannot open '%s' for appending", F->Name);
+            plang_err_cannot_open(Msg); // INTERIM -- see this section's top comment
+        }
+    }
+    F->Buf      = PlangFileUninit;
+    F->Readable = 0;
+    F->Mode     = PlangFmOutput;
+    unloadComponent(F);
+}
+
+/// TP Close(f): closes the underlying stream with none of ISO plang_close's
+/// three extra steps -- no closeFinalLine (see this section's top comment),
+/// no std::free(F->Comp) (nothing on the TP open/close path above ever
+/// allocates it; the dialect-agnostic plang_file_buffer is the only thing
+/// that does, and it owns freeing it whenever it reallocates -- leaving a
+/// stale allocation here after a program mixes typed-file component access
+/// with TP-style Close is a bounded one-time leak, not a use-after-free),
+/// and F->Name is left untouched -- real Turbo Pascal's Close does not
+/// un-Assign a file (confirmed against `fpc -Mtp`: Reset/Rewrite/Append
+/// with no intervening Assign after a Close reopen the same name), so a
+/// following Reset/Rewrite/Append with no new Assign call correctly reopens
+/// what was already bound.
+void plang_tp_close(PascalFile *F) {
+    closeStream(F);
+    F->Buf      = PlangFileUninit;
+    F->Readable = 0;
+    F->Mode     = PlangFmClosed;
+    unloadComponent(F);
+}
+
 // ---- status ----
 
 int8_t plang_eof_file(PascalFile *F) {

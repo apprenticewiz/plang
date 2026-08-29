@@ -22,12 +22,13 @@ var
   s, t: string[10];
 begin
   s := 'hi';
-  rewrite(f, '/tmp/plang_shortstring_file_regtest.txt');
+  assign(f, '/tmp/plang_shortstring_file_regtest.txt');
+  rewrite(f);
   write(f, s:8);
   writeln(f);
   close(f);
 
-  reset(f, '/tmp/plang_shortstring_file_regtest.txt');
+  reset(f);
   readln(f, t);
   writeln('[', t, ']');
   close(f);

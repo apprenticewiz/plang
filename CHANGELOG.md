@@ -102,6 +102,33 @@ version numbers follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html
   independent entry-point ABI is what lets `ParamCount`/`ParamStr(n)` read
   real command-line arguments back via a new `plang_set_args`, called as
   main's own first instruction.
+- **`-std=turbo`: `Assign`/`Append` and TP's own file model.** `Assign(f,
+  name)` binds a file variable to an external filename (or, for an empty
+  name, to "the console" -- confirmed against `fpc -Mtp`: a following
+  `Reset` then reads stdin, a following `Rewrite`/`Append` writes stdout);
+  `Reset`/`Rewrite`/`Append`/`Close` under `-std=turbo` take no filename
+  argument of their own, unlike ISO/EP's `reset`/`rewrite`, and instead
+  open whatever a prior `Assign` bound the file to. Backed by a genuinely
+  separate `plang_tp_assign`/`plang_tp_reset`/`plang_tp_rewrite`/
+  `plang_tp_append`/`plang_tp_close` runtime family (`runtime/
+  plang_file.cpp`), dispatched at the call site (`CGProcCall.cpp`) rather
+  than a shared function branching on a passed-in dialect flag -- ISO's
+  `reset`/`rewrite`/`close` are untouched and still reached for every other
+  dialect. `FileMode: Integer` (default `2`, matching real Turbo Pascal) is
+  now a second predefined mutable global, following `ExitCode`'s own
+  mechanism exactly. The shared `PascalFile` struct (`plang/Basic/
+  PascalFileLayout.h`) gained three fields every dialect's file variable
+  now carries -- `Name` (the bound filename), `Mode` (TP's
+  `fmClosed`/`fmInput`/`fmOutput`/`fmInOut`, real Borland-documented values
+  confirmed empirically against a local `fpc -Mtp` build) and `RecSize` (an
+  as-yet-unused placeholder a later item wires up for `Reset`/`Rewrite`'s
+  record-size argument) -- appended at the end, so no existing field's
+  offset moves and ISO 7185/Extended Pascal's own file behavior is
+  unchanged (verified by comparing `-emit-llvm` IR text before and after
+  across a sample of existing ISO/EP tests: identical but for the
+  struct-literal type's own spelling growing to match, confirmed
+  mechanical by substituting the old spelling for the new one in the
+  "before" IR and diffing again).
 
 ### Fixed
 

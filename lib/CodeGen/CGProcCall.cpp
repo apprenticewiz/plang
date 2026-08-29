@@ -98,6 +98,44 @@ void CGProcCall::emitCallStmt(const CallStmt& s) {
         }
         return;
     }
+    // -std=turbo only: Assign(f, name) -- TP's own file model (real
+    // Borland/FPC's Assign), which the reset/rewrite/append/close arms just
+    // below build on: Reset/Rewrite/Append under Turbo take no filename
+    // argument of their own, they open whatever Assign bound f to last.
+    // Gated only by Builtins.def's own TP-only dialect entry (like Assert/
+    // RunError/... above), so this is never reached under ISO/EP.
+    if (lo == "assign" && s.Args.size() >= 2) {
+        auto* fp = FileVars.fileVarPtr(*s.Args[0]);
+        // Same filename marshalling reset/rewrite/extend/update already
+        // need just below -- a string(n)/ShortString actual has no NUL
+        // terminator of its own, and plang_tp_assign takes `const char *`.
+        auto* nm = StrCall.emitCStrArg(*s.Args[1]);
+        auto* fn = RtFns.getExternFnN("plang_tp_assign",
+            llvm::Type::getVoidTy(Ctx), {PtrTy, PtrTy});
+        B.CreateCall(fn, {fp, nm});
+        return;
+    }
+
+    // -std=turbo only: Reset/Rewrite/Append take NO filename argument here
+    // (unlike the ISO/EP block just below) -- they open whatever a prior
+    // Assign bound the file to, an empty bound name meaning "the console"
+    // (stdin for Reset, stdout for Rewrite/Append).  A genuinely separate
+    // runtime function family (plang_tp_reset/plang_tp_rewrite/
+    // plang_tp_append, runtime/plang_file.cpp), not the ISO ones below with
+    // a flag -- this project's P7 rule that dialect selection happens at
+    // the CALL-SITE, since an ISO and a Turbo object file can be linked
+    // into one program.  Reset/Rewrite's Builtins.def arity is 1-2 under
+    // every dialect (a second argument under Turbo is a RecSize this item
+    // does not wire up yet -- see Builtins.def's own comment on Assign/
+    // Append), so any second argument written here is simply not read.
+    if ((lo == "reset" || lo == "rewrite" || lo == "append")
+            && !s.Args.empty() && RangeGuards.isTurbo()) {
+        auto* fp = FileVars.fileVarPtr(*s.Args[0]);
+        auto* fn = RtFns.getExternFnN("plang_tp_" + lo,
+            llvm::Type::getVoidTy(Ctx), {PtrTy});
+        B.CreateCall(fn, {fp});
+        return;
+    }
     if ((lo == "reset" || lo == "rewrite") && !s.Args.empty()) {
         auto* fp = FileVars.fileVarPtr(*s.Args[0]);
         // A string(n) filename has no NUL terminator of its own -- only the
@@ -126,6 +164,16 @@ void CGProcCall::emitCallStmt(const CallStmt& s) {
         auto* fn  = RtFns.getExternFnN("plang_" + lo + "_file",
             llvm::Type::getVoidTy(Ctx), {PtrTy, I64Ty});
         B.CreateCall(fn, {fp, esz});
+        return;
+    }
+    // -std=turbo only: Close under TP has none of ISO's §6.4.3.5
+    // "finish the final line" step (see plang_tp_close's own comment,
+    // runtime/plang_file.cpp, for exactly what is deliberately left out).
+    if (lo == "close" && !s.Args.empty() && RangeGuards.isTurbo()) {
+        auto* fp = FileVars.fileVarPtr(*s.Args[0]);
+        auto* fn = RtFns.getExternFnN("plang_tp_close",
+            llvm::Type::getVoidTy(Ctx), {PtrTy});
+        B.CreateCall(fn, {fp});
         return;
     }
     if (lo == "close" && !s.Args.empty()) {

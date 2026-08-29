@@ -386,6 +386,30 @@ void Sema::registerBuiltins() {
         (void)Symtab.define(std::move(ErrorAddrSym));
     }
 
+    // -std=turbo only: FileMode -- the first Tier 3 predefined identifier to
+    // actually follow the "reuse ExitCode's mechanism" plan ExitCode's own
+    // comment above set out.  Real Borland/FPC's FileMode: Byte controls the
+    // access/sharing mode Reset opens a file with, defaulting to 2
+    // (read-write) -- confirmed against `fpc -Mtp` (a fresh program's own
+    // FileMode reads 2 before anything touches it).  Nothing in this item
+    // reads FileMode back to change how Reset opens anything (that is a
+    // later item's job, same as InOutRes); it is registered here purely as
+    // a working, real, assignable predefined variable with the correct
+    // default, exactly like ExitCode.  Kept as TyInt (16-bit Integer) rather
+    // than a distinct Byte type, matching ExitCode's own storage width --
+    // plang_tp_filemode (runtime/plang_sys.cpp) is declared int16_t for the
+    // identical "both sides must agree on the byte width" reason ExitCode's
+    // own comment gives, and the real magnitude (2) fits either width.
+    if (Opts.turbo()) {
+        Symbol FileModeSym;
+        FileModeSym.Kind     = SymbolKind::Var;
+        FileModeSym.Name     = "FileMode";
+        FileModeSym.Ty       = TyInt;
+        FileModeSym.LinkName = "plang_tp_filemode";
+        FileModeSym.IsRequiredIdentifier = true;
+        (void)Symtab.define(std::move(FileModeSym));
+    }
+
     // -std=turbo only: the sized-integer ladder, AnsiChar, and the untyped
     // Pointer type -- the type names the rest of Tier 2 is written against.
     //
