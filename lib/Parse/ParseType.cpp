@@ -107,7 +107,17 @@ std::unique_ptr<TypeNode> Parser::parseTypeExpr() {
         }
 
         // EP §6.4.3.3: string(N) — variable-length string type.
-        // Plain 'string' without '(' remains a NamedTypeNode for ISO 7185 compat.
+        // Turbo string[N] — bounded ShortString, a distinct type with a
+        // distinct binary layout (see TypeKind::ShortString).  Gated to
+        // -std=turbo: EP's own bracket syntax is for array/set/file index
+        // types, not strings, and real Extended Pascal has no string[N]
+        // form.  Symmetrically, the paren form below is never gated to EP
+        // here at parse time -- Sema's resolveType refuses it under Turbo
+        // (Opts.extendedPascal() is false there), the same way it always
+        // has -- so the two spellings stay strictly one dialect apiece
+        // without the parser needing to know both refusals.
+        // Plain 'string' without '(' or '[' remains a NamedTypeNode for ISO
+        // 7185 compat.
         case TokenKind::String: {
             advance();
             if (match(TokenKind::LeftParen)) {
@@ -115,6 +125,14 @@ std::unique_ptr<TypeNode> Parser::parseTypeExpr() {
                 Node->Loc      = Loc;
                 Node->Capacity = parseSimpleExpr();
                 expect(TokenKind::RightParen);
+                return Node;
+            }
+            if (Opts.turbo() && match(TokenKind::LeftBracket)) {
+                auto Node         = std::make_unique<StringTypeNode>();
+                Node->Loc         = Loc;
+                Node->IsShortString = true;
+                Node->Capacity    = parseSimpleExpr();
+                expect(TokenKind::RightBracket);
                 return Node;
             }
             auto Node  = std::make_unique<NamedTypeNode>();

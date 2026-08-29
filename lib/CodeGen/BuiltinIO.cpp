@@ -124,6 +124,40 @@ void BuiltinIO::emitWriteArgs(
                 {fp, tmp, llvm::ConstantInt::get(I64Ty, esz)});
             continue;
         }
+        // Turbo string[N]: a minimal writer of its own -- see plang_sstr.cpp's
+        // own comment for exactly what this item does and does not implement
+        // (declaration/basic write only; TP's exact truncation/comparison/
+        // parameter-passing semantics are a later, separate item).  Checked
+        // ahead of the VarString/CharStr branch below: ShortString is
+        // neither -- emitExpr for it LOADS the struct by value (unlike
+        // VarString's address-returning IdentExpr special case), so this
+        // needs its own address via EmitLValue, not EmitExpr, and its own
+        // (one-byte-header) runtime writer.
+        if (argExpr->ResolvedType && argExpr->ResolvedType->Kind == TypeKind::ShortString) {
+            auto* addr = EmitLValue(*argExpr);
+            if (!addr) continue;
+            auto* capV = i64c(argExpr->ResolvedType->StrCapacity);
+            if (fp) {
+                // File-var I/O of a ShortString is out of this item's scope
+                // (no PascalFile-aware plang_sstr_write_file exists yet) --
+                // an honest internal error here, not a silent misprint or an
+                // LLVM type-mismatch crash from falling through to the
+                // scalar path below with an aggregate value.
+                codegenICE("ShortString file I/O is not implemented yet "
+                           "(write/writeln to stdout is)");
+            }
+            if (width) {
+                auto* fn = Strings.getStrFn(
+                    addNl ? "plang_sstr_writeln_w" : "plang_sstr_write_w",
+                    llvm::Type::getVoidTy(Ctx), {PtrTy, I64Ty, I64Ty});
+                B.CreateCall(fn, {addr, capV, width});
+            } else {
+                auto* fn = Strings.getStrFn(addNl ? "plang_sstr_writeln" : "plang_sstr_write",
+                    llvm::Type::getVoidTy(Ctx), {PtrTy, I64Ty});
+                B.CreateCall(fn, {addr, capV});
+            }
+            continue;
+        }
         // VarString arguments → string runtime; everything else → scalar write.
         // ISO §6.4.3.2: a packed array[1..n] of char is written as the string
         // it is, which the string writers already do once it is shaped like
@@ -414,6 +448,24 @@ void BuiltinIO::emitReadArg(const ExprNode& arg, llvm::Value* fp) {
     // Returning quietly would leave the variable out of the read entirely.
     if (!addr) addr = EmitLValue(arg);
     if (!addr) codegenICE("read/readln target is not an assignable variable");
+
+    // Turbo string[N]: a minimal reader of its own, the read-side twin of
+    // emitWriteArgs's ShortString branch above -- see plang_sstr.cpp's own
+    // comment for scope.  Checked ahead of the VarString check just below:
+    // ShortString is a completely separate TypeKind with its own (one-byte
+    // header) runtime reader, not a VarString variant.
+    if (arg.ResolvedType && arg.ResolvedType->Kind == TypeKind::ShortString) {
+        auto* capV = i64c(arg.ResolvedType->StrCapacity);
+        if (fp)
+            // File-var I/O of a ShortString is out of this item's scope; see
+            // the identical guard and its own comment in emitWriteArgs.
+            codegenICE("ShortString file I/O is not implemented yet "
+                       "(read/readln from stdin is)");
+        B.CreateCall(
+            Strings.getStrFn("plang_sstr_read", llvm::Type::getVoidTy(Ctx), {PtrTy, I64Ty}),
+            {addr, capV});
+        return;
+    }
 
     // string(N) is a { i64, [N x i8] } struct, so it needs the string reader;
     // the scalar readers would overwrite the length field.

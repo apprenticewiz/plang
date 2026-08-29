@@ -202,7 +202,13 @@ static void printType(const TypeNode& node, std::ostream& os) {
     }
     case NodeKind::StringTypeNode: {
         const auto* n = llvm::cast<StringTypeNode>(&node);
-        os << "(string";
+        // Turbo string[N] (ShortString) and EP string(N) (VarString) share
+        // this one AST node (see AstType.h's own comment) but are different
+        // types with different binary layouts -- printing them alike here
+        // would make a dump unable to tell which one a program actually
+        // wrote, exactly the ambiguity this project's naming elsewhere goes
+        // out of its way to avoid.
+        os << (n->IsShortString ? "(shortstring" : "(string");
         // EP §6.4.3.3: written without a capacity in a parameter list.
         if (n->Capacity) { os << " "; printExpr(*n->Capacity, os); }
         os << ")";

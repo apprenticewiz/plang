@@ -110,11 +110,21 @@ struct PointerTypeNode : TypeNode {
     std::unique_ptr<TypeNode> Base;  /// pointed-to type (^base)
 };
 
-/// EP §6.4.3.3: variable-length string type  string(N)
+/// EP §6.4.3.3: variable-length string type  string(N)  --  and, when
+/// IsShortString is set, Turbo's bounded string[N] (a distinct type, with a
+/// distinct binary layout; see TypeKind::ShortString).  One AST node covers
+/// both spellings because they differ only in which bracket the capacity is
+/// written inside; Sema and CodeGen branch on IsShortString to resolve/lower
+/// each to its own TypeKind.
 struct StringTypeNode : TypeNode {
     static bool classof(const Node* n) { return n->Kind == NodeKind::StringTypeNode; }
     StringTypeNode() : TypeNode(NodeKind::StringTypeNode) {}
-    std::unique_ptr<ExprNode> Capacity; /// the N in string(N); must be a constant expression
+    std::unique_ptr<ExprNode> Capacity; /// the N in string(N) or string[N]; must be a constant expression
+    /// True for Turbo's `string[N]`, false for EP's `string(N)`.  The parser
+    /// only ever sets this under -std=turbo (see ParseType.cpp); EP's paren
+    /// form remains EP's exclusively and Turbo's bracket form remains
+    /// Turbo's -- see the resolveType arm that reads this flag for why.
+    bool IsShortString{false};
 };
 
 /// EP §6.4.9: type of x — evaluates to the static type of a variable.

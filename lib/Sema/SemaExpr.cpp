@@ -1757,7 +1757,7 @@ void Sema::checkTypedConstFoldable(const ExprNode& E, const std::string& Name) {
 // See NumSemaTypeKinds in Sema/Type.h.  A new structured kind that can hold a
 // component defaults to "contains no file", and ISO §6.6.3.3's rule that a
 // file may not be passed by value stops being enforced through it.
-static_assert(NumSemaTypeKinds == 21,
+static_assert(NumSemaTypeKinds == 22,
               "a new structured type kind needs a case in typeContainsFile");
 
 bool Sema::typeContainsFile(const Type& T) {
@@ -2439,6 +2439,25 @@ bool Sema::isAssignCompatible(const Type& Dst, const Type& Src,
     if (Dst.Kind == Src.Kind) {
         switch (Dst.Kind) {
             // Scalar built-in types: kind equality suffices.
+            //
+            // ShortString (Turbo string[N]) is DELIBERATELY not listed here
+            // alongside VarString.  VarString's unconditional true means any
+            // two string(N)s are assignment-compatible regardless of
+            // capacity -- safe because CodeGen's plang_str_assign truncates
+            // across differently-sized buffers at run time.  ShortString has
+            // no such cross-capacity runtime support yet (out of this
+            // item's scope -- see plang_sstr.cpp), so admitting it here too
+            // would let `s: string[5] := t: string[10]` type-check into a
+            // CodeGen path with no safe lowering for it -- at best an
+            // internal error, at worst a mismatched-size store.  Falling to
+            // this switch's `default: return Dst.Name == Src.Name` instead
+            // gives exactly the right, SAFE answer for free: two
+            // ShortStrings of the SAME capacity share one interned Type
+            // object (TypeContext::getShortString), so they either hit the
+            // `&Dst == &Src` identity shortcut above already, or -- reached
+            // some other way -- have identical Names ("string[N]") and the
+            // default still says yes; two DIFFERENT capacities have
+            // different Names and the default correctly says no.
             case TypeKind::Integer: case TypeKind::Real: case TypeKind::Boolean:
             case TypeKind::Char:    case TypeKind::String: case TypeKind::Nil:
             case TypeKind::VarString:

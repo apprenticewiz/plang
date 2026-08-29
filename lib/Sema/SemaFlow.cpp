@@ -78,7 +78,7 @@ bool writesThroughDeref(const ExprNode* E) {
 // simple value", which does not report anything: it silently drops that type
 // out of the definite-assignment walk, so a variable of it used before it is
 // given a value is no longer diagnosed.
-static_assert(NumSemaTypeKinds == 21,
+static_assert(NumSemaTypeKinds == 22,
               "a new scalar type kind needs a case in isSimpleValue");
 
 /// Whether a value of this type is one the walk can follow.  A structured

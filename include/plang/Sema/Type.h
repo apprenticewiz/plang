@@ -46,6 +46,9 @@ enum class TypeKind {
     Char,
     String,     // ISO 7185 unbounded string (char*)
     VarString,  // EP §6.4.3.3 string(N); field: StrCapacity
+    ShortString, // Turbo string[N]: packed <{i8 length, [N x i8] data}>,
+                 // ONE-BYTE length prefix -- NOT VarString's i64-headed
+                 // layout, and NOT interchangeable with it.  field: StrCapacity
     Enum,       // ordinal; fields: EnumValues, Name
     Subrange,   // ordinal; fields: SubBase (underlying ordinal type)
     Array,      // fields: IndexType, ElemType, Packed
@@ -368,6 +371,17 @@ struct Type {
         auto T = std::make_shared<Type>();
         T->Kind = TypeKind::VarString;
         T->Name = "string(" + std::to_string(Cap) + ")";
+        T->StrCapacity = Cap;
+        return T;
+    }
+    /// Turbo `string[N]`.  A distinct TypeKind from VarString above with a
+    /// distinct, incompatible binary layout (see TypeKind::ShortString's own
+    /// comment) -- named with brackets here too, so a diagnostic naming this
+    /// type can never be confused with an EP string(N) in the same message.
+    [[nodiscard]] static std::shared_ptr<Type> makeShortString(int64_t Cap) {
+        auto T = std::make_shared<Type>();
+        T->Kind = TypeKind::ShortString;
+        T->Name = "string[" + std::to_string(Cap) + "]";
         T->StrCapacity = Cap;
         return T;
     }

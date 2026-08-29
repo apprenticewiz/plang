@@ -596,6 +596,41 @@ std::shared_ptr<Type> Sema::resolveTypeImpl(const TypeNode& Node) {
         // string` reading its component as the capacity schema.
     }
     if (auto* N = llvm::dyn_cast<StringTypeNode>(&Node)) {
+        // Turbo string[N] — bounded ShortString, a distinct type from EP's
+        // string(N) below with a distinct binary layout (TypeKind::
+        // ShortString: a one-byte length prefix, not string(N)'s eight).
+        // The parser only ever sets IsShortString under -std=turbo (see
+        // ParseType.cpp), so there is no separate dialect gate to check here
+        // -- reaching this arm at all already means Turbo.  Turbo has no
+        // schemas (EP §6.4.7), so unlike string(N) below there is no probe/
+        // ExtentVaries case to handle: the capacity is always a plain
+        // compile-time constant.
+        if (N->IsShortString) {
+            auto CapTy = checkExpr(*N->Capacity);
+            if (!CapTy->isError() && CapTy->Kind != TypeKind::Integer
+                    && !(CapTy->Kind == TypeKind::Subrange && CapTy->SubBase
+                         && CapTy->SubBase->Kind == TypeKind::Integer))
+                error(N->Loc, diag::err_string_cap_not_int);
+            const auto Cap = constBound(*N->Capacity);
+            if (!Cap) {
+                if (!CapTy->isError()) error(N->Loc, diag::err_string_cap_not_int);
+                return TyErr;
+            }
+            if (*Cap <= 0) {
+                error(N->Loc, diag::err_string_cap_not_positive,
+                      {std::to_string(*Cap)});
+                return TyErr;
+            }
+            // No upper bound enforced here on purpose: real Turbo/FPC cap a
+            // string[N]'s N at 255 (the length prefix's own one-byte width),
+            // but that is a TP-semantics rule this item's scope excludes --
+            // see byteSizeOf/byteAlignOf's ShortString cases below, which
+            // give a huge N a real, honest size instead of silently
+            // wrapping it, so Sema.cpp's existing 1 GiB declaration-size
+            // gate is what catches an unreasonable N (issue #410's DoS
+            // hole), the same gate every other oversized declaration hits.
+            return Ctx_.getShortString(*Cap);
+        }
         // EP §6.4.3.3: string(N) — variable-length string with capacity N.
         // Standard Pascal has no string type; its strings are values of
         // 'packed array [1..n] of char' (ISO §6.4.3.2).
@@ -1205,7 +1240,7 @@ std::shared_ptr<Type> Sema::resolveUndiscriminatedSchema(Symbol& Sym,
 // width check does not run for it -- which is the silent mask-truncation this
 // function exists to report.  A new non-ordinal kind belongs in the default
 // and needs nothing; only the count moves.
-static_assert(NumSemaTypeKinds == 21,
+static_assert(NumSemaTypeKinds == 22,
               "a new ordinal type kind needs a case in checkSetBaseRange");
 
 /// A set stores one bit per ordinal of its base type, so the base type's
@@ -1689,6 +1724,11 @@ uint64_t Sema::byteAlignOf(const Type& T) {
     case TypeKind::Procedure:
     case TypeKind::Function:    return T.Width / 8;
     case TypeKind::VarString:   return 8;   // the length field leads it
+    // Turbo string[N]: packed <{i8 length, [N x i8] data}>, ONE byte, not
+    // VarString's eight -- see TypeKind::ShortString's own comment.  The
+    // whole struct is byte-aligned, same as a packed record (T.Packed above)
+    // is: nothing inside it is ever wider than a byte.
+    case TypeKind::ShortString: return 1;
     case TypeKind::File:        return 8;   // a pointer leads PascalFile
     case TypeKind::Array:       return T.ElemType ? byteAlignOf(*T.ElemType) : 1;
     case TypeKind::Record:
@@ -1729,6 +1769,21 @@ std::optional<uint64_t> Sema::byteSizeOf(const Type& T, FieldOffsets* Offsets) {
     case TypeKind::VarString:
         return roundUp(8 + static_cast<uint64_t>(T.StrCapacity > 0 ? T.StrCapacity
                                                                    : 255), 8);
+    // Turbo string[N]: packed <{i8 length, [N x i8] data}> = N+1 bytes
+    // exactly, no rounding -- the whole point of the one-byte header is that
+    // nothing pads it out the way VarString's i64 header does above.
+    //
+    // This case is the one this project's issue #410 exists to keep from
+    // reopening: Sema.cpp's var/param/return-type size gates all read this
+    // function through `Sz && *Sz > Limit`, and a `default: return
+    // nullopt` here (the same default every unsized kind like
+    // ConformantArray/Schema legitimately falls through to, a few cases
+    // down) would make `Sz &&` false and silently ADMIT a `string[huge N]`
+    // the gate exists to refuse.  Returning a real, honest byte count --
+    // however large -- is what lets the gate see it and reject it, the same
+    // way it rejects every other oversized declaration.
+    case TypeKind::ShortString:
+        return static_cast<uint64_t>(T.StrCapacity > 0 ? T.StrCapacity : 255) + 1;
     // The PascalFile struct of Basic/PascalFileLayout.h, whose shape codegen
     // checks field by field.
     case TypeKind::File:

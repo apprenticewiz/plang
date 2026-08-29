@@ -375,6 +375,14 @@ private:
     /// being a representative shape, not the exact runtime allocation size
     /// of any one instance -- see the concerns note where this is called.
     llvm::DIType* buildStringDIType(int64_t cap);
+    /// Turbo string[N]'s own shape -- packed { i8 length; [cap x i8] data }
+    /// (StringRuntime/CGTypes::sstrStructType) -- a SEPARATE builder from
+    /// buildStringDIType above, not a parameterized shared one: the two
+    /// layouts genuinely differ (a one-byte length field here, eight there),
+    /// so describing them with one function risked the same "which header
+    /// width did I mean" mistake the two dedicated struct-type caches exist
+    /// to rule out at the LLVM-type level.
+    llvm::DIType* buildShortStringDIType(int64_t cap);
     llvm::DISubroutineType* buildSubroutineDIType(const plang::Type& T);
     /// Schema/SchemaInstance whose extent a discriminant fixes only at run
     /// time (Type::ExtentVaries): SchemaLayoutEngine::schemaHeaderBytes /

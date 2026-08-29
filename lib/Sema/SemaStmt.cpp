@@ -802,6 +802,11 @@ void Sema::checkReadParamType(const Type& T, SourceLocation Loc) {
     case TypeKind::Char:
     case TypeKind::String:
     case TypeKind::VarString:
+    // Turbo string[N]: CodeGen (BuiltinIO.cpp's emitReadArg) has a minimal
+    // read implementation for it, the same basic capability VarString gets
+    // here -- see that file's own comment for exactly what it does and does
+    // not yet do (TP-exact truncation semantics are a later item).
+    case TypeKind::ShortString:
         return;
     default:
         // ISO §6.10.1(e): a fixed-string-type (packed array[1..n] of char) is
@@ -963,6 +968,12 @@ void Sema::checkCallStmt(const CallStmt& S) {
                 case TypeKind::String:  case TypeKind::VarString:
                 case TypeKind::Subrange: case TypeKind::Enum:
                 case TypeKind::Complex: // EP §6.9.3.6
+                // Turbo string[N]: CodeGen (BuiltinIO.cpp's emitWriteArgs) has
+                // a minimal write implementation, the same basic capability
+                // VarString gets here -- see that file's own comment for the
+                // exact scope (not yet TP-exact truncation/field-width edge
+                // cases beyond what is already implemented).
+                case TypeKind::ShortString:
                     break;
                 default:
                     // ISO §6.4.3.2: a packed array[1..n] of char is a string
