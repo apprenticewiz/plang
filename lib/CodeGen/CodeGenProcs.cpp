@@ -199,6 +199,15 @@ void Codegen::Impl::emitGlobals(const BlockNode& block) {
     // Register constants — evaluated in definition order so later constants
     // can reference earlier ones (EP §6.8.2 general constant expressions).
     for (const auto& cd : block.Consts) {
+        // TP-only: a typed constant (ConstDef::Type set) is a real variable
+        // with static storage and a compile-time initializer -- see
+        // emitGlobalTypedConst's own comment -- so it takes neither of the
+        // two paths below, which are both for an actual, unassignable
+        // constant.
+        if (cd.Type) {
+            emitGlobalTypedConst(cd);
+            continue;
+        }
         // EP §6.8.7: a constant that is an array, record or set value is a
         // whole structure, so it needs storage rather than a value the way a
         // scalar constant does.  It is a global that no one may assign to,
@@ -229,6 +238,32 @@ void Codegen::Impl::emitGlobals(const BlockNode& block) {
     // Global variable declarations.
     for (const auto& vg : block.Vars) {
         llvm::Type* ty = llvmTypeOf(vg.Type.get(), nullptr);
+
+        // TP-only: 'absolute' at program scope.  Sema (checkBlock's Phase 4)
+        // has already required exactly one name and an addressable target;
+        // what CodeGen still has to do is find that target's ADDRESS with no
+        // builder to emit instructions through -- this runs before any
+        // function (including main) exists, the same reason emitPredefinedGlobals
+        // and friends never call emitLValue either.  A bare variable name
+        // costs nothing to address (its VarEntry::ptr already IS the
+        // address, whether a GlobalVariable or -- for a module -- an
+        // imported declaration), so that one case is supported directly;
+        // 'absolute' naming a COMPONENT of a global ('absolute B[2]') is not
+        // yet, and is refused with an internal error rather than silently
+        // doing the wrong thing.  The identical local case (emitBlockAllocas,
+        // above) has no such limit: it runs with a real entry block already
+        // open, so emitLValue there can address any designator.
+        if (vg.AbsoluteExpr) {
+            auto* id = llvm::dyn_cast<IdentExpr>(vg.AbsoluteExpr.get());
+            const VarEntry* target = id ? findVar(id->Name) : nullptr;
+            if (!target)
+                codegenICE("'absolute' at program scope currently supports only "
+                           "a bare variable name as its target, not a component "
+                           "of one");
+            defVar(vg.Names[0], target->ptr, ty, vg.Type.get());
+            continue;
+        }
+
         for (const auto& nm : vg.Names) {
             auto* zero = llvm::Constant::getNullValue(ty);
             auto* gv   = new llvm::GlobalVariable(*mod, ty, /*isConst=*/false,
@@ -1076,6 +1111,20 @@ void Codegen::Impl::emitBlockDecls(const BlockNode& block) {
     // For EP general constant expressions that can't be compile-time folded,
     // fall back to emitExpr() since we're inside a basic block.
     for (const auto& cd : block.Consts) {
+        // TP-only: a typed constant (ConstDef::Type set) gets static storage
+        // of its own -- a GlobalVariable, not a per-activation alloca -- see
+        // emitLocalStaticConst's own comment for why and for the guard
+        // below.  findVar first: this function runs once for a genuinely
+        // local typed constant (through emitBlockAllocas, from
+        // emitFunctionDef) but ALSO a second time, redundantly, when emitMain
+        // calls it directly on the program's own top-level block, which
+        // emitGlobals(*prog.Block) already gave this exact constant its
+        // storage in -- the same reason emitInheritedGlobals guards its own
+        // structured-constant call with findVar just below.
+        if (cd.Type) {
+            if (!findVar(cd.Name)) emitLocalStaticConst(cd);
+            continue;
+        }
         // EP §6.8.7: a structured constant is a whole array, record or set, so
         // it lives in storage of its own like the global case does.
         if (llvm::isa<StructuredValueExpr>(cd.Value.get())) {
@@ -1118,6 +1167,24 @@ void Codegen::Impl::emitBlockAllocas(const BlockNode& block) {
     emitBlockDecls(block);
     for (const auto& vg : block.Vars) {
         llvm::Type* ty = llvmTypeOf(vg.Type.get(), nullptr);
+
+        // TP-only: 'absolute' overlays this declaration's storage onto an
+        // existing variable's (or a component of one), so it gets no alloca
+        // of its own -- see AbsoluteExpr's own comment (AstDecl.h).  Sema
+        // (checkBlock's Phase 4) has already required exactly one name and an
+        // addressable target; emitLValue works here because, unlike
+        // emitGlobals' own var loop, this runs with a real entry block and
+        // builder position already in place (emitFunctionDef created both
+        // before calling emitBlockAllocas), so any designator -- 'absolute
+        // B', 'absolute B[2]', 'absolute R.Field' -- can be addressed, not
+        // only a bare name the way the global case is currently limited to.
+        if (vg.AbsoluteExpr) {
+            auto* addr = emitLValue(*vg.AbsoluteExpr);
+            if (!addr) codegenICE("'absolute' target has no storage to overlay onto");
+            defVar(vg.Names[0], addr, ty, vg.Type.get());
+            continue;
+        }
+
         for (const auto& nm : vg.Names) {
             auto* a = createEntryAlloca(ty, nm + ".addr");
             builder.CreateStore(llvm::Constant::getNullValue(ty), a);

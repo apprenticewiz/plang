@@ -25,6 +25,7 @@ add_library(PlangCodeGen OBJECT
     CGFieldAccess.cpp
     CGIndexAccess.cpp
     CGStructuredValue.cpp
+    CGTypedConst.cpp
     CGBinaryOps.cpp
     CGFuncCall.cpp
     CGExprCore.cpp

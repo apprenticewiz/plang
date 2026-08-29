@@ -167,15 +167,107 @@ void Parser::parseConstSection(BlockNode& Block) {
 }
 
 // const-def → identifier '=' expr ';'
+//           | identifier ':' type-expr '=' turbo-const-value ';'   (-std=turbo)
 // EP §6.8.2: any nonvarying expression is permitted as a constant value.
+//
+// Turbo's typed-constant form is checked for first (only under -std=turbo,
+// and only when a ':' actually follows the name): every other dialect falls
+// straight through to the classic form below, and a ':' where '=' was wanted
+// becomes the same "expected '='" syntax error it always was, which is
+// exactly the rejection -std=iso7185/-std=iso10206 want for this Turbo-only
+// syntax -- no separate dialect diagnostic is needed for it.
 ConstDef Parser::parseConstDef() {
     ConstDef Def;
     Def.Name  = expect(TokenKind::Identifier).Lexeme;
+    if (Opts.turbo() && check(TokenKind::Colon)) {
+        advance(); // ':'
+        Def.Type = parseTypeExpr();
+        expect(TokenKind::Equal);
+        Def.Value = parseTurboConstValue();
+        expect(TokenKind::Semicolon);
+        return Def;
+    }
     expect(TokenKind::Equal);
     Def.Value = Opts.has(LangOptions::Feature::ConstantExpressions) ? parseExpression()
                                                           : parseSimpleExpr();
     expect(TokenKind::Semicolon);
     return Def;
+}
+
+// See this method's own declaration (Parser.h) for the overall design.  Not
+// bounded by MaxValueDepth/ValueDepthScope the way parseComponentValue is:
+// that guard exists for EP's structured-value-constructor grammar, which
+// this is a sibling of but a separate recursion through (see
+// TurboConstValueDepth's own comment, Parser.h).  A typed constant nested
+// arbitrarily deep ('(((...)))' by hand or by a fuzzer) would otherwise
+// drive the real call stack instead of a diagnostic the same way an
+// unbounded parseComponentValue used to.
+static constexpr unsigned MaxTurboConstValueDepth = 500;
+
+std::unique_ptr<ExprNode> Parser::parseTurboConstValue() {
+    if (!check(TokenKind::LeftParen)) return parseExpression();
+
+    // Checked before the RAII bump just below: a caller already sitting at
+    // the ceiling must return without recursing again, not recurse once more
+    // and only then stop.  Mirrors parseComponentValue's own guard
+    // (ParseInit.cpp).
+    if (TurboConstValueDepth >= MaxTurboConstValueDepth) {
+        if (!TurboConstValueDepthLimitHit) {
+            TurboConstValueDepthLimitHit = true;
+            emitError(Current.toLoc(), diag::err_value_too_deeply_nested);
+        }
+        auto Node   = std::make_unique<IntLitExpr>();
+        Node->Loc   = Current;
+        Node->Value = 0;
+        return Node;
+    }
+    TurboConstValueDepthScope DepthGuard(TurboConstValueDepth, TurboConstValueDepthLimitHit);
+
+    Token Loc = Current;
+    advance(); // '('
+    auto Node = std::make_unique<StructuredValueExpr>();
+    Node->Loc = Loc;
+
+    if (match(TokenKind::RightParen)) return Node; // '()' -- Sema diagnoses.
+
+    // Parses one arm.  Sets IsField to say whether it turned out to be a
+    // 'name : value' record arm (decided per-arm from a single token of
+    // lookahead: an identifier that parseExpression stops at cleanly right
+    // before a ':', since ':' never continues an expression) or a bare
+    // positional array element.
+    auto parseArm = [&](bool& IsField) {
+        StructuredValueArm Arm;
+        if (check(TokenKind::Identifier)) {
+            Token IdTok = Current;
+            auto E = parseExpression();
+            if (check(TokenKind::Colon) && llvm::isa<IdentExpr>(E.get())) {
+                advance(); // ':'
+                auto Id  = std::make_unique<IdentExpr>();
+                Id->Loc  = IdTok.Loc;
+                Id->Name = IdTok.Lexeme;
+                Arm.Labels.push_back(std::move(Id));
+                Arm.Value = parseTurboConstValue();
+                IsField = true;
+            } else {
+                Arm.Value = std::move(E);
+                IsField = false;
+            }
+        } else {
+            Arm.Value = parseTurboConstValue();
+            IsField = false;
+        }
+        return Arm;
+    };
+
+    bool IsField = false;
+    Node->Arms.push_back(parseArm(IsField));
+    const TokenKind Sep = IsField ? TokenKind::Semicolon : TokenKind::Comma;
+    while (match(Sep)) {
+        bool ArmIsField = IsField;
+        Node->Arms.push_back(parseArm(ArmIsField));
+    }
+    expect(TokenKind::RightParen);
+    return Node;
 }
 
 // ---------------------------------------------------------------------------
@@ -269,6 +361,24 @@ VarGroup Parser::parseVarGroup() {
     // this declaration's variables it initialises and no others.
     if (Opts.extendedPascal() && match(TokenKind::Value)) {
         G.InitExpr = parseComponentValue();
+    }
+    // Turbo's 'absolute' directive: 'var W: Word absolute B;'.  Deliberately
+    // NOT a reserved word (TokenKinds.def has no token for it) -- it is
+    // recognized only by its spelling, only in this one position, right
+    // after a var-declaration's type -- so a program that declares its own
+    // identifier called 'absolute' anywhere else is completely unaffected.
+    // Same idiom ParseModule.cpp uses for EP's contextual 'implementation'.
+    if (Opts.turbo() && check(TokenKind::Identifier)
+            && toLower(Current.Lexeme) == "absolute") {
+        advance(); // 'absolute'
+        Token TargetTok = expect(TokenKind::Identifier);
+        auto Ident  = std::make_unique<IdentExpr>();
+        Ident->Loc  = TargetTok.Loc;
+        Ident->Name = TargetTok.Lexeme;
+        // The overlay target may itself be a component -- 'absolute B[0]',
+        // 'absolute R.Field' -- so it is parsed as a full postfix designator,
+        // the same as an assignment statement's left-hand side is.
+        G.AbsoluteExpr = parsePostfix(std::move(Ident));
     }
     expect(TokenKind::Semicolon);
     return G;

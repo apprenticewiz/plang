@@ -83,6 +83,28 @@ void nameNominalType(Type& T, const std::string& DeclName) {
     T.Anonymous = false;
 }
 
+/// TP-only: whether CodeGen's typed-constant lowering (buildTypedConstInit,
+/// CGTypedConst.cpp) can fold a value of type \p T into a compile-time
+/// llvm::Constant.  Scalars fold directly; an array or a fixed (non-variant)
+/// record folds if every element/field type does.  Deliberately excludes
+/// String/VarString/Set/File/Pointer/Procedure/Function/ConformantArray/
+/// SchemaInstance/Schema and a record with a variant part -- not because TP7
+/// itself refuses them, but because this first implementation does not yet
+/// have a lowering for them; see err_typed_const_unsupported_type's own
+/// comment (DiagnosticSemaKinds.def) for the reasoning behind the line.
+bool typedConstTypeSupported(const Type& T) {
+    if (T.isOrdinal() || T.Kind == TypeKind::Real) return true;
+    if (T.Kind == TypeKind::Array)
+        return T.ElemType && typedConstTypeSupported(*T.ElemType);
+    if (T.Kind == TypeKind::Record) {
+        if (T.RecordDecl && T.RecordDecl->Variant) return false;
+        for (const auto& F : T.RecordFields)
+            if (!F.Ty || !typedConstTypeSupported(*F.Ty)) return false;
+        return true;
+    }
+    return false;
+}
+
 /// TimeStamp's and BindingType's RecordFields lists are necessarily
 /// hand-written here -- they carry Sema-level subrange types the Basic-layer
 /// field-list macros in RequiredRecordLayouts.h cannot reference -- so
@@ -1025,6 +1047,12 @@ void Sema::checkBlock(const BlockNode& Block,
     // identifier" after the fact) is what tells that case apart from a
     // genuinely undefined identifier, which must still be reported here.
     std::vector<const ConstDef*> StructuredConsts;
+    // TP-only: typed constants (Cd.Type != null) are deferred the same way
+    // and for the same reason -- resolving the declared type may need a
+    // 'type' section elsewhere in this free-declaration-order block -- but
+    // are defined completely differently (defineTypedConst below), so they
+    // get their own list rather than sharing StructuredConsts.
+    std::vector<const ConstDef*> TypedConsts;
     std::set<std::string> PendingEnumNames;
     for (const auto& Td : Block.Types)
         if (auto* En = llvm::dyn_cast<EnumTypeNode>(Td.Type.get()))
@@ -1078,8 +1106,48 @@ void Sema::checkBlock(const BlockNode& Block,
         if (!Symtab.define(S))
             error(Cd.Value->Loc, diag::err_duplicate_declaration, {Cd.Name});
     };
+    // TP-only: a typed constant becomes a SymbolKind::Var (Symbol::
+    // IsTypedConst), never a SymbolKind::Const -- see IsTypedConst's own
+    // comment (SymbolTable.h) for why that is what makes it correctly
+    // refused as an array bound or a case label, with no extra rejection
+    // logic needed anywhere else.
+    auto defineTypedConst = [&](const ConstDef& Cd) {
+        auto T = resolveType(*Cd.Type);
+        // Reported and left there: a type CodeGen cannot fold makes whether
+        // the WRITTEN value would itself have folded a moot second question,
+        // and asking it anyway (checkTypedConstFoldable below) only bloats
+        // one bad declaration into two diagnostics about it.
+        const bool TypeSupported = T->isError() || typedConstTypeSupported(*T);
+        if (!TypeSupported)
+            error(Cd.Value->Loc, diag::err_typed_const_unsupported_type,
+                  {Cd.Name, T->Name});
+        // EP §6.8.7.1's own convention, reused here: a structured value is
+        // written without a type name, the type being the one the place it
+        // appears in calls for -- ExpectedValueType_ hands that in to
+        // checkStructuredValue.  A scalar initializer reads it the same way
+        // ordinary assignment-compatibility checking always has.
+        ExpectedValueType_ = T;
+        auto ValType = checkExpr(*Cd.Value);
+        ExpectedValueType_ = nullptr;
+        if (!T->isError() && !ValType->isError()
+                && !isAssignCompatible(*T, *ValType))
+            error(Cd.Value->Loc, diag::err_typed_const_type_mismatch,
+                  {ValType->Name, Cd.Name, T->Name});
+        if (!T->isError() && TypeSupported)
+            checkTypedConstFoldable(*Cd.Value, Cd.Name);
+        Symbol S;
+        S.Kind         = SymbolKind::Var;
+        S.Name         = Cd.Name;
+        S.Ty           = T;
+        S.DeclLoc      = Cd.Value->Loc;
+        S.IsTypedConst = true;
+        if (!Symtab.define(S))
+            error(Cd.Value->Loc, diag::err_duplicate_declaration, {Cd.Name});
+    };
     for (const auto& Cd : Block.Consts) {
-        if (llvm::isa<StructuredValueExpr>(Cd.Value.get())
+        if (Cd.Type)
+            TypedConsts.push_back(&Cd);
+        else if (llvm::isa<StructuredValueExpr>(Cd.Value.get())
                 || refsPendingEnum(Cd.Value.get()))
             StructuredConsts.push_back(&Cd);
         else
@@ -1239,6 +1307,11 @@ void Sema::checkBlock(const BlockNode& Block,
     // this block, now that the types exist.
     for (const ConstDef* Cd : StructuredConsts) defineConst(*Cd);
 
+    // Phase 3e — TP-only typed constants, deferred for the same reason as
+    // Phase 3d's structured constants just above (see TypedConsts' own
+    // comment).
+    for (const ConstDef* Cd : TypedConsts) defineTypedConst(*Cd);
+
     // Phase 4 — Variables
     for (const auto& Vg : Block.Vars) {
         auto T = resolveType(*Vg.Type);
@@ -1284,6 +1357,25 @@ void Sema::checkBlock(const BlockNode& Block,
             S.DeclLoc = NmLoc;
             if (!Symtab.define(S))
                 error(Vg.Type->Loc, diag::err_duplicate_declaration, {Nm});
+        }
+        // TP-only: 'absolute' overlays this declaration's storage onto an
+        // existing variable's (CodeGen wires the new symbol to the aliased
+        // one's own pointer -- see CodeGenProcs.cpp).  It needs exactly one
+        // variable to overlay onto -- see AbsoluteExpr's own comment
+        // (AstDecl.h) for why a name list is refused rather than aliasing
+        // every one of them onto the same target -- and a target that is
+        // itself addressable storage, the same requirement isLValue already
+        // enforces for a 'var' argument or Turbo's own '@' operator.  Real
+        // TP7 places no further restriction: an overlay of any size onto any
+        // variable is unchecked and unsafe by design, so (unlike an ordinary
+        // declaration) the new type's size is deliberately not compared
+        // against the target's.
+        if (Vg.AbsoluteExpr) {
+            if (Vg.Names.size() != 1)
+                error(Vg.AbsoluteExpr->Loc, diag::err_absolute_multiple_names);
+            (void)checkExpr(*Vg.AbsoluteExpr);
+            if (!isLValue(*Vg.AbsoluteExpr))
+                error(Vg.AbsoluteExpr->Loc, diag::err_absolute_target_not_variable);
         }
         // EP §6.4.1: optional 'value' initializer.
         if (Vg.InitExpr) {

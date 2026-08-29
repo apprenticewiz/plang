@@ -191,6 +191,19 @@ struct Symbol {
     /// every variable declared with that name is bindable.
     bool IsBindable{false};
 
+    /// Turbo's "typed constant" (`const X: Integer = 0;`) -- set on a
+    /// SymbolKind::Var this is, deliberately never a SymbolKind::Const.  TP7
+    /// gives it static storage that persists across calls when declared
+    /// inside a procedure, and lets it be assigned to like any other
+    /// variable; the one thing it may NOT do is stand as an array bound or a
+    /// case label.  Making it a Var rather than a Const is what delivers that
+    /// restriction for free: Sema::constBound only folds a SymbolKind::Const
+    /// with HasConstOrdinal, so a Var -- typed constant or not -- is simply
+    /// never a constant expression, with no extra rejection logic needed
+    /// here.  This flag exists only so CodeGen can tell "ordinary local" from
+    /// "wants static storage instead of a per-activation alloca" apart.
+    bool IsTypedConst{false};
+
     /// True for a required word the active dialect does not have.  Such a name
     /// is declared whatever the dialect, so that using it can say what it is
     /// rather than leaving it to look like a name the program forgot to
