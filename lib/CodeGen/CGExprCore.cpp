@@ -298,7 +298,45 @@ llvm::Value* CGExprCore::emitExpr(const ExprNode& e) {
     if (auto* n = llvm::dyn_cast<StructuredValueExpr>(&e))
         return StructuredValue.emitStructuredValue(*n);
 
+    if (auto* n = llvm::dyn_cast<TypeCastExpr>(&e)) return emitTypeCastValue(*n);
+
     codegenICE("unhandled expression node in emitExpr");
+}
+
+// Turbo VALUE typecast, read as a value (as opposed to used as an lvalue --
+// see emitLValue's TypeCastExpr case for that).  Sema::checkTypeCast has
+// already ruled out any pair for which neither strategy below applies.
+llvm::Value* CGExprCore::emitTypeCastValue(const TypeCastExpr& n) {
+    llvm::Type*  dstLlvmTy = Types.llvmTypeOfSemaType(*n.ResolvedType);
+    const auto&  DstTy     = n.ResolvedType;
+    const auto&  SrcTy     = n.Operand->ResolvedType;
+    const bool bothScalar = DstTy && SrcTy
+        && (DstTy->isOrdinal() || DstTy->Kind == plang::TypeKind::Real)
+        && (SrcTy->isOrdinal() || SrcTy->Kind == plang::TypeKind::Real);
+    if (bothScalar) {
+        // A genuine value CONVERSION -- Integer(SomeReal) truncates like
+        // Trunc would, Integer(SomeChar) reinterprets the ordinal value --
+        // reusing the exact same generic widen/narrow/int<->double helper
+        // every other numeric coercion in codegen already goes through.
+        // For a same-size ordinal pair (SmallInt(SomeInteger)) this is a
+        // no-op once the LLVM types agree, which is bit-for-bit identical to
+        // reinterpreting; for a genuinely different representation (Real's
+        // bits are not its integer value's bits) only this path is correct.
+        return CoerceToType(emitExpr(*n.Operand), dstLlvmTy);
+    }
+    // Not both ordinal-or-real: Sema only accepts this when the two types
+    // are exactly the same size, so it is a VARIABLE-style reinterpretation
+    // read here as a value (e.g. TByteRec(SomeWord) on the right of an
+    // assignment). Loading through a pointer whose STATIC type is the
+    // target, from storage the operand actually has, is what reinterprets
+    // the bytes -- opaque pointers carry no pointee type of their own, only
+    // the load does. An operand with no address of its own (a call result,
+    // say) is spilled to one first, the same fallback spillToTemporary
+    // itself is for.
+    llvm::Value* ptr = emitLValue(*n.Operand);
+    if (!ptr) ptr = spillToTemporary(*n.Operand);
+    if (!ptr) codegenICE("type cast operand has neither storage nor a spillable value");
+    return B.CreateLoad(dstLlvmTy, ptr, "typecast");
 }
 
 // Returns the POINTER to the storage for an lvalue expression.
@@ -373,6 +411,19 @@ llvm::Value* CGExprCore::emitLValue(const ExprNode& e) {
     if (auto* n = llvm::dyn_cast<SubstringExpr>(&e)) {
         // Substring lvalue s[i..j] — the address of the string variable itself.
         return emitLValue(*n->Str);
+    }
+    if (auto* n = llvm::dyn_cast<TypeCastExpr>(&e)) {
+        // Turbo VARIABLE typecast: Sema (isLValue) only ever accepts this as
+        // an lvalue when the operand is itself one and the two types are the
+        // same size, so this is the entire lowering -- hand back the
+        // OPERAND's own pointer, unchanged, so a write through it mutates
+        // the operand's own storage rather than a copy. Opaque pointers
+        // carry no static pointee type to reconcile; every load/store/GEP
+        // that goes through this pointer already carries its own type
+        // (n->ResolvedType, via CGTypes::llvmTypeOfSemaType), which is what
+        // makes the reinterpretation happen -- see emitTypeCastValue's twin
+        // case for the read side of the same idea.
+        return emitLValue(*n->Operand);
     }
     if (llvm::isa<CallExpr>(&e)) return spillToTemporary(e);
     return nullptr;

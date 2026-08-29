@@ -14,7 +14,7 @@
 using namespace plang;
 
 // See NumExprKinds in AstBase.h.
-static_assert(NumExprKinds == 16, "a new expression needs a case in checkExpr");
+static_assert(NumExprKinds == 17, "a new expression needs a case in checkExpr");
 
 // ---------------------------------------------------------------------------
 // Comparisons that one operand's type has already settled
@@ -160,6 +160,7 @@ std::shared_ptr<Type> Sema::checkExpr(const ExprNode& E) {
     else if (auto* N = llvm::dyn_cast<CallExpr>(&E))       T = checkCallExpr(*N);
     else if (auto* N = llvm::dyn_cast<SetLiteralExpr>(&E)) T = checkSetLit(*N);
     else if (auto* N = llvm::dyn_cast<StructuredValueExpr>(&E)) T = checkStructuredValue(*N);
+    else if (auto* N = llvm::dyn_cast<TypeCastExpr>(&E))   T = checkTypeCast(*N);
     else if (auto* N = llvm::dyn_cast<WriteParam>(&E)) {
         T = checkExpr(*N->Value);
         // ISO §6.9.3.1 / EP §6.10.3.1: TotalWidth and FracDigits are
@@ -1466,6 +1467,48 @@ std::shared_ptr<Type> Sema::checkCallExpr(const CallExpr& E) {
     return checkUserDefinedCall(*Sym, E.Loc, E.Args, /*expectFunction=*/true);
 }
 
+std::shared_ptr<Type> Sema::checkTypeCast(const TypeCastExpr& E) {
+    // Resolved exactly as an ordinary type-denoter naming this same spelling
+    // would be -- a synthetic NamedTypeNode reaches every existing rule
+    // (built-in keyword, user TypeAlias, EP schema, 'string' gated to EP)
+    // with no rule of its own duplicated here. resolveSchemaParams
+    // (SemaType.cpp) already uses this exact idiom for the same reason.
+    NamedTypeNode TargetNode;
+    TargetNode.Loc  = E.Loc;
+    TargetNode.Name = E.TypeName;
+    auto TargetTy = resolveNamed(TargetNode);
+
+    auto SrcTy = checkExpr(*E.Operand);
+
+    if (TargetTy->isError() || SrcTy->isError()) return TyErr;
+
+    // Turbo/EP's own conversion rules: real<->ordinal truncates/rounds like
+    // Trunc/Round would, and ordinal<->ordinal reinterprets the ordinal
+    // value (Integer(SomeChar) reads SomeChar's ordinal position as an
+    // Integer). Defined for every ordinal-or-real pair regardless of size.
+    const bool BothScalar = (TargetTy->isOrdinal() || TargetTy->Kind == TypeKind::Real)
+                          && (SrcTy->isOrdinal()    || SrcTy->Kind == TypeKind::Real);
+
+    // A VARIABLE typecast reinterprets the operand's own storage bit-for-bit
+    // in place, which is only meaningful when the two types occupy the same
+    // number of bytes -- TByteRec(SomeWord) requires TByteRec to be exactly
+    // 2 bytes, the same as Word.  Meaningful for any two types, scalar or
+    // not (TByteRec is a record, neither ordinal nor real).  Whether THIS
+    // particular occurrence can actually be used as a variable additionally
+    // needs the operand to be an lvalue in the first place -- isLValue's own
+    // TypeCastExpr case checks that; this only asks "could reinterpreting
+    // these two types' storage ever make sense."
+    const auto TargetSz = byteSizeOf(*TargetTy);
+    const auto SrcSz     = byteSizeOf(*SrcTy);
+    const bool SameSize  = TargetSz && SrcSz && *TargetSz == *SrcSz;
+
+    if (!BothScalar && !SameSize) {
+        error(E.Loc, diag::err_invalid_type_cast, {SrcTy->Name, TargetTy->Name});
+        return TyErr;
+    }
+    return TargetTy;
+}
+
 std::shared_ptr<Type> Sema::checkSetLit(const SetLiteralExpr& E, const std::shared_ptr<Type>& TargetHint) {
     if (E.Elements.empty()) {
         // Empty set: type is indeterminate; use a generic set-of-integer.
@@ -2372,6 +2415,23 @@ bool Sema::isLValue(const ExprNode& E) const {
     // EP §6.5.6: a substring-variable is a variable, so a substring of a
     // variable may be assigned to.
     if (auto* Sub = llvm::dyn_cast<SubstringExpr>(&E)) return isLValue(*Sub->Str);
+    // TP-only: TypeName(expr) is a variable (usable as an assignment target,
+    // a var-parameter actual, or @'s operand) exactly when its OPERAND is
+    // one and the two types are the same size -- see checkTypeCast's own
+    // comment. Integer(SomeReal) fails this (Real and Integer are different
+    // sizes) and stays a plain value, even though SomeReal is itself a
+    // variable; TByteRec(SomeWord) passes it (both 2 bytes) and reinterprets
+    // SomeWord's own storage. Sizes come from ResolvedType, which checkExpr
+    // has already set on both nodes by the time isLValue is ever asked.
+    if (auto* Tc = llvm::dyn_cast<TypeCastExpr>(&E)) {
+        if (!isLValue(*Tc->Operand)) return false;
+        const auto& Dst = Tc->ResolvedType;
+        const auto& Src = Tc->Operand->ResolvedType;
+        if (!Dst || !Src || Dst->isError() || Src->isError()) return false;
+        const auto DstSz = byteSizeOf(*Dst);
+        const auto SrcSz = byteSizeOf(*Src);
+        return DstSz && SrcSz && *DstSz == *SrcSz;
+    }
     return false;
 }
 

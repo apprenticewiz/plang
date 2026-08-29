@@ -106,22 +106,93 @@ std::unique_ptr<StmtNode> Parser::parseStatement() {
             return nullptr;
         }
 
+        // Turbo VARIABLE typecast rooted in one of the five standard type
+        // names that are lexer KEYWORDS rather than Identifier tokens --
+        // Integer(x) := ..., Real(x) := ..., etc. -- so the 'Identifier'
+        // case just below never sees them; mirrors parseFactor's identical
+        // keyword arm (ParseExpr.cpp).  Not Turbo, or not followed by '(':
+        // none of these keywords begins a statement of any other shape, so
+        // this falls out exactly the way it always has -- as the 'default'
+        // arm's empty-statement (epsilon) production, with the leftover
+        // token reported by whatever enclosing construct expected a
+        // separator or a closing keyword next.
+        case TokenKind::Integer:
+        case TokenKind::Real:
+        case TokenKind::Boolean:
+        case TokenKind::Char:
+        case TokenKind::String: {
+            if (!Opts.turbo()) return nullptr;
+            Token KwTok = Current;
+            advance();
+            if (!check(TokenKind::LeftParen)) return nullptr;
+            advance(); // consume '('
+            auto Node      = std::make_unique<TypeCastExpr>();
+            Node->Loc      = KwTok;
+            Node->TypeName = KwTok.Lexeme;
+            Node->Operand  = parseExpression();
+            expect(TokenKind::RightParen);
+            auto Lval = parsePostfix(std::move(Node));
+
+            if (check(TokenKind::Assign)) {
+                advance();
+                auto AssignNode    = std::make_unique<AssignStmt>();
+                AssignNode->Loc    = Lval->Loc;
+                AssignNode->Target = std::move(Lval);
+                AssignNode->Value  = parseExpression();
+                return AssignNode;
+            }
+            // Neither a label target (only an identifier or integer may be
+            // one) nor a procedure name (CallStmt needs an IdentExpr) can
+            // ever be built from one of these keywords, so unlike the
+            // Identifier case just below, there is only the one shape to
+            // fall back to here.
+            emitError(Lval->Loc, diag::err_expected_assign_after_var);
+            return nullptr;
+        }
+
         case TokenKind::Identifier: {
             Token IdentTok = Current;
             advance();
 
-            // Build IdentExpr then apply any postfix operators to form the LValue.
-            auto Ident  = std::make_unique<IdentExpr>();
-            Ident->Loc  = IdentTok;
-            Ident->Name = IdentTok.Lexeme;
-            // EP §6.11.2: M.name for a module imported `qualified` is one name,
-            // not a field selection.
-            if (check(TokenKind::Dot)
-                    && QualifiedModules_.count(toLower(Ident->Name))) {
-                advance();
-                Ident->Name += "." + expect(TokenKind::Identifier).Lexeme;
+            // Turbo VARIABLE typecast as the ROOT of an lvalue path:
+            // TypeName(expr) reinterprets expr's own storage in place, so
+            // `TByteRec(SomeWord).Lo := 0` mutates SomeWord itself rather
+            // than a copy -- see TypeCastExpr's own comment (AstExpr.h).
+            // Recognized by the exact same TypeNames_/VarNames_ test
+            // parseFactor's identifier branch uses for the value-cast form
+            // (ParseExpr.cpp), so the two never disagree about which of the
+            // two grammars a given 'TypeName(' begins. Once built, this
+            // feeds into parsePostfix exactly like an ordinary IdentExpr
+            // would, so `.field`/`[i]`/`^` chain onto it the same way.
+            std::unique_ptr<ExprNode> Lval;
+            {
+                const std::string Lower = toLower(IdentTok.Lexeme);
+                const bool NamesAType = Opts.turbo() && TypeNames_.count(Lower)
+                                         && !VarNames_.count(Lower);
+                if (NamesAType && check(TokenKind::LeftParen)) {
+                    advance(); // consume '('
+                    auto Node      = std::make_unique<TypeCastExpr>();
+                    Node->Loc      = IdentTok;
+                    Node->TypeName = IdentTok.Lexeme;
+                    Node->Operand  = parseExpression();
+                    expect(TokenKind::RightParen);
+                    Lval = parsePostfix(std::move(Node));
+                }
             }
-            auto Lval   = parsePostfix(std::move(Ident));
+            if (!Lval) {
+                // Build IdentExpr then apply any postfix operators to form the LValue.
+                auto Ident  = std::make_unique<IdentExpr>();
+                Ident->Loc  = IdentTok;
+                Ident->Name = IdentTok.Lexeme;
+                // EP §6.11.2: M.name for a module imported `qualified` is one
+                // name, not a field selection.
+                if (check(TokenKind::Dot)
+                        && QualifiedModules_.count(toLower(Ident->Name))) {
+                    advance();
+                    Ident->Name += "." + expect(TokenKind::Identifier).Lexeme;
+                }
+                Lval = parsePostfix(std::move(Ident));
+            }
 
             if (check(TokenKind::Assign)) {
                 // assignment → lvalue ':=' expression

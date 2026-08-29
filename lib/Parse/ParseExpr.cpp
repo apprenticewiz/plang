@@ -390,6 +390,38 @@ std::unique_ptr<ExprNode> Parser::parseFactor() {
             return Node;
         }
 
+        // Turbo VALUE typecast using one of the five standard type names that
+        // are lexer KEYWORDS rather than Identifier tokens (TokenKinds.def),
+        // so the 'case TokenKind::Identifier' arm below never sees them:
+        // Integer(x), Real(x), Boolean(x), Char(x), String(x).  Gated on
+        // Opts.turbo() -- ISO 7185/Extended Pascal have no typecast syntax at
+        // all, and a bare occurrence of one of these keywords means nothing
+        // there either, so the fallback below reproduces the exact
+        // "expected expression" diagnostic and recovery this position has
+        // always had for them.
+        case TokenKind::Integer:
+        case TokenKind::Real:
+        case TokenKind::Boolean:
+        case TokenKind::Char:
+        case TokenKind::String: {
+            const TokenKind KeywordKind = Current.Kind;
+            advance();
+            if (Opts.turbo() && check(TokenKind::LeftParen)) {
+                advance(); // consume '('
+                auto Node      = std::make_unique<TypeCastExpr>();
+                Node->Loc      = Loc;
+                Node->TypeName = Loc.Lexeme;
+                Node->Operand  = parseExpression();
+                expect(TokenKind::RightParen);
+                return parsePostfix(std::move(Node));
+            }
+            emitError(Loc.toLoc(), diag::err_expected_expr, {describe(KeywordKind)});
+            auto Node   = std::make_unique<IntLitExpr>();
+            Node->Loc   = Loc;
+            Node->Value = 0;
+            return Node;
+        }
+
         case TokenKind::Identifier: {
             std::string Name = Current.Lexeme;
             advance();
@@ -399,6 +431,31 @@ std::unique_ptr<ExprNode> Parser::parseFactor() {
                     && QualifiedModules_.count(toLower(Name))) {
                 advance(); // consume '.'
                 Name += "." + expect(TokenKind::Identifier).Lexeme;
+            }
+
+            // Turbo VALUE typecast: TypeName(expr).  Recognized here, not
+            // deferred to Sema the way an ordinary call is, because the node
+            // this builds has to be a TypeCastExpr rather than a CallExpr --
+            // see TypeCastExpr's own comment (AstExpr.h) for why the lvalue
+            // form needs a distinct NodeKind.  A type name and a routine name
+            // can never share a scope in Pascal, so TypeNames_ is a sound way
+            // to decide which of the two grammars '(' begins; VarNames_
+            // breaks the tie in favor of a variable that shadows an outer
+            // type, the same precedence parseStructuredValueOrIndex already
+            // gives EP's TypeName[...] just below.
+            {
+                const std::string Lower = toLower(Name);
+                const bool NamesAType = Opts.turbo() && TypeNames_.count(Lower)
+                                         && !VarNames_.count(Lower);
+                if (NamesAType && check(TokenKind::LeftParen)) {
+                    advance(); // consume '('
+                    auto Node      = std::make_unique<TypeCastExpr>();
+                    Node->Loc      = Loc;
+                    Node->TypeName = Name;
+                    Node->Operand  = parseExpression();
+                    expect(TokenKind::RightParen);
+                    return parsePostfix(std::move(Node));
+                }
             }
 
             if (match(TokenKind::LeftParen)) {

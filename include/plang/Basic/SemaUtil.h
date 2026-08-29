@@ -20,13 +20,13 @@ namespace plang {
 // See NumExprKinds and NumStmtKinds in AstBase.h.
 // Complete as written: of the twelve statement kinds, the nine that contain a
 // statement appear in walkStmts and the nine that hang an expression off
-// themselves appear in forEachStmtExpr; of the sixteen expression kinds, six
-// are leaves and the other ten appear in walkExprs.
+// themselves appear in forEachStmtExpr; of the seventeen expression kinds,
+// six are leaves and the other eleven appear in walkExprs.
 static_assert(NumStmtKinds == 12,
               "a new statement kind that contains statements needs a branch in "
               "walkStmts, and one that hangs an expression off itself needs a "
               "branch in forEachStmtExpr");
-static_assert(NumExprKinds == 16,
+static_assert(NumExprKinds == 17,
               "a new expression kind that owns a child expression needs a "
               "branch in walkExprs");
 
@@ -101,6 +101,8 @@ void walkExprs(const ExprNode* E, Fn&& F) {
         walkExprs(N->Value.get(), F);
         walkExprs(N->Width.get(), F);
         walkExprs(N->Decimals.get(), F);
+    } else if (auto* N = llvm::dyn_cast<TypeCastExpr>(E)) {
+        walkExprs(N->Operand.get(), F);
     }
 }
 

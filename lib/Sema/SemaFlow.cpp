@@ -52,6 +52,12 @@ const IdentExpr* rootVariable(const ExprNode* E) {
         if (auto* N = llvm::dyn_cast<FieldExpr>(E))     { E = N->Record.get();  continue; }
         if (auto* N = llvm::dyn_cast<DerefExpr>(E))     { E = N->Pointer.get(); continue; }
         if (auto* N = llvm::dyn_cast<SubstringExpr>(E)) { E = N->Str.get();     continue; }
+        // Turbo VARIABLE typecast: TByteRec(SomeWord).Lo := 0 reinterprets
+        // SomeWord's own storage, so SomeWord is the variable this access is
+        // ultimately of -- same simplification as IndexExpr/FieldExpr just
+        // above, one component (or the whole reinterpreted value) standing
+        // for the whole variable.
+        if (auto* N = llvm::dyn_cast<TypeCastExpr>(E))  { E = N->Operand.get(); continue; }
         return nullptr;
     }
     return nullptr;
@@ -69,6 +75,11 @@ bool writesThroughDeref(const ExprNode* E) {
         if (auto* N = llvm::dyn_cast<IndexExpr>(E))     { E = N->Array.get();  continue; }
         if (auto* N = llvm::dyn_cast<FieldExpr>(E))     { E = N->Record.get(); continue; }
         if (auto* N = llvm::dyn_cast<SubstringExpr>(E)) { E = N->Str.get();    continue; }
+        // See rootVariable's identical case just above: a variable typecast
+        // is transparent to this walk the same way a field/index access is,
+        // so a deref further down its operand (PByteRec(SomePointer)^.Lo :=
+        // 0) is still found.
+        if (auto* N = llvm::dyn_cast<TypeCastExpr>(E))  { E = N->Operand.get(); continue; }
         return false;
     }
     return false;
@@ -272,9 +283,21 @@ void Sema::flowStmt(const StmtNode* S, FlowState& St) {
                     if (X == Root) return;
                     flowRead(X, St);
                 });
-                // A dereference or a subscript reads the variable it is of:
-                // p^ := 0 needs p to point somewhere.
-                flowRead(Root, St);
+                // A dereference reads the variable it is of: p^ := 0 needs p
+                // to point somewhere. An index, a substring, or a Turbo
+                // variable typecast do not -- a[i] := 0 needs only i (already
+                // read by the walkExprs loop above), not a's own value, and
+                // TByteRec(SomeWord).Lo := 0 needs no value from SomeWord
+                // either: both write into the root's storage directly rather
+                // than following a value out of it to find where to write.
+                // writesThroughDeref is what already tells these apart for
+                // flowWrite just below; asking it here too, instead of
+                // reading the root unconditionally, is what keeps
+                // TByteRec(SomeWord).Lo := 0 from reading an uninitialized
+                // SomeWord that this statement is precisely what gives a
+                // value.
+                if (writesThroughDeref(N->Target.get()))
+                    flowRead(Root, St);
             }
         flowWrite(N->Target.get(), St);
         return;

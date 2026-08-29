@@ -51,7 +51,7 @@ namespace plang {
 // a kind exprToString learns to write has to be one canSerializeExpr agrees can
 // be written, or the gate keeps out what the writer could have said, and a kind
 // only the gate learns lets through what the writer will then write as a zero.
-static_assert(NumExprKinds == 16,
+static_assert(NumExprKinds == 17,
               "a new expression may need a case in exprToString and in "
               "canSerializeExpr");
 static_assert(NumTypeKinds == 14,
@@ -195,6 +195,10 @@ static std::string exprToString(const ExprNode& E) {
     }
     if (auto* RG = llvm::dyn_cast<SetRangeExpr>(&E))
         return exprToString(*RG->Low) + ".." + exprToString(*RG->High);
+    // Turbo typecast: round-trips as the same TypeName(expr) syntax it was
+    // written with.
+    if (auto* TC = llvm::dyn_cast<TypeCastExpr>(&E))
+        return TC->TypeName + "(" + exprToString(*TC->Operand) + ")";
     // EP §6.6: an initial state may be a whole array, record or set, and the
     // interface has to keep saying what state that is.
     if (auto* SL = llvm::dyn_cast<SetLiteralExpr>(&E)) {
@@ -276,6 +280,8 @@ static bool canSerializeExpr(const ExprNode& E) {
             if (!A || !canSerializeExpr(*A)) return false;
         return true;
     }
+    if (auto* TC = llvm::dyn_cast<TypeCastExpr>(&E))
+        return TC->Operand && canSerializeExpr(*TC->Operand);
     return false;
 }
 
