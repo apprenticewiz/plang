@@ -459,6 +459,20 @@ std::shared_ptr<Type> Sema::resolveTypeImpl(const TypeNode& Node) {
         // struct default (true), the same fix makeBoolean/makeChar (Type.h)
         // need for the identical reason.
         T->IsSigned   = false;
+        // TP7 ch.19's storage-width-selection rule, -std=turbo only: an
+        // enum's ordinals are always 0..count-1 (the same ISO §6.4.2.2 fact
+        // IsSigned above already relies on), so its narrowest storage is
+        // exactly TypeContext::narrowestStorage(0, count-1) -- the same rule
+        // getSubrange applies to a numeric subrange's own written bounds,
+        // just fed the enum's implicit range instead.  Only Width can
+        // change here: narrowestStorage always answers unsigned for a Lo=0
+        // range, agreeing with the IsSigned already set above.  ISO 7185/EP
+        // are byte-for-byte unaffected: Width is left at Type's struct
+        // default (64) exactly as it always has been, since nothing outside
+        // this `if` runs for them.
+        if (Opts.turbo() && !N->Values.empty())
+            T->Width = TypeContext::narrowestStorage(
+                0, static_cast<int64_t>(N->Values.size()) - 1).first;
         // Register each value as an EnumValue symbol in the current scope.
         int Ord = 0;
         for (const auto& Val : N->Values) {
