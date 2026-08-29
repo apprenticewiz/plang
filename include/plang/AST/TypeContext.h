@@ -88,6 +88,14 @@ public:
         TyPChar_->Name        = "PChar";
         TyPChar_->PointeeType = TyChar_;
         TyPChar_->Width       = PointerWidthBits_;
+        // Turbo `Pointer`: the generic, untyped pointer -- PointeeType left
+        // null on purpose (it names no specific type), also NOT interned via
+        // getPointer for the same "must not collide with structural ^T"
+        // reason PChar isn't.
+        TyPointer_ = std::make_shared<Type>();
+        TyPointer_->Kind = TypeKind::Pointer;
+        TyPointer_->Name = "Pointer";
+        TyPointer_->Width = PointerWidthBits_;
         TyErr_  = Type::makeError();
         // ISO §6.4.3.5: text is one predefined type, not a fresh type per
         // mention, so `var f: text` and `procedure p(var g: text)` agree.
@@ -151,16 +159,51 @@ public:
     /// Interned like the structural types and for the same reason: `Word` and
     /// `Word` have to be one type, or assigning one to the other fails an
     /// identity check that has nothing to say about why.
+    ///
+    /// A consequence of interning by {Bits, Signed} alone is that some Turbo
+    /// spellings name the SAME Type object: `SmallInt` (16, signed) is
+    /// `Integer`'s own object, and `LongWord` (32, unsigned) is `Cardinal`'s.
+    /// Type::Name is a field ON that shared object, so it cannot hold two
+    /// spellings at once, and it must not be overwritten after the fact by
+    /// whichever caller happens to register second -- that would make an
+    /// unrelated diagnostic about plain `Integer` say "SmallInt", or the
+    /// reverse, depending only on registration order.  Instead the name is
+    /// chosen exactly once, here, at mint time, from Bits/Signed alone, so it
+    /// is independent of what gets registered when:
+    ///   - the dialect's own unqualified `integer` (DefaultIntWidth_, signed)
+    ///     keeps makeInteger()'s "integer", unchanged from before this ladder
+    ///     existed, so every existing ISO/EP/Turbo-Integer diagnostic reads
+    ///     exactly as it did.
+    ///   - every other {Bits, Signed} pair -- the sized rungs `-std=turbo`
+    ///     adds -- gets the ladder's own name, so a diagnostic about a `Word`
+    ///     says "Word" and not "integer".
+    /// For the two collisions above this still shows one name for two
+    /// spellings, but that is correct rather than approximate: SmallInt IS
+    /// Integer and LongWord IS Cardinal (same width, same signedness, same
+    /// representation), so either name is an accurate description of the
+    /// other's variable.
     std::shared_ptr<Type> getInt(unsigned Bits, bool Signed) {
         auto& Slot = IntCache_[{Bits, Signed}];
         if (!Slot) {
             auto T      = Type::makeInteger();
             T->Width    = Bits;
             T->IsSigned = Signed;
+            if (Bits != DefaultIntWidth_ || !Signed)
+                if (const char* N = sizedIntegerName(Bits, Signed))
+                    T->Name = N;
             Slot = std::move(T);
         }
         return Slot;
     }
+
+    /// Turbo's generic, untyped `Pointer`.  Deliberately NOT minted through
+    /// getPointer/PointerCache_: that cache is keyed by pointee identity, and
+    /// this type has none -- PointeeType stays null, the same "no specific
+    /// domain type" state getNil's TyNil_ singleton already models for `nil`.
+    /// Sema::isAssignCompatible's Pointer/Pointer arm reads that null as
+    /// license to accept any other pointer type, in either direction; see its
+    /// own comment.
+    const std::shared_ptr<Type>& getGenericPointer() const { return TyPointer_; }
 
     // ---- Structural types — return canonical instances ---------------------
 
@@ -395,9 +438,24 @@ private:
         return std::to_string(reinterpret_cast<uintptr_t>(T.get()));
     }
 
+    /// The Turbo sized-integer ladder's display name for a {Bits, Signed}
+    /// pair that is not the dialect's own unqualified `integer`; see getInt.
+    /// Null for a width nothing in the ladder names, so an unrecognized pair
+    /// falls back to plain "integer" rather than a nonsense label.
+    static const char* sizedIntegerName(unsigned Bits, bool Signed) {
+        switch (Bits) {
+        case 8:  return Signed ? "ShortInt" : "Byte";
+        case 16: return Signed ? "Integer"  : "Word";
+        case 32: return Signed ? "LongInt"  : "Cardinal";
+        case 64: return Signed ? "Int64"    : "QWord";
+        default: return nullptr;
+        }
+    }
+
     // Scalar singletons
     std::shared_ptr<Type> TyInt_, TyReal_, TyCplx_, TyBool_, TyChar_,
-                          TyStr_, TyNil_, TyErr_, TyText_, TyPChar_;
+                          TyStr_, TyNil_, TyErr_, TyText_, TyPChar_,
+                          TyPointer_;
 
     /// What an unqualified `integer` is, and what an ordinal that is not
     /// narrowed by its host is stored as.

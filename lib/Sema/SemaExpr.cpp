@@ -798,9 +798,17 @@ std::shared_ptr<Type> Sema::checkBinary(const BinaryExpr& E) {
                          // interned (see schemaInstMatch), so two aliases
                          // naming the identical schema instantiation mint two
                          // distinct Pointer objects here too.  Issue #407.
-                         && !(Lt->PointeeType && Rt->PointeeType
-                              && (isIdenticalType(Lt->PointeeType, Rt->PointeeType)
-                                  || schemaInstMatch(*Lt->PointeeType, *Rt->PointeeType))))
+                         //
+                         // Turbo's generic `Pointer` has no PointeeType at
+                         // all (TypeContext::getGenericPointer) -- the guard
+                         // below requires BOTH sides to have one before the
+                         // domains are even asked about, so a comparison
+                         // with a generic Pointer on either side never
+                         // reaches (and cannot fail) the identity check,
+                         // the same blanket pass Nil gets a few lines above.
+                         && Lt->PointeeType && Rt->PointeeType
+                         && !(isIdenticalType(Lt->PointeeType, Rt->PointeeType)
+                              || schemaInstMatch(*Lt->PointeeType, *Rt->PointeeType)))
                     error(E.Loc, diag::err_cannot_compare, {Lt->Name, Rt->Name});
                 return TyBool;
             }
@@ -2577,8 +2585,17 @@ bool Sema::isAssignCompatible(const Type& Dst, const Type& Src,
             // kind other than SchemaInstance, so it adds this one carve-out
             // without loosening isIdenticalType's identity requirement for
             // Subrange or any other pointee kind.
+            //
+            // Turbo's generic `Pointer` (TypeContext::getGenericPointer) is
+            // the one deliberate exception to "both domains present": it has
+            // no PointeeType by construction -- the same "no specific
+            // pointee" state Nil's own carve-out a few lines below models --
+            // and is compatible with any pointer type, typed or generic,
+            // in either direction: `p := q` and `q := p` both compile for
+            // `p: Pointer; q: ^Integer`, matching real Turbo Pascal, where
+            // Pointer is untyped and no domain check applies to it at all.
             case TypeKind::Pointer:
-                if (!Dst.PointeeType || !Src.PointeeType) return false;
+                if (!Dst.PointeeType || !Src.PointeeType) return true;
                 return isIdenticalType(Dst.PointeeType, Src.PointeeType)
                     || schemaInstMatch(*Dst.PointeeType, *Src.PointeeType);
 

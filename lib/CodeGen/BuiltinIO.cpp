@@ -687,8 +687,20 @@ bool BuiltinIO::writesAsBoolean(const llvm::Type* ty, const plang::Type* semaTy)
 }
 
 bool BuiltinIO::writesAsChar(const llvm::Type* ty, const plang::Type* semaTy) {
-    if (ty->isIntegerTy(8)) return true;
-    if (!ty->isIntegerTy() || !semaTy) return false;
+    if (!ty->isIntegerTy()) return false;
+    // Width alone used to decide this: any i8 was taken for a char.  That
+    // was an unreachable-in-practice shortcut before Turbo's sized-integer
+    // ladder (ShortInt, Byte, ...) existed -- ISO 7185 and Extended Pascal
+    // stamp Width=64 on every Integer, and Turbo's own Integer is 16-bit, so
+    // the only i8 ordinal that ever reached here really was a Char.
+    // ShortInt and Byte are the first Integer-kind types that are also i8,
+    // and the shortcut wrote their values through plang_write(ln)_char,
+    // printing the raw byte as a (usually unprintable) character instead of
+    // a number.  semaTy's own Kind -- looking through a subrange to its
+    // host, the same as the wide subrange-of-char case below always has --
+    // is what actually answers "is this a char", and is used whenever it is
+    // available.
+    if (!semaTy) return ty->isIntegerTy(8); // no Sema type: keep the old guess
     const plang::Type* t = semaTy;
     while (t->Kind == TypeKind::Subrange && t->SubBase) t = t->SubBase.get();
     return t->Kind == TypeKind::Char;
