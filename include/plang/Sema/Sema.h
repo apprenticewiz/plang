@@ -845,6 +845,19 @@ private:
     /// plain checkExpr() calls -- this is the one call site that has to
     /// tell "a type" and "a value" apart before it knows which to ask for.
     [[nodiscard]] std::shared_ptr<Type> resolveTypeArgOrValue(const ExprNode& Arg);
+    /// TP-only: TypeName '(' expr ')'.  Resolves TypeName via resolveNamed --
+    /// the same name resolution an ordinary type-denoter goes through, so a
+    /// cast to a built-in keyword type (Integer, Real, ...) or to a
+    /// user-defined TypeAlias/Schema is accepted or refused exactly as
+    /// `var x: TypeName` already would be -- and accepts the cast when
+    /// either of two independent rules holds: both types are ordinal-or-real
+    /// (a VALUE conversion), or the two types are the same size
+    /// (Sema::byteSizeOf) — a VARIABLE reinterpretation. Which rule actually
+    /// applies to a given occurrence is decided later, by isLValue: a
+    /// same-size cast of an lvalue operand is ALSO usable as an lvalue
+    /// itself (see isLValue's TypeCastExpr case), while a cast whose sizes
+    /// differ can only ever be read as a converted value.
+    [[nodiscard]] std::shared_ptr<Type> checkTypeCast(const TypeCastExpr& E);
     /// Diagnoses a required function called with the wrong number of
     /// arguments.  Built-ins bypass the ordinary signature check, so without
     /// this an `abs()` reaches codegen and is indexed out of bounds there.

@@ -31,7 +31,7 @@
 #include "VarEntry.h"
 
 namespace llvm { class AllocaInst; class Module; class Value; }
-namespace plang { struct ExprNode; struct Type; }
+namespace plang { struct ExprNode; struct Type; struct TypeCastExpr; }
 
 class CGExprCore {
 public:
@@ -53,7 +53,8 @@ public:
                std::function<llvm::Value*(llvm::Value*)> EnsureI1,
                std::function<llvm::Value*(llvm::Value*)> ToI64,
                std::function<bool(const plang::ExprNode&)> ExprIsVarStr,
-               std::function<int64_t(const plang::ExprNode&)> ExprStrCapStatic)
+               std::function<int64_t(const plang::ExprNode&)> ExprStrCapStatic,
+               std::function<llvm::Value*(llvm::Value*, llvm::Type*)> CoerceToType)
         : Ctx(Ctx), Mod(Mod), B(B), RtFns(RtFns), SymTab(SymTab),
           ClosureAbi(ClosureAbi), Linkage(Linkage), FuncCall(FuncCall),
           BinaryOps(BinaryOps), IndexAccess(IndexAccess), FieldAccess(FieldAccess),
@@ -66,7 +67,8 @@ public:
           ResolveImportedVar(std::move(ResolveImportedVar)),
           EnsureI1(std::move(EnsureI1)), ToI64(std::move(ToI64)),
           ExprIsVarStr(std::move(ExprIsVarStr)),
-          ExprStrCapStatic(std::move(ExprStrCapStatic)) {}
+          ExprStrCapStatic(std::move(ExprStrCapStatic)),
+          CoerceToType(std::move(CoerceToType)) {}
 
     /// Invariant every caller of emitExpr (directly, or indirectly through
     /// the EmitExpr closures threaded into CGBinaryOps, CGControlFlow, and
@@ -97,6 +99,11 @@ public:
     llvm::Value* spillToTemporary(const plang::ExprNode& e);
 
 private:
+    /// Turbo VALUE typecast rvalue emission: TypeName(expr) read as a value.
+    /// See emitExpr's TypeCastExpr case for which of the two strategies
+    /// (numeric conversion vs. bit-for-bit reinterpretation) applies.
+    llvm::Value* emitTypeCastValue(const plang::TypeCastExpr& e);
+
     // Live activations of emitExpr.  Every recursive re-entry into expression
     // emission -- a binary/unary operand, a call argument, an index/field/
     // deref base -- funnels through emitExpr (directly, or indirectly via the
@@ -176,6 +183,11 @@ private:
     std::function<llvm::Value*(llvm::Value*)> ToI64;
     std::function<bool(const plang::ExprNode&)> ExprIsVarStr;
     std::function<int64_t(const plang::ExprNode&)> ExprStrCapStatic;
+    /// Codegen::Impl::coerceToType: widens/narrows/converts an ordinal or
+    /// real value to a destination LLVM type.  Used by a Turbo VALUE
+    /// typecast's rvalue emission (see emitExpr's TypeCastExpr case) -- see
+    /// its own definition (CodeGenExprs.cpp) for exactly what it does.
+    std::function<llvm::Value*(llvm::Value*, llvm::Type*)> CoerceToType;
 
     llvm::Constant* i64c(int64_t v) const {
         return llvm::ConstantInt::get(I64Ty, v, true);

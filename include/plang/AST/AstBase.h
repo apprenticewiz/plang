@@ -59,7 +59,8 @@ enum class NodeKind {
     SetLiteralExpr,
     SubstringExpr,        // EP §6.5.6: s[i..j] substring variable
     StructuredValueExpr,  // EP §6.8.7: typed value constructor (array/record/set)
-    ExprLast      = StructuredValueExpr,
+    TypeCastExpr,         // Turbo: TypeName '(' expr ')' value/variable typecast
+    ExprLast      = TypeCastExpr,
 
     // write/writeln argument wrapper: appears only in write/writeln arg lists.
     // Stored as ExprNode* via C++ inheritance but excluded from ExprFirst..ExprLast

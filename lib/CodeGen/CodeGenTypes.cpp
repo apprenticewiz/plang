@@ -486,7 +486,8 @@ void Codegen::Impl::init(const std::string& progName) {
         [this](llvm::Value* v){ return ensureI1(v); },
         [this](llvm::Value* v){ return toI64(v); },
         [](const ExprNode& e){ return exprIsVarStr(e); },
-        [](const ExprNode& e){ return exprStrCapStatic(e); });
+        [](const ExprNode& e){ return exprStrCapStatic(e); },
+        [this](llvm::Value* v, llvm::Type* t){ return coerceToType(v, t); });
     // DefineBuf/LookupBuf are narrow closures into defVar/findVar
     // (CGSymbolTable territory, not yet extracted) -- LookupBuf hands back
     // just the llvm::Value*, the only field of a VarEntry this engine needs.

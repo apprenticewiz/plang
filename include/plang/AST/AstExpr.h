@@ -213,6 +213,34 @@ struct StructuredValueExpr : ExprNode {
     std::vector<StructuredValueArm> Arms;     ///< constructor arms in source order
 };
 
+/// Turbo Pascal typecast: TypeName '(' expr ')'.
+///
+/// Two different things depending on how it is used, both spelled the same
+/// way. As a VALUE (Integer(SomeReal)) it converts: the ordinal or real
+/// value is truncated, rounded, or reinterpreted per Turbo's own conversion
+/// rules, and the result is a value like any other expression's. As a
+/// VARIABLE (TByteRec(SomeWord).Lo := 0, an lvalue) it does not convert
+/// anything -- it reinterprets the OPERAND'S OWN STORAGE in place, so a
+/// write through it mutates the operand's storage directly.
+///
+/// This is its own NodeKind, not a CallExpr with a type-named callee,
+/// specifically because of the lvalue form: CGExprCore::emitLValue's
+/// fallback for a CallExpr spills the call's result to a fresh temporary,
+/// which would silently turn a variable typecast into a copy -- exactly the
+/// bug a distinct NodeKind lets emitLValue avoid by giving it its own case
+/// that hands back the operand's own pointer instead.
+///
+/// A type name and a routine name can never share a scope in Pascal, so the
+/// parser recognizes this shape (Parser::TypeNames_) at parse time rather
+/// than leaving CallExpr-vs-TypeCastExpr for Sema to sort out after the
+/// fact -- see parseFactor's and parseStatement's identifier branches.
+struct TypeCastExpr : ExprNode {
+    static bool classof(const Node* n) { return n->Kind == NodeKind::TypeCastExpr; }
+    TypeCastExpr() : ExprNode(NodeKind::TypeCastExpr) {}
+    std::string                TypeName;  /// target type name, as written
+    std::unique_ptr<ExprNode>  Operand;   /// the expression being cast
+};
+
 /// A write/writeln argument with optional field-width and decimal specifiers.
 /// write(e : width : decimals) — ISO §6.9.3
 struct WriteParam : ExprNode {

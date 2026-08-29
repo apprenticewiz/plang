@@ -823,3 +823,14 @@ DIAG(err_hi_lo_swap_argument, Error,
 // narrow rather than any typed pointer.
 DIAG(err_inc_dec_argument, Error,
      "'%0' requires an ordinal or pointer argument, got '%1'")
+// TP-only: TypeName(expr) is a VALUE typecast (Integer(SomeReal) converts:
+// truncate/round/reinterpret the ordinal or real value) when both types are
+// ordinal-or-real, and a VARIABLE typecast (TByteRec(SomeWord).Lo := 0, an
+// lvalue reinterpreting the operand's own storage in place) when the two
+// types are exactly the same size -- see Sema::checkTypeCast.  A cast that
+// is neither -- different sizes and not both ordinal-or-real, e.g. casting a
+// 3-byte record onto a 2-byte Word -- has no defined meaning either way.
+DIAG(err_invalid_type_cast, Error,
+     "cannot cast '%0' to '%1': the types must either both be ordinal or "
+     "real (for a value conversion), or be the same size (for a variable "
+     "reinterpretation)")
