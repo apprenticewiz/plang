@@ -1344,11 +1344,13 @@ std::shared_ptr<Type> Sema::checkCallExpr(const CallExpr& E) {
             }
             // eoln asks whether the position is at a line marker, and only a
             // text file has those.  eof applies to any file and is not
-            // restricted here.
-            if (Lo == "eoln" && ArgTy->Kind == TypeKind::File && ArgTy->ElemType
-                && ArgTy->ElemType->Kind != TypeKind::Char)
+            // restricted here.  isTextFile (Type.h) is dialect-aware -- see
+            // its comment for why a `file of char` is text under ISO/EP but
+            // not -std=turbo, and why an untyped `file` (also null
+            // ElemType) is correctly refused here too now.
+            if (Lo == "eoln" && ArgTy->Kind == TypeKind::File && !isTextFile(*ArgTy, Opts))
                 error(E.Args[0]->Loc, diag::err_line_proc_not_text,
-                      {Lo, ArgTy->ElemType->Name});
+                      {Lo, ArgTy->Name});
             return TyBool;
         }
         // EP §6.7.6.6: position(f) and lastposition(f) report a value of f's

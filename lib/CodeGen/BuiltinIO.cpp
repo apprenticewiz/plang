@@ -104,9 +104,23 @@ void BuiltinIO::emitWriteArgs(
             // ISO §6.9.1: write(f,e) is f^ := e, so what lands in the file is a
             // component.  An integer written to a file of real has to widen
             // first, or the bytes would be read back as a real.
-            if (auto* compTy = FileVars.getFileElemType(*args[0]))
-                if (compTy->isSingleValueType() && val->getType()->isSingleValueType())
-                    val = CoerceToType(val, compTy);
+            //
+            // -std=turbo: TP's typed Read/Write requires the value's type to
+            // be IDENTICAL to the file's component type, not just assignment
+            // compatible -- Sema (SemaStmt.cpp's read/write arms,
+            // err_turbo_typed_file_exact_type) already refuses a mismatched
+            // Turbo program before it reaches codegen, so this call is
+            // reachable under Turbo only when val's LLVM type already equals
+            // compTy and CoerceToType would be a no-op -- but skipping it
+            // outright here, rather than relying on that invariant, is what
+            // actually keeps codegen from EVER performing ISO's implicit
+            // widening for Turbo, matching real Turbo Pascal (no `writeln`-
+            // style numeric promotion on a typed file the way ISO's f^ := e
+            // assignment-compatibility rule allows).
+            if (!Opts.turbo())
+                if (auto* compTy = FileVars.getFileElemType(*args[0]))
+                    if (compTy->isSingleValueType() && val->getType()->isSingleValueType())
+                        val = CoerceToType(val, compTy);
             // Store the value to a temporary alloca so we can pass its address.
             auto* tmp = CreateEntryAlloca(val->getType(), "bin.wr.tmp");
             B.CreateStore(val, tmp);
@@ -742,7 +756,14 @@ void BuiltinIO::emitBuiltinRead(const std::vector<std::unique_ptr<ExprNode>>& ar
             else if (auto* id = llvm::dyn_cast<IdentExpr>(args[i].get()))
                 if (auto* ve = SymTab.findVar(id->Name)) dstTy = ve->type;
             if (!compTy) compTy = dstTy ? dstTy : I64Ty;
-            const bool convert = dstTy && dstTy != compTy
+            // -std=turbo: no implicit widening on a typed file's Read, the
+            // same "exact type identity" rule as the write side just above
+            // (see emitWriteArgs's own comment) -- Sema already refuses a
+            // mismatched Turbo program before this is reached
+            // (err_turbo_typed_file_exact_type), so `convert` is unreachable
+            // under Turbo either way; gated explicitly rather than relying
+            // on that invariant, for the same reason as the write side.
+            const bool convert = !Opts.turbo() && dstTy && dstTy != compTy
                                  && dstTy->isSingleValueType()
                                  && compTy->isSingleValueType();
             auto* dest = convert ? CreateEntryAlloca(compTy, "bin.rd.tmp") : addr;

@@ -347,7 +347,15 @@ DIAG(err_variant_tag_not_ordinal, Error, "variant tag type must be an ordinal ty
 // names a declared tag type rather than a selector expression's type.
 DIAG(err_variant_label_type, Error,
      "variant case-constant has type '%0', which is not compatible with tag type '%1'")
-DIAG(err_line_proc_not_text, Error, "'%0' applies to a text file only, not to 'file of %1'")
+// %1 is the file's own full type name (Type::Name) -- "file of char", "file
+// of integer", or, for a genuinely untyped `file` (no `of` clause, only
+// reachable under -std=turbo -- ISO/EP have no untyped file), plain "file"
+// with no "of ..." to name.  Every call site passes T->ElemType->Name for a
+// TYPED file, or T->Name itself for an untyped one -- NOT T->ElemType->Name
+// unconditionally, which used to read "not to 'file of file'" for the
+// untyped case (this diagnostic's own %1 used to be just the element name,
+// with "file of" baked into the format string here).
+DIAG(err_line_proc_not_text, Error, "'%0' applies to a text file only, not to '%1'")
 // EP §6.7.5.2: reset/rewrite/extend/update's optional second argument names
 // the external file, and CodeGen's marshalling (StringCallMarshalling::
 // emitCStrArg) only knows how to turn a char or string-kind value into the
@@ -366,6 +374,28 @@ DIAG(err_reset_rewrite_arg_type, Error,
 // plang used to accept a string here under Turbo and no longer does.
 DIAG(err_turbo_reset_rewrite_recsize_type, Error,
      "'%0' record-size argument must be an integer, got '%1'")
+// -std=turbo only: real Turbo Pascal has no plain Read/Write on an untyped
+// file at all -- only BlockRead/BlockWrite (not yet implemented, a later
+// Tier 3 item) can transfer an untyped file's bytes.  Confirmed against
+// `fpc -Mtp`: `read(f, c)` for `var f: file;` is rejected outright with
+// "Can't use read or write on untyped file", not given some ad-hoc
+// byte-level meaning.  Before this diagnostic existed, plang silently
+// treated an untyped file exactly like `text` here (see isTextFile's own
+// doc comment, Type.h) -- `read`/`write` "worked", but ran the char/text
+// formatting path against raw file bytes, silently wrong rather than
+// refused.
+DIAG(err_turbo_untyped_file_read_write, Error,
+     "cannot use '%0' on an untyped file; use BlockRead/BlockWrite")
+// -std=turbo only: TP typed-file Read/Write requires the value's type to be
+// IDENTICAL to the file's component type -- no implicit widening the way
+// ISO's assignment-compatibility rule (isAssignCompatible, applied to
+// `f^ := e` per §6.9.1) allows for e.g. an Integer value into a Real file
+// component.  See this diagnostic's call site (BuiltinIO.cpp emitWriteArgs
+// and SemaStmt.cpp's read arm) for the exact-identity check it replaces
+// CoerceToType/isAssignCompatible with under Turbo.
+DIAG(err_turbo_typed_file_exact_type, Error,
+     "'%0': file element type is '%1', but value has type '%2' -- "
+     "Turbo Pascal requires an exact type match, not just assignment compatibility")
 DIAG(err_assign_file, Error, "a variable of a file type, or with a file component, cannot be assigned")
 DIAG(err_function_result_type, Error, "a function result must be a simple or pointer type, not '%0'")
 DIAG(err_duplicate_enum_value, Error, "duplicate enumeration value '%0'")

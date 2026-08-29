@@ -1,6 +1,7 @@
 #pragma once
 
 #include "plang/AST/AstBase.h"
+#include "plang/Basic/LangOptions.h"
 #include "plang/Basic/RequiredRecordLayouts.h"
 #include "plang/Basic/StringUtil.h"
 
@@ -345,6 +346,23 @@ struct Type {
     /// Returns true if this is the nil pointer constant type.
     bool isNil()    const { return Kind == TypeKind::Nil;   }
 
+    /// ISO §6.4.3.5: true only for the one predefined `text` type (the
+    /// TypeContext::getText singleton), never for any `file of ...`
+    /// (including `file of char`) no matter how it was declared.  A file's
+    /// element type is null for both `text` and a genuine untyped `file`
+    /// (TypeContext::getFile with a null element), so Kind/ElemType alone
+    /// cannot tell them apart -- only the interned Name can (see getFile and
+    /// the text singleton in TypeContext.h): `text`'s Name is exactly
+    /// "text", and getFile never produces that Name for anything it mints
+    /// (elem ? "file of " + elem->Name : "file").  This is deliberately NOT
+    /// "is this a text file" -- under ISO/EP, `file of char` also reads and
+    /// writes as text (isTextFile, below, is the dialect-aware predicate for
+    /// that question); this predicate is the narrower "is this THE text
+    /// type" building block it is built from.
+    bool isPredefinedText() const {
+        return Kind == TypeKind::File && !ElemType && Name == "text";
+    }
+
     /// Returns true for Integer, Boolean, Char, Enum, and Subrange — types that
     /// can be used as ordinals, for-loop variables, or set base types.
     bool isOrdinal() const {
@@ -445,6 +463,46 @@ struct Type {
 /// setBaseOffset for a set type rather than its base type.
 [[nodiscard]] inline int64_t setOffsetOf(const Type& SetTy) {
     return SetTy.ElemType ? setBaseOffset(*SetTy.ElemType) : 0;
+}
+
+/// Whether a file-typed \p T (the file VARIABLE's type, e.g. a checkExpr
+/// result for a file argument -- T.Kind is expected to be TypeKind::File;
+/// anything else answers false) reads/writes in TEXT mode: line-oriented,
+/// with readln/writeln/eoln/page all meaningful, and `read`/`write` of
+/// Integer/Real/Boolean/Char/String all formatting to/from characters
+/// rather than transferring a raw component.
+///
+/// ISO §6.4.3.5 gives `file of char` no separate identity from `text` at
+/// all -- "a file of the type char is termed a textfile" -- so under
+/// -std=iso7185/-std=iso10206 this returns true for BOTH the predefined
+/// `text` singleton (isPredefinedText) AND any `file of char`, exactly the
+/// single `T->ElemType->Kind == TypeKind::Char` (or `!= Char` negated) test
+/// every call site used to run inline before this predicate existed.
+///
+/// Real Turbo Pascal instead makes `text` its own distinct predefined type
+/// (Borland's own manual: "the standard type Text ... is not the same as
+/// File Of Char"), and `file of char` a typed BINARY file like any other --
+/// each Char component is one raw byte, no line-ending or formatting
+/// convention applies.  So under -std=turbo this returns true ONLY for the
+/// predefined `text` type; `file of char` returns false, the same as `file
+/// of integer` always has.
+///
+/// A null ElemType means either `text` (isPredefinedText, Name=="text") or a
+/// genuine untyped `file` (Name=="file", TypeContext::getFile with a null
+/// element) -- the two are told apart by isPredefinedText the same way
+/// FileVarHelpers::isUntypedFileVar does, so an untyped `file` is correctly
+/// NOT a text file here even though its ElemType is null exactly like
+/// `text`'s is.  Old call sites that tested only `!T->ElemType` (rather
+/// than `!T->ElemType || ElemType->Kind == Char`) to decide "this is a
+/// textfile" got this case wrong -- they silently treated a genuine untyped
+/// file as text too; routing them through this predicate instead is itself
+/// a bug fix (see FileVarHelpers::isUntypedFileVar's own doc comment).
+[[nodiscard]] inline bool isTextFile(const Type& T, const LangOptions& Opts) {
+    if (T.Kind != TypeKind::File) return false;
+    if (!T.ElemType) return T.isPredefinedText();
+    if (Opts.turbo()) return false;
+    // ISO §6.4.3.5 / EP: file of char IS a textfile.
+    return T.ElemType->Kind == TypeKind::Char;
 }
 
 /// The first and last values of an ordinal type, or nothing when it has no

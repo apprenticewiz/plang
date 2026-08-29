@@ -1771,6 +1771,21 @@ void plang_read_binary(PascalFile *F, void *Buf, int64_t ElemSize) {
 // (Sema::resolveType's FileTypeNode arm), so Read(f, v) on one is reachable
 // from Turbo exactly as it is from ISO/EP, and needs the same choke point
 // every text-file operation in this section gets.
+//
+// Tier 3 Cluster C item 5 audit: prime()/unloadComponent() here are NOT both
+// the same thing.  prime() is NOT ISO's f^ buffer-variable bookkeeping in
+// disguise -- it also drives plang_eof_file_turbo (this file, "eof reads the
+// window" comment on plang_read_binary above applies here too: eof(f) under
+// -std=turbo peeks one byte/char ahead via F->Buf exactly the way ISO/EP's
+// does), so it stays.  unloadComponent(), on the other hand, only resets
+// F->CompLoaded, which nothing under Turbo ever reads again: F->Comp/
+// CompLoaded exist solely to back f^ (plang_file_buffer, FileVarHelpers.cpp
+// fileBufferPtr), and `f^` is already rejected under Turbo at Sema (#477,
+// TypeContext/SemaExpr's buffer-variable-access check).  Calling it here was
+// genuinely dead work -- not a bug (F->CompLoaded has no other reader), just
+// wasted -- so it is dropped from the two _turbo functions; plang_read_binary/
+// plang_write_binary (the ISO/EP twins, just above/below) keep it, since EP's
+// own f^ is very much reachable there.
 void plang_read_binary_turbo(PascalFile *F, void *Buf, int64_t ElemSize) {
     if (ElemSize > 0) std::memset(Buf, 0, static_cast<std::size_t>(ElemSize));
     if (!tpFileReady(F, "read")) return;
@@ -1778,7 +1793,6 @@ void plang_read_binary_turbo(PascalFile *F, void *Buf, int64_t ElemSize) {
     std::fread(Buf, static_cast<std::size_t>(ElemSize), 1, F->Fp);
     trapOnStreamError(F, "read");
     prime(F);
-    unloadComponent(F);
 }
 
 void plang_write_binary(PascalFile *F, const void *Buf, int64_t ElemSize) {
@@ -1791,13 +1805,13 @@ void plang_write_binary(PascalFile *F, const void *Buf, int64_t ElemSize) {
 
 // -std=turbo only: the fileReady twin of plang_write_binary just above --
 // see plang_read_binary_turbo's own comment for why typed binary files need
-// one at all.
+// one at all, and for why unloadComponent() (which plang_write_binary above
+// still calls) is dropped here.
 void plang_write_binary_turbo(PascalFile *F, const void *Buf, int64_t ElemSize) {
     if (!tpFileReady(F, "write")) return;
     trapOnWrongDirection(F, "write", 1);
     std::fwrite(Buf, static_cast<std::size_t>(ElemSize), 1, F->Fp);
     trapOnStreamError(F, "write");
-    unloadComponent(F);
 }
 
 // ---- EP §6.7.5.2: extend / update ----
