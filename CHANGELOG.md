@@ -8,6 +8,20 @@ version numbers follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 
 ## [Unreleased]
 
+### Fixed
+
+- Turbo constant-expression folding now bounds-checks against the expression's
+  own (possibly narrow) resolved type instead of always assuming 64-bit
+  `Integer`: Tier 1 shipped `checkedAdd`/`checkedSub`/`checkedMul`/
+  `checkedNeg`/`isoPow` (`Arith.h`) as width-generic, but neither Sema's
+  constant folder (`SemaType.cpp`) nor CodeGen's (`ConstFold.cpp`) ever
+  actually passed a width, so `const Big = 30000 + 30000;` under `-std=turbo`
+  compiled with no diagnostic and silently gave `Big` the 64-bit sum
+  truncated to 16 bits (`-5536`) instead of refusing a value 27233 past
+  Turbo's `Integer` range. It is now a compile-time error; `30000 + 2000`
+  (in range) still folds cleanly. ISO 7185 and Extended Pascal, whose one
+  `Integer` type is always 64-bit, are unaffected.
+
 ## [0.3.5] - 2026-08-27
 
 A sixth adversarial review round, and by far the largest: three external models,
