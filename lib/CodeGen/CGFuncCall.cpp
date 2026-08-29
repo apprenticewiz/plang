@@ -640,6 +640,25 @@ llvm::Value* CGFuncCall::emitBuiltinCall(const std::string& Name,
         auto* upped = B.CreateSub(ch, llvm::ConstantInt::get(I8Ty, 32), "upcase.upped");
         return B.CreateSelect(isLower, upped, ch, "upcase");
     }
+    // ParamCount -- reads back the argc CodeGenProcs.cpp's emitMain stored
+    // via plang_set_args as the first instruction of `main`.
+    if (lo == "paramcount") {
+        auto* fn = RtFns.getExternFnN("plang_tp_paramcount", I64Ty, {});
+        return B.CreateCall(fn, {}, "paramcount");
+    }
+    // ParamStr(n) -- argv[n] (or '' outside range) as a capacity-255
+    // ShortString; plang_tp_paramstr writes directly into the result
+    // temporary, the same way every other ShortString-producing runtime
+    // routine in this file does (see e.g. Copy/StringOfChar just above).
+    if (lo == "paramstr" && !Args.empty()) {
+        auto* n = ToI64(EmitExpr(*Args[0]));
+        auto* resPtr = CreateEntryAlloca(Types.sstrStructType(PlangMaxStringCapacity),
+                                          "paramstr.res");
+        auto* fn = RtFns.getExternFnN("plang_tp_paramstr", llvm::Type::getVoidTy(Ctx),
+            {I64Ty, PtrTy, I64Ty});
+        B.CreateCall(fn, {n, resPtr, llvm::ConstantInt::get(I64Ty, PlangMaxStringCapacity)});
+        return resPtr;
+    }
 
     // Every Func-kind row in Builtins.def has a named arm above; reaching
     // here means ResolvedBuiltin was set to a spelling none of them matched,

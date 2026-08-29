@@ -113,6 +113,21 @@ llvm::Value* CGExprCore::emitExpr(const ExprNode& e) {
                 auto* fn = RtFns.getExternFnN("plang_tp_random_real", DblTy, {});
                 return B.CreateCall(fn, {}, "random");
             }
+            // TP-only: ParamCount, like eof/eoln/Random just above, is real
+            // Turbo Pascal's own idiom used bare, with no parentheses at
+            // all -- Sema::checkIdent's generic SymbolKind::Builtin case
+            // already types this correctly (it answers Sym->ReturnType for
+            // any zero-argument bare builtin function read), but nothing
+            // before this call routed the READ itself anywhere but the
+            // ordinary variable table, so an undeclared 'ParamCount' fell
+            // through to ResolveImportedVar and linked against a global
+            // that was never one.  CGFuncCall::emitBuiltinCall's own
+            // "paramcount" arm handles the WITH-parentheses call shape;
+            // this is the same runtime call, reached the other way.
+            if (lo == "paramcount" && !n->UserDeclared) {
+                return B.CreateCall(
+                    RtFns.getExternFnN("plang_tp_paramcount", I64Ty, {}), {}, lo);
+            }
         }
         // Function result pseudo-variable (Pascal: assign to function name).
         // n->Resolution == ResultVariable alone is NOT enough: it only says

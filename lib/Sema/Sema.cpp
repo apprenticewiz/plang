@@ -312,6 +312,80 @@ void Sema::registerBuiltins() {
         (void)Symtab.define(std::move(RandSeedSym));
     }
 
+    // -std=turbo only: HeapError and ExitProc -- Turbo's own settable
+    // procedural-VALUE predefined variables (Tier 2's procedural types/
+    // values, VarEntry.h's isProcVar substrate reused here rather than
+    // inventing a second function-pointer mechanism), plus ErrorAddr, an
+    // ordinary Pointer-typed one alongside them.  Follows ExitCode's own
+    // pattern just above (LinkName names the runtime global CodeGen's
+    // emitPredefinedGlobals independently declares under the identical
+    // literal string -- see ExitCode's own comment for why the two sides
+    // stay in agreement by hand rather than a shared source of truth), with
+    // one difference: NEITHER HeapError NOR ExitProc is ever CALLED from
+    // Pascal source in real Turbo Pascal -- only the RUNTIME calls through
+    // either (plang_tp_getmem on an allocation failure; the exit sequence on
+    // Halt/RunError/normal termination, runtime/plang_sys.cpp) -- so, unlike
+    // an ordinary program-declared `var f: TProc`, only the ASSIGNMENT side
+    // ('HeapError := MyHandler') has to type-check here; nothing needs to
+    // CALL either one through plang IR, which is the only thing CodeGen's
+    // VarEntry::isProcVar/procType exist to support (emitPredefinedGlobals'
+    // own comment explains the rest).
+    if (Opts.turbo()) {
+        // HeapError: function(Size: Int64): Int64.  Deliberately Int64/
+        // Int64, not real Borland's Word/Integer -- runtime/plang_sys.cpp's
+        // plang_tp_getmem calls through this as a raw C function pointer
+        // directly, not through codegen-emitted LLVM IR the way an ordinary
+        // procedural-value call is, and only a full-register-width return
+        // is guaranteed free of the x86-64 SysV ABI's unspecified-upper-bits
+        // hazard a narrower one (Turbo's own 16-bit Integer) would risk; see
+        // plang_tp_getmem's own comment for the full reasoning.  Size
+        // matches GetMem/FreeMem's own Int64 Size parameter (Builtins.def)
+        // for the same reason a mismatched pair would be worse than either
+        // alone: a handler that cannot see the value GetMem was actually
+        // asked for is strictly less useful than one that can.
+        auto Int64Ty = Ctx_.getInt(64, /*Signed=*/true);
+        auto HeapErrorTy = std::make_shared<Type>();
+        HeapErrorTy->Kind = TypeKind::Function;
+        HeapErrorTy->Params.push_back(
+            Type::Param{ /*IsVar=*/false, "Size", Int64Ty, /*IsConst=*/false });
+        HeapErrorTy->RetType = Int64Ty;
+        HeapErrorTy->Name = "function(Size: Int64): Int64";
+        Symbol HeapErrorSym;
+        HeapErrorSym.Kind     = SymbolKind::Var;
+        HeapErrorSym.Name     = "HeapError";
+        HeapErrorSym.Ty       = HeapErrorTy;
+        HeapErrorSym.LinkName = "plang_tp_heaperror";
+        HeapErrorSym.IsRequiredIdentifier = true;
+        (void)Symtab.define(std::move(HeapErrorSym));
+
+        // ExitProc: procedure -- no arguments, no result, exactly real
+        // Turbo Pascal's own shape; no ABI-width hazard to work around the
+        // way HeapError's return above has, since there is no return value
+        // at all.
+        auto ExitProcTy = std::make_shared<Type>();
+        ExitProcTy->Kind = TypeKind::Procedure;
+        ExitProcTy->Name = "procedure";
+        Symbol ExitProcSym;
+        ExitProcSym.Kind     = SymbolKind::Var;
+        ExitProcSym.Name     = "ExitProc";
+        ExitProcSym.Ty       = ExitProcTy;
+        ExitProcSym.LinkName = "plang_tp_exitproc";
+        ExitProcSym.IsRequiredIdentifier = true;
+        (void)Symtab.define(std::move(ExitProcSym));
+
+        // ErrorAddr: an ordinary untyped Pointer, not a procedural value --
+        // see runtime/plang_sys.cpp's plang_tp_erroraddr for the scope this
+        // was deliberately simplified to (set only at RunError and at a
+        // nonzero-status Halt, not at every individual runtime-fault site).
+        Symbol ErrorAddrSym;
+        ErrorAddrSym.Kind     = SymbolKind::Var;
+        ErrorAddrSym.Name     = "ErrorAddr";
+        ErrorAddrSym.Ty       = Ctx_.getGenericPointer();
+        ErrorAddrSym.LinkName = "plang_tp_erroraddr";
+        ErrorAddrSym.IsRequiredIdentifier = true;
+        (void)Symtab.define(std::move(ErrorAddrSym));
+    }
+
     // -std=turbo only: the sized-integer ladder, AnsiChar, and the untyped
     // Pointer type -- the type names the rest of Tier 2 is written against.
     //

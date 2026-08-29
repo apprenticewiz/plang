@@ -41,6 +41,13 @@ std::size_t ModuleFinaliserCap   = 0;
 void       **ConfArrStack = nullptr;
 std::size_t  ConfArrTop   = 0;
 std::size_t  ConfArrCap   = 0;
+
+/// -std=turbo only: ParamCount/ParamStr's own backing storage (this file's
+/// "-std=turbo" section, far below) -- kept here, in the file's existing
+/// internal-state namespace, rather than beside the extern "C" functions
+/// that read them, the same way ModuleFinalisers/ConfArrStack already are.
+int    g_argc = 0;
+char **g_argv = nullptr;
 } // namespace
 
 extern "C" {
@@ -52,6 +59,12 @@ extern "C" {
 /// same finalisers that falling off the end of the program block already
 /// does (CodeGenProcs.cpp's emitMain).
 void plang_module_finals_run(void);
+
+/// -std=turbo only: Turbo's ErrorAddr, defined in this file's own
+/// "-std=turbo" section far below -- forward-declared here for the same
+/// reason plang_module_finals_run just above is: plang_halt sets this for a
+/// nonzero status before that section's own definition appears in the file.
+extern void *plang_tp_erroraddr;
 
 /// Run every registered module finaliser, flush stdout, then terminate
 /// (EP §6.7.5.7 \c halt).  The standard's halt takes no argument; \p Status
@@ -68,6 +81,19 @@ void plang_module_finals_run(void);
 /// calls halt -- reentering this function -- still cannot run anything a
 /// second time; it just drains whatever the outer call had not reached yet.
 void plang_halt(int64_t Status) {
+    // -std=turbo only: ErrorAddr, captured for a NONZERO status only --
+    // Halt(0) is an ordinary successful exit, not a reported error.  See
+    // this file's own "-std=turbo" section, far below, for plang_tp_erroraddr's
+    // storage and the scope this was deliberately simplified to; see
+    // plang_tp_runerror's identical use of this same builtin for why the
+    // address captured here is a real, useful one (the caller's own `call
+    // halt` site) and not a placeholder.  Harmless to always compute
+    // regardless of dialect: this storage exists unconditionally (see its
+    // own comment), and no ISO 7185/Extended Pascal program can ever read it
+    // back -- Sema registers 'ErrorAddr' as a predefined identifier only
+    // under -std=turbo.
+    if (Status != 0)
+        plang_tp_erroraddr = const_cast<void*>(__builtin_return_address(0));
     plang_module_finals_run();
     std::fflush(stdout);
     std::exit(static_cast<int>(Status));
@@ -707,8 +733,21 @@ static void escapeCC(const char *S, std::FILE *Stream) {
 // in the runtime to do better, and a full symbolizing backtrace is more
 // machinery than this milestone's "don't over-engineer it" scope calls for.
 [[noreturn]] void plang_tp_runerror(int64_t Code) {
-    std::fflush(stdout);
     const void *Addr = __builtin_return_address(0);
+    // -std=turbo only: ErrorAddr -- set BEFORE the finalizer chain below
+    // runs, so a custom ExitProc hooked into that same chain
+    // (plang_tp_run_exitproc's own comment, this file's "-std=turbo"
+    // section) sees the right value from inside its own call: reading
+    // ErrorAddr from an ExitProc is real Turbo Pascal field practice's most
+    // common reason to read it at all.
+    plang_tp_erroraddr = const_cast<void*>(Addr);
+    // EP §6.11.2's finalizers, and -std=turbo's own ExitProc registered
+    // alongside them (see plang_tp_run_exitproc's own comment for how) --
+    // the same chain plang_halt and emitMain's own end-of-program path
+    // already reach, so a runtime error exits through exactly the same
+    // cleanup every other way this program can end already does.
+    plang_module_finals_run();
+    std::fflush(stdout);
     std::fprintf(stderr, "Runtime error %" PRId64 " at $%016" PRIxPTR "\n",
                  Code, reinterpret_cast<std::uintptr_t>(Addr));
     std::exit(static_cast<int>(Code));
@@ -757,6 +796,176 @@ int16_t plang_tp_exitcode = 0;
 /// difference in how the SAME 32 bits are interpreted, not a second,
 /// disagreeing width.
 uint32_t plang_tp_randseed = 0;
+
+// ---- -std=turbo only: GetMem/FreeMem, HeapError, ExitProc, ErrorAddr,
+// ParamCount/ParamStr ----
+//
+// See plang_tp_exitcode's own comment just above for why every mutable
+// predefined-identifier global in this section is defined exactly once
+// here and only ever DECLARED by compiled Turbo objects (Codegen::Impl::
+// emitPredefinedGlobals, CodeGenProcs.cpp).
+
+/// A settable procedural VALUE (Tier 2's procedural types/values --
+/// ClosureAndCallABI.cpp/VarEntry.h's isProcVar substrate, reused here
+/// rather than inventing a second function-pointer mechanism; see
+/// Sema::registerBuiltins' own comment) the program may assign its own
+/// allocation-failure handler to.  nullptr means "no handler installed".
+/// See plang_tp_getmem's own comment for the exact contract this is called
+/// under, and for why its signature is Int64 -> Int64 rather than real
+/// Borland's Word -> Integer.
+void *plang_tp_heaperror = nullptr;
+
+/// The settable procedural-value predefined variable (`procedure;`, no
+/// arguments, no result) real Turbo Pascal calls as part of its own exit
+/// sequence.  See plang_tp_run_exitproc, just below, for how this is hooked
+/// into the ALREADY-WORKING plang_module_finals_run chain (issue #242)
+/// rather than a second, separately-invoked mechanism.
+void *plang_tp_exitproc = nullptr;
+
+/// Turbo's ErrorAddr -- the address the most recent runtime error occurred
+/// at, or nullptr (0) if there has not been one yet.  DELIBERATELY
+/// SIMPLIFIED, and documented as such rather than either skipped or fully
+/// built out: an exact address at EVERY runtime-fault call site would need
+/// __builtin_return_address threaded through every plang_err_*/plang_tp_*
+/// reporter in this file, a much larger change for a predefined variable
+/// real Turbo programs mostly read from inside a custom ExitProc/error
+/// handler rather than compare bit-for-bit.  Set at exactly the two places a
+/// plang Turbo program's own control flow reports a genuine fault: this
+/// function (plang_tp_runerror, both TP's own RunError and every numbered
+/// range/overflow/... check that routes through it) and plang_halt for a
+/// NONZERO status (an ordinary halt(0) is a successful exit, not an error).
+/// Any OTHER runtime fault (e.g. a plang_err_* ISO/EP check, which a Turbo
+/// program cannot reach in the first place -- RangeCheckGuards.cpp routes
+/// Turbo's own checks through plang_tp_runerror instead, never the
+/// plang_err_* family) leaves this untouched.
+void *plang_tp_erroraddr = nullptr;
+
+/// Runs ExitProc, if the program has assigned one, and clears it first --
+/// the same "pop before call" rule plang_module_finals_run's own loop
+/// already follows, so a handler that itself triggers another exit path
+/// (calling Halt from inside its own ExitProc, say) cannot run twice or
+/// recurse forever.  Codegen::Impl::emitMain registers this, via
+/// plang_module_final_push, exactly ONCE, near the very start of a Turbo
+/// program's main -- after that one registration, every existing call to
+/// plang_module_finals_run (plang_halt above, plang_tp_runerror above, and
+/// emitMain's own end-of-program call) already reaches this automatically,
+/// with no separate "and also run ExitProc" step needed at any of the three.
+void plang_tp_run_exitproc(void) {
+    auto Fn = reinterpret_cast<void (*)(void)>(plang_tp_exitproc);
+    plang_tp_exitproc = nullptr;
+    if (Fn) Fn();
+}
+
+/// GetMem(var P: Pointer; Size: Int64) / FreeMem(P: Pointer[, Size: Int64])
+/// (Builtins.def, CGProcCall.cpp) -- a wholly separate pair of runtime entry
+/// points from plang_new/plang_dispose, not a flag added to them: ISO 7185/
+/// Extended Pascal code must keep aborting the process unconditionally on
+/// out-of-memory (plang_new), since ordinary ISO-generated code never checks
+/// a `new` result at all, and this project's object files compiled under
+/// different -std= may be linked into one program -- so "abort on OOM or
+/// not" can never be a runtime-consulted flag (the identical reasoning the
+/// "-std=turbo run-time error reporting" section above already establishes
+/// for plang_tp_runerror vs the plang_err_* family).
+///
+/// Size is Int64, not real Borland Turbo Pascal 7's 16-bit Word: confirmed
+/// against a local `fpc -Mtp` that modern field practice already widened
+/// this (its own rtl/inc/heap.inc declares GetMem's Size as a PtrUInt, far
+/// past 65535, even under `-Mtp`) -- HeapError's own Size parameter, below,
+/// is kept the same width for the same reason a mismatched pair would be
+/// worse than either alone: a handler that cannot see the value GetMem was
+/// actually asked for is strictly less useful than one that can.
+///
+/// Failure contract -- deliberately simplified from real Borland TP7, and
+/// documented here rather than silently guessed at: the local `fpc`
+/// install's own rtl/inc sources have NO HeapError at all (grepped
+/// systemh.inc/heap.inc directly; modern FPC replaced it outright with a
+/// TMemoryManager/SetMemoryManager architecture, confirmed by a failed
+/// compile of a HeapError-using program under `fpc -Mtp`: "Identifier not
+/// found"), so this follows classic Borland TP7 documentation instead, with
+/// one deliberate divergence called out below.
+///   - No HeapError installed: returns nil, and NEVER aborts.  This is the
+///     one deliberate divergence from real Borland (whose actual default is
+///     to halt with Runtime error 203) -- chosen so a plang Turbo program
+///     can check GetMem's result for nil without installing a handler at
+///     all, which is this whole pair's reason for existing as a separate,
+///     non-aborting entry point from plang_new in the first place.
+///   - HeapError installed, returns 1: returns nil (matches real Borland).
+///   - HeapError installed, returns anything else (0, 2, ...): reports
+///     Runtime error 203, the numbered "out of memory" error, the same way
+///     an actual numbered range/overflow check does (plang_tp_runerror).
+///     Real Borland's 0 ("not handled") and 2 ("retry after growing the
+///     heap") both collapse to this one outcome: this heap IS the OS
+///     allocator, with no separate arena for 2's "retry" to mean anything
+///     about.
+void *plang_tp_getmem(int64_t Size) {
+    // A negative size is a caller bug, not a real allocation failure --
+    // HeapError is not consulted for it, matching this whole pair's job of
+    // never aborting the process either way.
+    if (Size < 0) return nullptr;
+    void *P = std::malloc(Size > 0 ? static_cast<std::size_t>(Size) : 1);
+    if (P) return P;
+
+    // Called as a raw C function pointer directly from this runtime, NOT
+    // through codegen-emitted LLVM IR the way an ordinary procedural-value
+    // call (ClosureAndCallABI::emitProcVarCall) is -- which is exactly why
+    // HeapError's own signature (Sema::registerBuiltins) is Int64 -> Int64
+    // rather than Borland's Word -> Integer: the x86-64 SysV ABI leaves the
+    // upper bits of a sub-32-bit return register UNSPECIFIED for the callee
+    // to fill in, so reinterpreting this call through a narrower return
+    // type could read garbage above the low bits and compare unequal to 1
+    // even when the compiled Pascal function really did return it. A full
+    // 64-bit return has no such partial-register hazard.
+    auto HeapErrorFn = reinterpret_cast<int64_t (*)(int64_t)>(plang_tp_heaperror);
+    if (!HeapErrorFn) return nullptr;
+    if (HeapErrorFn(Size) == 1) return nullptr;
+    plang_tp_runerror(203);
+}
+
+/// See plang_tp_getmem's own comment.  Size is accepted -- and, like real
+/// Borland/FPC, never checked against what the matching GetMem was actually
+/// given -- but otherwise unused: std::free needs no size.  P is a plain
+/// value argument, not `var`: confirmed against the local `fpc -Mtp`
+/// install's own rtl/inc/heap.inc, whose FreeMem takes `p:pointer` with no
+/// `var`, unlike GetMem's own out-parameter P.
+void plang_tp_freemem(void *P, int64_t Size) {
+    (void)Size;
+    std::free(P);
+}
+
+/// Codegen::Impl::emitMain (CodeGenProcs.cpp) calls this as the FIRST
+/// instruction of every compiled program's own C `main` -- ISO 7185/
+/// Extended Pascal/Turbo alike, unconditionally (see that call site's own
+/// comment for why the C main signature change and this call are not gated
+/// on -std=turbo the way everything else in this section is) -- storing
+/// argc/argv in g_argc/g_argv (this file's own top anonymous namespace) for
+/// plang_tp_paramcount/plang_tp_paramstr, just below, to read back later,
+/// however deep into the program either is actually asked for.
+void plang_set_args(int argc, char **argv) {
+    g_argc = argc;
+    g_argv = argv;
+}
+
+/// ParamCount: the number of command-line arguments, not counting argv[0]
+/// itself -- confirmed against `fpc -Mtp`: ParamStr(0) is the running
+/// program's own path, and ParamCount does not count it.
+int64_t plang_tp_paramcount(void) {
+    return g_argc > 0 ? static_cast<int64_t>(g_argc - 1) : 0;
+}
+
+/// plang_sstr.cpp's own ShortString constructor from a C string --
+/// forward-declared the same way plang_tp_runerror already is in
+/// plang_io.cpp/plang_file.cpp, since ParamStr's whole job just below is
+/// filling one in from argv's own C strings.
+void plang_sstr_from_cstr(void *dst, int64_t cap, const char *src);
+
+/// ParamStr(n): argv[n] as a capacity-255 ShortString (Copy/Concat/
+/// StringOfChar's own result capacity -- Builtins.def's own comment on why),
+/// or an empty string for n outside 0..ParamCount -- confirmed against
+/// `fpc -Mtp`: an out-of-range index is not an error, just an empty result.
+void plang_tp_paramstr(int64_t N, void *Dst, int64_t DstCap) {
+    const char *S = (N >= 0 && N < g_argc) ? g_argv[N] : "";
+    plang_sstr_from_cstr(Dst, DstCap, S);
+}
 
 } // extern "C"
 

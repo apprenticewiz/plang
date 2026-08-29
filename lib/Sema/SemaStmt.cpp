@@ -1686,6 +1686,46 @@ void Sema::checkCallStmt(const CallStmt& S) {
             return;
         }
 
+        // GetMem(var P: Pointer; Size: Int64) -- P is a var/out-parameter
+        // (runtime/plang_sys.cpp's plang_tp_getmem writes the new address
+        // back through it), so unlike FreeMem's own P just below, it needs
+        // isLValue too, exactly like new's own first-argument check just
+        // above.  Size is Int64, not real Borland TP7's 16-bit Word --
+        // Builtins.def's own comment on why.
+        if (Lo == "getmem" && S.Args.size() == 2) {
+            auto PTy    = checkExpr(*S.Args[0]);
+            auto SizeTy = checkExpr(*S.Args[1]);
+            if (!PTy->isError()) {
+                if (PTy->Kind != TypeKind::Pointer)
+                    error(S.Args[0]->Loc, diag::err_heap_arg_not_pointer,
+                          {Lo, PTy->Name});
+                else if (!isLValue(*S.Args[0]))
+                    error(S.Args[0]->Loc, diag::err_var_param_needs_lvalue,
+                          {std::string_view("1"), std::string_view(Lo)});
+            }
+            if (!SizeTy->isError() && !SizeTy->isIntegral())
+                error(S.Args[1]->Loc, diag::err_numeric_argument, {Lo, SizeTy->Name});
+            return;
+        }
+        // FreeMem(P: Pointer[, Size: Int64]) -- P is a plain value argument,
+        // not `var`: confirmed against the local `fpc -Mtp` install's own
+        // rtl/inc/heap.inc, whose FreeMem takes `p:pointer` with no `var`,
+        // unlike GetMem's own out-parameter P just above.  Size, when given,
+        // is accepted but never checked against what the matching GetMem was
+        // actually given (runtime/plang_sys.cpp's plang_tp_freemem's own
+        // comment) -- matching real Borland/FPC field practice.
+        if (Lo == "freemem" && !S.Args.empty()) {
+            auto PTy = checkExpr(*S.Args[0]);
+            if (!PTy->isError() && PTy->Kind != TypeKind::Pointer)
+                error(S.Args[0]->Loc, diag::err_heap_arg_not_pointer, {Lo, PTy->Name});
+            if (S.Args.size() > 1) {
+                auto SizeTy = checkExpr(*S.Args[1]);
+                if (!SizeTy->isError() && !SizeTy->isIntegral())
+                    error(S.Args[1]->Loc, diag::err_numeric_argument, {Lo, SizeTy->Name});
+            }
+            return;
+        }
+
         // Generic: arity was already checked against Builtins.def above.
         // Evaluate arguments for side-effects / type errors and leave the
         // rest -- which argument means what -- to codegen.

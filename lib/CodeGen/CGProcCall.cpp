@@ -606,6 +606,30 @@ void CGProcCall::emitCallStmt(const CallStmt& s) {
         return;
     }
 
+    // TP-only: GetMem(var P: Pointer; Size: Int64) -- a wholly separate,
+    // NON-ABORTING allocation entry point from New's plang_new just above
+    // (runtime/plang_sys.cpp's plang_tp_getmem's own top comment explains
+    // the whole design, including how HeapError is consulted on failure).
+    if (lo == "getmem" && s.Args.size() == 2) {
+        auto* addr = EmitLValue(*s.Args[0]);
+        auto* size = ToI64(EmitExpr(*s.Args[1]));
+        auto* fn = RtFns.getExternFnN("plang_tp_getmem", PtrTy, {I64Ty});
+        auto* p = B.CreateCall(fn, {size}, "getmem");
+        B.CreateStore(p, addr);
+        return;
+    }
+    // TP-only: FreeMem(P: Pointer[, Size: Int64]) -- Size defaults to 0 when
+    // omitted; plang_tp_freemem ignores it either way (its own comment).
+    if (lo == "freemem" && !s.Args.empty()) {
+        auto* p    = EmitExpr(*s.Args[0]);
+        auto* size = s.Args.size() > 1 ? ToI64(EmitExpr(*s.Args[1]))
+                                        : llvm::ConstantInt::get(I64Ty, 0);
+        auto* fn = RtFns.getExternFnN("plang_tp_freemem",
+                                       llvm::Type::getVoidTy(Ctx), {PtrTy, I64Ty});
+        B.CreateCall(fn, {p, size});
+        return;
+    }
+
     // s.ResolvedBuiltin != BuiltinID::None (the top of this function already
     // returned otherwise) and lo matched none of the required-PROCEDURE
     // names above -- every Proc-kind row in Builtins.def has its own arm

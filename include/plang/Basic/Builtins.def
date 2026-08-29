@@ -340,6 +340,26 @@ BUILTIN(Str,          "str",          Proc, TP, 2, 2, R_None)
 // abort-on-malformed-input machinery.
 BUILTIN(Val,          "val",          Proc, TP, 3, 3, R_None)
 
+// -std=turbo only: GetMem(var P: Pointer; Size: Int64) / FreeMem(P: Pointer
+// [, Size: Int64]) -- runtime/plang_sys.cpp's plang_tp_getmem/
+// plang_tp_freemem, a wholly separate, NON-ABORTING pair of allocation entry
+// points from New/Dispose's plang_new/plang_dispose (that file's own top
+// comment on why this is a genuinely separate pair, not a flag).  Size is
+// Int64, not real Borland TP7's 16-bit Word -- matches `fpc -Mtp` field
+// practice (its own rtl/inc/heap.inc widened GetMem's Size well past 65535
+// even in TP-compat mode) and HeapError's own Size parameter
+// (Sema::registerBuiltins), for the same reason a mismatched pair would be
+// worse than either alone.
+BUILTIN(GetMem,       "getmem",       Proc, TP, 2, 2, R_None)
+BUILTIN(FreeMem,      "freemem",      Proc, TP, 1, 2, R_None)
+
+// -std=turbo only: ParamCount/ParamStr(n) -- read back the argc/argv every
+// compiled program's own C main now receives (CodeGenProcs.cpp's emitMain,
+// runtime/plang_sys.cpp's plang_set_args).  ParamStr returns a capacity-255
+// ShortString, the same result type Copy/Concat/StringOfChar above do.
+BUILTIN(ParamCount,   "paramcount",   Func, TP, 0, 0, R_Int)
+BUILTIN(ParamStr,     "paramstr",     Func, TP, 1, 1, R_Str)
+
 #undef ALL
 #undef TP
 #undef EP

@@ -50,6 +50,28 @@ void Codegen::Impl::emitPredefinedGlobals() {
                                          llvm::GlobalValue::ExternalLinkage,
                                          /*Initializer=*/nullptr, "plang_tp_randseed");
     defVar("RandSeed", seedGv, seedTy, /*typeNode=*/nullptr);
+
+    // HeapError/ExitProc/ErrorAddr: Turbo procedural VALUES' own storage is
+    // a flat `ptr` slot exactly like a user-declared procedural variable's
+    // (VarEntry::isProcVar's own comment; ErrorAddr is an ordinary Pointer,
+    // the same shape either way) -- but typeNode is null here, same as
+    // ExitCode just above, so isProcVar/procType are never set: neither
+    // HeapError nor ExitProc is ever CALLED from Pascal source (see
+    // Sema::registerBuiltins' own comment on why), only ASSIGNED to and read
+    // back, and neither of those consults isProcVar/procType at all -- only
+    // an indirect CALL through the variable would (ClosureAndCallABI::
+    // emitProcVarCall), which this deliberately never emits for either.
+    static constexpr std::pair<const char*, const char*> PtrPredefinedGlobals[] = {
+        {"HeapError", "plang_tp_heaperror"},
+        {"ExitProc",  "plang_tp_exitproc"},
+        {"ErrorAddr", "plang_tp_erroraddr"},
+    };
+    for (const auto& [PascalName, LinkName] : PtrPredefinedGlobals) {
+        auto* g = new llvm::GlobalVariable(*mod, ptrTy, /*isConst=*/false,
+                                            llvm::GlobalValue::ExternalLinkage,
+                                            /*Initializer=*/nullptr, LinkName);
+        defVar(PascalName, g, ptrTy, /*typeNode=*/nullptr);
+    }
 }
 
 // Attaches 'input' and 'output' to the standard streams.  Any other
@@ -1852,9 +1874,21 @@ void Codegen::Impl::emitMain(const BlockNode& block,
     curRetAlloca = nullptr;
     curRetSemaType = nullptr;
 
-    auto* funcTy = llvm::FunctionType::get(i32Ty, {}, false);
+    // The standard C `int main(int argc, char** argv)` shape, UNCONDITIONALLY
+    // for every dialect -- not just Turbo's own ParamCount/ParamStr, which
+    // are the only PASCAL-level feature that reads argc/argv back (through
+    // plang_set_args just below and runtime/plang_sys.cpp's own g_argc/
+    // g_argv).  ISO 7185 and Extended Pascal programs compile through this
+    // exact same emitMain and simply never read what plang_set_args stored;
+    // a single, dialect-independent entry-point ABI here is what lets one
+    // `int main(int, char**)` -- the shape the C runtime environment (glibc's
+    // own _start/__libc_start_main) actually calls -- serve all three,
+    // rather than needing two different generated `main`s.
+    auto* funcTy = llvm::FunctionType::get(i32Ty, {i32Ty, ptrTy}, false);
     auto* func   = llvm::Function::Create(funcTy, llvm::Function::ExternalLinkage,
                                            "main", mod.get());
+    func->getArg(0)->setName("argc");
+    func->getArg(1)->setName("argv");
     curFunc = func;
 
     // -g: the program's own top-level scope, so a breakpoint on the first
@@ -1871,6 +1905,38 @@ void Codegen::Impl::emitMain(const BlockNode& block,
 
     auto* entry = llvm::BasicBlock::Create(ctx, "entry", func);
     builder.SetInsertPoint(entry);
+
+    // Literally the first instruction of every compiled program's own
+    // `main`, every dialect alike (see this function's own funcTy comment
+    // above): stores argc/argv where Turbo's ParamCount/ParamStr can read
+    // them back later, however deep into the program either is asked for.
+    // A plain runtime global rather than threading argc/argv through every
+    // function that might want them -- runtime/plang_sys.cpp's own
+    // g_argc/g_argv, exactly the same pattern plang_tp_exitcode's own
+    // comment already establishes for a Turbo predefined identifier's
+    // storage.
+    builder.CreateCall(
+        getExternFnN("plang_set_args", llvm::Type::getVoidTy(ctx), {i32Ty, ptrTy}),
+        {func->getArg(0), func->getArg(1)});
+
+    // TP-only: ExitProc, hooked into the ALREADY-WORKING
+    // plang_module_finals_run/plang_halt chain (issue #242) exactly once,
+    // here, near the very start of the program -- before anything the
+    // program itself does could possibly reach a Halt/RunError/normal-exit
+    // path.  After this one registration, every existing call to
+    // plang_module_finals_run (plang_halt, plang_tp_runerror, and this same
+    // function's own end-of-program call just below) already runs whatever
+    // routine the program has assigned to ExitProc by the time each of those
+    // is reached, with no separate "and also run ExitProc" step needed at
+    // any of the three -- see plang_tp_run_exitproc's own comment
+    // (runtime/plang_sys.cpp) for the rest of this design.
+    if (langOpts.turbo()) {
+        auto* runExitProc =
+            getExternFnN("plang_tp_run_exitproc", llvm::Type::getVoidTy(ctx), {});
+        auto* pushFinal =
+            getExternFnN("plang_module_final_push", llvm::Type::getVoidTy(ctx), {ptrTy});
+        builder.CreateCall(pushFinal, {runExitProc});
+    }
 
     // TP-only: where a bare `Exit` at the program's own top level branches
     // to -- confirmed against `fpc -Mtp` that Exit at program scope ends the
