@@ -26,6 +26,16 @@ first line) -- eof-before and eof-after-clear both report false from the
 SAME real position, proving the true report in between really is about
 InOutRes and not a side effect of the forced assignment moving anything.
 
+`{$I-}` from the forced assignment on: this file is about Eof/Eoln's own
+InOutRes-pending check, not about the automatic `{$I+}` check a later part
+of this same item adds -- under that check's real default (`{$I+}` ON
+unless a program says otherwise), the very first `writeln` after `InOutRes
+:= 5` would itself abort the process, since InOutRes is nonzero right there
+too.  See io-plus-aborts-at-the-next-checked-operation-not-the-failing-
+one.pas for the check's own dedicated coverage -- Reset/Readln above stay
+unguarded by `{$I-}` since neither can fail against this file (a lit
+fixture the RUN line itself just created).
+
 RUN: printf 'line one\nline two\n' > %t.txt
 RUN: %plang -std=turbo %s -o %t
 RUN: %run %t %t.txt | FileCheck %s
@@ -50,6 +60,7 @@ begin
   if Eof(f)  then writeln('eof-before: true')  else writeln('eof-before: false');
   if Eoln(f) then writeln('eoln-before: true') else writeln('eoln-before: false');
 
+  {$I-}
   InOutRes := 5;
 
   if Eof(f)  then writeln('eof-during-error: true')  else writeln('eof-during-error: false');
