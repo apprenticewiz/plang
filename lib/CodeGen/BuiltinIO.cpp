@@ -124,17 +124,23 @@ void BuiltinIO::emitWriteArgs(
                 {fp, tmp, llvm::ConstantInt::get(I64Ty, esz)});
             continue;
         }
-        // Turbo string[N]: a minimal writer of its own -- see plang_sstr.cpp's
-        // own comment for exactly what this item does and does not implement
-        // (declaration/basic write only; TP's exact truncation/comparison/
-        // parameter-passing semantics are a later, separate item).  Checked
-        // ahead of the VarString/CharStr branch below: ShortString is
-        // neither -- emitExpr for it LOADS the struct by value (unlike
-        // VarString's address-returning IdentExpr special case), so this
-        // needs its own address via EmitLValue, not EmitExpr, and its own
-        // (one-byte-header) runtime writer.
+        // Turbo string[N]: its own writer, with its own (one-byte-header)
+        // runtime entry points -- checked ahead of the VarString/CharStr
+        // branch below, since ShortString is neither.  StrCall.emitStrAddr,
+        // not EmitLValue: argExpr may be a COMPUTED ShortString value with no
+        // storage of its own -- `writeln(s + t)`, most concretely, now that
+        // this item's own concatenation support (CGBinaryOps.cpp) makes that
+        // a real, expected expression -- and EmitLValue has no BinaryExpr
+        // case at all, so it silently returned null for one and this whole
+        // write argument vanished with no diagnostic (`continue`, just
+        // below, reads as "not a writable string" rather than "not
+        // addressable at all").  emitStrAddr already falls back to EmitExpr
+        // for exactly this case (EmitExpr's own ShortString IdentExpr/Index/
+        // Field/Deref cases, CGExprCore.cpp, all return an address too, by
+        // the same "a string value is carried by its address" contract
+        // VarString already established).
         if (argExpr->ResolvedType && argExpr->ResolvedType->Kind == TypeKind::ShortString) {
-            auto* addr = EmitLValue(*argExpr);
+            auto* addr = StrCall.emitStrAddr(*argExpr);
             if (!addr) continue;
             auto* capV = i64c(argExpr->ResolvedType->StrCapacity);
             if (fp) {
@@ -671,6 +677,14 @@ void BuiltinIO::emitBuiltinReadln(const std::vector<std::unique_ptr<ExprNode>>& 
 // write/read lowering with a runtime redirect onto a memory buffer.
 
 /// writestr(s, p1, ..., pn) — format the write-parameters into the string s.
+///
+/// DELIBERATELY EP-only throughout, ExprIsVarStr calls included: writestr
+/// and readstr are both registered `EP` in Builtins.def, and ShortString
+/// only ever exists under -std=turbo (LangOptions::Standard is one mutually
+/// exclusive enum, so turbo() and extendedPascal() can never both be true
+/// for one compilation) -- so a ShortString argument can never reach either
+/// of these two functions in a Sema-accepted program, and neither needs a
+/// ShortString branch of its own.
 void BuiltinIO::emitBuiltinWriteStr(
         const std::vector<std::unique_ptr<ExprNode>>& args) {
     const ExprNode& dest = *args[0];

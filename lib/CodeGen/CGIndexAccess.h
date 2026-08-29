@@ -35,14 +35,18 @@ public:
                   std::function<llvm::Value*(llvm::Value*)> ToI64,
                   std::function<const plang::TypeNode*(const plang::TypeNode*)> DenoterOf,
                   std::function<bool(const plang::ExprNode&)> ExprIsVarStr,
-                  std::function<std::optional<llvm::Align>(const plang::ExprNode&)> PackedAccessAlign)
+                  std::function<std::optional<llvm::Align>(const plang::ExprNode&)> PackedAccessAlign,
+                  std::function<bool(const plang::ExprNode&)> ExprIsShortStr,
+                  std::function<int64_t(const plang::ExprNode&)> ExprShortStrCap)
         : Ctx(Ctx), B(B), Schema(Schema), StrCall(StrCall), RangeGuards(RangeGuards),
           Strings(Strings), RtFns(RtFns), SymTab(SymTab), Types(Types),
           I8Ty(I8Ty), I64Ty(I64Ty),
           EmitExpr(std::move(EmitExpr)), EmitLValue(std::move(EmitLValue)),
           ToI64(std::move(ToI64)), DenoterOf(std::move(DenoterOf)),
           ExprIsVarStr(std::move(ExprIsVarStr)),
-          PackedAccessAlign(std::move(PackedAccessAlign)) {}
+          PackedAccessAlign(std::move(PackedAccessAlign)),
+          ExprIsShortStr(std::move(ExprIsShortStr)),
+          ExprShortStrCap(std::move(ExprShortStrCap)) {}
 
     llvm::Value* emitConformantElemPtr(const plang::IndexExpr& e);
     llvm::Value* emitIndexGEP(const plang::IndexExpr& e);
@@ -69,4 +73,11 @@ private:
     std::function<const plang::TypeNode*(const plang::TypeNode*)> DenoterOf;
     std::function<bool(const plang::ExprNode&)> ExprIsVarStr;
     std::function<std::optional<llvm::Align>(const plang::ExprNode&)> PackedAccessAlign;
+    /// Turbo string[N]'s own predicate/capacity pair -- see exprIsShortStr's
+    /// doc comment (CodeGenImpl.h).  s[i]'s own bounds (0..declared capacity,
+    /// s[0] the length byte) are a genuinely separate rule from VarString's
+    /// 1..current-length one just above, so this file's ShortString s[i]
+    /// arm is its own branch throughout, never a widening of ExprIsVarStr's.
+    std::function<bool(const plang::ExprNode&)> ExprIsShortStr;
+    std::function<int64_t(const plang::ExprNode&)> ExprShortStrCap;
 };

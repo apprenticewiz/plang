@@ -1106,6 +1106,36 @@ struct Codegen::Impl {
         return varies ? PlangMaxStringCapacity : T->StrCapacity;
     }
 
+    // ====================================================================
+    // Turbo ShortString helpers -- the string[N] siblings of the EP string
+    // helpers just above, kept in their own section rather than folded into
+    // varStrTypeOf/exprIsVarStr/exprStrCap*: ShortString is a completely
+    // separate TypeKind with its own runtime layout (see TypeKind::
+    // ShortString's own comment), never reached by looking through a schema
+    // (Turbo has no schema mechanism at all -- EP §6.4.7 is EP-only) and
+    // never varying in extent (a ShortString's capacity is always a plain
+    // compile-time constant, so there is no ExtentVaries/exprStrCapV-style
+    // dynamic-capacity counterpart to give it).
+    // ====================================================================
+
+    /// The Turbo string[N] type an expression denotes, or null.
+    static const Type* shortStrTypeOf(const Type* T) {
+        return (T && T->Kind == TypeKind::ShortString) ? T : nullptr;
+    }
+    static const Type* shortStrTypeOf(const ExprNode& e) {
+        return shortStrTypeOf(e.ResolvedType.get());
+    }
+    /// True if the expression's resolved type is Turbo's string[N].
+    static bool exprIsShortStr(const ExprNode& e) { return shortStrTypeOf(e) != nullptr; }
+    /// Capacity of the expression's ShortString type; 0 if not ShortString.
+    /// Always a real compile-time constant -- see this section's own
+    /// comment for why, unlike exprStrCapStatic, there is no ExtentVaries
+    /// case to widen for.
+    static int64_t exprShortStrCap(const ExprNode& e) {
+        const Type* T = shortStrTypeOf(e);
+        return T ? T->StrCapacity : 0;
+    }
+
     /// EP §6.4.7 run-time layout, for a schema body whose extent a discriminant
     /// fixes.  Call under an RtDiscScope for the object being laid out: every
     /// extent in the body is a closed form over the discriminants BY INDEX, and

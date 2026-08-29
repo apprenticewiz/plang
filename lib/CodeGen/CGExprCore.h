@@ -54,7 +54,8 @@ public:
                std::function<llvm::Value*(llvm::Value*)> ToI64,
                std::function<bool(const plang::ExprNode&)> ExprIsVarStr,
                std::function<int64_t(const plang::ExprNode&)> ExprStrCapStatic,
-               std::function<llvm::Value*(llvm::Value*, llvm::Type*)> CoerceToType)
+               std::function<llvm::Value*(llvm::Value*, llvm::Type*)> CoerceToType,
+               std::function<bool(const plang::ExprNode&)> ExprIsShortStr)
         : Ctx(Ctx), Mod(Mod), B(B), RtFns(RtFns), SymTab(SymTab),
           ClosureAbi(ClosureAbi), Linkage(Linkage), FuncCall(FuncCall),
           BinaryOps(BinaryOps), IndexAccess(IndexAccess), FieldAccess(FieldAccess),
@@ -68,7 +69,8 @@ public:
           EnsureI1(std::move(EnsureI1)), ToI64(std::move(ToI64)),
           ExprIsVarStr(std::move(ExprIsVarStr)),
           ExprStrCapStatic(std::move(ExprStrCapStatic)),
-          CoerceToType(std::move(CoerceToType)) {}
+          CoerceToType(std::move(CoerceToType)),
+          ExprIsShortStr(std::move(ExprIsShortStr)) {}
 
     /// Invariant every caller of emitExpr (directly, or indirectly through
     /// the EmitExpr closures threaded into CGBinaryOps, CGControlFlow, and
@@ -188,6 +190,12 @@ private:
     /// typecast's rvalue emission (see emitExpr's TypeCastExpr case) -- see
     /// its own definition (CodeGenExprs.cpp) for exactly what it does.
     std::function<llvm::Value*(llvm::Value*, llvm::Type*)> CoerceToType;
+    /// Turbo string[N]'s own predicate, the sibling ExprIsVarStr has none of
+    /// -- see exprIsShortStr's doc comment (CodeGenImpl.h) for why ShortString
+    /// needs no capacity-query closure the way ExprStrCapStatic exists for
+    /// VarString (a ShortString's capacity is always a compile-time constant,
+    /// read directly off ResolvedType wherever it's needed).
+    std::function<bool(const plang::ExprNode&)> ExprIsShortStr;
 
     llvm::Constant* i64c(int64_t v) const {
         return llvm::ConstantInt::get(I64Ty, v, true);

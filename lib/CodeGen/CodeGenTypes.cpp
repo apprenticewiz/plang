@@ -185,7 +185,9 @@ void Codegen::Impl::init(const std::string& progName) {
         [](const ExprNode& e){ return exprIsCharStr(e); },
         [](const ExprNode& e){ return exprIsVarStr(e); },
         [](const ExprNode& e){ return exprCharStrLen(e); },
-        [](const ExprNode& e){ return exprStrCapStatic(e); });
+        [](const ExprNode& e){ return exprStrCapStatic(e); },
+        [](const ExprNode& e){ return exprIsShortStr(e); },
+        [](const ExprNode& e){ return exprShortStrCap(e); });
     // Procedural-parameter ABI + conformant-array marshalling.
     // BuildStaticLinkFrame/IsNestedFunction deliberately don't absorb
     // buildStaticLinkFrame/nestedFunctions_ -- the closure-capture loop's
@@ -246,7 +248,9 @@ void Codegen::Impl::init(const std::string& progName) {
         [](const ExprNode& e){ return exprIsVarStr(e); },
         [](const ExprNode& e){ return exprIsCharStr(e); },
         [](const ExprNode& e){ return exprCharStrLen(e); },
-        [](const ExprNode& e){ return exprStrCapStatic(e); });
+        [](const ExprNode& e){ return exprStrCapStatic(e); },
+        [](const ExprNode& e){ return exprIsShortStr(e); },
+        [](const ExprNode& e){ return exprShortStrCap(e); });
     // Structured-statement emission.  EmitExpr/EmitStmt/EnsureI1/ToI64/
     // CoerceToType/CreateEntryAlloca/ResumeAfterTerminator/IsTerminated/
     // BrIfNeeded/OrdinalIsUnsigned are narrow closures into methods that
@@ -391,7 +395,9 @@ void Codegen::Impl::init(const std::string& progName) {
         [this](llvm::Value* v){ return toI64(v); },
         [this](const TypeNode* tn){ return denoterOf(tn); },
         [](const ExprNode& e){ return exprIsVarStr(e); },
-        [this](const ExprNode& e){ return packedAccessAlign(e); });
+        [this](const ExprNode& e){ return packedAccessAlign(e); },
+        [](const ExprNode& e){ return exprIsShortStr(e); },
+        [](const ExprNode& e){ return exprShortStrCap(e); });
     // EP §6.8.7 typed value constructors.  EmitExpr/CoerceToType/
     // InitialStateShapeOf/CreateEntryAlloca are narrow closures into
     // methods not yet extracted (CodeGenExprs.cpp/CodeGenProcs.cpp/
@@ -428,7 +434,9 @@ void Codegen::Impl::init(const std::string& progName) {
         [](const ExprNode& e){ return exprIsCharStr(e); },
         [](const ExprNode& e){ return exprCharStrLen(e); },
         [](const ExprNode& e){ return exprStrCapStatic(e); },
-        [](const Type* t){ return ordinalIsUnsigned(t); });
+        [](const Type* t){ return ordinalIsUnsigned(t); },
+        [](const ExprNode& e){ return exprIsShortStr(e); },
+        [](const ExprNode& e){ return exprShortStrCap(e); });
     // Call-expression emission: the built-in dispatch chain plus the tail
     // call to a user-declared function.  Same 12-sibling-unit shape as
     // procCall_'s analogous split; BuildStaticLinkFrame stays on Impl
@@ -465,7 +473,8 @@ void Codegen::Impl::init(const std::string& progName) {
         [](const ExprNode& e){ return exprIsVarStr(e); },
         [](const ExprNode& e){ return exprIsCharStr(e); },
         [](const ExprNode& e){ return exprCharStrLen(e); },
-        [](const ExprNode& e){ return exprStrCapStatic(e); });
+        [](const ExprNode& e){ return exprStrCapStatic(e); },
+        [](const ExprNode& e){ return exprIsShortStr(e); });
     // ISO §6.7.1 expression emission -- the central recursive-descent
     // dispatcher every other extracted unit already reaches via its own
     // EmitExpr/EmitLValue closure (unaffected by this move, since those
@@ -487,7 +496,8 @@ void Codegen::Impl::init(const std::string& progName) {
         [this](llvm::Value* v){ return toI64(v); },
         [](const ExprNode& e){ return exprIsVarStr(e); },
         [](const ExprNode& e){ return exprStrCapStatic(e); },
-        [this](llvm::Value* v, llvm::Type* t){ return coerceToType(v, t); });
+        [this](llvm::Value* v, llvm::Type* t){ return coerceToType(v, t); },
+        [](const ExprNode& e){ return exprIsShortStr(e); });
     // DefineBuf/LookupBuf are narrow closures into defVar/findVar
     // (CGSymbolTable territory, not yet extracted) -- LookupBuf hands back
     // just the llvm::Value*, the only field of a VarEntry this engine needs.

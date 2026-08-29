@@ -94,3 +94,31 @@ void StringRuntime::emitStrFromChar(llvm::Value* dst, llvm::Value* cap,
         llvm::Type::getVoidTy(Ctx), {ptrTy(), i64Ty(), i8Ty()});
     B.CreateCall(fn, {dst, cap, c});
 }
+
+void StringRuntime::emitSstrAssign(llvm::Value* dst, llvm::Value* capDst,
+                                    llvm::Value* src, llvm::Value* capSrc) {
+    auto* fn = getStrFn("plang_sstr_assign",
+        llvm::Type::getVoidTy(Ctx), {ptrTy(), i64Ty(), ptrTy(), i64Ty()});
+    B.CreateCall(fn, {dst, capDst, src, capSrc});
+}
+
+void StringRuntime::emitSstrFromCStr(llvm::Value* dst, llvm::Value* cap,
+                                      llvm::Value* cstr) {
+    auto* fn = getStrFn("plang_sstr_from_cstr",
+        llvm::Type::getVoidTy(Ctx), {ptrTy(), i64Ty(), ptrTy()});
+    B.CreateCall(fn, {dst, cap, cstr});
+}
+
+void StringRuntime::emitSstrFromBytes(llvm::Value* dst, llvm::Value* cap,
+                                       llvm::Value* cstr, llvm::Value* len) {
+    auto* fn = getStrFn("plang_sstr_from_bytes",
+        llvm::Type::getVoidTy(Ctx), {ptrTy(), i64Ty(), ptrTy(), i64Ty()});
+    B.CreateCall(fn, {dst, cap, cstr, len});
+}
+
+void StringRuntime::emitSstrFromChar(llvm::Value* dst, llvm::Value* cap,
+                                      llvm::Value* c) {
+    auto* fn = getStrFn("plang_sstr_from_char",
+        llvm::Type::getVoidTy(Ctx), {ptrTy(), i64Ty(), i8Ty()});
+    B.CreateCall(fn, {dst, cap, c});
+}

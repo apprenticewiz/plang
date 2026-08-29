@@ -187,6 +187,20 @@ llvm::Value* CGExprCore::emitExpr(const ExprNode& e) {
         }
         // VarString: return the struct address directly — callers use it as ptr.
         if (ExprIsVarStr(e)) return ve->ptr;
+        // Turbo string[N]: the identical "carried by address" contract as
+        // VarString just above, and for the identical reason -- every
+        // caller of a string-shaped expression expects an ADDRESS to pass to
+        // the string runtime, not the struct loaded by value.  A separate
+        // branch rather than widening the VarString check with an `||`:
+        // ShortString is never VarString (ExprIsVarStr is false for it by
+        // construction), and the two runtimes must never be interchangeable
+        // just because this one piece of plumbing happens to be identical.
+        // Before this branch existed, falling through to the generic
+        // B.CreateLoad below loaded the WHOLE packed <{i8,[N]}> struct by
+        // value instead -- wrong in kind for every consumer downstream (a
+        // concatenation, comparison, assignment, or call argument all
+        // expect a pointer).
+        if (ExprIsShortStr(e)) return ve->ptr;
         auto* ld = B.CreateLoad(ve->type, ve->ptr, n->Name);
         // Issue #192: a with-bound field of a packed record is an ordinary
         // IdentExpr by the time it gets here, and IRBuilder's default ABI
@@ -207,6 +221,17 @@ llvm::Value* CGExprCore::emitExpr(const ExprNode& e) {
     // `string(25)` parameter loaded a { i64, [20 x i8] } and failed IR
     // verification, and every other caller of the contract had the same hole.
     if (ExprIsVarStr(e)
+            && (llvm::isa<IndexExpr>(&e) || llvm::isa<FieldExpr>(&e)
+                || llvm::isa<DerefExpr>(&e)))
+        if (auto* p = emitLValue(e)) return p;
+    // Turbo string[N]: the identical fix, for the identical reason, as the
+    // VarString case just above -- a ShortString reached as a field, an
+    // element or a dereference needs its ADDRESS here too, not a load of the
+    // struct by value.  Kept as its own condition rather than an `||` onto
+    // the VarString one: see this function's IdentExpr case for why the two
+    // dialects' string-shaped values must stay two separate branches
+    // throughout, never a single widened check.
+    if (ExprIsShortStr(e)
             && (llvm::isa<IndexExpr>(&e) || llvm::isa<FieldExpr>(&e)
                 || llvm::isa<DerefExpr>(&e)))
         if (auto* p = emitLValue(e)) return p;

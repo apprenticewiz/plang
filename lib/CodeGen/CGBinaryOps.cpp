@@ -172,6 +172,51 @@ llvm::Value* CGBinaryOps::emitBinary(const BinaryExpr& e) {
         return B.CreateCall(powFn, {base, exp}, "pow");
     }
 
+    // Turbo string[N] concatenation -- decided FIRST and separately from the
+    // EP block just below, which only ever recognizes VarString/String/
+    // char-string-type operands (ExprIsVarStr is false for ShortString by
+    // construction -- see its own comment, CodeGenImpl.h) and always builds
+    // an EP-shaped, eight-byte-headed result temporary via plang_str_*.
+    // Mirrors the EP block's own operand-to-(addr,cap) shape but calls the
+    // plang_sstr_* family throughout and sizes the result off Sema's own
+    // ShortString result type (Type::makeShortString, SemaExpr.cpp's
+    // checkBinary Plus case) rather than re-deriving it here -- Sema has
+    // already summed and clamped the two operands' capacities at 255.
+    if (e.Op == TokenKind::Plus && ExprIsShortStr(e)) {
+        // A non-ShortString operand is a char or a plain literal/String --
+        // Sema's checkBinary Plus case is what limits it to exactly those,
+        // so unlike the EP lambda below this has no ExprIsCharStr arm to
+        // mirror. A literal's OWN length sizes its temporary (not a bare
+        // "one character" guess) so a multi-character literal operand
+        // ('abc' + s) is not silently truncated to its first character.
+        auto sstrOperand = [&](const ExprNode& x) -> std::pair<llvm::Value*, llvm::Value*> {
+            // StrCall.emitStrAddr, not EmitLValue: an operand may itself be a
+            // computed ShortString value with no storage of its own -- a
+            // nested concatenation (`(s + t) + u`), most concretely -- and
+            // emitStrAddr already falls back to EmitExpr for exactly that.
+            if (ExprIsShortStr(x)) return {StrCall.emitStrAddr(x), i64c(ExprShortStrCap(x))};
+            int64_t cap = 1;
+            if (auto* sl = llvm::dyn_cast<StringLitExpr>(&x))
+                cap = std::max<int64_t>(1, (int64_t)sl->Value.size());
+            auto* val = EmitExpr(x);
+            auto* tmp = CreateEntryAlloca(Types.sstrStructType(cap), "sstr.operand");
+            if (val && val->getType()->isIntegerTy(8))
+                Strings.emitSstrFromChar(tmp, i64c(cap), val);
+            else if (val)
+                Strings.emitSstrFromBytes(tmp, i64c(cap), val, i64c(cap));
+            return {tmp, i64c(cap)};
+        };
+        auto [lv, capL] = sstrOperand(*e.Left);
+        auto [rv, capR] = sstrOperand(*e.Right);
+        const int64_t capRes = ExprShortStrCap(e);
+        auto* capResV = i64c(capRes);
+        auto* resPtr  = CreateEntryAlloca(Types.sstrStructType(capRes), "sstr.concat");
+        auto* fn = Strings.getStrFn("plang_sstr_concat", llvm::Type::getVoidTy(Ctx),
+            {PtrTy, I64Ty, PtrTy, I64Ty, PtrTy, I64Ty});
+        B.CreateCall(fn, {resPtr, capResV, lv, capL, rv, capR});
+        return resPtr;
+    }
+
     // EP §6.8.3.6: string concatenation  a + b
     // Use Sema-annotated type to detect operands and read capacities.
     if (e.Op == TokenKind::Plus && ExprIsVarStr(e)) {
@@ -263,6 +308,54 @@ llvm::Value* CGBinaryOps::emitBinary(const BinaryExpr& e) {
             B.CreateCall(fn, {resPtr, capResV, lv, capL, rv});
         }
         return resPtr;
+    }
+
+    // Turbo string[N] comparison -- PREFIX lexicographic order, SHORTER is
+    // LESS (plang_sstr_eq and siblings, plang_sstr.cpp): the OPPOSITE of
+    // EP's space-padded plang_str_eq family just below ('a' < 'a ' is TRUE
+    // here, but 'a' = 'a ' there), so the two must never share a runtime
+    // entry point or an operand-shaping lambda.  Checked FIRST and
+    // unconditionally returns when it fires -- critical, not cosmetic: the
+    // EP block's own gate, exprIsStringLike, is true for a plain String/Char
+    // operand even when the OTHER side is ShortString (e.g. `shortStr =
+    // 'hi'`), so without deciding this case first, that comparison would
+    // fall into the EP block below, which addresses a ShortString operand
+    // as if it had EP's eight-byte length header instead of ShortString's
+    // one-byte one -- the exact StringCallMarshalling-shaped corruption this
+    // whole work item exists to avoid, here in a second place.  A
+    // comparison with NO ShortString operand at all leaves this condition
+    // false and reaches the EP block exactly as before.
+    if ((e.Op == TokenKind::Equal || e.Op == TokenKind::NotEqual
+         || e.Op == TokenKind::LessThan || e.Op == TokenKind::LessThanOrEqual
+         || e.Op == TokenKind::GreaterThan || e.Op == TokenKind::GreaterThanOrEqual)
+            && (ExprIsShortStr(*e.Left) || ExprIsShortStr(*e.Right))) {
+        const char* fnName =
+            e.Op == TokenKind::Equal           ? "plang_sstr_eq" :
+            e.Op == TokenKind::NotEqual        ? "plang_sstr_ne" :
+            e.Op == TokenKind::LessThan        ? "plang_sstr_lt" :
+            e.Op == TokenKind::LessThanOrEqual ? "plang_sstr_le" :
+            e.Op == TokenKind::GreaterThan     ? "plang_sstr_gt" : "plang_sstr_ge";
+        auto toSstrPtr = [&](const ExprNode& expr) -> std::pair<llvm::Value*, llvm::Value*> {
+            // See sstrOperand's identical comment (this file's concatenation
+            // block, just above): an operand may be a computed ShortString
+            // value (e.g. `(s + t) = u`) with no lvalue of its own.
+            if (ExprIsShortStr(expr)) return {StrCall.emitStrAddr(expr), i64c(ExprShortStrCap(expr))};
+            int64_t cap = 1;
+            if (auto* sl = llvm::dyn_cast<StringLitExpr>(&expr))
+                cap = std::max<int64_t>(1, (int64_t)sl->Value.size());
+            auto* val = EmitExpr(expr);
+            auto* tmp = CreateEntryAlloca(Types.sstrStructType(cap), "sstr.cmp.tmp");
+            if (val && val->getType()->isIntegerTy(8))
+                Strings.emitSstrFromChar(tmp, i64c(cap), val);
+            else if (val)
+                Strings.emitSstrFromBytes(tmp, i64c(cap), val, i64c(cap));
+            return {tmp, i64c(cap)};
+        };
+        auto [la, capL] = toSstrPtr(*e.Left);
+        auto [ra, capR] = toSstrPtr(*e.Right);
+        auto* fn  = Strings.getStrFn(fnName, I8Ty, {PtrTy, I64Ty, PtrTy, I64Ty});
+        auto* raw = B.CreateCall(fn, {la, capL, ra, capR}, "sstr.cmp");
+        return EnsureI1(raw);
     }
 
     // EP §6.8.3.5: string comparison via runtime (lexicographic, space-padded).

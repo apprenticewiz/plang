@@ -44,7 +44,9 @@ public:
         std::function<bool(const plang::ExprNode&)> ExprIsCharStr,
         std::function<bool(const plang::ExprNode&)> ExprIsVarStr,
         std::function<int64_t(const plang::ExprNode&)> ExprCharStrLen,
-        std::function<int64_t(const plang::ExprNode&)> ExprStrCap)
+        std::function<int64_t(const plang::ExprNode&)> ExprStrCap,
+        std::function<bool(const plang::ExprNode&)> ExprIsShortStr,
+        std::function<int64_t(const plang::ExprNode&)> ExprShortStrCap)
         : Ctx(Ctx), B(B), Strings(Strings), RangeGuards(RangeGuards),
           RtFns(RtFns), Types(Types), Schema(Schema), I64Ty(I64Ty), PtrTy(PtrTy),
           EmitExpr(std::move(EmitExpr)), EmitLValue(std::move(EmitLValue)),
@@ -54,7 +56,9 @@ public:
           ExprIsCharStr(std::move(ExprIsCharStr)),
           ExprIsVarStr(std::move(ExprIsVarStr)),
           ExprCharStrLen(std::move(ExprCharStrLen)),
-          ExprStrCap(std::move(ExprStrCap)) {}
+          ExprStrCap(std::move(ExprStrCap)),
+          ExprIsShortStr(std::move(ExprIsShortStr)),
+          ExprShortStrCap(std::move(ExprShortStrCap)) {}
 
     /// One argument of a call to a user-declared procedure or function,
     /// given the LLVM type the callee declared for that position: an
@@ -86,6 +90,15 @@ public:
     /// this takes depends on what the source is; assignment and the
     /// 'value' initializer both come through here.
     void emitStrStore(llvm::Value* dst, llvm::Value* capDst, const plang::ExprNode& src);
+    /// Turbo string[N]'s own sibling of emitStrStore just above -- stores
+    /// \p src (a ShortString, a char, or a plain literal/String) into the
+    /// ShortString variable at \p dst via plang_sstr_* (TRUNCATING, never
+    /// erroring; see plang_sstr.cpp), never plang_str_*.  A separate
+    /// function rather than a branch inside emitStrStore: the two runtimes'
+    /// struct layouts are incompatible, and every call site must pick one
+    /// or the other explicitly rather than have a single function decide
+    /// which shape \p dst actually has.
+    void emitSstrStore(llvm::Value* dst, llvm::Value* capDst, const plang::ExprNode& src);
 
 private:
     llvm::LLVMContext& Ctx;
@@ -110,6 +123,10 @@ private:
     std::function<bool(const plang::ExprNode&)> ExprIsVarStr;
     std::function<int64_t(const plang::ExprNode&)> ExprCharStrLen;
     std::function<int64_t(const plang::ExprNode&)> ExprStrCap;
+    /// Turbo string[N]'s own predicate/capacity pair -- see exprIsShortStr's
+    /// doc comment (CodeGenImpl.h).
+    std::function<bool(const plang::ExprNode&)> ExprIsShortStr;
+    std::function<int64_t(const plang::ExprNode&)> ExprShortStrCap;
 
     llvm::Constant* i64c(int64_t v) const {
         return llvm::ConstantInt::get(I64Ty, static_cast<uint64_t>(v), true);

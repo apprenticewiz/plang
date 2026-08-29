@@ -562,5 +562,20 @@ llvm::Value* CGFuncCall::emitUserFuncCall(const CallExpr& e) {
         B.CreateStore(ret, tmp);
         return tmp;
     }
+    // Turbo string[N]: a ShortString RESULT comes back the same way -- the
+    // whole packed <{i8,[N]}> struct by value -- and needs the identical
+    // spill-to-a-temporary treatment so its consumers see an address the
+    // way every other string expression does (see exprIsShortStr's own doc
+    // comment, CodeGenImpl.h).  A SEPARATE branch rather than widening the
+    // VarString check just above with an `||`: spilling any struct return
+    // to an addressable temporary happens to be identical plumbing for
+    // both dialects, but the two runtimes it feeds into downstream are not,
+    // and this file's whole ShortString policy is to never let one
+    // condition quietly serve both.
+    if (ExprIsShortStr(e) && ret->getType()->isStructTy()) {
+        auto* tmp = CreateEntryAlloca(ret->getType(), "sstr.ret");
+        B.CreateStore(ret, tmp);
+        return tmp;
+    }
     return ret;
 }

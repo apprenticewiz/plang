@@ -611,4 +611,18 @@ inline bool isVarStringLike(const Type* T) {
 }
 inline bool isVarStringLike(const Type& T) { return isVarStringLike(&T); }
 
+/// True when a type denotes Turbo's string[N] (ShortString) -- the sibling
+/// predicate to isVarStringLike just above, for the OTHER bounded-string
+/// type.  Deliberately NOT a call to isVarStringLike or a widening of it:
+/// the two are separate, incompatible runtime layouts (see TypeKind::
+/// ShortString's own comment) and must never be treated as the same
+/// question.  Structural only, with no schemaUnderlying hop to make -- Turbo
+/// has no schema mechanism (EP §6.4.7 is EP-only), so a ShortString's Kind
+/// is never hidden behind a Schema/SchemaInstance the way a VarString's can
+/// be.
+inline bool isShortStringLike(const Type* T) {
+    return T && T->Kind == TypeKind::ShortString;
+}
+inline bool isShortStringLike(const Type& T) { return isShortStringLike(&T); }
+
 } // namespace plang

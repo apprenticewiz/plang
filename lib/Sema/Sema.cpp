@@ -1602,7 +1602,20 @@ void Sema::checkProcSignature(const ProcDecl& Proc) {
         if (Ret && !Ret->isError()) {
             const bool AnyFile = typeContainsFile(*Ret);
             const bool Simple  = Ret->isOrdinal() || Ret->isNumeric()
-                              || Ret->Kind == TypeKind::Pointer;
+                              || Ret->Kind == TypeKind::Pointer
+                              // Turbo: a function may return its own
+                              // string[N] -- ordinary, idiomatic Turbo
+                              // Pascal (`function F: string;`), the same
+                              // shape real Turbo/FPC accept.  A narrow,
+                              // ShortString-only addition rather than
+                              // following EP's own blanket "any
+                              // assignable, file-free type" carve-out just
+                              // below: Turbo has no schema/record/array-
+                              // result convention (or Extended Pascal's own
+                              // rationale) for this to generalize from, and
+                              // widening "Simple" to admit those too would
+                              // be well outside this item's scope.
+                              || (Opts.turbo() && Ret->Kind == TypeKind::ShortString);
             if (AnyFile || (!Simple && !Opts.extendedPascal()))
                 error(Proc.Loc, diag::err_function_result_type, {Ret->Name});
         }

@@ -44,7 +44,9 @@ public:
                 std::function<bool(const plang::ExprNode&)> ExprIsCharStr,
                 std::function<int64_t(const plang::ExprNode&)> ExprCharStrLen,
                 std::function<int64_t(const plang::ExprNode&)> ExprStrCapStatic,
-                std::function<bool(const plang::Type*)> OrdinalIsUnsigned)
+                std::function<bool(const plang::Type*)> OrdinalIsUnsigned,
+                std::function<bool(const plang::ExprNode&)> ExprIsShortStr,
+                std::function<int64_t(const plang::ExprNode&)> ExprShortStrCap)
         : Ctx(Ctx), B(B), CurFn(CurFn), Complex(Complex), Schema(Schema), StrCall(StrCall),
           Strings(Strings), Types(Types), Sets(Sets), RangeGuards(RangeGuards), RtFns(RtFns),
           I1Ty(I1Ty), I64Ty(I64Ty), I8Ty(I8Ty), DblTy(DblTy), PtrTy(PtrTy),
@@ -57,7 +59,9 @@ public:
           ExprIsVarStr(std::move(ExprIsVarStr)), ExprIsCharStr(std::move(ExprIsCharStr)),
           ExprCharStrLen(std::move(ExprCharStrLen)),
           ExprStrCapStatic(std::move(ExprStrCapStatic)),
-          OrdinalIsUnsigned(std::move(OrdinalIsUnsigned)) {}
+          OrdinalIsUnsigned(std::move(OrdinalIsUnsigned)),
+          ExprIsShortStr(std::move(ExprIsShortStr)),
+          ExprShortStrCap(std::move(ExprShortStrCap)) {}
 
     llvm::Value* emitBinary(const plang::BinaryExpr& e);
     llvm::Value* emitUnary(const plang::UnaryExpr& e);
@@ -122,4 +126,10 @@ private:
     std::function<int64_t(const plang::ExprNode&)> ExprCharStrLen;
     std::function<int64_t(const plang::ExprNode&)> ExprStrCapStatic;
     std::function<bool(const plang::Type*)> OrdinalIsUnsigned;
+    /// Turbo string[N]'s own predicate/capacity pair -- the sibling of
+    /// ExprIsVarStr/ExprStrCapStatic just above, for concatenation and
+    /// comparison's OWN ShortString branches (never routed through Schema's
+    /// VarString-only strAddrAndCap/exprStrCapV).
+    std::function<bool(const plang::ExprNode&)> ExprIsShortStr;
+    std::function<int64_t(const plang::ExprNode&)> ExprShortStrCap;
 };

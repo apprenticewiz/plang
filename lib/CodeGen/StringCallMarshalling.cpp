@@ -21,13 +21,20 @@ llvm::Value* StringCallMarshalling::emitCallArg(const ExprNode& arg,
     // struct, and its capacity is the callee's, not the argument's.  Build the
     // copy at the callee's width and hand over its value; passing the
     // argument's own address, which is what a string expression evaluates to,
-    // would not even be the right type.
+    // would not even be the right type.  This is also what makes Turbo's
+    // "value parameters copied at the callee's declared width" work: passing
+    // a string[20] actual to a `procedure p(s: string[5])` formal builds a
+    // 5-capacity temporary and truncates into it (plang_sstr_assign), never
+    // hands over or reads out of the caller's own 20-capacity storage.
     // A char or a plain literal is string-compatible with the parameter, and
-    // arrives here as something other than a string; emitStrStore knows how to
-    // widen each of them, so the test is on the parameter, not the argument.
+    // arrives here as something other than a string; emitStrStore/
+    // emitSstrStore each know how to widen one, so the test is on the
+    // parameter, not the argument -- argIsStrLike below now also admits
+    // ShortString for that same reason.
     const bool argIsStrLike =
         arg.ResolvedType
         && (arg.ResolvedType->Kind == TypeKind::VarString
+            || arg.ResolvedType->Kind == TypeKind::ShortString
             || arg.ResolvedType->Kind == TypeKind::String
             || arg.ResolvedType->Kind == TypeKind::Char);
     if (paramTy && paramTy->isStructTy() && argIsStrLike) {
@@ -38,7 +45,26 @@ llvm::Value* StringCallMarshalling::emitCallArg(const ExprNode& arg,
                 cap = static_cast<int64_t>(at->getNumElements());
         if (cap > 0) {
             auto* tmp = CreateEntryAlloca(st, "str.arg");
-            emitStrStore(tmp, i64c(cap), arg);
+            // CONFIRMED-LIVE BUG, fixed here: EP's { i64, [N x i8] } and
+            // ShortString's packed <{ i8, [N x i8] }> are BOTH two-element
+            // structs whose second element is an [N x i8] array, so `cap`
+            // just above -- read purely from that array's element count --
+            // comes out right for either one, but WHICH RUNTIME FUNCTION
+            // FAMILY to marshal through is a separate question the array
+            // shape alone cannot answer.  Unconditionally calling
+            // emitStrStore here, regardless of what `st` actually was, sent
+            // a ShortString actual through plang_str_from_bytes/
+            // plang_str_assign's EIGHT-BYTE length-header geometry into a
+            // buffer that is really a ONE-BYTE-header ShortString struct --
+            // silent corruption, no diagnostic.  `st->isPacked()` is what
+            // actually tells the two apart: CGTypes::sstrStructType builds
+            // ShortString's struct with isPacked=true SPECIFICALLY so this
+            // is a guarantee rather than an accident of the current
+            // DataLayout (see its own comment), while strStructType's EP
+            // struct is never packed.  Checked here against the CALLEE's own
+            // declared struct type, not guessed from the argument's kind.
+            if (st->isPacked()) emitSstrStore(tmp, i64c(cap), arg);
+            else                emitStrStore(tmp, i64c(cap), arg);
             return B.CreateLoad(st, tmp, "str.arg.val");
         }
     }
@@ -232,4 +258,48 @@ void StringCallMarshalling::emitStrStore(llvm::Value* dst, llvm::Value* capDst,
         Strings.emitStrFromChar(dst, capDst, rhs);
     else
         Strings.emitStrFromCStr(dst, capDst, rhs);
+}
+
+// Turbo string[N]'s own sibling of emitStrStore just above.  Same dispatch
+// shape (literal / same-dialect-string / char-or-cstr fallback), but every
+// runtime call is a plang_sstr_* one -- and, critically, TRUNCATING rather
+// than erroring: unlike EP's string(N), ISO 10206 §6.9.2.2's capacity-error
+// rule was never Turbo's, so a source longer than \p capDst is silently cut
+// down rather than reported (see checkStringCapacity's own ShortString early
+// return, SemaStmt.cpp, and plang_sstr_assign/plang_sstr.cpp).  No
+// ExprIsCharStr arm: Sema's isAssignCompatible has no ShortString←
+// fixed-string-type rule (out of this item's scope), so that combination
+// never reaches here.
+void StringCallMarshalling::emitSstrStore(llvm::Value* dst, llvm::Value* capDst,
+                                           const ExprNode& src) {
+    // A literal is already a run of bytes; going through emitExpr would
+    // build a string temporary first and copy it twice -- the identical
+    // shortcut emitStrStore's own literal arm takes.
+    if (auto* sl = llvm::dyn_cast<StringLitExpr>(&src)) {
+        Strings.emitSstrFromBytes(dst, capDst, Strings.internStrPtr(sl->Value),
+                                  i64c(static_cast<int64_t>(sl->Value.size())));
+        return;
+    }
+    // A ShortString source keeps its own one-byte length prefix; assigning
+    // it is a truncating copy (plang_sstr_assign), never the error EP's
+    // plang_str_assign raises for a source that doesn't fit.  emitStrAddr,
+    // not EmitLValue: src may be a computed ShortString VALUE with no
+    // storage of its own to take the lvalue of -- a concatenation result,
+    // most concretely (`s := s + t` reaches here with src = the `s + t`
+    // BinaryExpr, which emitLValue does not and cannot handle) -- and
+    // emitStrAddr already knows to fall back to EmitExpr for exactly that
+    // case, the same dispatch emitStrStore's own ExprIsVarStr arm relies on
+    // via Schema.strAddrAndCap.
+    if (ExprIsShortStr(src)) {
+        auto* sp = emitStrAddr(src);
+        if (!sp) codegenICE("ShortString assignment from an unlowerable expression");
+        Strings.emitSstrAssign(dst, capDst, sp, i64c(ExprShortStrCap(src)));
+        return;
+    }
+    auto* rhs = EmitExpr(src); // char → i8; other → ptr (cstr)
+    if (!rhs) codegenICE("ShortString assignment from an unlowerable expression");
+    if (rhs->getType()->isIntegerTy(8))
+        Strings.emitSstrFromChar(dst, capDst, rhs);
+    else
+        Strings.emitSstrFromCStr(dst, capDst, rhs);
 }
