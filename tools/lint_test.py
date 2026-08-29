@@ -151,6 +151,12 @@ BRACE_CHECK_EXEMPT = {
     "test/Driver/Turbo/x-plus-lets-a-function-be-called-as-a-statement-discarding-its-result.pas",
     "test/Driver/Turbo/x-minus-rejects-a-function-called-as-a-statement-with-isos-own-diagnostic.pas",
     "test/Driver/Turbo/a-builtin-function-called-as-a-statement-under-x-plus-compiles-and-runs.pas",
+    # Same reasoning again (only ever compiles under -std=turbo -- see its own
+    # RUN: line -- so the matched-delimiter rule this check doesn't model is
+    # the one that actually applies): its header prose discusses '{$R+}'
+    # syntax in English the same way the switch-directive files above already
+    # do.  Not a hazard to fix.
+    "test/Driver/Turbo/minint-div-negative-one-on-a-16-bit-integer-aborts-with-runtime-error-215.pas",
 }
 
 
