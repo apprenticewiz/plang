@@ -92,7 +92,14 @@ BUILTIN(Halt,      "halt",      Proc, EP | TP, 0, 1, R_None)
 // EP §6.7.6.3
 BUILTIN(Card,      "card",      Func, EP,  1,  1, R_Int)
 // EP §6.7.6.7: strings
-BUILTIN(Length,    "length",    Func, EP,  1,  1, R_Int)
+// Length is also Turbo's: real TP7/FPC's own System.Length(s) is a
+// ShortString's length byte read back as an Integer -- discovered as a
+// blocking gap while testing the System-unit string routines below (Copy/
+// Delete/Insert/SetLength are meaningless to test without a way to ask a
+// ShortString its own length), not a pre-existing, deliberate Turbo
+// omission: no prior Turbo work landed a "length" of any kind, and nothing
+// under -std=turbo could ask a ShortString's length at all before this.
+BUILTIN(Length,    "length",    Func, EP | TP,  1,  1, R_Int)
 BUILTIN(Index,     "index",     Func, EP,  2,  2, R_Int)
 BUILTIN(Substr,    "substr",    Func, EP,  2,  3, R_Str)
 BUILTIN(Trim,      "trim",      Func, EP,  1,  1, R_Str)
@@ -220,6 +227,86 @@ BUILTIN(Dec,          "dec",          Proc, TP, 1, 2, R_None)
 // count in both, matching FPC field practice.
 BUILTIN(FillChar,     "fillchar",     Proc, TP, 3, 3, R_None)
 BUILTIN(Move,         "move",         Proc, TP, 3, 3, R_None)
+
+// -std=turbo only: the System-unit ShortString routines and Str/Val.
+// Deliberately NOT LowerCase/UpperCase (confirmed absent from real TP7's
+// System unit -- SysUtils-era additions, out of this milestone) and NOT
+// Trim/Index/Substr (those already exist above as EP-only builtins with
+// EP-specific semantics -- an empty-pattern `index` returns 1, EP's substr
+// RAISES out of range -- that must not be disturbed or reused here).
+//
+// Copy/Concat/StringOfChar all return a capacity-255 ShortString, R_Str's
+// placeholder overridden the same way Sqr/Abs/High/Low's R_Int placeholder
+// is: their real signatures in FPC's own System unit are `function Copy(...):
+// string` etc, i.e. the DEFAULT capacity, regardless of any input operand's
+// own declared (possibly narrower) string[N] capacity -- confirmed against
+// `fpc -Mtp` (Copy/Concat of two string[5] operands is still a full
+// string[255] until truncated by a later assignment, not string[10]).
+BUILTIN(Copy,         "copy",         Func, TP, 3, 3, R_Str)
+// Pos(substr, s) -- 1-based index of the first occurrence of substr in s, or
+// 0 if not found.  EP's `index` returns 1 for an EMPTY pattern (ISO 10206's
+// own rule); Pos does NOT share that rule -- confirmed against `fpc -Mtp`:
+// Pos('', s) is 0 for every s, empty or not.  A completely separate runtime
+// entry point (plang_sstr_pos) from EP's plang_str_index for exactly this
+// reason, even though the search algorithm is otherwise the same shape.
+BUILTIN(Pos,          "pos",          Func, TP, 2, 2, R_Int)
+// Concat(s1 [, s2, ..., sn]) -- variadic concatenation, same capacity-255
+// result and same clamping the `+` operator's own ShortString arm already
+// implements (CGBinaryOps.cpp); MaxArgs -1 since real Turbo/FPC's Concat
+// takes one or more strings, not exactly two.
+BUILTIN(Concat,       "concat",       Func, TP, 1, -1, R_Str)
+// Delete(var s: string; index, count: Integer) -- removes count characters
+// from s starting at index, MUTATING s in place.  Unlike Copy's index/count
+// clamping, an out-of-range index (< 1 or > Length(s)) is a silent NO-OP,
+// not clamped to the nearest valid position -- confirmed against `fpc -Mtp`
+// (Delete(s, 0, 2) and Delete(s, 100, 3) both leave s completely unchanged).
+BUILTIN(Delete,       "delete",       Proc, TP, 3, 3, R_None)
+// Insert(source: string; var s: string; index: Integer) -- inserts source
+// into s before position index, MUTATING s in place, clamped at s's own
+// declared capacity.  Unlike Delete, an out-of-range index IS clamped (to 1
+// or to Length(s)+1) rather than making the call a no-op -- confirmed
+// against `fpc -Mtp`; see CGProcCall.cpp's own comment for the full
+// empirically-derived clamp table.
+BUILTIN(Insert,       "insert",       Proc, TP, 3, 3, R_None)
+// SetLength(var s: string; newLength: Integer) -- sets s's own length byte
+// directly, clamped to s's declared capacity (0 if newLength < 0).  Bytes
+// exposed by growing are left whatever they already held -- confirmed
+// against `fpc -Mtp` that real Turbo/FPC does not zero or space-pad them
+// either.  Deliberately DOES NOT reproduce one further fpc quirk also
+// confirmed empirically: real `fpc -Mtp` lets SetLength write a length byte
+// past a narrow string[N]'s own physical (N+1)-byte storage with no clamp at
+// all (SetLength(s5, 100) on a string[5] left Length(s5) = 100 and a later
+// s5[6] read/wrote out of bounds, `Runtime error 201` under `-Cr`) -- an
+// actual buffer overrun in real Turbo/FPC's implementation, not a rule worth
+// matching; plang clamps to the declared capacity here the same way every
+// other plang_sstr_* function already does.
+BUILTIN(SetLength,    "setlength",    Proc, TP, 2, 2, R_None)
+// StringOfChar(ch: Char; count: Integer) -- a capacity-255 ShortString of
+// count copies of ch, clamped at 255 (StringOfChar('x', 300) is 255 x's, not
+// a runtime error) the same way every other ShortString-producing routine
+// here clamps rather than errors.
+BUILTIN(StringOfChar, "stringofchar", Func, TP, 2, 2, R_Str)
+// UpCase(ch: Char): Char -- real Turbo Pascal 7's UpCase takes and returns a
+// CHAR, not a string (that two-argument-shape confusion is a later Delphi/
+// SysUtils-era overload this milestone excludes, matching the Lower/
+// UpperCase exclusion above).  Only 'a'..'z' change; every other character,
+// ASCII or not, passes through unchanged.
+BUILTIN(UpCase,       "upcase",       Func, TP, 1, 1, R_Char)
+// Str(x [: width [: decimals]]; var s: string) -- formats x the same way
+// write(x [: width [: decimals]]) already does (reusing the writestr capture
+// machinery, BuiltinIO.cpp), into ShortString destination s.  x's optional
+// width/decimals are parsed the same way write's own are (ParseStmt.cpp adds
+// "str" to the write-parameter spelling set for exactly this).
+BUILTIN(Str,          "str",          Proc, TP, 2, 2, R_None)
+// Val(s: string; var v; var code: Integer) -- parses s as v's own type
+// (integer or real) into v, and sets code to 0 on success or to the 1-based
+// index of the first character that does not fit Val's grammar on failure.
+// NEVER aborts the process on bad input, unlike plang_read_i64/_f64's
+// err_read_format/err_read_int_range ([[noreturn]], plang_io.cpp) -- this is
+// Val's entire reason for being a separate, new, non-fatal parsing primitive
+// (runtime/plang_val.cpp) rather than a thin reuse of readstr's existing
+// abort-on-malformed-input machinery.
+BUILTIN(Val,          "val",          Proc, TP, 3, 3, R_None)
 
 #undef ALL
 #undef TP

@@ -367,6 +367,131 @@ void CGProcCall::emitCallStmt(const CallStmt& s) {
         return;
     }
 
+    // ---- Turbo System-unit ShortString routines that mutate a var
+    // parameter, plus Str/Val -- gated TP in Builtins.def, so reaching any
+    // of these arms already means -std=turbo.  sstrArgPtr mirrors
+    // CGFuncCall.cpp's own identical local lambda (its own doc comment
+    // explains why each file keeps a copy rather than sharing one): a
+    // ShortString expression's address and static capacity directly, or a
+    // fresh capacity-sized temporary for a Char/literal operand.
+    auto sstrArgPtr = [&](const ExprNode& x) -> std::pair<llvm::Value*, llvm::Value*> {
+        if (ExprIsShortStr(x))
+            return {StrCall.emitStrAddr(x), llvm::ConstantInt::get(I64Ty, ExprShortStrCap(x), true)};
+        // A literal's OWN length is the byte count to copy -- NOT the
+        // capacity floor below, which exists only so a 0-length literal ('',
+        // legal under Turbo too) still gets a real (1-byte-minimum) alloca
+        // to point at.  See CGBinaryOps.cpp's sstrOperand for the identical
+        // fix and the bug this avoids repeating (an empty-literal argument
+        // reading one stray byte off its own zero-length interned data).
+        int64_t litLen = 0;
+        bool isLit = false;
+        if (auto* sl = llvm::dyn_cast<StringLitExpr>(&x)) {
+            isLit  = true;
+            litLen = static_cast<int64_t>(sl->Value.size());
+        }
+        const int64_t cap = isLit ? std::max<int64_t>(1, litLen) : 1;
+        auto* val = EmitExpr(x);
+        auto* tmp = CreateEntryAlloca(Types.sstrStructType(cap), "sstr.arg");
+        if (val && val->getType()->isIntegerTy(8))
+            Strings.emitSstrFromChar(tmp, llvm::ConstantInt::get(I64Ty, cap), val);
+        else if (isLit)
+            Strings.emitSstrFromBytes(tmp, llvm::ConstantInt::get(I64Ty, cap), val,
+                                       llvm::ConstantInt::get(I64Ty, litLen));
+        else if (val)
+            Strings.emitSstrFromBytes(tmp, llvm::ConstantInt::get(I64Ty, cap), val,
+                                       llvm::ConstantInt::get(I64Ty, cap));
+        return {tmp, llvm::ConstantInt::get(I64Ty, cap)};
+    };
+    // Delete(var s, index, count) -- mutates s in place; Builtins.def's own
+    // comment on the out-of-range-index NO-OP rule (not a clamp).
+    if (lo == "delete" && s.Args.size() == 3) {
+        auto* sp  = StrCall.emitStrAddr(*s.Args[0]);
+        auto* idx = ToI64(EmitExpr(*s.Args[1]));
+        auto* cnt = ToI64(EmitExpr(*s.Args[2]));
+        auto* fn  = RtFns.getExternFnN("plang_sstr_delete", llvm::Type::getVoidTy(Ctx),
+            {PtrTy, I64Ty, I64Ty, I64Ty});
+        B.CreateCall(fn, {sp, llvm::ConstantInt::get(I64Ty, ExprShortStrCap(*s.Args[0])), idx, cnt});
+        return;
+    }
+    // Insert(source, var s, index) -- mutates s in place, clamped at s's own
+    // declared capacity; Builtins.def's own comment on the out-of-range-index
+    // CLAMP rule (the opposite of Delete's no-op).
+    if (lo == "insert" && s.Args.size() == 3) {
+        auto [srcp, srcc] = sstrArgPtr(*s.Args[0]);
+        auto* sp  = StrCall.emitStrAddr(*s.Args[1]);
+        auto* idx = ToI64(EmitExpr(*s.Args[2]));
+        auto* fn  = RtFns.getExternFnN("plang_sstr_insert", llvm::Type::getVoidTy(Ctx),
+            {PtrTy, I64Ty, PtrTy, I64Ty, I64Ty});
+        B.CreateCall(fn, {sp, llvm::ConstantInt::get(I64Ty, ExprShortStrCap(*s.Args[1])),
+                          srcp, srcc, idx});
+        return;
+    }
+    // SetLength(var s, newLength) -- sets s's own length byte, clamped to
+    // s's declared capacity; Builtins.def's own comment on the deliberate
+    // divergence from fpc's own unclamped (buffer-overrunning) behavior.
+    if (lo == "setlength" && s.Args.size() == 2) {
+        auto* sp     = StrCall.emitStrAddr(*s.Args[0]);
+        auto* newLen = ToI64(EmitExpr(*s.Args[1]));
+        auto* fn = RtFns.getExternFnN("plang_sstr_setlength", llvm::Type::getVoidTy(Ctx),
+            {PtrTy, I64Ty, I64Ty});
+        B.CreateCall(fn, {sp, llvm::ConstantInt::get(I64Ty, ExprShortStrCap(*s.Args[0])), newLen});
+        return;
+    }
+    // Str(x [: width [: decimals]], var s) -- reuses the writestr capture
+    // machinery (BuiltinIO.cpp), which owns the full argument-order/
+    // ShortString-header handling; nothing further to do here.
+    if (lo == "str" && s.Args.size() == 2) {
+        Builtins.emitBuiltinStr(s.Args);
+        return;
+    }
+    // Val(s, var v, var code) -- parses s (any turbo-string-like value, not
+    // necessarily an lvalue) into v (Integer- or Real-kind, any width;
+    // Sema's own Val arm already refused anything else) and sets code to 0
+    // on success or the 1-based bad-character index on failure.  NEVER
+    // aborts the process -- the whole reason plang_val_parse_int/_real
+    // (runtime/plang_val.cpp) exist as a genuinely new, non-fatal primitive
+    // rather than a reuse of plang_read_i64/_f64's [[noreturn]] machinery.
+    if (lo == "val" && s.Args.size() == 3) {
+        auto [sp, scap] = sstrArgPtr(*s.Args[0]);
+        (void)scap;
+        auto* dataPtr = Strings.sstrDataPtr(sp);
+        auto* lenRaw  = Strings.sstrLoadLen(sp);
+        auto* lenV    = B.CreateZExt(lenRaw, I64Ty, "val.srclen");
+
+        auto* vAddr = EmitLValue(*s.Args[1]);
+        auto* cAddr = EmitLValue(*s.Args[2]);
+        const auto& vTy = s.Args[1]->ResolvedType;
+        const plang::Type* vBase = vTy.get();
+        while (vBase && vBase->Kind == TypeKind::Subrange && vBase->SubBase)
+            vBase = vBase->SubBase.get();
+
+        auto* codeTmp = CreateEntryAlloca(I64Ty, "val.code");
+        auto* voidTy  = llvm::Type::getVoidTy(Ctx);
+        if (vBase && vBase->Kind == TypeKind::Real) {
+            auto* valTmp = CreateEntryAlloca(DblTy, "val.real");
+            auto* fn = RtFns.getExternFnN("plang_val_parse_real", voidTy,
+                {PtrTy, I64Ty, PtrTy, PtrTy});
+            B.CreateCall(fn, {dataPtr, lenV, valTmp, codeTmp});
+            auto* loaded = B.CreateLoad(DblTy, valTmp, "val.real.loaded");
+            llvm::Type* vLLTy = Types.llvmTypeOfSemaType(*vTy);
+            B.CreateStore(CoerceToType(loaded, vLLTy), vAddr);
+        } else {
+            const bool isUnsigned = vBase && !vBase->IsSigned;
+            auto* valTmp = CreateEntryAlloca(I64Ty, "val.int");
+            auto* fn = RtFns.getExternFnN("plang_val_parse_int", voidTy,
+                {PtrTy, I64Ty, I8Ty, PtrTy, PtrTy});
+            B.CreateCall(fn, {dataPtr, lenV,
+                llvm::ConstantInt::get(I8Ty, isUnsigned ? 1 : 0), valTmp, codeTmp});
+            auto* loaded = B.CreateLoad(I64Ty, valTmp, "val.int.loaded");
+            llvm::Type* vLLTy = Types.llvmTypeOfSemaType(*vTy);
+            B.CreateStore(CoerceToType(loaded, vLLTy), vAddr);
+        }
+        auto* codeLoaded = B.CreateLoad(I64Ty, codeTmp, "val.code.loaded");
+        llvm::Type* cLLTy = Types.llvmTypeOfSemaType(*s.Args[2]->ResolvedType);
+        B.CreateStore(CoerceToType(codeLoaded, cLLTy), cAddr);
+        return;
+    }
+
     if (lo == "new" && !s.Args.empty()) {
         // EP §6.7.5.3: new(p, d1..ds) when p's domain-type is a schema-name.
         if (const auto& pt = s.Args[0]->ResolvedType;

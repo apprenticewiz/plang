@@ -142,7 +142,22 @@ std::shared_ptr<Type> Sema::checkExpr(const ExprNode& E) {
         if (N->Value.empty() && !Opts.has(LangOptions::Feature::EmptyStringLiteral))
             error(E.Loc, diag::err_empty_string_const);
         if (N->Value.empty())
-            T = Type::makeVarString(0);
+            // Turbo has no VarString at all (isVarStringLike is false for
+            // EVERY Turbo type -- ShortString is a structurally distinct
+            // Kind), so unconditionally typing '' as EP's VarString(0) left
+            // it the one string-shaped value under -std=turbo that every
+            // ShortString operator (assignment, +, comparison -- each keyed
+            // on isShortStringLike(T)/T->Kind==String) refused to touch:
+            // `s := ''` for a ShortString s failed to even type-check
+            // ("cannot assign 'string(0)' to variable of type 'string[10]'"),
+            // and `s = ''`/`s <> ''` failed the same way.  This follows the
+            // same EP-vs-not split every OTHER string literal on this arm
+            // already makes just below (TyStr is what a multi-character
+            // literal already resolves to outside EP, and every ShortString
+            // operator already accepts a TyStr operand for exactly that
+            // literal case) rather than treating the empty case as a special
+            // one-off.
+            T = Opts.extendedPascal() ? Type::makeVarString(0) : TyStr;
         else if (N->Value.size() == 1)
             T = TyChar;
         else if (Opts.extendedPascal())
@@ -1371,8 +1386,16 @@ std::shared_ptr<Type> Sema::checkCallExpr(const CallExpr& E) {
             for (const auto& Arg : E.Args) {
                 auto T = checkExpr(*Arg);
                 if (T->isError()) continue;
+                // isShortStringLike widens this for "length" only in
+                // practice: "index" is EP-only (Builtins.def), so under
+                // -std=turbo checkEPOnly has already refused a call to it
+                // before this arm is ever reached, and under EP a
+                // ShortString type does not exist for isShortStringLike to
+                // ever match -- so this one extra disjunct is a genuine
+                // no-op for "index" in both dialects, not a widening of what
+                // "index" itself accepts.
                 const bool StringLike = isVarStringLike(T.get())
-                    || isCharStringType(*T)
+                    || isCharStringType(*T) || isShortStringLike(T.get())
                     || T->Kind == TypeKind::Char || T->Kind == TypeKind::String;
                 if (!StringLike)
                     error(Arg->Loc, diag::err_string_fn_arg_type, {Lo, T->Name});
@@ -1520,6 +1543,77 @@ std::shared_ptr<Type> Sema::checkCallExpr(const CallExpr& E) {
                     error(Arg->Loc, diag::err_string_fn_arg_type, {Lo, T->Name});
             }
             return TyBool;
+        }
+        // TP-only: the System-unit ShortString routines.  A string-like
+        // argument here is ShortString, Char or a plain literal/String --
+        // deliberately NOT isCharStringType (a packed array[1..n] of char):
+        // Turbo's own operators (checkBinary's Plus/comparison ShortString
+        // arms) never widen for that ISO/EP-only shape either, so neither do
+        // these.  isTurboStringLike is local to this arm rather than a
+        // Type.h predicate: nothing outside Turbo's own builtin dispatch
+        // needs "string-like, Turbo's narrower sense" as a named question.
+        auto isTurboStringLike = [](const std::shared_ptr<Type>& T) {
+            return isShortStringLike(T.get()) || T->Kind == TypeKind::Char
+                || T->Kind == TypeKind::String;
+        };
+        // Copy(s, index, count) -- returns a capacity-255 ShortString
+        // (Builtins.def's own comment: real Turbo/FPC's declared signature is
+        // `function Copy(...): string`, unrelated to any input's own
+        // capacity).  index/count are checked only for being integral here;
+        // out-of-range values are CLAMPED at run time (CGFuncCall.cpp), not
+        // rejected at compile time or run time either -- unlike EP's substr,
+        // which raises on an out-of-range request (plang_str.cpp).
+        if (Lo == "copy" && E.Args.size() == 3) {
+            auto ST = checkExpr(*E.Args[0]);
+            auto IT = checkExpr(*E.Args[1]);
+            auto CT = checkExpr(*E.Args[2]);
+            if (!ST->isError() && !isTurboStringLike(ST))
+                error(E.Args[0]->Loc, diag::err_string_fn_arg_type, {Lo, ST->Name});
+            if (!IT->isError() && !IT->isIntegral())
+                error(E.Args[1]->Loc, diag::err_numeric_argument, {Lo, IT->Name});
+            if (!CT->isError() && !CT->isIntegral())
+                error(E.Args[2]->Loc, diag::err_numeric_argument, {Lo, CT->Name});
+            return Ctx_.getShortString(PlangMaxStringCapacity);
+        }
+        // Pos(substr, s) -- 1-based index of the first match, 0 if none.
+        // Builtins.def's own comment: an EMPTY pattern is 0 here (confirmed
+        // against `fpc -Mtp`), the OPPOSITE of EP's index('', s) = 1.
+        if (Lo == "pos" && E.Args.size() == 2) {
+            auto PT = checkExpr(*E.Args[0]);
+            auto ST = checkExpr(*E.Args[1]);
+            if (!PT->isError() && !isTurboStringLike(PT))
+                error(E.Args[0]->Loc, diag::err_string_fn_arg_type, {Lo, PT->Name});
+            if (!ST->isError() && !isTurboStringLike(ST))
+                error(E.Args[1]->Loc, diag::err_string_fn_arg_type, {Lo, ST->Name});
+            return TyInt;
+        }
+        // Concat(s1, ..., sn) -- variadic; same capacity-255 result as Copy.
+        if (Lo == "concat") {
+            for (const auto& Arg : E.Args) {
+                auto T = checkExpr(*Arg);
+                if (!T->isError() && !isTurboStringLike(T))
+                    error(Arg->Loc, diag::err_string_fn_arg_type, {Lo, T->Name});
+            }
+            return Ctx_.getShortString(PlangMaxStringCapacity);
+        }
+        // StringOfChar(ch, count) -- count copies of ch, capacity-255 result.
+        if (Lo == "stringofchar" && E.Args.size() == 2) {
+            auto ChT = checkExpr(*E.Args[0]);
+            auto CT  = checkExpr(*E.Args[1]);
+            if (!ChT->isError() && ChT->Kind != TypeKind::Char)
+                error(E.Args[0]->Loc, diag::err_string_fn_arg_type, {Lo, ChT->Name});
+            if (!CT->isError() && !CT->isIntegral())
+                error(E.Args[1]->Loc, diag::err_numeric_argument, {Lo, CT->Name});
+            return Ctx_.getShortString(PlangMaxStringCapacity);
+        }
+        // UpCase(ch): Char -- real Turbo Pascal 7's own single-character
+        // form; see Builtins.def's own comment on why the later Delphi
+        // string-argument overload is out of scope.
+        if (Lo == "upcase" && !E.Args.empty()) {
+            auto ChT = checkExpr(*E.Args[0]);
+            if (!ChT->isError() && ChT->Kind != TypeKind::Char)
+                error(E.Args[0]->Loc, diag::err_string_fn_arg_type, {Lo, ChT->Name});
+            return TyChar;
         }
         for (const auto& Arg : E.Args) (void)checkExpr(*Arg);
         return Sym->ReturnType ? Sym->ReturnType : TyErr;

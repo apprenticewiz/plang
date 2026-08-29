@@ -25,10 +25,20 @@
 /// and clamped-at-capacity concatenation (plang_sstr_concat and friends).
 /// It still does NOT implement s[0]-as-length-byte (that needs no runtime
 /// entry point at all -- see CGIndexAccess.cpp, which addresses it directly
-/// as an ordinary byte of the struct) or Copy/Pos/Delete/Insert/Str/Val/
-/// SetLength/StringOfChar/UpCase, which are a separate, later work item
-/// (System string routines) that depends on this one; do not extend this
-/// file with those without reading that item's own scope first.
+/// as an ordinary byte of the struct).
+///
+/// The System-unit string routines (a later, now-landed work item) add
+/// Copy/Pos/Delete/Insert/SetLength/StringOfChar below, following this
+/// file's own established conventions throughout (truncate/clamp rather
+/// than raise, a (ptr, capacity) pair per string argument even where the
+/// capacity is not read).  Concat needs no runtime entry point of its own --
+/// CGFuncCall.cpp builds it by chaining plang_sstr_concat, just above,
+/// starting from an empty accumulator.  UpCase needs none either (a single
+/// i8 branch, kept inline in CGFuncCall.cpp).  Str/Val are a different
+/// shape entirely -- Str reuses the writestr capture machinery
+/// (plang_writestr_end_sstr, plang_io.cpp) and Val is a non-fatal parser
+/// with no truncate-and-continue shape to share with anything here
+/// (runtime/plang_val.cpp) -- so neither lives in this file.
 
 #include "plang_stream.h"
 
@@ -159,6 +169,139 @@ void plang_sstr_concat_char(void* dst, int64_t cap_dst,
     std::memcpy(sstrData(dst), sstrData(a), static_cast<size_t>(la2));
     if (la2 < ld) sstrData(dst)[la2] = static_cast<char>(c);
     sstrLen(dst) = static_cast<uint8_t>(la2 + (la2 < ld ? 1 : 0));
+}
+
+// ---- System-unit string routines -------------------------------------------
+//
+// Copy/Pos/Delete/Insert/SetLength/StringOfChar -- see this file's own
+// header comment for what does NOT live here (Concat, UpCase, Str, Val) and
+// why.  Every empirically-derived rule below was checked against a local
+// `fpc -Mtp` install; see the PR this shipped in for the full transcript.
+
+/// Copy(s, index, count) -- CLAMPS index/count into range rather than
+/// raising the way EP's plang_str_substr does for an out-of-range request.
+/// index < 1 clamps to 1 (the count is NOT re-based off the clamp: `Copy(s,
+/// 0, 5)` and `Copy(s, 1, 5)` give the same five characters, confirmed
+/// against `fpc -Mtp`); count < 0 clamps to 0; an index beyond the source's
+/// own length yields an empty result.
+void plang_sstr_copy(void* dst, int64_t cap_dst,
+                      const void* src, int64_t /*cap_src*/,
+                      int64_t index, int64_t count) {
+    const int64_t ecap = effCap(cap_dst);
+    const int64_t srcLen = sstrLen(src);
+    int64_t idx = index;
+    if (idx < 1) idx = 1;
+    int64_t cnt = count;
+    if (cnt < 0) cnt = 0;
+    int64_t avail = 0;
+    if (idx <= srcLen) avail = srcLen - idx + 1;
+    if (cnt > avail) cnt = avail;
+    if (cnt > ecap) cnt = ecap;
+    if (cnt > 0) std::memcpy(sstrData(dst), sstrData(src) + (idx - 1), static_cast<size_t>(cnt));
+    sstrLen(dst) = static_cast<uint8_t>(cnt);
+}
+
+/// Pos(pat, s) -- 1-based index of the first match, 0 if none.  An EMPTY
+/// pattern is 0 -- confirmed against `fpc -Mtp`, the OPPOSITE of EP's own
+/// plang_str_index('', s) = 1 (ISO 10206's own rule for `index`); this is a
+/// wholly separate function from plang_str_index for exactly that reason,
+/// even though the search itself is the same naive substring scan.
+int64_t plang_sstr_pos(const void* pat, int64_t /*cap_pat*/,
+                        const void* s, int64_t /*cap_s*/) {
+    const int64_t plen = sstrLen(pat);
+    const int64_t slen = sstrLen(s);
+    if (plen == 0 || plen > slen) return 0;
+    const char* pd = sstrData(pat);
+    const char* sd = sstrData(s);
+    for (int64_t i = 0; i <= slen - plen; ++i)
+        if (std::memcmp(sd + i, pd, static_cast<size_t>(plen)) == 0) return i + 1;
+    return 0;
+}
+
+/// Delete(var s, index, count) -- removes count characters starting at
+/// index, MUTATING s in place.  Unlike Copy, an out-of-range index (< 1 or >
+/// Length(s)) makes the whole call a NO-OP rather than clamping -- confirmed
+/// against `fpc -Mtp`: Delete(s, 0, 2) and Delete(s, 100, 3) both leave s
+/// completely unchanged.  count is still clamped to what is actually
+/// available (and to >= 0), matching Copy's own count rule.
+void plang_sstr_delete(void* s, int64_t /*cap_s*/, int64_t index, int64_t count) {
+    const int64_t len = sstrLen(s);
+    if (index < 1 || index > len) return;
+    int64_t cnt = count;
+    if (cnt < 0) cnt = 0;
+    const int64_t avail = len - index + 1;
+    if (cnt > avail) cnt = avail;
+    if (cnt == 0) return;
+    char* data = sstrData(s);
+    const int64_t tailStart = index - 1 + cnt;
+    const int64_t tailLen   = len - tailStart;
+    if (tailLen > 0) std::memmove(data + (index - 1), data + tailStart, static_cast<size_t>(tailLen));
+    sstrLen(s) = static_cast<uint8_t>(len - cnt);
+}
+
+/// Insert(source, var s, index) -- inserts source into s before position
+/// index, MUTATING s in place, clamped at s's own declared capacity.  Unlike
+/// Delete, an out-of-range index IS clamped (to 1, or to Length(s)+1) rather
+/// than making the call a no-op -- confirmed against `fpc -Mtp`.  Built into
+/// a 255-byte scratch buffer first (kMaxLen bounds it, so no dynamic
+/// allocation is needed) rather than shifted in place, since the source and
+/// the tail being displaced can overlap the destination in ways a single
+/// memmove cannot express in one pass.
+void plang_sstr_insert(void* s, int64_t cap_s, const void* src, int64_t /*cap_src*/,
+                        int64_t index) {
+    const int64_t ecap = effCap(cap_s);
+    int64_t len = sstrLen(s);
+    if (len > ecap) len = ecap;
+    int64_t idx = index;
+    if (idx < 1) idx = 1;
+    if (idx > len + 1) idx = len + 1;
+    const int64_t idx0 = idx - 1;
+    const int64_t srcLen = sstrLen(src);
+    const char* sdata = sstrData(s);
+    const char* xdata = sstrData(src);
+    char buf[kMaxLen];
+    int64_t pos = 0;
+    for (int64_t i = 0; i < idx0 && pos < ecap; ++i) buf[pos++] = sdata[i];
+    for (int64_t i = 0; i < srcLen && pos < ecap; ++i) buf[pos++] = xdata[i];
+    for (int64_t i = idx0; i < len && pos < ecap; ++i) buf[pos++] = sdata[i];
+    std::memcpy(sstrData(s), buf, static_cast<size_t>(pos));
+    sstrLen(s) = static_cast<uint8_t>(pos);
+}
+
+/// SetLength(var s, newLength) -- sets s's own length byte directly, clamped
+/// to [0, s's declared capacity].  Bytes exposed by growing are left exactly
+/// as they were (no zero-fill, no space-padding) -- confirmed against
+/// `fpc -Mtp` that real Turbo/FPC does not touch them either.  Deliberately
+/// does NOT reproduce two further fpc quirks also confirmed empirically:
+/// real `fpc -Mtp` lets SetLength write a length byte past a narrow
+/// string[N]'s own physical storage with no clamp at all (an actual buffer
+/// overrun, `Runtime error 201` under `-Cr` for a later out-of-bounds
+/// access), AND writes a NEGATIVE newLength through as a raw byte
+/// reinterpretation rather than refusing or clamping it -- SetLength(s,
+/// -1) left Length(s) = 255, i.e. real fpc's implementation is simply
+/// `PByte(@s)^ := Byte(newLength)` with no range check in either direction.
+/// See Builtins.def's own comment on SetLength for the full transcript.
+/// plang clamps to [0, cap_dst] here the same way every other function in
+/// this file already does -- both real quirks above are memory-safety or
+/// input-validation holes, not "ambiguous field practice" worth matching.
+void plang_sstr_setlength(void* s, int64_t cap_s, int64_t newLen) {
+    const int64_t ecap = effCap(cap_s);
+    int64_t n = newLen;
+    if (n < 0) n = 0;
+    if (n > ecap) n = ecap;
+    sstrLen(s) = static_cast<uint8_t>(n);
+}
+
+/// StringOfChar(ch, count) -- count copies of ch, clamped at cap_dst (255 by
+/// construction: Builtins.def's own comment on why StringOfChar's result is
+/// always capacity-255).
+void plang_sstr_of_char(void* dst, int64_t cap_dst, int8_t ch, int64_t count) {
+    const int64_t ecap = effCap(cap_dst);
+    int64_t n = count;
+    if (n < 0) n = 0;
+    if (n > ecap) n = ecap;
+    if (n > 0) std::memset(sstrData(dst), ch, static_cast<size_t>(n));
+    sstrLen(dst) = static_cast<uint8_t>(n);
 }
 
 // ---- comparison -----------------------------------------------------------

@@ -195,13 +195,28 @@ llvm::Value* CGBinaryOps::emitBinary(const BinaryExpr& e) {
             // nested concatenation (`(s + t) + u`), most concretely -- and
             // emitStrAddr already falls back to EmitExpr for exactly that.
             if (ExprIsShortStr(x)) return {StrCall.emitStrAddr(x), i64c(ExprShortStrCap(x))};
-            int64_t cap = 1;
-            if (auto* sl = llvm::dyn_cast<StringLitExpr>(&x))
-                cap = std::max<int64_t>(1, (int64_t)sl->Value.size());
+            // A literal's OWN length is the byte count to copy -- NOT the
+            // capacity floor below, which exists only so a 0-length literal
+            // ('', legal under Turbo too: see SemaExpr.cpp's checkExpr
+            // StringLitExpr arm) still gets a real (1-byte-minimum) alloca to
+            // point at.  Conflating the two (using the floored capacity as
+            // the memcpy length too, as this used to) copied ONE byte out of
+            // an empty literal's interned (zero-length, so off-the-end) data
+            // for `s + ''`/`s = ''` under Turbo -- unreachable before '' had
+            // a Turbo-usable type at all, and live from the moment it does.
+            int64_t litLen = 0;
+            bool isLit = false;
+            if (auto* sl = llvm::dyn_cast<StringLitExpr>(&x)) {
+                isLit  = true;
+                litLen = static_cast<int64_t>(sl->Value.size());
+            }
+            const int64_t cap = isLit ? std::max<int64_t>(1, litLen) : 1;
             auto* val = EmitExpr(x);
             auto* tmp = CreateEntryAlloca(Types.sstrStructType(cap), "sstr.operand");
             if (val && val->getType()->isIntegerTy(8))
                 Strings.emitSstrFromChar(tmp, i64c(cap), val);
+            else if (isLit)
+                Strings.emitSstrFromBytes(tmp, i64c(cap), val, i64c(litLen));
             else if (val)
                 Strings.emitSstrFromBytes(tmp, i64c(cap), val, i64c(cap));
             return {tmp, i64c(cap)};
@@ -340,13 +355,23 @@ llvm::Value* CGBinaryOps::emitBinary(const BinaryExpr& e) {
             // block, just above): an operand may be a computed ShortString
             // value (e.g. `(s + t) = u`) with no lvalue of its own.
             if (ExprIsShortStr(expr)) return {StrCall.emitStrAddr(expr), i64c(ExprShortStrCap(expr))};
-            int64_t cap = 1;
-            if (auto* sl = llvm::dyn_cast<StringLitExpr>(&expr))
-                cap = std::max<int64_t>(1, (int64_t)sl->Value.size());
+            // See sstrOperand's identical fix, just above in this file's
+            // concatenation block, for why litLen (not the floored capacity)
+            // is the memcpy length: an empty literal's true length is 0, and
+            // conflating the two copied one stray byte out of it.
+            int64_t litLen = 0;
+            bool isLit = false;
+            if (auto* sl = llvm::dyn_cast<StringLitExpr>(&expr)) {
+                isLit  = true;
+                litLen = static_cast<int64_t>(sl->Value.size());
+            }
+            const int64_t cap = isLit ? std::max<int64_t>(1, litLen) : 1;
             auto* val = EmitExpr(expr);
             auto* tmp = CreateEntryAlloca(Types.sstrStructType(cap), "sstr.cmp.tmp");
             if (val && val->getType()->isIntegerTy(8))
                 Strings.emitSstrFromChar(tmp, i64c(cap), val);
+            else if (isLit)
+                Strings.emitSstrFromBytes(tmp, i64c(cap), val, i64c(litLen));
             else if (val)
                 Strings.emitSstrFromBytes(tmp, i64c(cap), val, i64c(cap));
             return {tmp, i64c(cap)};

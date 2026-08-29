@@ -834,3 +834,9 @@ DIAG(err_invalid_type_cast, Error,
      "cannot cast '%0' to '%1': the types must either both be ordinal or "
      "real (for a value conversion), or be the same size (for a variable "
      "reinterpretation)")
+// TP-only: Val(s, v, code) -- v must be Integer- or Real-kind, any width;
+// confirmed against `fpc -Mtp`, which refuses a Char/Boolean/Enum
+// destination with its own "Integer or real expression expected" (a
+// genuinely narrower rule than "ordinal", which Char/Boolean/Enum all are).
+DIAG(err_val_argument, Error,
+     "'val' requires an integer or real variable, got '%0'")

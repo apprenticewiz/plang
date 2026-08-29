@@ -662,6 +662,35 @@ void plang_writestr_end_fixed(void *Buf, int64_t N) {
     for (int64_t I = L; I < N; ++I) Data[I] = ' ';
 }
 
+/// The Turbo string[N] (ShortString) sibling of plang_writestr_end just
+/// above: same capture-buffer bracketing, but a ONE-byte length prefix (no
+/// [8-byte header, then bytes] layout, no space-padding -- ShortString has
+/// no fixed-string-type sibling the way EP's writestr_end_fixed serves) at
+/// \p S, clamped at \p Cap the same TRUNCATING way every other
+/// plang_sstr_*-family assignment does (plang_sstr.cpp), not EP's
+/// error-on-overflow.  Cap is clamped to 255 defensively -- the length
+/// byte's own ceiling -- the same effCap every plang_sstr_* function applies,
+/// even though Str's own destination is always Sema-sized at exactly 255 or
+/// less already (Builtins.def's own comment on Copy/Concat/StringOfChar).
+void plang_writestr_end_sstr(void *S, int64_t Cap) {
+    std::size_t Len = 0;
+    const char* Buf = nullptr;
+    if (CapDepth > 0) {
+        CapFrame& F = CapStack[--CapDepth];
+        Len = F.Len;
+        Buf = F.Buf;
+    }
+    if (!S) return;
+    int64_t ecap = Cap;
+    if (ecap > 255) ecap = 255;
+    if (ecap < 0)   ecap = 0;
+    auto L = static_cast<int64_t>(Len);
+    if (L > ecap) L = ecap;
+    auto* Base = static_cast<unsigned char*>(S);
+    Base[0] = static_cast<unsigned char>(L);
+    if (L > 0) std::memcpy(Base + 1, Buf, static_cast<std::size_t>(L));
+}
+
 void plang_readstr_begin(const void *S, int64_t Len) {
     PlangInBuf = static_cast<const char*>(S);
     PlangInLen = (Len > 0) ? static_cast<std::size_t>(Len) : 0;

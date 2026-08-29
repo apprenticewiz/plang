@@ -934,6 +934,20 @@ std::shared_ptr<Type> Sema::resolveNamedUnrestricted(const NamedTypeNode& N) {
     if (Lo == "real")    return TyReal;
     if (Lo == "boolean") return TyBool;
     if (Lo == "char")    return TyChar;
+    // Turbo: a bare `string` (no explicit `[N]`) is real TP7/FPC field
+    // practice for "ShortString at the default capacity" -- `{$mode tp} var
+    // s: string;` under real Turbo/FPC gives SizeOf(s) = 256 (255 data bytes
+    // plus the one-byte length prefix), confirmed empirically against a local
+    // `fpc -Mtp` install, not a rejection and not EP's unbounded String.
+    // Checked here, before the EP-only branch below, so that under
+    // -std=turbo "string" resolves exactly the way "string[255]"
+    // (StringTypeNode::IsShortString, ParseType.cpp/SemaType.cpp above)
+    // already does, rather than falling into the EP-only
+    // err_ep_type refusal every other spelling of a bare `string` still gets
+    // outside extendedPascal().  Gated to Opts.turbo() specifically (not
+    // just "not EP") so ISO 7185 mode's own refusal of the name is unchanged.
+    if (Opts.turbo() && Lo == "string")
+        return Ctx_.getShortString(PlangMaxStringCapacity);
     // Both are Extended Pascal's (EP §6.4.2.2, §6.4.3.3).  They are recognized
     // under either standard so that naming one while reading standard Pascal
     // says which type it is and where it comes from, rather than reporting an

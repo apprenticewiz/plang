@@ -62,10 +62,25 @@ public:
     void emitBuiltinReadln(const std::vector<std::unique_ptr<plang::ExprNode>>& args);
     void emitBuiltinWriteStr(const std::vector<std::unique_ptr<plang::ExprNode>>& args);
     void emitBuiltinReadStr(const std::vector<std::unique_ptr<plang::ExprNode>>& args);
+    /// TP-only: Str(x [: width [: decimals]], var s) -- formats x (args[0],
+    /// which may carry a WriteParam width/decimals the same way write's own
+    /// arguments do -- see ParseStmt.cpp's parseWriteArg) into ShortString
+    /// destination s (args[1]), reusing the same writestr capture machinery
+    /// emitBuiltinWriteStr does, just with x written FIRST (not a
+    /// destination-first argument order) and a ShortString (one-byte header)
+    /// destination rather than writestr's EP one.
+    void emitBuiltinStr(const std::vector<std::unique_ptr<plang::ExprNode>>& args);
 
 private:
+    /// \p end bounds the range of args formatted, defaulting to the whole
+    /// vector (SIZE_MAX, clamped to args.size()) -- write/writeln/writestr's
+    /// own calls below are all "format everything from start to the end of
+    /// the argument list" and never pass it, so only emitBuiltinStr (which
+    /// must format ONLY args[0], never args[1], the destination) needs to
+    /// narrow it.
     void emitWriteArgs(const std::vector<std::unique_ptr<plang::ExprNode>>& args, size_t start,
-                        bool newline, llvm::Value* fp, bool binaryTyped);
+                        bool newline, llvm::Value* fp, bool binaryTyped,
+                        size_t end = SIZE_MAX);
     void emitWriteValue(llvm::Value* val, bool newline, llvm::Value* fp = nullptr,
                          const plang::Type* semaTy = nullptr);
     void emitWriteValueFormatted(llvm::Value* val, llvm::Value* w, llvm::Value* d,

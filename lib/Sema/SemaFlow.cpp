@@ -343,6 +343,18 @@ void Sema::flowStmt(const StmtNode* S, FlowState& St) {
             // v1..vn fell to the "only looks" default and warned "read
             // before given a value" on names this statement itself assigns.
             if (Lo == "readstr")                return I >= 1;
+            // TP-only: the System-unit string routines that write through a
+            // var parameter -- missing here, each fell to the "only looks"
+            // default and warned "read before given a value" on a variable
+            // the call itself assigns (the same gap readstr's own comment,
+            // just above, already describes for EP).  Delete/SetLength's var
+            // string is argument 0; Insert's is argument 1 (source, its
+            // OTHER string argument, is read, not written); Str's
+            // destination is argument 1; Val's v and code are arguments 1
+            // and 2 (its source string, argument 0, is read).
+            if (Lo == "delete" || Lo == "setlength") return I == 0;
+            if (Lo == "insert" || Lo == "str")       return I == 1;
+            if (Lo == "val")                         return I == 1 || I == 2;
             return false;
         };
 
