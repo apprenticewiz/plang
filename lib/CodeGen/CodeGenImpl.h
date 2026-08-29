@@ -526,6 +526,18 @@ struct Codegen::Impl {
         // handed the address of the caller's pointer variable, and `p^` read
         // the variable rather than what it pointed at.
         bool byRef{false};
+        // Turbo's own `array of T` open-array parameter (as opposed to
+        // EP/ISO 7185's conformant-array-schema form, gated to the opposite
+        // dialect) -- read only within CodeGenProcs.cpp's own prologue,
+        // which normalizes this activation's copy of the bound to Low=0 /
+        // High=(actual's own extent - 1) regardless of what the actual's
+        // OWN declared bounds were, confirmed empirically against fpc -Mtp.
+        // Not exposed through paramIsByRef/paramMeta_'s other accessors
+        // below because nothing outside that one prologue needs to ask: the
+        // call site pushes an ordinary (lo, hi) pair exactly like any other
+        // conformant dimension (pushConformantArgs, ClosureAndCallABI.cpp)
+        // and relies on the CALLEE to normalize it on entry.
+        bool isOpenArray{false};
     };
     std::map<std::string, std::vector<ParamMeta>> paramMeta_;
 

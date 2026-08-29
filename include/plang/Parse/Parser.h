@@ -264,6 +264,12 @@ private:
     std::unique_ptr<TypeNode> parsePackedTypeTail(Token Loc,
                                                   bool ConformantAllowed);
 
+    // Turbo's own open-array parameter form: array of T -- no bracket, no
+    // bound-variable clause at all (-std=turbo only; called from
+    // parseParamGroup instead of parseConformantOrRegular when this dialect
+    // is active).  'array' has not yet been consumed.
+    std::unique_ptr<TypeNode> parseTurboOpenArrayParamType();
+
     // variant-part → 'case' [identifier ':'] type-expr 'of' variant-case*
     // Called with Current pointing at 'case'.
     std::unique_ptr<VariantPart>    parseVariantPart();

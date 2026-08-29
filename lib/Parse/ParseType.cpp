@@ -668,6 +668,46 @@ std::unique_ptr<TypeNode> Parser::parseConformantOrRegular(bool Packed) {
     return node;
 }
 
+// Turbo's own open-array parameter form: array of T -- no bracket, no
+// bound-variable clause at all.  'array' has not yet been consumed.
+// Reuses ConformantArrayTypeNode (IsOpenArray=true) rather than a form of
+// its own so CodeGen's existing ptr+bounds calling convention for a
+// conformant dimension -- and Sema's existing bound-identifier machinery --
+// carry over almost unchanged; see that flag's own comment (AstType.h) for
+// the whole design, including why the (never-read) placeholder Specs entry
+// below exists at all.
+//
+// If a '[' follows instead, the program wrote EP/ISO 7185 Level 1's
+// conformant-array-schema form, which never existed in real Turbo Pascal
+// (checked against a local fpc -Mtp build) -- diagnosed here explicitly
+// rather than silently accepted, then recovered by parsing it as that form
+// anyway so one bad parameter does not cascade into unrelated errors for
+// the rest of the file.
+std::unique_ptr<TypeNode> Parser::parseTurboOpenArrayParamType() {
+    Token Loc = Current;
+    expect(TokenKind::Array);
+    if (check(TokenKind::LeftBracket)) {
+        emitError(Current.toLoc(), diag::err_turbo_conformant_array, {});
+        return parseConformantOrRegular(/*Packed=*/false);
+    }
+    expect(TokenKind::Of);
+    auto Elem = parseTypeExpr();
+
+    auto Node        = std::make_unique<ConformantArrayTypeNode>();
+    Node->Loc        = Loc;
+    Node->Packed     = false;
+    Node->IsOpenArray = true;
+    // Never read for an open array (Sema and CodeGen each synthesize a
+    // per-parameter-name bound pair instead -- openArrayLowBoundName/
+    // openArrayHighBoundName's own comment) but kept as a single entry so
+    // every existing "one entry per dimension" walk (conformantDimCount,
+    // Specs.size(), ...) continues to see exactly one dimension here, the
+    // same as it would for a single-dimension EP schema.
+    Node->Specs.push_back({/*Lo=*/"", /*Hi=*/"", /*OrdType=*/"integer"});
+    Node->Element = std::move(Elem);
+    return Node;
+}
+
 // record-type → 'record' field-section* variant-part? ';'? 'end'
 std::unique_ptr<RecordTypeNode> Parser::parseRecordType(bool Packed) {
     auto Node    = std::make_unique<RecordTypeNode>();

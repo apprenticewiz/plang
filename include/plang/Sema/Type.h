@@ -219,6 +219,16 @@ struct Type {
     };
     /// One entry per dimension of the conformant array.
     std::vector<ConformantBound> ConformantBounds;
+    /// Turbo's own `array of T` parameter form (-std=turbo only), as opposed
+    /// to EP/ISO 7185's conformant-array-schema form (this same TypeKind,
+    /// gated to the opposite dialect) -- see
+    /// ConformantArrayTypeNode::IsOpenArray's own comment for the whole
+    /// design. Always exactly one dimension, whose lower bound is fixed at 0
+    /// (never a named bound variable the way EP's own may be): only the
+    /// actual's upper bound travels at the call site, and an empty actual
+    /// gives High = -1, Low = 0 -- both confirmed empirically against
+    /// fpc -Mtp.
+    bool IsOpenArray{false};
 
     // --- Record ---
     /// One field in a record type.
@@ -248,8 +258,28 @@ struct Type {
         bool                  IsVar;
         /// Parameter name as declared.
         std::string           Name;
-        /// Declared type of this parameter.
+        /// Declared type of this parameter.  Null exactly when IsUntyped is
+        /// set -- see IsUntyped's own comment.
         std::shared_ptr<Type> Ty;
+        /// Turbo's own `const` parameter (-std=turbo only): see
+        /// ParamGroup::IsConst's own comment (AstType.h) for why this is a
+        /// separate flag from any protected/var distinction rather than
+        /// folded into one of them.  Deliberately NOT folded into IsVar
+        /// either: a const parameter reads like an ordinary value parameter
+        /// everywhere outside CodeGen's own ABI choice (which structured
+        /// const parameters alone use IsVar's by-reference MECHANISM for,
+        /// without being var in the language sense -- see CodeGenProcs.cpp).
+        bool                  IsConst{false};
+        /// Turbo's own UNTYPED parameter (-std=turbo only): `procedure
+        /// P(var x)`, with no type at all -- Ty is null exactly when this is
+        /// set.  A dedicated flag rather than relying on "Ty happens to be
+        /// null" alone: every OTHER null Ty in this codebase means a failed
+        /// resolution (Sema::resolveType never itself returns null -- it
+        /// returns the TyErr sentinel -- so in practice the two are already
+        /// unambiguous), but this flag documents the distinction at every
+        /// call site rather than leaving a reader to rediscover that
+        /// invariant.
+        bool                  IsUntyped{false};
     };
     /// Parameters of this callable type.
     std::vector<Param>    Params;
@@ -543,6 +573,20 @@ ordinalRange(const Type& T) {
     return T.Kind == TypeKind::Procedure || T.Kind == TypeKind::Function;
 }
 
+/// True for a structured type (record, array, or set) -- the shapes Turbo's
+/// `const` parameter passes by REFERENCE rather than copying in, for the
+/// efficiency the feature exists for (CodeGenProcs.cpp).  A scalar or string
+/// const parameter is still copied in exactly like an ordinary value
+/// parameter: there is no efficiency gain to be had for one, and real Turbo
+/// Pascal makes the same choice.  Deliberately excludes ConformantArray/
+/// Schema/SchemaInstance: those are EP-only and never coexist with Turbo's
+/// `const` in the same compilation, so there is nothing for this to answer
+/// about them.
+[[nodiscard]] inline bool isStructuredForConstByRef(const Type& T) {
+    return T.Kind == TypeKind::Record || T.Kind == TypeKind::Array
+        || T.Kind == TypeKind::Set;
+}
+
 /// How a procedural parameter reads in a diagnostic, close to how it was
 /// written: "function(integer): integer", "procedure(var real)".  Parameter
 /// names are left out because ISO §6.6.3.6 does not compare them.
@@ -551,7 +595,13 @@ ordinalRange(const Type& T) {
     for (size_t I = 0; I < T.Params.size(); ++I) {
         if (I) Out += "; ";
         if (T.Params[I].IsVar) Out += "var ";
-        Out += T.Params[I].Ty ? T.Params[I].Ty->Name : "?";
+        if (T.Params[I].IsConst) Out += "const ";
+        // Ty is deliberately null for a Turbo untyped parameter (`procedure
+        // P(var x)`) -- see Param::IsUntyped's own comment -- so this asks
+        // that flag rather than treating a null Ty here the same as the
+        // generic "?" a genuine resolution failure gets just below.
+        Out += T.Params[I].IsUntyped ? "untyped"
+             : (T.Params[I].Ty ? T.Params[I].Ty->Name : "?");
     }
     Out += ")";
     if (T.RetType) Out += ": " + T.RetType->Name;

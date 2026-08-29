@@ -840,3 +840,20 @@ DIAG(err_invalid_type_cast, Error,
 // genuinely narrower rule than "ordinal", which Char/Boolean/Enum all are).
 DIAG(err_val_argument, Error,
      "'val' requires an integer or real variable, got '%0'")
+
+// TP-only: Turbo's `const` parameter (procedure P(const x: T)) -- read-only,
+// parallel in spirit to EP's protected value parameter (err_protected_
+// param_assigned/err_protected_import_assigned above) but a distinct flag
+// and a distinct diagnostic naming 'const' specifically -- see
+// ParamGroup::IsConst's own comment (AstType.h) for why the two are kept
+// separate rather than merged.
+DIAG(err_const_param_assigned, Error, "assignment to const parameter '%0'")
+// TP-only: Turbo's UNTYPED parameter (procedure P(var x), no ': type' at
+// all).  Sema::checkIdent gives this whenever one is used bare -- as a
+// plain value, a field/index base, an actual for a TYPED formal, and so on
+// -- everything except the two legal uses of one: the operand of a
+// variable typecast (Sema::checkTypeCast) and a direct relay to another
+// untyped formal (Sema::checkCallArgs), both confirmed against fpc -Mtp.
+DIAG(err_untyped_param_bare_use, Error,
+     "untyped parameter '%0' can only be used through a type cast, or "
+     "passed on to another untyped parameter")

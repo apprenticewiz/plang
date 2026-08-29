@@ -168,6 +168,17 @@ struct Symbol {
     /// function body is a compile-time error.
     bool IsProtected{false};
 
+    /// Turbo's own `const` parameter (-std=turbo only) — assignment inside
+    /// the function body is a compile-time error, exactly like a protected
+    /// EP value parameter, but reported with its own diagnostic
+    /// (err_const_param_assigned) and, for a structured type, passed by
+    /// reference rather than copied — see ParamGroup::IsConst's own comment
+    /// (AstType.h) for why this is kept as a separate flag from IsProtected
+    /// rather than folded into it.  checkNotProtected / protectedBaseOf
+    /// treat this the same way they already treat IsConformantBound: same
+    /// walk, a diagnostic of its own.
+    bool IsConstParam{false};
+
     /// EP §6.7.3.7.1 NOTE 2: set for a conformant-array bound identifier (the
     /// lo/hi pseudo-variable an index-type-specification introduces).  Such an
     /// identifier "is neither constant nor a variable" — it denotes the actual

@@ -158,16 +158,72 @@ struct ConformantArrayTypeNode : TypeNode {
     std::vector<IndexSpec>     Specs;   // one entry per dimension (usually 1 after expansion)
     std::unique_ptr<TypeNode>  Element; // element type (may itself be ConformantArrayTypeNode)
     bool Packed{false};
+    /// Turbo's own `array of T` parameter form (-std=turbo only), reusing
+    /// this same node rather than a new TypeKind -- see Type::IsOpenArray's
+    /// own comment for the whole design.  Set only by parseTurboOpenArrayParamType;
+    /// EP/ISO 7185's conformant-array-schema form (this struct's usual
+    /// meaning) never sets it, and the two are gated to opposite dialects,
+    /// so nothing downstream ever needs to ask "which form, really" beyond
+    /// checking this flag.  Always exactly one dimension: Specs holds one
+    /// placeholder entry whose Lo/Hi strings are never read -- Sema
+    /// (checkProcBody) and CodeGen (CodeGenProcs.cpp) each synthesize a
+    /// PER-PARAMETER-NAME bound-variable name instead (openArrayLowBoundName/
+    /// openArrayHighBoundName below), because unlike EP's conformant-array
+    /// group semantics, two names sharing one `array of T` group
+    /// (`a, b: array of Integer`) have to size INDEPENDENTLY at the call
+    /// site -- confirmed empirically against fpc -Mtp.
+    bool IsOpenArray{false};
 };
+
+/// The names of the hidden, per-parameter-NAME bound variables a Turbo open-
+/// array parameter is given -- see ConformantArrayTypeNode::IsOpenArray's own
+/// comment for why they must be synthesized per name rather than shared, EP-
+/// conformant-array style, across a whole parameter group.  '$' can never
+/// appear in a Pascal identifier, so this can never collide with a name the
+/// program itself could write.  Sema (registering the symbol) and CodeGen
+/// (naming/finding the incoming value) each call these rather than agreeing
+/// on the spelling by convention alone.
+inline std::string openArrayLowBoundName(const std::string& ParamName) {
+    return ParamName + "$low";
+}
+inline std::string openArrayHighBoundName(const std::string& ParamName) {
+    return ParamName + "$high";
+}
 
 struct ParamGroup {
     bool                      IsVar{false};       /// true = pass by reference
     bool                      IsProtected{false}; /// EP §6.7.3.1: cannot be assigned inside the body
+    /// Turbo's own `const` parameter (-std=turbo only): passed efficiently
+    /// (by reference for a structured type -- CodeGenProcs.cpp; by value
+    /// otherwise, same as an ordinary value parameter) but, like a
+    /// protected EP value parameter, may not be assigned inside the body.
+    /// Deliberately a SEPARATE flag from IsProtected rather than folded into
+    /// it: the two differ in how CodeGen passes a STRUCTURED actual (const
+    /// passes it by reference; protected still copies it in, see
+    /// checkProcBody's own comment) and in which diagnostic names the
+    /// violation (err_const_param_assigned vs. err_protected_param_assigned/
+    /// err_protected_import_assigned) -- a shared flag would need a third
+    /// axis threaded through both to tell them apart again.
+    bool                      IsConst{false};
     std::vector<std::string>  Names;
     /// Where each name in Names was written, index-aligned with Names.  Used
     /// so diagnostics about one name in a multi-name group ("a, b: integer")
     /// point at that name's own token rather than at the shared type.
     std::vector<SourceLocation> NameLocs;
+    /// Where this parameter GROUP itself begins (its 'const'/'var'/protected'
+    /// prefix, or its first name when it has none).  Used as the diagnostic
+    /// location wherever Type->Loc would ordinarily serve but Type may be
+    /// null -- see the field just below.
+    SourceLocation             Loc;
+    /// Null for a Turbo (-std=turbo only) UNTYPED parameter -- `procedure
+    /// P(var x);`, no ': type' at all.  Confirmed against a local fpc -Mtp
+    /// check that only the VAR form is legal in real Turbo Pascal (a bare
+    /// `procedure P(x);` with no 'var' and no type is rejected outright), so
+    /// IsVar is always true whenever Type is null.  Every existing
+    /// dereference of this field elsewhere in the compiler was audited and
+    /// null-guarded when this was introduced (see the PR that added this
+    /// comment for the full list) -- treat a new one exactly as
+    /// suspiciously.
     std::unique_ptr<TypeNode> Type;
 };
 
