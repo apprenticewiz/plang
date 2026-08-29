@@ -6,18 +6,26 @@
 (`$hex`, `#code`, `^ctrl`, adjacent string/char gluing), its `case`-statement
 and text-formatting rules, and — the subject of this document — a `{$...}`
 compiler-directive system with no equivalent in ISO 7185 or Extended Pascal.
-This is Tier 1 of the Turbo milestone: enough of the dialect to compile and
-run real Turbo/FPC-`-Mtp` source, not (yet) the real-mode DOS surface
+This was Tier 1 of the Turbo milestone: enough of the dialect to compile and
+run real Turbo/FPC-`-Mtp` source. Tier 2 (this document's later sections)
+builds the type system real Turbo programs actually declare things with —
+the sized-integer ladder, `PChar` and pointer arithmetic, procedural types
+and values, typed constants and `absolute`, the Boolean-family variants and
+`Single`, `string[N]` (`ShortString`) with its full TP value semantics, the
+System-unit string routines, and `const`/untyped/open-array parameters.
+Still not (yet) covered, at either tier: the real-mode DOS surface
 (`Seg`/`Ofs`/`Mem`/`Intr`/...), which plang rejects by name as targeting a
 machine this compiler does not build for, or object types.
 
-This document covers the compiler-directive system in the depth `plang(1)`
-doesn't: every accepted `{$...}` directive, the predefined `{$IFDEF}` symbols,
-how `{$I file}` resolves a path, and — because a compatibility dialect is
-only honest if it says where it stops being one — every point where plang's
-Turbo mode is known to diverge from what a real `fpc -Mtp` (this project's
-stand-in for Turbo Pascal 7 itself, and empirically checked against
-throughout) actually does.
+This document covers what `plang(1)` doesn't have room for: every accepted
+`{$...}` directive, the predefined `{$IFDEF}` symbols, how `{$I file}`
+resolves a path, the full shape of every Tier 2 type and routine below, and —
+because a compatibility dialect is only honest if it says where it stops
+being one — every point where plang's Turbo mode is known to diverge from
+what a real `fpc -Mtp` (this project's stand-in for Turbo Pascal 7 itself,
+and empirically checked against throughout) actually does. Both tiers'
+divergences are collected in one place, "Documented deviations," near the
+end.
 
 ---
 
@@ -349,6 +357,539 @@ with any code the program names, including one none of the checks above uses
 
 ---
 
+# Tier 2: types, values, and the System-unit string routines
+
+Tier 1 (above) is the dialect's syntax and its compiler-directive system.
+Tier 2 is the type system a real Turbo program actually declares variables,
+parameters, and constants with: a ladder of sized integers, a real pointer
+type with arithmetic, procedural values, static-storage "typed constants,"
+loose Booleans, a 32-bit float, a genuinely different bounded-string type
+from Extended Pascal's, and the handful of System-unit routines that make a
+bounded string usable (`Copy`, `Pos`, `Delete`, `Insert`, ...). Every feature
+below is gated to `-std=turbo` and rejected under `-std=iso7185`/
+`-std=iso10206` exactly like Tier 1's own extensions.
+
+## The sized-integer ladder
+
+`-std=turbo` declares nine additional integer names, `AnsiChar`, and an
+untyped `Pointer`, alongside the dialect's own 16-bit `Integer`:
+
+| Name | Width | Signed | Real TP7, or later? |
+|---|---|---|---|
+| `ShortInt` | 8 | yes | genuine TP7 |
+| `Byte` | 8 | no | genuine TP7 |
+| `SmallInt` | 16 | yes | **FPC** (an explicit synonym for `Integer`; not in TP7 at all) |
+| `Word` | 16 | no | genuine TP7 |
+| `Integer` | 16 | yes | genuine TP7 (the dialect's own plain integer, unaffected) |
+| `LongInt` | 32 | yes | genuine TP7 |
+| `Cardinal` | 32 | no | **FPC/Delphi** (TP7 had no unsigned 32-bit type) |
+| `LongWord` | 32 | no | **FPC** (an explicit synonym for `Cardinal`) |
+| `Int64` | 64 | yes | **FPC/Delphi** (TP7's widest integer was `LongInt`, 32 bits) |
+| `QWord` | 64 | no | **FPC** |
+| `AnsiChar` | 8 | (char) | **Delphi/FPC** naming for what TP7 just called `Char` |
+| `Pointer` | (target width) | (pointer) | genuine TP7, untyped, assignment/comparison-compatible with any other pointer type in either direction |
+
+This isn't a gap being closed reluctantly — it's this project's own "match
+field compilers on ambiguity" convention (cited by that name in, e.g.,
+`CGFuncCall.cpp`'s own comment on `Hi`/`Lo`/`Swap`, below): where real TP7
+and `fpc -Mtp` disagree, plang follows `fpc -Mtp`, since that is the actual,
+checkable, still-maintained target this whole dialect is verified against,
+not a museum-piece compiler nobody can run anymore. `SmallInt`/`Integer` and
+`LongWord`/`Cardinal` are not merely
+compatible — they are **the same interned `Type` object**
+(`TypeContext::getInt` keys purely on `{Width, Signed}`), so a variable
+declared `SmallInt` and one declared `Integer` are assignment-compatible for
+the ordinary reason two variables of one type always are, and a diagnostic
+about either says whichever name is idiomatic: `getInt` names a
+`{Width, Signed}` pair with the ladder's own name (`ShortInt`, `Byte`, ...)
+*unless* it is exactly the dialect's own unqualified `integer` (16-bit
+signed), which keeps that plain lowercase name. So an error about a 32-bit
+unsigned value always says `'Cardinal'`, never `'LongWord'`, even if the
+program itself wrote `LongWord` — an accurate description of the same type
+either name denotes, not a bug in which spelling "won."
+
+None of these eleven names exist under `-std=iso7185` or `-std=iso10206`;
+ISO 7185/Extended Pascal keep their own single, always-64-bit `Integer` and
+`Real` exactly as before Tier 2, unaffected by construction (every new type
+is minted only when `Opts.turbo()` is true).
+
+### Narrowed subrange and enum storage (TP7 ch.19)
+
+A numeric subrange under `-std=turbo` is stored at the *narrowest* width
+that holds its own declared bounds, not at its host type's width — `type
+Grade = 1..100` is a **byte**, even though `1` and `100` are themselves
+written as plain `Integer` (16-bit) literals. This is genuine TP7 chapter 19
+field practice, verified against a real `fpc -Mtp`: `1..100` is 1 byte;
+`-100..100` is 1 byte *signed* (the negative bound needs the sign bit even
+though `100` alone would not); `-200..200` is 2 bytes signed (`-200` doesn't
+fit signed 8-bit); `0..1000000` is 4 bytes; `0..255` is 1 byte *unsigned*;
+`0..256` is 2 bytes. The exact rule
+(`TypeContext::narrowestStorage`) tries unsigned 8/16/32-bit first (in that
+order, whenever the lower bound is `>= 0`), then signed 8/16/32-bit, and
+falls back to 64-bit signed only if nothing narrower fits — so a subrange
+with a nonnegative lower bound is *always* unsigned at whatever width it
+lands on, never signed at that same width, even when a signed encoding of
+that width would also have held it. An enumeration's own implicit `0..N-1`
+range is narrowed by the identical rule and the identical helper (a
+3-member enum is a byte; a 300-member one is a `Word`). A subrange hosted on
+`Char` or `Boolean` gets its host's own natural width (8 bits) instead of
+falling back to the dialect's default width, and a subrange hosted on an
+already-narrowed `Enum` inherits that enum's own (possibly narrowed) width.
+ISO 7185 and Extended Pascal are completely unaffected — this narrowing is
+gated on the same `Turbo_` flag as everything else in this section, and
+every dialect other than Turbo keeps the wide, uniform storage it always
+had.
+
+### Value and variable typecasts
+
+`TypeName(expr)` is a typecast, not a function call, resolved by the same
+mechanism EP's own `TypeName[...]` bracket-cast machinery already uses,
+extended to Turbo's parenthesized spelling. It means two different things
+depending on whether it appears where a *value* is wanted or where a
+*variable* (an lvalue) is:
+
+- **As a value** — `Integer(SomeReal)`, `Byte(SomeWord)` — it *converts*:
+  ordinal-to-ordinal reinterprets the ordinal value (truncating or
+  sign/zero-extending as needed, the same as an assignment between the two
+  types would), and real-to-ordinal truncates toward zero (`Trunc`'s own
+  rule), never rounds.
+- **As a variable** — `TByteRec(SomeWord).Lo := 0`, or a bare
+  `Color(c) := Red` as a whole assignment target — it does **not** convert
+  anything. It reinterprets the operand's *own storage* in place, the C
+  `reinterpret_cast`/union-overlay idiom real Turbo code uses to pick apart
+  a wider value's bytes. This requires the two types be *exactly* the same
+  size (`Sema::byteSizeOf`, the identical size arithmetic `SizeOf` itself
+  answers from — see below), or it's a compile-time error: `Word(SomeByte)`
+  as an lvalue is rejected, since a two-byte reinterpretation of one-byte
+  storage would read past the end of it.
+
+A variable typecast is its own AST node kind (`TypeCastExpr`), not a
+`CallExpr` with a type-named callee, specifically so it can be an lvalue:
+the ordinary call-expression code path spills its result to a temporary,
+which would silently turn `TByteRec(w).Lo := 0` into a write to a throwaway
+copy instead of mutating `w`'s real storage.
+
+## `PChar`/`PAnsiChar`, pointer arithmetic, and `p[i]` indexing
+
+`PChar` (and its FPC-era synonym `PAnsiChar`) is Turbo's null-terminated
+C-style string pointer: `p + n` and `p - n` (pointer arithmetic), `p1 - p2`
+(the element count between two pointers of the same pointee type), `p[i]`
+indexing as both a read and a write, and a zero-based `array[0..n] of Char`
+decaying to its own address with no `@` needed (`p := buf`) all work on it.
+
+**The gate is structural, not nominal — this was corrected empirically
+against a real `fpc -Mtp` (3.2.2) during this project's own Turbo work,
+after an initial draft gated on "is this literally the predefined `PChar`
+type."** Real Turbo/Delphi/FPC gives this same arithmetic to *any* pointer
+whose pointee is `Char` — a program's own `type P = ^Char; var q: P;`
+declaration gets exactly the same `q + 1`, `q[i]`, and array-decay treatment
+`PChar` does, confirmed across both `{$mode tp}` and `{$mode objfpc}`, with
+`{$pointermath off}` and `{$T+}` both forced explicitly to rule either one
+out as the real gate. A `^Byte` or `^Integer` alias does **not** get this
+treatment merely for sharing a width with `Char` — the rule keys on the
+*pointee type*, not the pointer's declared name or its underlying
+representation. plang's own gate (`isCharPointerType`, `Type.h`) matches
+this exactly: any pointer type whose pointee resolves to `Char` qualifies,
+checked independently at each of the three call sites that need it
+(`Sema::checkBinary` for `+`/`-`, `Sema::checkIndex` for `p[i]`,
+`Sema::isAssignCompatible` for the array-decay assignment) — not a special
+case for the name `PChar` anywhere in Sema.
+
+Two scope boundaries worth being explicit about:
+
+- **ISO 7185 and Extended Pascal `^char` are completely untouched.** Their
+  `=`/`<>`-only comparison (ISO §6.7.2.5) is exactly what it always was;
+  every one of the checks above is additionally gated on `Opts.turbo()`,
+  independent of the structural pointee check.
+- **Only a *zero-based* `array[0..n] of Char` decays.** ISO §6.4.3.2's
+  canonical `array[1..n] of char` string-type — 1-based — does **not**
+  decay to a `PChar`-compatible pointer, matching `fpc -Mtp`'s own refusal
+  of the 1-based case. This is not an oversight; a 1-based array's element
+  0 doesn't exist, so decaying it to a pointer whose arithmetic assumes
+  index 0 is the start would be silently wrong.
+
+`write`/`writeln` of a `PChar` value prints the bytes it points to up to the
+terminating NUL (gated to `-std=turbo`, confirmed against `fpc -Mtp`).
+`read`/`readln` of a `PChar` remains rejected — also matching `fpc -Mtp`: a
+bare pointer carries no buffer capacity for a reader to respect, so there is
+no safe destination to read into.
+
+## Procedural types and procedural variables
+
+`type TProc = procedure(x: Integer);` declares a procedural type, and `f:
+TProc` a *variable* of it — genuinely new surface with no ISO 7185/Extended
+Pascal equivalent (the existing procedural/functional *parameter* form, ISO
+§6.6.3.1, is unaffected and untouched by this feature). `f := SomeRoutine`
+and `f := @SomeRoutine` both assign a reference (the general `@` operator
+from Tier 1, optional here); `f(10)` calls through it, dispatching to
+whichever routine was assigned most recently.
+
+**Disambiguating `f := g`** — "call `g` and assign its result" vs. "take a
+reference to `g`" — is resolved by the **assignment target's own type**:
+only when the target's resolved type is itself callable (`Procedure`/
+`Function`) does a bare routine name on the right-hand side become a
+reference. `f: Integer; f := SomeFunc` still means exactly what it always
+has under every dialect — call `SomeFunc`, assign its result — since
+`Integer` is never itself callable. This is the single most important
+compatibility property of the feature: it must not disturb the ubiquitous
+"assign a function's own result via its own name" idiom that appears
+throughout ordinary ISO/EP/Turbo code.
+
+**The nested-routine restriction.** A procedural *variable* lowers to one
+flat function pointer, unlike a procedural *parameter*, which is carried as
+an `{entry point, frame}` pair (`ClosureAndCallABI`). Storing a *nested*
+routine's reference into a flat pointer would silently drop its static
+link — the moment the enclosing activation returns, that pointer dangles,
+a memory-corruption bug rather than a mere type error. So `checkRoutineValue`
+refuses to assign either of two things to a procedural variable:
+
+1. **A textually nested routine**, by name (`Symbol::IsNested`) — refused
+   outright, not only when it is proven to actually capture an outer
+   variable, since whether it does is not something this check tries to
+   prove either way.
+2. **A procedural parameter itself** — its own actual binding (possibly to
+   some other, nested, capturing routine from an entirely different
+   activation) isn't known at the point it would be assigned, so it is
+   refused the same way.
+
+A **top-level** (non-nested) routine has no static link to drop and may
+always be assigned. A procedural *variable* may itself be captured by a
+nested routine through the ordinary static-link mechanism, like any other
+outer variable — what's disallowed is only storing a nested routine's own
+reference *into* one, not reading one from within nested code.
+
+## Typed constants and `absolute`
+
+**Typed constants** (`const X: Integer = 0;`) are not constants at all —
+matching real TP7, plang gives one static storage and a one-time
+initializer, and it may be assigned to like an ordinary variable
+afterward. Implemented as `SymbolKind::Var` (with `Symbol::IsTypedConst`
+set), deliberately never `SymbolKind::Const` — which is what makes it
+correctly refused as an array bound or `case` label with no extra rejection
+logic of its own: `Sema::constBound` only ever folds a real
+`SymbolKind::Const`.
+
+Declared **inside a procedure**, a typed constant keeps its value across
+separate calls, the same as a C `static` local — not a fresh,
+freshly-initialized stack slot on every activation the way an ordinary
+local `var` or local `const` gets. It has its own internal-linkage
+`llvm::GlobalVariable`, mangled with the enclosing procedure's own scope, in
+place of the per-activation alloca every other local receives.
+
+The initializer must fold to a genuine compile-time constant (TP7's own
+rule — it's baked into the program's data segment once, not computed at
+start-up); a scalar, or a *fixed* (non-variant) record/array built from
+scalars, folds to a real `llvm::Constant` aggregate, with Turbo's own
+positional literal syntax (`(1, 2, 3)`, or `(X: 10; Y: 20)` for a record —
+unlike EP's labeled `[1: 1; 2: 2]` bracket form). `Set`/`String`/`File`/
+`Pointer`/`Procedure`/`SchemaInstance`-typed constants and variant records
+are refused with a clear diagnostic rather than partially or unsoundly
+handled — a scope line for this first implementation, not a permanent
+restriction.
+
+**`absolute`** (`var W: Word absolute B;`) overlays a new variable's
+storage directly onto an existing one's, rather than allocating storage of
+its own — `W` and `B` genuinely share memory from then on, not merely start
+out equal. It's not a reserved word: recognized only by spelling, only
+immediately after a var-declaration's type, so a program's own unrelated use
+of the identifier `absolute` anywhere else is completely unaffected. A
+local `absolute` (declared inside a procedure) can overlay any addressable
+designator, including a component (`absolute B[1]`, `absolute SomeRec.Field`)
+— it runs with a real entry block already open, so the ordinary lvalue
+machinery can address it. A **global** `absolute` currently supports only a
+bare variable name as its target, a narrower scope than the local case (not
+a permanent restriction, just what this item's first landing covers). Both
+directives are `-std=turbo`-only, rejected as an ordinary syntax error under
+every other dialect.
+
+## Boolean-family variants and `Single`
+
+**`ByteBool`/`WordBool`/`LongBool`** (8/16/32 bits) are Turbo's "loose"
+Booleans: unlike strict `boolean` (always exactly `{0, 1}`, still lowered to
+`i1` and unaffected by any of this), a loose Boolean may legally hold *any*
+bit pattern, and **any nonzero value reads as true** — `ByteBool(200)` is
+stored as the literal byte 200 and tests true, not silently normalized to
+1. This reuses `TypeKind::Boolean` with a new `Type::IsLooseBool` flag,
+rather than a new `TypeKind` — the same shape the sized-integer ladder
+already uses to add width without adding new kinds. `set of ByteBool` and
+`array[ByteBool]` are both refused, matching `fpc -Mtp`: a loose Boolean is
+treated as unbounded for exactly the same reason an ordinary `Integer`
+would be, since checking a whole loose-Boolean-sized range as a set/index
+base is not what any real program means by declaring one. The only way to
+*construct* a loose Boolean's own non-canonical value is a typecast
+(`ByteBool(200)`) — assigning a plain integer to one is itself rejected, so
+a working cast is not merely a convenience here.
+
+**`Single`** is a second, 32-bit `Real` (`TypeKind::Real` with `Width = 32`,
+lowered to LLVM `float` rather than `double`) alongside the dialects'
+existing 64-bit `Real`. Its default (no field-width) `write`/`writeln`, and
+a width-only (no decimals) field write, both cap output at nine significant
+digits and pad with leading spaces rather than showing double-precision
+noise past what a 32-bit float can actually represent — see "Documented
+deviations" for the related, permanent real-literal-width caveat this does
+not (and cannot) resolve.
+
+**`Extended`/`Comp`** — real TP7's 80-bit and 64-bit-integer-backed
+numeric types — get an explicit, dialect-aware diagnostic under
+`-std=turbo` naming them as unsupported, rather than the generic "undefined
+type" a typo would produce elsewhere; outside Turbo they remain simply
+undefined, exactly as before this item. Neither is implemented; see
+"Documented deviations" for why `Extended` specifically has no path to one
+(this project has only ever had one floating-point representation, 8-byte
+`Double`).
+
+## `ShortString`: Turbo's `string[N]`, contrasted with EP's `string(N)`
+
+**This is the single most important thing to keep straight when reading
+Turbo source alongside Extended Pascal source: `string[N]` and `string(N)`
+look similar and are not.** They are two different `TypeKind`s
+(`ShortString` vs. `VarString`), two different binary layouts, and — the
+point of this section — different value semantics at nearly every operation
+that touches one. Turbo's `-std=turbo` uses square brackets; EP's
+`-std=iso10206` uses parentheses; the two dialects are structurally mutually
+exclusive today, so this contrast is never something a single program has
+to navigate, but a reader moving between plang's own two Pascal dialects
+does.
+
+### Layout
+
+| | `string[N]` (Turbo `ShortString`) | `string(N)` (EP `VarString`) |
+|---|---|---|
+| Length field | 1 byte, `0..255` | 8 bytes (`i64`) |
+| `SizeOf` | `N + 1` exactly, no padding | `roundUp(8 + N, 8)` |
+| Struct | `<{i8, [N x i8]}>`, **packed** (1-byte aligned throughout) | `{i64, [N x i8]}`, normally aligned |
+| Bare `string` (no size) | Capacity **255** (confirmed real TP7/FPC field practice — not EP's unbounded `String`) | N/A — EP always requires an explicit or discriminant-derived capacity |
+| Maximum declarable capacity | Length field is 1 byte wide, so no *in-bounds* length can ever exceed 255 regardless of `N`'s own declared size | Governed only by the 1 GiB declaration-size gate |
+
+`SizeOf(string[10])` is `11`; a record with two `string[10]` fields is `22`
+bytes (both fields at 1-byte alignment, no padding between or after them,
+since nothing in a `ShortString` is ever wider than a byte). This is a
+*completely different, incompatible* runtime (`runtime/plang_sstr.cpp`) from
+EP's `string(N)` (`runtime/plang_str.cpp`) — no function in one is ever
+called with the other's pointer, and `StringCallMarshalling::emitCallArg`
+picks between them by checking the parameter type's actual packedness, not
+by LLVM struct shape (both are superficially "a two-element struct with an
+`[N x i8]` second element," which is exactly the mismatch a shape-only test
+would miss — and did, transiently, during this feature's own development;
+now dispatched on `paramTy->isPacked()`).
+
+### Assignment: truncates, never errors
+
+A `string[N]` assignment longer than `N` **silently truncates** — matching
+real Turbo/FPC field practice. This is the opposite of EP's `string(N)`,
+where ISO 10206 §6.9.2.2 makes an over-capacity assignment a runtime error
+(`plang_err_str_capacity`, "assigned to a string(N)"). Every `ShortString`
+runtime function that writes a result clamps to the destination's declared
+(255-ceilinged) capacity instead of calling any capacity-error reporter.
+
+### Comparison: prefix order, shorter is less — the opposite of EP
+
+A `ShortString` compares by **prefix lexicographic order with the shorter
+string treated as less** whenever one is a strict prefix of the other:
+`'a' < 'a '` is **true**. EP's `string(N)` instead **space-pads the shorter
+operand out to the longer one's length before comparing**
+(`plang_str.cpp`'s `strCmp`), so under EP `'a' = 'a '` is **true** — the
+same two literals, opposite relational answer, for opposite reasons (one
+treats the trailing space as real content that makes the values unequal and
+resolves the tie by length; the other treats it as padding that makes them
+equal). Neither implementation shares any comparison code with the other —
+`plang_sstr.cpp`'s `sstrCmp` compares only the overlapping prefix and then
+breaks a length tie directly, with no padding step at all.
+
+### `s[0]` is the length byte — a `0..capacity` indexing range, not EP's `1..length`
+
+Indexing a `ShortString` at `0` reads (and, as an lvalue, writes) its own
+one-byte length field directly — `Ord(s[0]) = Length(s)` always holds, and
+remains true after any mutation (`Insert`/`Delete`/`SetLength`/plain
+reassignment), since every one of those routines updates the same length
+byte `s[0]` aliases rather than some separate bookkeeping field. This has no
+EP equivalent: EP's `string(N)` indexes `1..length` only, with its own
+8-byte length header entirely inaccessible through ordinary indexing.
+
+### Concatenation, function results, and parameters
+
+`+` concatenation clamps at the destination's declared (or 255, for a bare
+`string`) capacity, the same silent-truncate rule assignment follows,
+implemented by `plang_sstr_concat` and friends — a genuinely different
+runtime family from EP's own `+`. A `ShortString` function result and a
+`ShortString` value parameter are both copied/spilled at the **callee's own
+declared width**, not the caller's — a confirmed, fixed bug in this
+feature's own early development (`StringCallMarshalling::emitCallArg` was
+picking the wrong runtime family by LLVM shape alone, described above) is
+what makes this guarantee worth stating explicitly rather than assuming it
+falls out of the general calling convention for free.
+
+## The System-unit string routines
+
+`Copy`, `Pos`, `Concat`, `Delete`, `Insert`, `SetLength`, `StringOfChar`,
+`UpCase`, `Str`, and `Val` are Turbo's own String-routine surface, all
+`-std=turbo`-only, all operating on `ShortString`s specifically — genuinely
+new runtime entry points (`plang_sstr_*`), never a reuse of EP's
+`plang_str_index`/`plang_str_substr`/etc., because several of them
+*deliberately* disagree with EP's superficially similar functions on the
+exact question that matters:
+
+| Routine | Signature | Key semantics |
+|---|---|---|
+| `Copy(s, index, count)` | function, returns capacity-255 `ShortString` | **Clamps** `index`/`count` into range rather than raising (EP's `substr` raises out of range). `index < 1` clamps to `1` **without re-basing `count`** off the clamp — `Copy(s, 0, 5)` and `Copy(s, 1, 5)` give the same five characters. `count < 0` clamps to `0`. An index past the source's own length yields an empty result. |
+| `Pos(pat, s)` | function, returns `Integer` | 1-based index of the first match, `0` if none. **`Pos('', s)` is `0`** for every `s` — the *opposite* of EP's `index('', s) = 1` (ISO 10206's own rule). A wholly separate function from EP's `index` for exactly this reason, even though the underlying scan is the same naive substring search. |
+| `Concat(s1[, s2, ..., sn])` | function, variadic (1 or more args), returns capacity-255 `ShortString` | Same clamped concatenation `+` already implements, chained; needs no dedicated runtime entry point. |
+| `Delete(var s, index, count)` | procedure, mutates `s` in place | An out-of-range `index` (`< 1` or `> Length(s)`) makes the **whole call a no-op** — unlike `Copy`, nothing is clamped. `count` itself is still clamped to what's actually available (and to `>= 0`). |
+| `Insert(source, var s, index)` | procedure, mutates `s` in place | Unlike `Delete`, an out-of-range `index` **is** clamped (to `1`, or to `Length(s)+1`) rather than making the call a no-op. Clamped at `s`'s own declared capacity; built through a 255-byte scratch buffer since source and the displaced tail can overlap the destination in ways one `memmove` can't express. |
+| `SetLength(var s, newLength)` | procedure, mutates `s` in place | Sets `s`'s length byte directly, clamped to `[0, s`'s declared capacity`]`. Bytes newly exposed by growing are left as whatever they already held — no zero-fill, no space-padding (confirmed: real `fpc -Mtp` doesn't touch them either). **Two safety divergences from real `fpc -Mtp`, both deliberate** — see "Documented deviations." |
+| `StringOfChar(ch, count)` | function, returns capacity-255 `ShortString` | `count` copies of `ch`, clamped at 255 (`StringOfChar('x', 300)` is 255 `'x'`s, not a runtime error). |
+| `UpCase(ch: Char): Char` | function | Takes and returns a **`Char`**, not a string — the two-argument-shape overload is a later Delphi/`SysUtils` addition this milestone deliberately excludes. Only `'a'..'z'` change; every other byte, ASCII or not, passes through unchanged. |
+| `Str(x[:w[:d]], var s)` | procedure | Formats `x` exactly the way `write(x[:w[:d]])` already does (reuses the `writestr` capture machinery), into `ShortString` destination `s`. |
+| `Val(s, var v, var code)` | procedure | See below — Turbo's one **non-fatal** numeric-parsing entry point. |
+
+`Length(s)` itself, previously EP-only, is now available under `-std=turbo`
+too, reading a `ShortString`'s own length byte the same way `s[0]` does.
+`LowerCase`/`UpperCase` and `Trim`/`Index`/`Substr` are **deliberately not**
+part of this surface: the first pair is a later `SysUtils`-era addition
+absent from real TP7's System unit; the second three already exist as
+EP-only builtins with EP-specific semantics (`Index('', s) = 1`, `Substr`
+raising out of range) that must not be disturbed by, or reused for,
+anything Turbo-shaped.
+
+### `Val`'s error contract
+
+Every *other* numeric-parsing entry point in this runtime
+(`plang_read_i64`/`_f64` and friends) is fatal on malformed input — it
+reports and exits the process. `Val` is the opposite, and is the entire
+reason it's a new, separate, non-fatal primitive
+(`runtime/plang_val.cpp`) rather than a thin wrapper over `read`'s existing
+scanners: `code` is an **output parameter**, `0` on success or the
+**1-based index of the first character that doesn't fit `Val`'s grammar**
+on failure, and control **always** returns to the caller either way, never
+a process exit.
+
+- **Integer form**: optional leading blanks, an optional `+`/`-` sign
+  (`IsUnsigned` destinations reject a leading `-` outright, `Code = 2`, even
+  for magnitude 0 — `Val('-0', aWordVar, code)` fails exactly like
+  `Val('-1', ...)` does), an optional radix prefix (`$` or `x`/`X` for hex —
+  `'x12'` and `'0x12'` both mean hex 18; `&` for octal; `%` for binary),
+  then one or more digits of that radix. The **entire remainder must be
+  consumed** for success (`'123  '` with trailing spaces fails at the first
+  trailing space, not silently accepted). On success, the full `int64_t`
+  magnitude (sign applied) is written to the output; **overflow of `int64_t`
+  itself** — not the eventual destination's own, possibly narrower, width —
+  is what `Code` reports as failure (a 21-digit literal fails at digit 19,
+  exactly where the accumulator overflows). A value that overflows the
+  *destination's* width but still fits `int64_t` is instead a `Code = 0`
+  success whose value simply doesn't fit — the caller truncates it into the
+  destination with an ordinary sign-extend-or-truncate, reproducing `fpc`'s
+  own silent wraparound exactly (`Val('40000', aTurboIntegerVar, code)` →
+  `code = 0`, value wrapped to `-25536`).
+- **Real form**: optional leading blanks, optional sign, decimal digits, an
+  optional `.`-fraction, an optional `e`/`E` exponent (sign optional,
+  **digits required** once `e`/`E` appears at all) — same "entire remainder
+  must be consumed" rule. **No radix-prefix extension** — `Val('$FF',
+  aRealVar, code)` fails at position 1; Turbo's hex/octal/binary literal
+  forms are integer-only.
+- **Two deliberate, documented divergences from `fpc -Mtp`'s own exact
+  behavior**, both still fully within `Val`'s contract (non-fatal, a
+  defensible `Code` on failure): real `fpc -Mtp`'s real-number scanner has
+  an internal backtracking quirk around a trailing `e`/`e+`/`e-` with no
+  exponent digits that could not be reduced to one general rule from the
+  cases tried — `Val('1e', ...)` fails at `Length+1`, but `Val('1e+', ...)`
+  **succeeds**, silently discarding the `e+`, inconsistent even within
+  `fpc` itself. plang's single-pass, non-backtracking scanner instead
+  uniformly fails both cases at the position right after the introducer.
+
+## `const`, untyped, and open-array parameters
+
+Three related Turbo parameter forms, all `-std=turbo`-only:
+
+- **`const` parameters** (`procedure P(const x: T)`) are read-only —
+  assigning to `x` is `err_const_param_assigned` — but are a *distinct*
+  mechanism from EP's protected value parameter, with a distinct
+  diagnostic, because the two differ in calling convention: a **structured**
+  `const` actual (record/array/set) is passed **by reference**, for the
+  efficiency the feature exists to provide, confirmed via IR inspection to
+  use a bare pointer rather than copying the whole value the way a plain or
+  EP-protected value parameter still does.
+- **Untyped parameters** (`procedure P(var x)` — no `: type` at all) are
+  the classic `memcpy`/`memcmp`-idiom form, confirmed against `fpc -Mtp`
+  that only the `var` spelling is legal (no untyped value-parameter form
+  exists). Sema rejects every use of `x` except as the operand of a
+  **variable typecast** (`Integer(x) := 0`) or a **direct relay to another
+  untyped formal** (`procedure Q(var y); begin Q(x) end` where `x` is
+  itself untyped) — both confirmed against `fpc -Mtp` as the only legal
+  uses — with a real diagnostic (`err_untyped_param_bare_use`) rather than
+  a crash or a silent fallback.
+- **Open-array parameters** (`procedure Sum(a: array of Integer): Integer`)
+  are Turbo's own syntax, distinct from EP/ISO 7185 Level 1's
+  conformant-array-schema form (`array [lo..hi: T] of E`) — the two stay
+  mutually rejected under each other's dialect. Reuses the existing
+  conformant-array machinery (ptr+bounds calling convention, by-value
+  copy-on-modify) rather than a new mechanism: the callee always sees
+  `Low(a) = 0` and `High(a) = ` the actual's own element count minus one,
+  **regardless of what bounds the actual was itself declared with** —
+  `CodeGenProcs.cpp`'s prologue normalizes whatever bounds the caller
+  passes on entry. Two names sharing one parameter group (`a, b: array of
+  Integer`) size **independently** — confirmed against `fpc -Mtp` — and
+  ordinary (non-`var`) open-array parameters copy on entry while a `var`
+  open-array parameter aliases the actual, the same value-vs-`var` split
+  every other parameter kind already has.
+
+`SizeOf`/`High`/`Low` (below) and the string routines above compose with
+all three of these forms freely — an open array of `Word`, or a `const`
+record parameter with a `ShortString` field, work exactly as their
+individual documentation implies with no special interaction of its own.
+
+## New builtins
+
+**`SizeOf`/`High`/`Low`** are, syntactically, the one argument *shape* new
+to this compiler: the sole argument may be a **type name**
+(`SizeOf(Integer)`) rather than a value expression, admitted only in this
+one position (`Parser::parseSizeHighLowArg`), alongside still accepting an
+ordinary value expression exactly like real FPC (`SizeOf(x)`, `High(arr)`).
+Neither ever evaluates its argument as an expression — a type name has no
+value to evaluate, and a value argument is only ever asked for its *static
+type* (`SizeOf(arr[F])` does not call `F`), the same unevaluated-operand
+rule C's own `sizeof` follows. `SizeOf`/`High`/`Low` all fold in constant
+expressions too (`const BufSize = 4 * SizeOf(Integer)`). `High`/`Low`
+answer *in the argument's own type* — `High(Byte)` is a `Byte`, not a bare
+`Integer` — the same "stays in the argument's own type" rule `succ`/`pred`
+already follow. For a Turbo open-array parameter specifically, `Low`/`High`
+read this activation's own synthesized runtime bound slots rather than any
+static range, since an open array's extent is a run-time fact of the actual
+passed, not a compile-time one.
+
+**`Hi`/`Lo`/`Swap`** are **FPC's size-aware versions — a deliberate,
+permanent divergence from literal Turbo Pascal 7**, whose `Hi`/`Lo`/`Swap`
+only ever worked on a 16-bit value. `fpc -Mtp` instead sizes all three off
+the argument's own width, and plang follows `fpc -Mtp` here for the same
+"targets FPC `-Mtp` semantics" reason the sized-integer ladder's naming
+does: `Hi`/`Lo` answer in an **unsigned integer half the argument's own
+width** (`Hi`/`Lo(Word) -> Byte`, `Hi`/`Lo(LongInt) -> Word`,
+`Hi`/`Lo(Int64) -> LongWord`), and `Swap` rotates by half the width (a byte
+swap at 16 bits, a word swap at 32, a doubleword swap at 64) — one formula
+covers every width the ladder provides. **All three require a real integer
+argument at least 16 bits wide**: `ShortInt`/`Byte` (8 bits) have no
+separate high and low half to name at all, and are rejected
+(`err_hi_lo_swap_argument`), not merely narrowed to something degenerate.
+Verified bit-for-bit against `fpc -Mtp` 3.2.2 on `Word` and `LongInt`
+values.
+
+**`Include(s, x)`/`Exclude(s, x)`** are `s := s + [x]`/`s := s - [x]` by
+another name, reusing the existing set-literal/union/difference codegen
+primitives directly rather than a new mechanism.
+
+**`Inc(x[, n])`/`Dec(x[, n])`** mutate an ordinal variable in place by `n`
+(defaulting to `1`) — for a `PChar`-like typed pointer, this advances or
+retreats it the same way `p + n`/`p - n` already do. Mirrors the existing
+`succ`/`pred` lowering (widen, add/subtract, range-check, narrow) but
+stores back into the argument instead of returning a new value.
+
+**`FillChar(var X; Count: Integer; Value)`/`Move(const Source; var Dest;
+Count: Integer)`** — `X`/`Source`/`Dest` are "untyped" the same way real
+Turbo Pascal's are: any variable, addressed directly, its own declared type
+not otherwise examined. `Count` is a **byte** count in both, matching FPC
+field practice (not an element count).
+
+---
+
 ## Documented deviations from real Turbo Pascal / FPC field practice
 
 Everywhere above describes what plang's Turbo mode does; this section is
@@ -430,6 +971,69 @@ alignment. A real Turbo program that depends on a specific `{$PACKRECORDS}`
 setting for its record layout will not get that same layout from plang —
 only the plain `packed`/unpacked distinction is honored.
 
+### Permanent: no `QWord` literal syntax — build one with a typecast
+
+Neither Turbo Pascal nor plang has an *unsigned* integer-literal syntax, and
+plang's own integer literals are `int64_t` end to end, from the scanner
+through constant folding — so a literal past `Int64`'s own maximum
+(`9223372036854775807`) is rejected by the lexer's range check regardless of
+the destination type, before Sema ever sees which type it's headed for. A
+`QWord` value in that upper half of its range (`9223372036854775808` through
+`18446744073709551615`) therefore cannot be written as a literal at all —
+build it with a typecast or arithmetic a `QWord` variable can hold instead,
+exactly the two idioms real `fpc -Mtp` source uses for the identical reason:
+`QWord(-1)` for the all-ones maximum, or `QWord(9223372036854775807) + 1`
+for the value one past `Int64`'s own maximum. This is permanent — not a gap
+in `QWord`'s own write/read support (which is complete and covers the full
+unsigned range end to end), but a limitation of literal syntax that predates
+`QWord` and affects only how its uppermost values get *into* a program's
+source text.
+
+### Permanent: a set is always 256 bits wide, in every dialect — narrowing does not reach it
+
+The sized-integer ladder's per-declaration storage narrowing (see "Narrowed
+subrange and enum storage" above) applies to integers, subranges, and
+enumerations — it does **not** apply to `set of T`. Every set, under every
+dialect including Turbo, is lowered to a fixed 256-bit (32-byte) bitmask
+(`PlangMaxSetElements`, `Sema/Type.h`) regardless of how few elements its
+base type actually has: `set of 0..9` occupies the same 32 bytes `set of
+char` does. This is a pre-existing, dialect-independent design choice (the
+representation that lets any base type up to 256 elements share one set
+implementation), not something Tier 2's narrowing work was ever scoped to
+touch, and not a bug — a real `fpc -Mtp` set is itself sized per-declaration
+in a way plang's is not, so this is a genuine, permanent representational
+difference worth stating plainly rather than leaving a reader to assume
+narrowing reaches everywhere it plausibly could.
+
+### Permanent: `SetLength` is clamped/safe where real `fpc -Mtp` is not
+
+`SetLength(var s, newLength)` sets `s`'s own length byte directly, clamped
+to `[0, s`'s declared capacity`]`. Real `fpc -Mtp` has two confirmed quirks
+here plang deliberately does not reproduce, both memory-safety or
+input-validation holes rather than "ambiguous field practice" worth
+matching: it lets `SetLength` write a length byte **past** a narrow
+`string[N]`'s own physical `(N+1)`-byte storage with no clamp at all — a
+genuine buffer overrun (`SetLength(s5, 100)` on a `string[5]` left
+`Length(s5) = 100` and a later `s5[6]` read/write went out of bounds,
+`Runtime error 201` under `-Cr`) — and it writes a **negative** `newLength`
+through as a raw byte reinterpretation rather than refusing or clamping it
+(`SetLength(s, -1)` left `Length(s) = 255`, i.e. real `fpc`'s implementation
+is simply an unchecked `PByte(@s)^ := Byte(newLength)`). plang clamps to
+`[0, cap]` in both directions instead, the same way every other
+`plang_sstr_*` function already does — a deliberate safety improvement, not
+an oversight, and permanent: there is no reason to reproduce a real buffer
+overrun for compatibility's own sake.
+
+### `Hi`/`Lo`/`Swap` and `Val`'s two scanner quirks: already covered above
+
+Two more permanent, deliberate divergences from real Turbo Pascal 7 /
+`fpc -Mtp` are documented in full where they're most useful to a reader —
+alongside the feature itself, in the Tier 2 sections above — rather than
+repeated here: `Hi`/`Lo`/`Swap` being FPC's size-aware versions rather than
+literal TP7's 16-bit-only ones (see "New builtins"), and `Val`'s two
+confirmed, unreproduced `fpc -Mtp` inconsistencies around a trailing
+`e`/`e+`/`e-` with no exponent digits (see "`Val`'s error contract").
+
 ### Not a Turbo deviation (checked and excluded)
 
 This project's own history has a `div`/`mod` sign-handling fix connected to
@@ -452,4 +1056,7 @@ own comment.
 - `plang(1)` — the full command-line reference, including `-d`/`-u`/`-Fi`/`-frange-checks`.
 - [`docs/conformance.md`](conformance.md) — the ISO 7185 clause 5.1 documentation for the base language.
 - [`docs/modules.md`](modules.md) — Extended Pascal modules and separate compilation.
-- `include/plang/Basic/CompilerSwitches.def`, `lib/Lex/Directives.cpp` — the source of truth this document was written from.
+- `include/plang/Basic/CompilerSwitches.def`, `lib/Lex/Directives.cpp` — the source of truth Tier 1's directive-system sections above were written from.
+- `include/plang/AST/TypeContext.h`, `include/plang/Sema/Type.h`, `lib/Sema/SemaType.cpp` — the sized-integer ladder, narrowed subrange/enum storage, and `SizeOf`/`byteSizeOf`/`byteAlignOf`'s layout arithmetic Tier 2's type sections above were written from.
+- `include/plang/Basic/Builtins.def`, `runtime/plang_sstr.cpp`, `runtime/plang_val.cpp` — the System-unit string routines' and `Val`'s exact, empirically-derived semantics, including the `fpc -Mtp` field-practice citations this document summarizes.
+- `test/CodeGen/Turbo/`, `test/Driver/Turbo/` — per-feature and cross-feature regression coverage for everything in this document.
