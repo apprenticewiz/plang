@@ -20,10 +20,17 @@ newline, present here and absent there.
 
 RUN: %plang %s -o %t
 RUN: %run %t
-RUN: od -An -tx1 a-file-of-char-is-still-text-under-iso-and-ep-not-turbo.dat | FileCheck --strict-whitespace --match-full-lines %s
+RUN: wc -c < a-file-of-char-is-still-text-under-iso-and-ep-not-turbo.dat | tr -d ' ' | FileCheck --check-prefix=SIZE %s
+RUN: od -An -tx1 a-file-of-char-is-still-text-under-iso-and-ep-not-turbo.dat | FileCheck %s
 *)
 
+(* GNU od (Linux) and BSD od (macOS) pad columns differently, so this checks
+   content loosely (default FileCheck whitespace handling, no --match-full-
+   lines) and instead pins the byte COUNT exactly via `wc -c`, which is
+   portable and is what actually distinguishes "2 bytes" from "2 bytes plus
+   a text-mode trailing newline" -- the thing this test exists to catch. *)
 (*
+SIZE: 3
 CHECK: 41 42 0a
 *)
 

@@ -21,10 +21,17 @@ bytes, 0x41 0x42 -- if the text path were used by mistake, a third byte
 
 RUN: %plang -std=turbo %s -o %t
 RUN: %run %t
-RUN: od -An -tx1 file-of-char-is-a-genuine-binary-file-not-text.dat | FileCheck --strict-whitespace --match-full-lines %s
+RUN: wc -c < file-of-char-is-a-genuine-binary-file-not-text.dat | tr -d ' ' | FileCheck --check-prefix=SIZE %s
+RUN: od -An -tx1 file-of-char-is-a-genuine-binary-file-not-text.dat | FileCheck %s
 *)
 
+(* GNU od (Linux) and BSD od (macOS) pad columns differently, so this checks
+   content loosely (default FileCheck whitespace handling, no --match-full-
+   lines) and instead pins the byte COUNT exactly via `wc -c`, which is
+   portable and is what actually distinguishes "2 raw bytes" from "2 bytes
+   plus a text-mode trailing newline" -- the thing this test exists to catch. *)
 (*
+SIZE: 2
 CHECK: 41 42
 *)
 
