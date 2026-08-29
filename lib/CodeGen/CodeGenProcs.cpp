@@ -72,6 +72,16 @@ void Codegen::Impl::emitPredefinedGlobals() {
                                             /*Initializer=*/nullptr, LinkName);
         defVar(PascalName, g, ptrTy, /*typeNode=*/nullptr);
     }
+
+    // FileMode: see Sema::registerBuiltins' FileMode Symbol comment for the
+    // whole design -- this is exactly ExitCode's own mechanism just above,
+    // reused rather than reinvented.  A declaration, not a definition: the
+    // one real plang_tp_filemode lives in runtime/plang_sys.cpp, shared by
+    // every object a Turbo compilation produces.
+    auto* fmGv = new llvm::GlobalVariable(*mod, ty, /*isConst=*/false,
+                                           llvm::GlobalValue::ExternalLinkage,
+                                           /*Initializer=*/nullptr, "plang_tp_filemode");
+    defVar("FileMode", fmGv, ty, /*typeNode=*/nullptr);
 }
 
 // Attaches 'input' and 'output' to the standard streams.  Any other

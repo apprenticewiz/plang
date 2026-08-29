@@ -3,6 +3,7 @@
 #include "plang/AST/Ast.h"
 #include "plang/Basic/Arith.h"
 #include "plang/Basic/Diagnostic.h"
+#include "plang/Basic/PascalFileLayout.h"
 #include "plang/Basic/SemaUtil.h"
 #include "plang/Basic/StringUtil.h"
 
@@ -1850,9 +1851,35 @@ std::optional<uint64_t> Sema::byteSizeOf(const Type& T, FieldOffsets* Offsets) {
     case TypeKind::ShortString:
         return static_cast<uint64_t>(T.StrCapacity > 0 ? T.StrCapacity : 255) + 1;
     // The PascalFile struct of Basic/PascalFileLayout.h, whose shape codegen
-    // checks field by field.
-    case TypeKind::File:
-        return roundUp(8 + 8 + 8 + 4 + 1 + 1 + 1, 8);
+    // checks field by field.  A by-hand field-by-field walk, deliberately
+    // NOT built from that header's own PLANG_FILE_FIELDS macro (whose
+    // second slot constructs an llvm::Type*, which this pure-Sema function
+    // has no LLVMContext to build) -- this is the THIRD, independent
+    // computation of the struct's size the header's own top comment and
+    // CGTypes.h's file-level comment describe (runtime sizeof, codegen's
+    // llvm::StructType layout, and this), cross-checked against the other
+    // two by checkSizeAgreement (CGTypes.cpp) the same as every other type
+    // this function sizes.  PlangFileNameCap is read from the shared header
+    // rather than re-hardcoded, matching how the ShortString case just
+    // above reads T.StrCapacity rather than guessing a width of its own --
+    // both are the one place that particular number is allowed to live;
+    // every OTHER field width below is a fixed LP64 ABI width instead (see
+    // PascalFileLayout.h's own top comment on why those are safe to spell
+    // out directly), the same as this function's every other case does.
+    case TypeKind::File: {
+        uint64_t Off = 0;
+        Off += 8;                                          // Fp (ptr)
+        Off += 8;                                          // Comp (ptr)
+        Off += 8;                                          // CompSize (i64)
+        Off += 4;                                          // Buf (i32)
+        Off += 1;                                          // Binding (i8)
+        Off += 1;                                          // Readable (i8)
+        Off += 1;                                          // CompLoaded (i8)
+        Off += static_cast<uint64_t>(PlangFileNameCap);    // Name (char[N], align 1)
+        Off  = roundUp(Off, 4); Off += 4;                  // Mode (i32)
+        Off  = roundUp(Off, 8); Off += 8;                  // RecSize (i64)
+        return roundUp(Off, 8);
+    }
     case TypeKind::Array: {
         if (!T.IndexType || !T.ElemType) return std::nullopt;
         // ordinalRangeCount, not "SubHi - SubLo + 1" directly: that plain

@@ -98,6 +98,62 @@ void CGProcCall::emitCallStmt(const CallStmt& s) {
         }
         return;
     }
+    // -std=turbo only: Assign(f, name) -- TP's own file model (real
+    // Borland/FPC's Assign), which the reset/rewrite/append/close arms just
+    // below build on: Reset/Rewrite/Append under Turbo take no filename
+    // argument of their own, they open whatever Assign bound f to last.
+    // Gated only by Builtins.def's own TP-only dialect entry (like Assert/
+    // RunError/... above), so this is never reached under ISO/EP.
+    if (lo == "assign" && s.Args.size() >= 2) {
+        auto* fp = FileVars.fileVarPtr(*s.Args[0]);
+        // Same filename marshalling reset/rewrite/extend/update already
+        // need just below -- a string(n)/ShortString actual has no NUL
+        // terminator of its own, and plang_tp_assign takes `const char *`.
+        auto* nm = StrCall.emitCStrArg(*s.Args[1]);
+        auto* fn = RtFns.getExternFnN("plang_tp_assign",
+            llvm::Type::getVoidTy(Ctx), {PtrTy, PtrTy});
+        B.CreateCall(fn, {fp, nm});
+        return;
+    }
+
+    // -std=turbo only: Reset/Rewrite/Append's own binding comes from
+    // whatever Assign(f, name) last bound f to -- an empty bound name
+    // meaning "the console" (stdin for Reset, stdout for Rewrite/Append).
+    // The pre-Assign 2-argument form (`reset(f, 'name.txt')`) is still
+    // accepted here too (PR #475's own Sema-level type check, and its
+    // "still works under -std=turbo" non-regression test, both confirm
+    // this form must go on compiling under Turbo) -- when a second
+    // argument IS given, this is an IMPLICIT Assign: bind f to that name
+    // first (the identical plang_tp_assign call the explicit `assign` arm
+    // above makes, including the identical ShortString/string(n) C-string
+    // marshalling), THEN open it, rather than silently discarding the
+    // argument and falling through to whatever f.Name was left holding
+    // from a stale or absent prior Assign (previously a real bug: a
+    // 2-argument `rewrite(f, 'name.txt')` under Turbo silently wrote to
+    // the console instead of the named file, since nothing ever told f
+    // what to bind to). Second argument here is never a RecSize integer --
+    // that overload is Sema-rejected before codegen ever sees it (this
+    // item does not wire RecSize up; a later item does), so the only
+    // shape reaching here is a filename.  A genuinely separate runtime
+    // function family (plang_tp_reset/plang_tp_rewrite/plang_tp_append,
+    // runtime/plang_file.cpp), not the ISO ones below with a flag --
+    // this project's P7 rule that dialect selection happens at the
+    // CALL-SITE, since an ISO and a Turbo object file can be linked into
+    // one program.
+    if ((lo == "reset" || lo == "rewrite" || lo == "append")
+            && !s.Args.empty() && RangeGuards.isTurbo()) {
+        auto* fp = FileVars.fileVarPtr(*s.Args[0]);
+        if (s.Args.size() > 1) {
+            auto* nm = StrCall.emitCStrArg(*s.Args[1]);
+            auto* assignFn = RtFns.getExternFnN("plang_tp_assign",
+                llvm::Type::getVoidTy(Ctx), {PtrTy, PtrTy});
+            B.CreateCall(assignFn, {fp, nm});
+        }
+        auto* fn = RtFns.getExternFnN("plang_tp_" + lo,
+            llvm::Type::getVoidTy(Ctx), {PtrTy});
+        B.CreateCall(fn, {fp});
+        return;
+    }
     if ((lo == "reset" || lo == "rewrite") && !s.Args.empty()) {
         auto* fp = FileVars.fileVarPtr(*s.Args[0]);
         // A string(n) filename has no NUL terminator of its own -- only the
@@ -126,6 +182,16 @@ void CGProcCall::emitCallStmt(const CallStmt& s) {
         auto* fn  = RtFns.getExternFnN("plang_" + lo + "_file",
             llvm::Type::getVoidTy(Ctx), {PtrTy, I64Ty});
         B.CreateCall(fn, {fp, esz});
+        return;
+    }
+    // -std=turbo only: Close under TP has none of ISO's §6.4.3.5
+    // "finish the final line" step (see plang_tp_close's own comment,
+    // runtime/plang_file.cpp, for exactly what is deliberately left out).
+    if (lo == "close" && !s.Args.empty() && RangeGuards.isTurbo()) {
+        auto* fp = FileVars.fileVarPtr(*s.Args[0]);
+        auto* fn = RtFns.getExternFnN("plang_tp_close",
+            llvm::Type::getVoidTy(Ctx), {PtrTy});
+        B.CreateCall(fn, {fp});
         return;
     }
     if (lo == "close" && !s.Args.empty()) {

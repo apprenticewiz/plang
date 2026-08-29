@@ -1358,6 +1358,36 @@ void Sema::checkCallStmt(const CallStmt& S) {
             return;
         }
 
+        // TP-only: Assign(f, name) / Append(f).  Both take a file-variable
+        // first argument the same way eof/eoln/position/lastposition/empty
+        // do (SemaExpr.cpp's identical check) -- without this,
+        // FileVarHelpers::fileVarPtr's IdentExpr fast path (its own comment)
+        // hands back ANY variable's storage address with no type check of
+        // its own, so `Assign(i, 'x')` for a plain integer i reached the
+        // runtime with that address reinterpreted as a PascalFile*,
+        // corrupting memory with no diagnostic -- the exact bug class issue
+        // #417 closed for position/lastposition/empty.
+        if ((Lo == "assign" || Lo == "append") && !S.Args.empty()) {
+            auto FTy = checkExpr(*S.Args[0]);
+            if (!FTy->isError() && FTy->Kind != TypeKind::File)
+                error(S.Args[0]->Loc, diag::err_file_argument, {Lo, FTy->Name});
+            // Assign's second argument is the filename -- any of Turbo's
+            // string-shaped types (ShortString, PChar's pointee-Char
+            // exemption aside, a plain literal, EP's own string(n) reached
+            // under -std=turbo through a type alias) or a single Char, the
+            // same "string-like" set length/index already check just above
+            // in checkCallExpr (SemaExpr.cpp) for the identical reason.
+            if (Lo == "assign" && S.Args.size() > 1) {
+                auto NTy = checkExpr(*S.Args[1]);
+                const bool StringLike = isVarStringLike(NTy.get())
+                    || isCharStringType(*NTy) || isShortStringLike(NTy.get())
+                    || NTy->Kind == TypeKind::Char || NTy->Kind == TypeKind::String;
+                if (!NTy->isError() && !StringLike)
+                    error(S.Args[1]->Loc, diag::err_string_fn_arg_type, {Lo, NTy->Name});
+            }
+            return;
+        }
+
         // TP-only: Assert(cond: Boolean [; msg: string]).  Type-checked
         // exactly the same whether or not {$C-} is in effect at S.Loc --
         // CGProcCall::emitCallStmt is where the switch is actually read, and

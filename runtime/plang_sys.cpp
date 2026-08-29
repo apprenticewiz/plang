@@ -967,6 +967,19 @@ void plang_tp_paramstr(int64_t N, void *Dst, int64_t DstCap) {
     plang_sstr_from_cstr(Dst, DstCap, S);
 }
 
+/// TP `FileMode: Byte` (Sema::registerBuiltins' FileMode Symbol, -std=turbo
+/// only) -- see that comment for the whole design; this reuses
+/// plang_tp_exitcode's mechanism exactly (one shared definition here, every
+/// compiled Turbo object only declares it -- Codegen::Impl::
+/// emitPredefinedGlobals, CodeGenProcs.cpp).  int16_t for the identical
+/// "matches the LLVM type codegen declares this under" reason
+/// plang_tp_exitcode's own comment gives (defaultIntWidth() under Turbo is
+/// always 16 bits).  Defaults to 2, confirmed against `fpc -Mtp` (a fresh
+/// program's own FileMode reads 2 before anything touches it).  Nothing in
+/// this compiler reads FileMode back yet to change how Reset opens a file --
+/// a later item is expected to.
+int16_t plang_tp_filemode = 2;
+
 } // extern "C"
 
 } // namespace plang

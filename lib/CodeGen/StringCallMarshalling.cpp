@@ -121,6 +121,31 @@ llvm::Value* StringCallMarshalling::emitCStrArg(const ExprNode& e) {
         B.CreateStore(llvm::ConstantInt::get(i8Ty, 0), nulAt);
         return buf;
     }
+    // Turbo string[N] (ShortString): a ONE-byte length prefix followed by
+    // its data, not null-terminated at all (plang_sstr.cpp's own layout
+    // comment) -- so, like string(n) just below, it needs converting rather
+    // than falling to the "already a char *" default this function's own
+    // comment describes.  TP's own Assign(f, name) (CGProcCall.cpp) is the
+    // first caller that can reach this with a ShortString argument -- every
+    // OTHER user of this function (EP's reset/rewrite/extend/update) can
+    // never see a ShortString, since that type does not exist outside
+    // -std=turbo -- but the check is unconditional here anyway, the same
+    // way the VarStr branch below is: correctness by construction, not by
+    // trusting every call site to know which dialect it is in.
+    if (ExprIsShortStr(e)) {
+        auto* addr = emitStrAddr(e);
+        if (!addr) codegenICE("a ShortString value with no address");
+        auto* i8Ty  = llvm::Type::getInt8Ty(Ctx);
+        auto* len   = B.CreateZExt(Strings.sstrLoadLen(addr), I64Ty, "sstr.cstr.len");
+        auto* data  = Strings.sstrDataPtr(addr);
+        const int64_t cap = ExprShortStrCap(e);
+        auto* buf = CreateEntryAlloca(
+            llvm::ArrayType::get(i8Ty, static_cast<uint64_t>(cap) + 1), "sstr.cstr");
+        B.CreateMemCpy(buf, llvm::MaybeAlign(), data, llvm::MaybeAlign(), len);
+        auto* nulAt = B.CreateInBoundsGEP(i8Ty, buf, len, "sstr.cstr.nul");
+        B.CreateStore(llvm::ConstantInt::get(i8Ty, 0), nulAt);
+        return buf;
+    }
     // Only a string(n) value needs converting -- everything else EmitExpr
     // returns for a string-shaped argument (a plain string literal outside
     // Extended Pascal, an already-null-terminated `String`) is already a
