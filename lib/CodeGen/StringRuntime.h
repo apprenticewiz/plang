@@ -73,6 +73,21 @@ public:
                           llvm::Value* len);
     void emitStrFromChar(llvm::Value* dst, llvm::Value* cap, llvm::Value* c);
 
+    /// Turbo string[N] siblings of the five EP emitters just above -- call
+    /// plang_sstr_assign/from_cstr/from_bytes/from_char (plang_sstr.cpp,
+    /// TRUNCATING) rather than plang_str_assign and friends (which ERROR on
+    /// overflow).  Kept entirely separate rather than parameterized
+    /// alongside the EP ones: the two runtimes' struct layouts (one-byte vs.
+    /// eight-byte length header) are incompatible, and a caller must never
+    /// be able to hand a ShortString address to an EP emitter or vice versa
+    /// by merely picking the wrong overload.
+    void emitSstrAssign(llvm::Value* dst, llvm::Value* capDst,
+                        llvm::Value* src, llvm::Value* capSrc);
+    void emitSstrFromCStr(llvm::Value* dst, llvm::Value* cap, llvm::Value* cstr);
+    void emitSstrFromBytes(llvm::Value* dst, llvm::Value* cap, llvm::Value* cstr,
+                           llvm::Value* len);
+    void emitSstrFromChar(llvm::Value* dst, llvm::Value* cap, llvm::Value* c);
+
 private:
     llvm::LLVMContext& Ctx;
     llvm::Module& Mod;

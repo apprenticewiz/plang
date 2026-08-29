@@ -195,6 +195,53 @@ llvm::Value* CGIndexAccess::emitIndexGEP(const IndexExpr& e) {
         return B.CreateGEP(elemTy, ref->data, {idx}, "elem.ptr");
     }
 
+    // Turbo string[N]: s[i], 0-BASED -- a genuinely separate rule from EP's
+    // s[i] arm just below, not a widening of it.  Two deliberate differences
+    // from EP: (1) s[0] is a documented ALIASING exception onto the string's
+    // own one-byte length prefix, addressable and assignable as an ordinary
+    // Char (Ord(s[0]) reads the length; `s[0] := Chr(n)` truncates/extends
+    // the string in place by overwriting its length field directly -- the
+    // canonical Turbo idiom for building a string via indexed assignment);
+    // (2) the upper bound checked is the DECLARED CAPACITY (a compile-time
+    // constant ShortString always has -- Turbo has no schema/discriminant
+    // mechanism, see exprShortStrCap's own comment, to make it anything
+    // else), not the current run-time length the way EP's is, since
+    // `s[Length(s)+1] := 'x'; s[0] := Chr(Length(s)+1)` is the ordinary way
+    // to grow a ShortString past its old length.  Deliberately NOT reached
+    // by widening EP's idx<1 guard below to admit 0: that would silently
+    // ALSO admit index 0 for an EP VarString, which EP explicitly forbids.
+    if (ExprIsShortStr(*e.Array)) {
+        // StrCall.emitStrAddr, not EmitLValue: e.Array may be a computed
+        // ShortString value with no storage of its own -- `(s + t)[1]`, most
+        // concretely -- and emitStrAddr already falls back to EmitExpr for
+        // exactly that, the same dispatch EP's own s[i] arm just below uses.
+        auto* strPtr = StrCall.emitStrAddr(*e.Array);
+        auto* idx    = ToI64(EmitExpr(*e.Index));
+        const int64_t cap = ExprShortStrCap(*e.Array);
+        if (RangeGuards.rangeChecksAt(e.Loc)) {
+            auto* bad = B.CreateOr(
+                B.CreateICmpSLT(idx, llvm::ConstantInt::get(I64Ty, 0), "sstr.rng.lo"),
+                B.CreateICmpSGT(idx, llvm::ConstantInt::get(I64Ty, cap), "sstr.rng.hi"),
+                "sstr.rng.bad");
+            RangeGuards.emitGuard(bad, "sstrbounds", [&] {
+                B.CreateCall(
+                    RtFns.getExternFnN("plang_err_str_index",
+                                 llvm::Type::getVoidTy(Ctx), {I64Ty, I64Ty}),
+                    {idx, llvm::ConstantInt::get(I64Ty, cap)});
+            });
+        }
+        // Byte offset 0 is the one-byte length prefix, offset 1..cap is
+        // data[0..cap-1] (see plang_sstr.cpp's own layout comment) -- so
+        // s[idx]'s address is simply strPtr+idx for EVERY idx in this
+        // range, index 0 included.  No separate "is this index 0" case is
+        // needed the way EP's arm below needs strDataPtr+(idx-1) to skip
+        // its own eight-byte header: ShortString's index space and its byte
+        // layout coincide exactly once the one-byte length prefix is
+        // accounted for, which the +1 implicit in "index 1 is byte offset
+        // 1" already does on its own.
+        return B.CreateGEP(I8Ty, strPtr, {idx}, "sstr.elem.ptr");
+    }
+
     // EP §6.5.3.2: s[i] selects the i'th character, counting from 1 and running
     // to the string's current length rather than to its capacity.
     if (ExprIsVarStr(*e.Array)) {
@@ -333,6 +380,11 @@ llvm::Value* CGIndexAccess::emitIndexGEP(const IndexExpr& e) {
 
 llvm::Value* CGIndexAccess::emitIndexLoad(const IndexExpr& e) {
     auto* ptr = emitIndexGEP(e);
+    // Turbo string[N]: a component (including s[0], the aliased length
+    // byte) is a char too -- own branch, not a widening of EP's, matching
+    // emitIndexGEP's identical split just above.
+    if (ExprIsShortStr(*e.Array))
+        return B.CreateLoad(I8Ty, ptr, "sstr.elem");
     // EP §6.5.3.2: a string component is a char.
     if (ExprIsVarStr(*e.Array))
         return B.CreateLoad(I8Ty, ptr, "str.elem");

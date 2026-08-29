@@ -386,6 +386,17 @@ void Sema::checkStringCapacity(const Type& Dst, const ExprNode& Src) {
         return;
     }
 
+    // Turbo string[N]: a too-long literal TRUNCATES at run time
+    // (plang_sstr_assign/plang_sstr_from_bytes -- runtime/plang_sstr.cpp)
+    // rather than being an error the way EP's string(N) capacity below is --
+    // ISO 10206 §6.9.2.2 is EP's own rule and was never Turbo's.  An
+    // explicit early return rather than relying on the `!isVarStringLike`
+    // return just below happening to also catch ShortString (it does,
+    // isVarStringLike is false for ShortString by construction): this way
+    // the "ShortString truncates, no diagnostic" decision is a fact this
+    // function states about ShortString on its own terms, not a side effect
+    // of a check meant for something else.
+    if (isShortStringLike(&Dst)) return;
     if (!isVarStringLike(&Dst)) return;
     // The capacity lives on the string itself, which for `type s(n) = string(n);
     // var v: s(10)` is the schema's BODY and not the instance.  Widening the

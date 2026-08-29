@@ -362,6 +362,23 @@ std::shared_ptr<Type> Sema::checkIndex(const IndexExpr& E) {
             error(E.Loc, diag::err_index_not_ordinal, {IdxTy->Name});
         return TyChar;
     }
+    // Turbo string[N]: s[i] has char components too -- but 0-based, with
+    // s[0] a deliberate aliasing exception onto the string's own one-byte
+    // length prefix (see CGIndexAccess.cpp's own s[0] comment for the
+    // in-place-truncation idiom that exists for).  Sema does not itself
+    // bound-check EITHER dialect's string index (VarString's arm just above
+    // doesn't either -- that is CodeGen's job, via RangeCheckGuards), so the
+    // only thing this arm needs to decide, like VarString's, is the element
+    // TYPE.  A separate arm rather than widening isVarStringLike's own test
+    // above: ShortString is never VarString-like (isVarStringLike is false
+    // for it by construction), and the two dialects' index BOUNDS differ
+    // (1..current-length for VarString, 0..declared-capacity for
+    // ShortString) even though the element type does not.
+    if (isShortStringLike(ArrTy.get())) {
+        if (!IdxTy->isError() && !IdxTy->isOrdinal())
+            error(E.Loc, diag::err_index_not_ordinal, {IdxTy->Name});
+        return TyChar;
+    }
     // Turbo: `p[i]` on a PChar-like pointer indexes through it, zero-based,
     // with no declared extent to range-check against -- the same "pointee is
     // Char" gate checkBinary's pointer-arithmetic case uses (see
@@ -519,6 +536,41 @@ std::shared_ptr<Type> Sema::checkBinary(const BinaryExpr& E) {
 
     switch (E.Op) {
         case TokenKind::Plus: {
+            // Turbo string[N] concatenation -- decided FIRST and separately
+            // from the EP block below, which classifies every operand with
+            // isStringConcatOperand (isVarStringLike/String/isCharStringType)
+            // and, whenever it fires, always returns an EP-shaped VarString
+            // result via Type::makeVarString.  isVarStringLike is false for
+            // ShortString by construction (see its own comment, Type.h), so
+            // a ShortString operand pair would otherwise fall all the way
+            // through to the plain-numeric '+' checked further down and be
+            // refused as non-numeric.  Gated on at least one operand
+            // actually being a ShortString, so a plain literal/char/
+            // char-array concatenation with NO ShortString involved is
+            // completely unaffected and still reaches the EP block exactly
+            // as before.
+            auto isShortStrConcatOperand = [](const std::shared_ptr<Type>& T) {
+                return isShortStringLike(T.get()) || T->Kind == TypeKind::Char
+                    || T->Kind == TypeKind::String;
+            };
+            if ((isShortStringLike(Lt.get()) || isShortStringLike(Rt.get()))
+                    && isShortStrConcatOperand(Lt) && isShortStrConcatOperand(Rt)) {
+                auto cap = [](const std::shared_ptr<Type>& T) -> int64_t {
+                    if (isShortStringLike(T.get())) return T->StrCapacity;
+                    if (T->Kind == TypeKind::Char)   return 1;
+                    return PlangMaxStringCapacity; // a String operand's
+                                                    // length is not known
+                                                    // until run time
+                };
+                // A ShortString's capacity can never exceed 255 -- the
+                // one-byte length prefix's own ceiling (see plang_sstr.cpp)
+                // -- regardless of what the two operands' capacities sum to;
+                // CodeGen's plang_sstr_concat clamps identically at run time,
+                // so the declared result type and what the runtime actually
+                // does agree.
+                const int64_t sum = cap(Lt) + cap(Rt);
+                return Type::makeShortString(std::min<int64_t>(sum, PlangMaxStringCapacity));
+            }
             // EP §6.8.3.6: string concatenation.  ISO 10206 §6.4.3.3.1's note
             // is explicit that a STRING-TYPE -- the category covering the
             // fixed-string-type (ISO §6.4.3.2's packed array[1..n] of char)
@@ -759,6 +811,19 @@ std::shared_ptr<Type> Sema::checkBinary(const BinaryExpr& E) {
                 return T.Kind == TypeKind::String || isVarStringLike(&T)
                     || T.Kind == TypeKind::Char   || isCharStringType(T);
             };
+            // Turbo string[N]'s own sibling of isStringLike just above --
+            // kept SEPARATE (an added OR at each of isStringLike's two use
+            // sites below) rather than folded into it: isStringLike is a
+            // shared EP/ISO predicate whose Char/isCharStringType/String
+            // arms are not ShortString's to redefine, and ShortString's
+            // comparison RESULT (prefix, shorter-is-less; plang_sstr_eq and
+            // siblings) is a genuinely different runtime question from
+            // isStringLike's own space-padded EP one even where, as here,
+            // the two happen to share which OPERAND KINDS qualify.
+            auto isShortStrLike = [](const Type& T) {
+                return isShortStringLike(&T) || T.Kind == TypeKind::Char
+                    || T.Kind == TypeKind::String;
+            };
             // ISO §6.7.2.5: sets support = <> <= >= only; '<' and '>' are not
             // set operators, and comparing a set against a non-set is invalid.
             if (Lt->Kind == TypeKind::Set || Rt->Kind == TypeKind::Set) {
@@ -817,7 +882,7 @@ std::shared_ptr<Type> Sema::checkBinary(const BinaryExpr& E) {
             // files are not among them.  Matching kinds alone let these
             // through to codegen, which has no instruction for them.
             auto isUncomparable = [&](const Type& T) {
-                if (isStringLike(T)) return false;
+                if (isStringLike(T) || isShortStrLike(T)) return false;
                 return T.Kind == TypeKind::Array || T.Kind == TypeKind::Record
                     || T.Kind == TypeKind::File;
             };
@@ -838,7 +903,8 @@ std::shared_ptr<Type> Sema::checkBinary(const BinaryExpr& E) {
             bool Ok = isAssignCompatible(*Lt, *Rt)
                    || isAssignCompatible(*Rt, *Lt)
                    || (Lt->isNumeric() && Rt->isNumeric())
-                   || (isStringLike(*Lt) && isStringLike(*Rt));
+                   || (isStringLike(*Lt) && isStringLike(*Rt))
+                   || (isShortStrLike(*Lt) && isShortStrLike(*Rt));
             if (!Ok)
                 error(E.Loc, diag::err_cannot_compare, {Lt->Name, Rt->Name});
             else
@@ -2605,27 +2671,21 @@ bool Sema::isAssignCompatible(const Type& Dst, const Type& Src,
         switch (Dst.Kind) {
             // Scalar built-in types: kind equality suffices.
             //
-            // ShortString (Turbo string[N]) is DELIBERATELY not listed here
-            // alongside VarString.  VarString's unconditional true means any
-            // two string(N)s are assignment-compatible regardless of
-            // capacity -- safe because CodeGen's plang_str_assign truncates
-            // across differently-sized buffers at run time.  ShortString has
-            // no such cross-capacity runtime support yet (out of this
-            // item's scope -- see plang_sstr.cpp), so admitting it here too
-            // would let `s: string[5] := t: string[10]` type-check into a
-            // CodeGen path with no safe lowering for it -- at best an
-            // internal error, at worst a mismatched-size store.  Falling to
-            // this switch's `default: return Dst.Name == Src.Name` instead
-            // gives exactly the right, SAFE answer for free: two
-            // ShortStrings of the SAME capacity share one interned Type
-            // object (TypeContext::getShortString), so they either hit the
-            // `&Dst == &Src` identity shortcut above already, or -- reached
-            // some other way -- have identical Names ("string[N]") and the
-            // default still says yes; two DIFFERENT capacities have
-            // different Names and the default correctly says no.
+            // ShortString (Turbo string[N]) now sits alongside VarString,
+            // unlike when this comment was first written: VarString's
+            // unconditional true means any two string(N)s are assignment-
+            // compatible regardless of capacity, safe because CodeGen's
+            // plang_str_assign truncates across differently-sized buffers at
+            // run time.  ShortString now has the identical run-time support
+            // -- plang_sstr_assign (runtime/plang_sstr.cpp), truncating
+            // rather than erroring, wired in through StringCallMarshalling::
+            // emitSstrStore -- so `s: string[5] := t: string[10]` is exactly
+            // as safe here as the VarString case immediately above it, and
+            // for the same reason.
             case TypeKind::Integer: case TypeKind::Real: case TypeKind::Boolean:
             case TypeKind::Char:    case TypeKind::String: case TypeKind::Nil:
             case TypeKind::VarString:
+            case TypeKind::ShortString:
                 return true;
 
             // ISO §6.4.2.3: each enumerated-type definition is a distinct
@@ -2836,6 +2896,17 @@ bool Sema::isAssignCompatible(const Type& Dst, const Type& Src,
     if (isVarStringLike(&Dst) && Src.Kind == TypeKind::String)  return true;
     // String (7185) ← VarString: allow for passing to legacy write/writeln
     if (Dst.Kind == TypeKind::String && isVarStringLike(&Src))  return true;
+
+    // Turbo string[N] compatibility -- the ShortString-specific siblings of
+    // the two VarString←Char/String rules just above.  Not folded into
+    // those (e.g. by widening isVarStringLike's own OR chain): ShortString
+    // and VarString are separate, incompatible runtime layouts, and
+    // deciding "may X be assigned to a ShortString" is a genuinely
+    // different question from the VarString one even where the answer
+    // happens to be the same shape.  ShortString(N) ← char.
+    if (isShortStringLike(&Dst) && Src.Kind == TypeKind::Char)   return true;
+    // ShortString(N) ← plain string literal / String.
+    if (isShortStringLike(&Dst) && Src.Kind == TypeKind::String) return true;
 
     // ISO §6.4.3.2: a string-type takes a string value of exactly its own
     // length.  A literal arrives as String or, in EP, as VarString carrying

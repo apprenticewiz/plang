@@ -43,7 +43,9 @@ public:
              std::function<bool(const plang::ExprNode&)> ExprIsVarStr,
              std::function<bool(const plang::ExprNode&)> ExprIsCharStr,
              std::function<int64_t(const plang::ExprNode&)> ExprCharStrLen,
-             std::function<int64_t(const plang::ExprNode&)> ExprStrCapStatic)
+             std::function<int64_t(const plang::ExprNode&)> ExprStrCapStatic,
+             std::function<bool(const plang::ExprNode&)> ExprIsShortStr,
+             std::function<int64_t(const plang::ExprNode&)> ExprShortStrCap)
         : Ctx(Ctx), Mod(Mod), B(B), Schema(Schema), SchemaLayout(SchemaLayout),
           StrCall(StrCall), Strings(Strings), Types(Types),
           RangeGuards(RangeGuards), Sets(Sets), Complex(Complex), SymTab(SymTab),
@@ -53,7 +55,9 @@ public:
           PackedAccessAlign(std::move(PackedAccessAlign)),
           ExprIsVarStr(std::move(ExprIsVarStr)), ExprIsCharStr(std::move(ExprIsCharStr)),
           ExprCharStrLen(std::move(ExprCharStrLen)),
-          ExprStrCapStatic(std::move(ExprStrCapStatic)) {}
+          ExprStrCapStatic(std::move(ExprStrCapStatic)),
+          ExprIsShortStr(std::move(ExprIsShortStr)),
+          ExprShortStrCap(std::move(ExprShortStrCap)) {}
 
     void emitAssign(const plang::AssignStmt& s);
 
@@ -101,6 +105,10 @@ private:
     std::function<bool(const plang::ExprNode&)> ExprIsCharStr;
     std::function<int64_t(const plang::ExprNode&)> ExprCharStrLen;
     std::function<int64_t(const plang::ExprNode&)> ExprStrCapStatic;
+    /// Turbo string[N]'s own predicate/capacity pair -- see exprIsShortStr's
+    /// doc comment (CodeGenImpl.h).
+    std::function<bool(const plang::ExprNode&)> ExprIsShortStr;
+    std::function<int64_t(const plang::ExprNode&)> ExprShortStrCap;
 
     llvm::Constant* i64c(int64_t v) const {
         return llvm::ConstantInt::get(I64Ty, static_cast<uint64_t>(v), true);

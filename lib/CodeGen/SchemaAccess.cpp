@@ -341,6 +341,19 @@ SchemaAccess::SchemaRef SchemaAccess::emitNewSchema(const ExprNode& ptrArg,
 }
 
 llvm::Value* SchemaAccess::exprStrCapV(const ExprNode& e) {
+    // DELIBERATELY EP-only, Turbo string[N] included: this whole function
+    // exists to answer a capacity that may depend on a run-time
+    // discriminant (EP §6.4.7), which Turbo has no equivalent of at all --
+    // a ShortString's capacity is always a plain compile-time constant (see
+    // exprShortStrCap, CodeGenImpl.h). A ShortString `e` falls straight
+    // through ExprIsVarStr's guard just below to `i64c(ExprStrCap(e))`,
+    // which is ExprStrCap -- itself VarString-only -- answering 0, not the
+    // real capacity; every caller that might hand this function a
+    // ShortString expression is responsible for checking ExprIsShortStr
+    // FIRST and using exprShortStrCap directly instead of ever reaching
+    // here.  (Confirmed no caller does today: see the ~35-call-site sweep
+    // that added ShortString support throughout CodeGen.)
+    //
     // ISO §6.4.3.2's other string shape, `packed array[1..n] of char`, has a
     // capacity too -- exprStrCap answers 0 for it, being VarString-only, so a
     // substr/trim chained off a char-string argument (below) capped its
@@ -411,6 +424,16 @@ llvm::Value* SchemaAccess::exprStrCapV(const ExprNode& e) {
 /// only the varying case ever had two to collapse.
 std::pair<llvm::Value*, llvm::Value*>
 SchemaAccess::strAddrAndCap(const ExprNode& e) {
+    // DELIBERATELY EP-only, same as exprStrCapV just above and for the same
+    // reason: ShortString never has anything for the ExtentVaries branch
+    // below to walk (Turbo has no schema mechanism), so the one-address-one-
+    // walk optimization this function exists for has nothing to do for it
+    // -- a ShortString caller needs only a single EmitLValue plus
+    // exprShortStrCap's own compile-time constant, with no side-effecting
+    // subscript ever at risk of a second walk.  Every CodeGen call site that
+    // might hand this a ShortString expression checks ExprIsShortStr first
+    // and never reaches here with one.
+    //
     // R6: a substr/trim call primed below, answered instead of re-walked --
     // see pendingArgExpr_'s own comment for why this exists and why a bare
     // pointer compare is enough to key it.

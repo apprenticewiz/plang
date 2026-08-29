@@ -57,7 +57,8 @@ public:
                std::function<bool(const plang::ExprNode&)> ExprIsVarStr,
                std::function<bool(const plang::ExprNode&)> ExprIsCharStr,
                std::function<int64_t(const plang::ExprNode&)> ExprCharStrLen,
-               std::function<int64_t(const plang::ExprNode&)> ExprStrCapStatic)
+               std::function<int64_t(const plang::ExprNode&)> ExprStrCapStatic,
+               std::function<bool(const plang::ExprNode&)> ExprIsShortStr)
         : Ctx(Ctx), Mod(Mod), B(B), RtFns(RtFns), Sets(Sets), Complex(Complex),
           FileVars(FileVars), Types(Types), Schema(Schema), Strings(Strings),
           StrCall(StrCall), Linkage(Linkage), SymTab(SymTab), ClosureAbi(ClosureAbi),
@@ -72,7 +73,8 @@ public:
           ParamSetBaseOf(std::move(ParamSetBaseOf)),
           ProcParamArg(std::move(ProcParamArg)), ParamIsByRef(std::move(ParamIsByRef)),
           ExprIsVarStr(std::move(ExprIsVarStr)), ExprIsCharStr(std::move(ExprIsCharStr)),
-          ExprCharStrLen(std::move(ExprCharStrLen)), ExprStrCapStatic(std::move(ExprStrCapStatic)) {}
+          ExprCharStrLen(std::move(ExprCharStrLen)), ExprStrCapStatic(std::move(ExprStrCapStatic)),
+          ExprIsShortStr(std::move(ExprIsShortStr)) {}
 
     llvm::Value* emitCallExpr(const plang::CallExpr& e);
     llvm::Value* emitUserFuncCall(const plang::CallExpr& e);
@@ -137,6 +139,13 @@ private:
     std::function<bool(const plang::ExprNode&)> ExprIsCharStr;
     std::function<int64_t(const plang::ExprNode&)> ExprCharStrLen;
     std::function<int64_t(const plang::ExprNode&)> ExprStrCapStatic;
+    /// Turbo string[N]'s own predicate -- see exprIsShortStr's doc comment
+    /// (CodeGenImpl.h).  Used only by emitUserFuncCall's struct-return spill;
+    /// the EP-only builtin string functions (Length/Substr/Trim/EQ and
+    /// friends, all gated `EP` in Builtins.def) never see a ShortString
+    /// argument at all, so they need no ShortString capacity query to match
+    /// ExprStrCapStatic's VarString one.
+    std::function<bool(const plang::ExprNode&)> ExprIsShortStr;
 
     llvm::Constant* i64c(int64_t v) const {
         return llvm::ConstantInt::get(I64Ty, v, true);

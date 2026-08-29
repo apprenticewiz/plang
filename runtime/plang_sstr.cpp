@@ -14,15 +14,21 @@
 /// or writes an i64 header, and nothing here is called with a string(N)
 /// pointer or vice versa.
 ///
-/// SCOPE (see the work item this shipped with): this file gives ShortString's
-/// TYPE/LAYOUT existence the minimal runtime support a bare declaration and a
-/// basic, non-truncating write/read round-trip need to not crash.  It does
-/// NOT implement Turbo Pascal's actual string[N] semantics -- truncating
-/// assignment, prefix/space-padded comparison, s[0] as the length byte,
-/// concatenation clamping, Copy/Pos/Delete/Insert/Str/Val, or parameter-copy-
-/// at-callee-width.  Those are a separate, later work item that builds on top
-/// of this one; do not extend this file with them without reading that item's
-/// own scope first.
+/// SCOPE: this file originally gave ShortString's TYPE/LAYOUT existence the
+/// minimal runtime support a bare declaration and a basic write/read
+/// round-trip needed to not crash.  It now ALSO implements Turbo Pascal's
+/// actual string[N] VALUE semantics: truncating assignment/from-literal
+/// (plang_sstr_assign and friends -- truncates rather than erroring, unlike
+/// EP's plang_str_assign in plang_str.cpp), prefix lexicographic comparison
+/// with shorter-is-less (plang_sstr_eq and friends -- the OPPOSITE of EP's
+/// space-padded plang_str_eq family: 'a' < 'a ' is true here, false there),
+/// and clamped-at-capacity concatenation (plang_sstr_concat and friends).
+/// It still does NOT implement s[0]-as-length-byte (that needs no runtime
+/// entry point at all -- see CGIndexAccess.cpp, which addresses it directly
+/// as an ordinary byte of the struct) or Copy/Pos/Delete/Insert/Str/Val/
+/// SetLength/StringOfChar/UpCase, which are a separate, later work item
+/// (System string routines) that depends on this one; do not extend this
+/// file with those without reading that item's own scope first.
 
 #include "plang_stream.h"
 
@@ -66,6 +72,123 @@ static int checkedWidth(int64_t w) {
     if (w > INT32_MAX) plang_err_field_width(w);
     return static_cast<int>(w);
 }
+
+// ---- assignment -------------------------------------------------------------
+
+// Turbo string[N] has no EP-style capacity ERROR (ISO 10206 §6.9.2.2 is an
+// Extended Pascal rule, never Turbo's): a value longer than the destination's
+// capacity silently TRUNCATES, matching real Turbo/FPC field practice.  Every
+// function below clamps to effCap(cap_dst) rather than calling any
+// plang_err_str_capacity-style reporter -- contrast with plang_str_assign
+// (plang_str.cpp), this file's EP sibling, which errors instead.
+
+void plang_sstr_assign(void* dst, int64_t cap_dst,
+                        const void* src, int64_t /*cap_src*/) {
+    const int64_t ecap = effCap(cap_dst);
+    int64_t len = sstrLen(src);
+    if (len > ecap) len = ecap;
+    sstrLen(dst) = static_cast<uint8_t>(len);
+    std::memcpy(sstrData(dst), sstrData(src), static_cast<size_t>(len));
+}
+
+// Length-aware source (a string literal, materialized with its compile-time
+// byte count) -- the ShortString sibling of plang_str_from_bytes.  ISO
+// 7185 §6.1.7/EP §6.1.8 place no restriction on what characters appear
+// between a literal's quotes (a literal may contain NUL like any other
+// character), so this takes an explicit length rather than scanning for a
+// terminator the way plang_sstr_from_cstr below has to.
+void plang_sstr_from_bytes(void* dst, int64_t cap, const char* src, int64_t len) {
+    const int64_t ecap = effCap(cap);
+    if (!src || len <= 0) { sstrLen(dst) = 0; return; }
+    if (len > ecap) len = ecap;
+    sstrLen(dst) = static_cast<uint8_t>(len);
+    std::memcpy(sstrData(dst), src, static_cast<size_t>(len));
+}
+
+void plang_sstr_from_cstr(void* dst, int64_t cap, const char* src) {
+    if (!src) { sstrLen(dst) = 0; return; }
+    plang_sstr_from_bytes(dst, cap, src, static_cast<int64_t>(std::strlen(src)));
+}
+
+void plang_sstr_from_char(void* dst, int64_t cap, int8_t c) {
+    if (effCap(cap) < 1) { sstrLen(dst) = 0; return; }
+    sstrLen(dst)     = 1;
+    sstrData(dst)[0] = static_cast<char>(c);
+}
+
+// ---- concatenation ------------------------------------------------------
+
+// Mirrors plang_str_concat's own std::min(len, cap_dst) clamp (plang_str.cpp)
+// exactly -- a ShortString's declared capacity can never usefully exceed 255
+// (effCap), so the same shape serves both without any extra logic of its own.
+
+void plang_sstr_concat(void* dst, int64_t cap_dst,
+                        const void* a, int64_t /*cap_a*/,
+                        const void* b, int64_t /*cap_b*/) {
+    const int64_t ecap = effCap(cap_dst);
+    int64_t la  = sstrLen(a), lb = sstrLen(b);
+    int64_t ld  = std::min(la + lb, ecap);
+    int64_t la2 = std::min(la, ld);
+    int64_t lb2 = std::min(lb, ld - la2);
+    std::memcpy(sstrData(dst),       sstrData(a), static_cast<size_t>(la2));
+    std::memcpy(sstrData(dst) + la2, sstrData(b), static_cast<size_t>(lb2));
+    sstrLen(dst) = static_cast<uint8_t>(la2 + lb2);
+}
+
+void plang_sstr_concat_cstr(void* dst, int64_t cap_dst,
+                             const void* a, int64_t /*cap_a*/,
+                             const char* cstr) {
+    const int64_t ecap = effCap(cap_dst);
+    int64_t la  = sstrLen(a);
+    int64_t lb  = cstr ? static_cast<int64_t>(std::strlen(cstr)) : 0;
+    int64_t ld  = std::min(la + lb, ecap);
+    int64_t la2 = std::min(la, ld);
+    int64_t lb2 = std::min(lb, ld - la2);
+    std::memcpy(sstrData(dst), sstrData(a), static_cast<size_t>(la2));
+    if (lb2 > 0) std::memcpy(sstrData(dst) + la2, cstr, static_cast<size_t>(lb2));
+    sstrLen(dst) = static_cast<uint8_t>(la2 + lb2);
+}
+
+void plang_sstr_concat_char(void* dst, int64_t cap_dst,
+                             const void* a, int64_t /*cap_a*/,
+                             int8_t c) {
+    const int64_t ecap = effCap(cap_dst);
+    int64_t la  = sstrLen(a);
+    int64_t ld  = std::min(la + 1, ecap);
+    int64_t la2 = std::min(la, ld);
+    std::memcpy(sstrData(dst), sstrData(a), static_cast<size_t>(la2));
+    if (la2 < ld) sstrData(dst)[la2] = static_cast<char>(c);
+    sstrLen(dst) = static_cast<uint8_t>(la2 + (la2 < ld ? 1 : 0));
+}
+
+// ---- comparison -----------------------------------------------------------
+
+// Turbo string[N] compares as a PREFIX lexicographic order with SHORTER
+// treated as LESS -- the OPPOSITE of EP's plang_str.cpp strCmp, which pads
+// the shorter operand out to the longer one's length with spaces before
+// comparing (so 'a' equals 'a ' there).  Neither that padding step nor any
+// other part of strCmp is reused here: this compares only the overlapping
+// PREFIX, and any leftover length alone (not a padding character) breaks the
+// tie, matching real Turbo/FPC field practice ('a' < 'a ' is true).
+static int sstrCmp(const void* a, int64_t /*cap_a*/,
+                    const void* b, int64_t /*cap_b*/) {
+    const int64_t la = sstrLen(a), lb = sstrLen(b);
+    const int64_t lm = std::min(la, lb);
+    for (int64_t i = 0; i < lm; ++i) {
+        const auto ca = static_cast<unsigned char>(sstrData(a)[i]);
+        const auto cb = static_cast<unsigned char>(sstrData(b)[i]);
+        if (ca != cb) return ca < cb ? -1 : 1;
+    }
+    if (la != lb) return la < lb ? -1 : 1;
+    return 0;
+}
+
+int8_t plang_sstr_eq(const void* a, int64_t ca, const void* b, int64_t cb) { return sstrCmp(a,ca,b,cb) == 0; }
+int8_t plang_sstr_ne(const void* a, int64_t ca, const void* b, int64_t cb) { return sstrCmp(a,ca,b,cb) != 0; }
+int8_t plang_sstr_lt(const void* a, int64_t ca, const void* b, int64_t cb) { return sstrCmp(a,ca,b,cb)  < 0; }
+int8_t plang_sstr_le(const void* a, int64_t ca, const void* b, int64_t cb) { return sstrCmp(a,ca,b,cb) <= 0; }
+int8_t plang_sstr_gt(const void* a, int64_t ca, const void* b, int64_t cb) { return sstrCmp(a,ca,b,cb)  > 0; }
+int8_t plang_sstr_ge(const void* a, int64_t ca, const void* b, int64_t cb) { return sstrCmp(a,ca,b,cb) >= 0; }
 
 // ---- I/O -------------------------------------------------------------------
 

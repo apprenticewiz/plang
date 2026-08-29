@@ -214,6 +214,24 @@ void CGAssign::emitAssignValue(const ExprNode& Target, const ExprNode& Value,
         return;
     }
 
+    // Turbo string[N] assignment: the truncating-not-erroring sibling of the
+    // VarString store just above.  A separate branch, not a widened
+    // `ExprIsVarStr(Target) || ExprIsShortStr(Target)` condition: the two
+    // runtimes are incompatible, and Schema.exprStrCapV above is VarString-
+    // only (it answers 0 for a ShortString target, having nowhere else to
+    // ask -- see exprIsShortStr's own comment for why ShortString needs no
+    // such dynamic-capacity query at all, only ExprShortStrCap's plain
+    // compile-time constant).  Before this branch existed, `s := 'hello'`
+    // for a ShortString s was rejected outright by Sema (no isAssignCompatible
+    // rule); now that Sema accepts it, this is what gives it a correct
+    // (truncating) lowering instead of falling through to the generic scalar
+    // store further down, which would store a raw pointer or i8 over part of
+    // the struct rather than running plang_sstr_assign/from_bytes/from_char.
+    if (ExprIsShortStr(Target)) {
+        StrCall.emitSstrStore(addr, i64c(ExprShortStrCap(Target)), Value);
+        return;
+    }
+
     // ISO §6.4.3.2: a packed array[1..n] of char takes a string value, which
     // may be a literal or a string(n) and so is not an array to load and store.
     if (ExprIsCharStr(Target)) {
