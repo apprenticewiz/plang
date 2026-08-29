@@ -90,6 +90,23 @@ llvm::Value* CGExprCore::emitExpr(const ExprNode& e) {
             // because the builtin reads standard input a program whose own eof
             // never touches a file HUNG on a terminal.
             if ((lo == "eof" || lo == "eoln") && !n->UserDeclared) {
+                // -std=turbo only: 'input' is now a real, addressable
+                // PascalFile (Sema::registerBuiltins' Input Symbol) that
+                // Assign/Reset may have redirected away from stdin -- see
+                // CGFuncCall.cpp's identical eof/eoln arm for the full
+                // reasoning, which this bare (no-parentheses) spelling
+                // mirrors exactly, dispatching to the same plang_eof_
+                // file_turbo/plang_eoln_file_turbo entry points rather than
+                // reading the real stdin regardless of any redirection.
+                if (RangeGuards.isTurbo()) {
+                    if (auto* ve = SymTab.findVar("Input")) {
+                        auto* r = B.CreateCall(
+                            RtFns.getExternFnN(lo == "eof" ? "plang_eof_file_turbo"
+                                                            : "plang_eoln_file_turbo",
+                                                I8Ty, {PtrTy}), {ve->ptr}, lo);
+                        return EnsureI1(r);
+                    }
+                }
                 auto* r = B.CreateCall(
                     RtFns.getRuntimeBoolFn(lo == "eof" ? "plang_eof_stdin"
                                                  : "plang_eoln_stdin"), {}, lo);

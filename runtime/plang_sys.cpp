@@ -9,6 +9,8 @@
 #include <cstddef>
 #include <cstdlib>
 
+#include "plang/Basic/PascalFileLayout.h"
+
 namespace plang {
 
 namespace {
@@ -95,7 +97,16 @@ void plang_halt(int64_t Status) {
     if (Status != 0)
         plang_tp_erroraddr = const_cast<void*>(__builtin_return_address(0));
     plang_module_finals_run();
-    std::fflush(stdout);
+    // NOT fflush(stdout): -std=turbo's own Input/Output (this file's
+    // plang_input/plang_output) may have been redirected to a real file by
+    // Assign/Rewrite (`Assign(Output, 'out.txt'); Rewrite(Output);`), and
+    // std::exit below already flushes and closes every open C stream on
+    // most platforms -- but that guarantee is exactly the assumption this
+    // fixes: flushing ALL open streams here, explicitly, rather than
+    // trusting std::exit's own implementation-defined cleanup to reach a
+    // stream this runtime opened itself, is what makes a redirected
+    // Output's buffered content reliably on disk before the process ends.
+    std::fflush(nullptr);
     std::exit(static_cast<int>(Status));
 }
 
@@ -1081,6 +1092,31 @@ void plang_iocheck(void) {
     const int64_t Code = plang_tp_ioresult();
     if (Code != 0) plang_tp_runerror(Code);
 }
+
+/// -std=turbo only: Input/Output as ordinary, addressable text-file
+/// VARIABLES (Sema::registerBuiltins) rather than the ISO/EP `program
+/// p(input, output);` heading mechanism's implicit file-parameter Vars
+/// (Sema.cpp's own Prog.FileParams loop, unchanged for ISO 7185/Extended
+/// Pascal -- see that loop's own comment for how the two are reconciled
+/// so a Turbo program that still writes the ISO heading does not double-
+/// define either name).  plang_tp_exitcode's own mechanism exactly: one
+/// shared PascalFile defined here, and every compiled Turbo object only
+/// DECLARES it (Codegen::Impl::emitPredefinedGlobals) -- so `Input`/
+/// `Output` name the SAME two file records no matter how many objects a
+/// Turbo program is linked from, letting `Assign(Output, 'x'); Rewrite
+/// (Output);` in one file and a bare `Writeln` in another still agree on
+/// where the write goes.
+///
+/// Zero-initialized (PascalFile's own in-class default member
+/// initializers), exactly like a program-declared `var f: text;` would be
+/// before anything ever touches it -- Codegen::Impl::emitMain's Turbo
+/// prologue calls plang_bind_std on each, the same runtime entry point
+/// the ISO/EP file-parameter mechanism already uses to attach 'input'/
+/// 'output' to stdin/stdout, before the program body runs, so ordinary
+/// unredirected use already sees them bound to the console by the time
+/// any statement in the program body executes.
+PascalFile plang_input;
+PascalFile plang_output;
 
 } // extern "C"
 

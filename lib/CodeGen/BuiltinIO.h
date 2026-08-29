@@ -95,6 +95,14 @@ private:
     /// item's P7-rule choke point, instead of inlining the same ternary at
     /// each of this file's several call sites.
     void emitWritelnFile(llvm::Value* fp);
+    /// -std=turbo only: the storage pointer for the predefined Input/Output
+    /// Var (Sema::registerBuiltins), or null under any other dialect or if
+    /// somehow unregistered.  emitBuiltinWrite/Read/Readln's own "no
+    /// explicit file argument" case resolves fp through this under Turbo,
+    /// rather than leaving fp null to mean "write straight to the console"
+    /// the way ISO/EP's identical case still does (Opts.turbo() guards it
+    /// off for both) -- see this method's call sites for the reasoning.
+    llvm::Value* turboStdFilePtr(bool isInput) const;
     /// A file-directed runtime function's base (ISO/EP) name, resolved to its
     /// `_turbo`-suffixed sibling under -std=turbo -- the one-line version of
     /// emitWritelnFile's own dispatch, for call sites that build the rest of
