@@ -15,6 +15,19 @@ using namespace plang;
 // Built-in write / writeln / read — dispatch to plang_runtime functions
 // ====================================================================
 
+// -std=turbo: every file-directed plang_writeln_file call site in this file
+// (a bare writeln(f), and the trailing newline after every write(f,...)/
+// writeln(f,...) value) has to dispatch to plang_writeln_file_turbo instead
+// (runtime/plang_file.cpp) -- this item's P7-rule choke point: dialect
+// selection happens at CODEGEN TIME, through which symbol codegen calls,
+// never inside the runtime function itself.  Centralized here rather than
+// inlining the same `Opts.turbo() ? ..._turbo : ...` ternary at each of the
+// several call sites below.
+void BuiltinIO::emitWritelnFile(llvm::Value* fp) {
+    B.CreateCall(RtFns.getExternFnN(fileFn("plang_writeln_file"),
+        llvm::Type::getVoidTy(Ctx), {PtrTy}), {fp});
+}
+
 void BuiltinIO::emitBuiltinWrite(const std::vector<std::unique_ptr<ExprNode>>& args, bool newline) {
     // Detect file variable as first argument: write(f, ...) vs write(...)
     size_t start = 0;
@@ -30,8 +43,7 @@ void BuiltinIO::emitBuiltinWrite(const std::vector<std::unique_ptr<ExprNode>>& a
         // writeln with no value arguments (just the newline/file)
         if (newline) {
             if (fp)
-                B.CreateCall(RtFns.getExternFnN("plang_writeln_file",
-                    llvm::Type::getVoidTy(Ctx), {PtrTy}), {fp});
+                emitWritelnFile(fp);
             else
                 B.CreateCall(RtFns.getRuntimeFn("plang_writeln", nullptr), {});
         }
@@ -82,7 +94,7 @@ void BuiltinIO::emitWriteArgs(
                 const auto& dl  = Mod.getDataLayout();
                 const int64_t esz = (int64_t)dl.getTypeAllocSize(compTy);
                 B.CreateCall(
-                    RtFns.getExternFnN("plang_write_binary", llvm::Type::getVoidTy(Ctx),
+                    RtFns.getExternFnN(fileFn("plang_write_binary"), llvm::Type::getVoidTy(Ctx),
                                  {PtrTy, PtrTy, I64Ty}),
                     {fp, addr, llvm::ConstantInt::get(I64Ty, esz)});
                 continue;
@@ -120,7 +132,7 @@ void BuiltinIO::emitWriteArgs(
                 codegenICE("a value written to a typed file is not the width of "
                            "the file's component");
             B.CreateCall(
-                RtFns.getExternFnN("plang_write_binary", llvm::Type::getVoidTy(Ctx),
+                RtFns.getExternFnN(fileFn("plang_write_binary"), llvm::Type::getVoidTy(Ctx),
                              {PtrTy, PtrTy, I64Ty}),
                 {fp, tmp, llvm::ConstantInt::get(I64Ty, esz)});
             continue;
@@ -163,8 +175,7 @@ void BuiltinIO::emitWriteArgs(
                                      {PtrTy, PtrTy, I64Ty}),
                         {fp, addr, capV});
                 if (addNl)
-                    B.CreateCall(
-                        RtFns.getExternFnN("plang_writeln_file", voidTy, {PtrTy}), {fp});
+                    emitWritelnFile(fp);
                 continue;
             }
             if (width) {
@@ -200,20 +211,18 @@ void BuiltinIO::emitWriteArgs(
                 // dropping it wrote the whole string into a field too small.
                 if (width)
                     B.CreateCall(
-                        RtFns.getExternFnN("plang_str_write_file_w",
+                        RtFns.getExternFnN(fileFn("plang_str_write_file_w"),
                                      llvm::Type::getVoidTy(Ctx),
                                      {PtrTy, PtrTy, I64Ty, I64Ty}),
                         {fp, sptr, capV, width});
                 else
                     B.CreateCall(
-                        RtFns.getExternFnN("plang_str_write_file",
+                        RtFns.getExternFnN(fileFn("plang_str_write_file"),
                                      llvm::Type::getVoidTy(Ctx),
                                      {PtrTy, PtrTy, I64Ty}),
                         {fp, sptr, capV});
                 if (addNl)
-                    B.CreateCall(
-                        RtFns.getExternFnN("plang_writeln_file",
-                                     llvm::Type::getVoidTy(Ctx), {PtrTy}), {fp});
+                    emitWritelnFile(fp);
             } else if (width) {
                 auto* fn = Strings.getStrFn(addNl ? "plang_str_writeln_w" : "plang_str_write_w",
                     llvm::Type::getVoidTy(Ctx), {PtrTy, I64Ty, I64Ty});
@@ -297,8 +306,11 @@ void BuiltinIO::emitWriteValue(llvm::Value* val, bool newline, llvm::Value* fp,
     auto callStdout = [&](const std::string& fn, llvm::Type* pt, llvm::Value* v) {
         B.CreateCall(RtFns.getRuntimeFn(fn, pt), {v});
     };
+    // -std=turbo: resolved to the `_turbo` sibling (fileFn) -- Write/Writeln
+    // are ALL-dialect builtins, so every scalar file writer below is shared
+    // with ISO/EP and needs this item's P7-rule choke point.
     auto callFile = [&](const std::string& fn, llvm::Type* pt, llvm::Value* v) {
-        B.CreateCall(RtFns.getExternFnN(fn, voidTy, {PtrTy, pt}), {fp, v});
+        B.CreateCall(RtFns.getExternFnN(fileFn(fn), voidTy, {PtrTy, pt}), {fp, v});
     };
 
     if (ty->isIntegerTy(64)) {
@@ -319,7 +331,7 @@ void BuiltinIO::emitWriteValue(llvm::Value* val, bool newline, llvm::Value* fp,
         auto* upper = turboFlag();
         const char* fam = wasSingle ? "f32" : "f64";
         if (fp)
-            B.CreateCall(RtFns.getExternFnN(std::string("plang_write_file_") + fam, voidTy,
+            B.CreateCall(RtFns.getExternFnN(fileFn(std::string("plang_write_file_") + fam), voidTy,
                              {PtrTy, DblTy, I8Ty}), {fp, val, upper});
         else
             B.CreateCall(RtFns.getExternFnN(std::string("plang_write") + (newline?"ln":"") + "_" + fam,
@@ -328,7 +340,7 @@ void BuiltinIO::emitWriteValue(llvm::Value* val, bool newline, llvm::Value* fp,
         auto* ext = toBoolByte(val);
         auto* upper = turboFlag();
         if (fp)
-            B.CreateCall(RtFns.getExternFnN("plang_write_file_bool", voidTy, {PtrTy, I8Ty, I8Ty}),
+            B.CreateCall(RtFns.getExternFnN(fileFn("plang_write_file_bool"), voidTy, {PtrTy, I8Ty, I8Ty}),
                          {fp, ext, upper});
         else
             B.CreateCall(RtFns.getExternFnN(std::string("plang_write") + (newline?"ln":"") + "_bool",
@@ -342,7 +354,7 @@ void BuiltinIO::emitWriteValue(llvm::Value* val, bool newline, llvm::Value* fp,
     }
     // File writeln: append newline after value
     if (fp && newline)
-        B.CreateCall(RtFns.getExternFnN("plang_writeln_file", voidTy, {PtrTy}), {fp});
+        emitWritelnFile(fp);
 }
 
 // Emit a write call with field-width (and optional decimal-places) formatting.
@@ -403,6 +415,9 @@ void BuiltinIO::emitWriteValueFormatted(llvm::Value* val, llvm::Value* w, llvm::
     // A file destination takes a different family of writers, and the newline
     // is a separate call rather than part of the name.
     if (fp) {
+        // -std=turbo: resolved to the `_turbo` sibling (fileFn), same as
+        // emitWriteValue's own callFile just above -- these field-width
+        // writers are just as shared with ISO/EP.
         auto callFile = [&](const std::string& fn,
                             std::initializer_list<llvm::Type*> argTys,
                             std::initializer_list<llvm::Value*> args) {
@@ -410,7 +425,7 @@ void BuiltinIO::emitWriteValueFormatted(llvm::Value* val, llvm::Value* w, llvm::
             std::vector<llvm::Value*> vs{fp};
             tys.insert(tys.end(), argTys);
             vs.insert(vs.end(), args);
-            B.CreateCall(RtFns.getExternFnN(fn, voidTy, tys), vs);
+            B.CreateCall(RtFns.getExternFnN(fileFn(fn), voidTy, tys), vs);
         };
         // Upper (f64/bool)/NoTrunc (bool/str)/AlwaysWrite (char): the same
         // single CodeGen-resolved isTurbo() fact, threaded as a trailing
@@ -441,7 +456,7 @@ void BuiltinIO::emitWriteValueFormatted(llvm::Value* val, llvm::Value* w, llvm::
             callFile("plang_write_file_str_w", {PtrTy, I64Ty, I8Ty}, {val, w, turbo});
         }
         if (newline)
-            B.CreateCall(RtFns.getExternFnN("plang_writeln_file", voidTy, {PtrTy}), {fp});
+            emitWritelnFile(fp);
         return;
     }
 
@@ -562,7 +577,7 @@ void BuiltinIO::emitReadArg(const ExprNode& arg, llvm::Value* fp) {
         auto* n = i64c(ExprCharStrLen(arg));
         if (fp)
             B.CreateCall(
-                RtFns.getExternFnN("plang_str_read_fixed_file", llvm::Type::getVoidTy(Ctx),
+                RtFns.getExternFnN(fileFn("plang_str_read_fixed_file"), llvm::Type::getVoidTy(Ctx),
                              {PtrTy, PtrTy, I64Ty}),
                 {fp, addr, n});
         else
@@ -640,6 +655,18 @@ void BuiltinIO::emitReadArg(const ExprNode& arg, llvm::Value* fp) {
     // _turbo twins.
     if (Opts.turbo() && (suffix == "_i64" || suffix == "_f64" || suffix == "_u64"))
         suffix += "_turbo";
+    // -std=turbo, file-directed char reads only: a SECOND, independent reason
+    // to append "_turbo", nothing to do with the numeric grammar difference
+    // above -- this item's own fileReady/InOutRes choke point, which every
+    // Turbo-reachable file-I/O runtime entry point needs regardless of
+    // whether its own parsing grammar differs from ISO/EP's.  The comment
+    // just above still holds for WHY char reads get no grammar-driven
+    // "_turbo" suffix; this is a different axis entirely, and the `fp &&`
+    // guard keeps it scoped to an actual PascalFile -- a bare `read(c)` from
+    // stdin has no such file to be not-open, so plang_read_char (no file,
+    // plang_io.cpp) is correctly left alone.
+    if (fp && Opts.turbo() && suffix == "_char")
+        suffix += "_turbo";
 
     // The runtime stores through the pointer at the reader's own width, so a
     // variable of a different width is read into a temporary and converted --
@@ -680,7 +707,7 @@ void BuiltinIO::emitReadArg(const ExprNode& arg, llvm::Value* fp) {
 /// Advances past the rest of the current line on fp (or stdin).
 void BuiltinIO::emitSkipLine(llvm::Value* fp) {
     if (fp)
-        B.CreateCall(RtFns.getExternFnN("plang_readln_file",
+        B.CreateCall(RtFns.getExternFnN(fileFn("plang_readln_file"),
             llvm::Type::getVoidTy(Ctx), {PtrTy}), {fp});
     else
         B.CreateCall(RtFns.getRuntimeFn("plang_readln", nullptr), {});
@@ -721,7 +748,7 @@ void BuiltinIO::emitBuiltinRead(const std::vector<std::unique_ptr<ExprNode>>& ar
             auto* dest = convert ? CreateEntryAlloca(compTy, "bin.rd.tmp") : addr;
             int64_t esz = (int64_t)Mod.getDataLayout().getTypeAllocSize(compTy);
             B.CreateCall(
-                RtFns.getExternFnN("plang_read_binary", llvm::Type::getVoidTy(Ctx),
+                RtFns.getExternFnN(fileFn("plang_read_binary"), llvm::Type::getVoidTy(Ctx),
                              {PtrTy, PtrTy, I64Ty}),
                 {fp, dest, llvm::ConstantInt::get(I64Ty, esz)});
             if (convert)

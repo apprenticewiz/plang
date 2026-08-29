@@ -410,6 +410,33 @@ void Sema::registerBuiltins() {
         (void)Symtab.define(std::move(FileModeSym));
     }
 
+    // -std=turbo only: InOutRes -- the hidden global IOResult (registered as
+    // an ordinary Func just below, not here) reads and clears; FileMode's
+    // own comment just above already named this as the mechanism's next
+    // user.  Real Borland/FPC's InOutRes is a Word (confirmed against the
+    // local `fpc -Mtp` install's own rtl/inc sources); this is Ctx_.getInt
+    // (64, true), NOT TyInt, for the identical reason RandSeed's own Symbol
+    // just above is Ctx_.getInt(32, true) rather than TyInt -- the runtime
+    // storage this LinkName binds to (plang_tp_inoutres, runtime/
+    // plang_sys.cpp) is a fixed int64_t regardless of Integer's own dialect
+    // width, a DELIBERATE divergence from Borland's 16-bit Word documented
+    // at length on that global's own definition, and both sides of a
+    // LinkName binding must always agree on the exact width (RandSeed's own
+    // comment).  A program may read and assign InOutRes directly (real
+    // Turbo Pascal allows this, even though IOResult is the documented,
+    // idiomatic way to consume it) -- registering it as an ordinary
+    // predefined Var, exactly like ExitCode/RandSeed/FileMode, is what makes
+    // that work "for free" the same way it already does for those three.
+    if (Opts.turbo()) {
+        Symbol InOutResSym;
+        InOutResSym.Kind     = SymbolKind::Var;
+        InOutResSym.Name     = "InOutRes";
+        InOutResSym.Ty       = Ctx_.getInt(64, /*Signed=*/true);
+        InOutResSym.LinkName = "plang_tp_inoutres";
+        InOutResSym.IsRequiredIdentifier = true;
+        (void)Symtab.define(std::move(InOutResSym));
+    }
+
     // -std=turbo only: the sized-integer ladder, AnsiChar, and the untyped
     // Pointer type -- the type names the rest of Tier 2 is written against.
     //

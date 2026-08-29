@@ -93,6 +93,67 @@ static void setBinding(PascalFile *F, const char *Name);
 /// directly instead of going through a CodeGen-emitted guard.
 [[noreturn]] void plang_tp_runerror(int64_t Code);
 
+/// -std=turbo only: the single InOutRes global -- DEFINED once in
+/// runtime/plang_sys.cpp, right beside plang_tp_exitcode/plang_tp_randseed/
+/// plang_tp_filemode, whose own "one definition, every compiled object only
+/// declares" mechanism this reuses exactly (Sema::registerBuiltins' InOutRes
+/// Symbol, CodeGenProcs.cpp's emitPredefinedGlobals).  Declared here with a
+/// plain `extern` -- not through that LLVM-global machinery -- because every
+/// USE in this file is from the runtime's OWN C++ code (tpFileReady,
+/// plang_eof_file_turbo/plang_eoln_file_turbo, and every other `_turbo`
+/// entry point below that can set or test it), never from CodeGen-emitted
+/// Pascal IR.  See plang_sys.cpp's own definition for why this is
+/// int64_t -- deliberately NOT Borland's 16-bit Word.
+extern int64_t plang_tp_inoutres;
+
+/// -std=turbo only: maps a POSIX errno to the InOutRes code real Turbo
+/// Pascal / Free Pascal field practice actually reports for it -- confirmed
+/// against the locally installed `fpc` 3.2.2's own
+/// rtl/linux/sysos.inc (PosixToRunError/Errno2InoutRes), not guessed at.
+/// That table: ENOENT -> 2 ("file not found"), ENAMETOOLONG -> 3 ("path not
+/// found"), ENFILE/EMFILE -> 4 ("too many open files"),
+/// EACCES/EROFS/EEXIST/ENOTEMPTY/EBUSY/ENOTDIR/EISDIR -> 5 ("file access
+/// denied" -- FPC folds all seven into the one code, not just EACCES), and
+/// EPIPE/EINTR/EIO/EAGAIN/ENOSPC -> 101 ("disk write error").  Real FPC's
+/// table also carries ENOMEM/EFAULT -> 217, EINVAL -> 218 and EBADF -> 6;
+/// left out here because nothing in this item calls this with an errno a
+/// POSIX fopen(3) can actually produce one of those three for, and adding
+/// them with no exercised call site to confirm them against would be
+/// guessing rather than matching field practice.  EPERM is deliberately
+/// NOT folded into EACCES's 5, tempting as "both mean permission" looks --
+/// FPC's own `case` statement has no ESysEPERM arm either, so it falls to
+/// the same `else` every unlisted errno does below: passed through
+/// unchanged, exactly like real `fpc -Mtp`.  This is also deliberately NOT
+/// the whole InOutRes table: 100 (disk read error/EOF), 102 (file not
+/// assigned), 103 (file not open), 104/105 (not open for input/output) and
+/// 106 (invalid numeric format) are never DERIVED from an errno in real FPC
+/// either -- its own I/O layer sets each directly as a literal constant at
+/// the point of failure, which is exactly what tpFileReady's own literal
+/// 103 below, and plang_tp_runerror(106)'s existing Turbo numeric-parse
+/// callers, already do -- so producing any of those five is not this
+/// function's job.
+int64_t plang_tp_posix_to_run_error(int PosixErrno) {
+    switch (PosixErrno) {
+        case ENOENT:        return 2;
+        case ENAMETOOLONG:  return 3;
+        case ENFILE:
+        case EMFILE:        return 4;
+        case EACCES:
+        case EROFS:
+        case EEXIST:
+        case ENOTEMPTY:
+        case EBUSY:
+        case ENOTDIR:
+        case EISDIR:        return 5;
+        case EPIPE:
+        case EINTR:
+        case EIO:
+        case EAGAIN:
+        case ENOSPC:        return 101;
+        default:            return PosixErrno;
+    }
+}
+
 /// Look at the next character without consuming it.
 static void prime(PascalFile *F) {
     F->Buf = std::fgetc(F->Fp);
@@ -144,6 +205,47 @@ static void abortIfClosed(PascalFile *F, const char *Op) {
         std::abort();
     }
     std::clearerr(F->Fp);
+}
+
+/// -std=turbo only: the non-aborting counterpart to abortIfClosed just
+/// above, for every file-I/O entry point Turbo-generated code can actually
+/// reach.  abortIfClosed itself is UNCHANGED -- see its own comment -- and
+/// still aborts unconditionally at every ISO/EP call site, which is correct
+/// ISO/EP behavior a later {$I+}/InOutRes item does not get to relax.  This
+/// project's P7 rule (see e.g. plang_tp_reset/plang_tp_rewrite/
+/// plang_tp_append/plang_tp_close's own top comment, and
+/// plang_sys.cpp's "-std=turbo run-time error reporting" section) is that
+/// dialect selection happens at CODEGEN TIME, through WHICH SYMBOL codegen
+/// calls, never inside one runtime function branching on a passed-in "which
+/// dialect" flag -- an ISO object file and a Turbo one can be linked into
+/// the same program, so a runtime function can never ask "which dialect is
+/// this" at all.  Every `_turbo`-suffixed sibling below (and the ones
+/// already established by PR #478/plang_read_file_i64_turbo before this
+/// item) calls THIS instead of abortIfClosed, and is reached only when
+/// CodeGen (CGProcCall.cpp/BuiltinIO.cpp/CGFuncCall.cpp) already knows,
+/// statically, that it is emitting Turbo code.
+///
+/// On success (F && F->Fp): the identical clearerr() abortIfClosed itself
+/// does, so a Turbo entry point gets the exact same sticky-ferror()
+/// protection issue #238 fixed for the ISO ones -- returns true.  On
+/// failure: sets InOutRes to 103 ("file not open", Borland/FPC's own
+/// documented code for exactly this condition -- see plang_tp_
+/// posix_to_run_error's own comment for why this is a literal here and not
+/// something that function computes) and returns false.  Every caller below
+/// is written to immediately `return` (or, for a Func, return a harmless
+/// default) when this comes back false, performing NONE of its own I/O --
+/// so a closed file's operation becomes a silent no-op instead of a crash.
+/// \p Op is accepted only for symmetry with abortIfClosed's own signature
+/// (every call site already has one to hand); nothing here prints it, since
+/// there is nothing to print -- the failure is recorded in InOutRes, not on
+/// stderr.
+static bool tpFileReady(PascalFile *F, const char * /*Op*/) {
+    if (!F || !F->Fp) {
+        plang_tp_inoutres = 103;
+        return false;
+    }
+    std::clearerr(F->Fp);
+    return true;
 }
 
 /// ISO §6.7.5.6: a write/read against a file positioned or opened for the
@@ -461,12 +563,21 @@ void plang_close(PascalFile *F, int8_t IsText) {
 //    status/read entry point already, dialect-agnostically) prime lazily
 //    on the first real query instead.
 //
-// None of Assign/Reset/Rewrite/Append below sets any InOutRes-like error
-// state on failure -- that mechanism does not exist yet (a separate,
-// later item builds it).  Until it does, a failed open reports and exits
-// the same way the ISO functions above already do (plang_err_cannot_open),
-// clearly marked INTERIM at each call below: replacing that call is the
-// hook the later item is expected to use.
+// Reset/Rewrite/Append's own open FAILURE (fopen returning null, or Reset's
+// directory guard just below) now sets InOutRes via
+// plang_tp_posix_to_run_error(errno) and simply RETURNS, leaving F closed --
+// F->Fp stays the null closeStream() already left it, so a following I/O
+// call against F correctly finds it not-open (tpFileReady's own 103) --
+// instead of the ISO functions' plang_err_cannot_open, which aborts the
+// whole process.  This is this item's own manual-test requirement made
+// concrete: a Reset against a file that does not exist, or one with no read
+// permission, has to set a sensible InOutRes rather than crash.  errno is
+// captured IMMEDIATELY after the failing fopen, before anything else
+// (including std::fclose in Reset's directory-guard arm) has a chance to
+// clobber it.  None of Assign/Reset/Rewrite/Append below range-checks
+// F->Mode against fmClosed..fmInOut before proceeding, and Close is left
+// entirely alone (it cannot itself fail) -- both remain a later item's job,
+// exactly as PascalFileLayout.h's own RecSize field comment says.
 
 /// TP Assign(f, name): binds F to an external filename (or, for an empty
 /// name, to "the console" -- see the Reset/Rewrite/Append functions below
@@ -501,20 +612,24 @@ void plang_tp_reset(PascalFile *F) {
     } else {
         F->Fp = std::fopen(F->Name, "r");
         if (!F->Fp) {
-            char Msg[PlangFileNameCap + 64];
-            std::snprintf(Msg, sizeof(Msg), "cannot open '%s' for reading", F->Name);
-            plang_err_cannot_open(Msg); // INTERIM -- see this section's top comment
+            const int Err = errno; // captured before anything else can clobber it
+            plang_tp_inoutres = plang_tp_posix_to_run_error(Err);
+            return;
         }
         // Issue #287's directory guard, reproduced here for the identical
         // reason plang_reset above has it: opening a directory read-only
         // succeeds at the C level on POSIX with nothing ever readable back.
+        // EISDIR is not one of PosixToRunError's own mapped cases (real POSIX
+        // fopen("r") never fails on a directory to begin with -- this guard
+        // exists precisely because it does NOT), so this reports the same
+        // code 5 ("file access denied") real FPC's own EISDIR arm maps to,
+        // as the closest honest match rather than inventing a new one.
         struct stat St;
         if (fstat(fileno(F->Fp), &St) == 0 && S_ISDIR(St.st_mode)) {
             std::fclose(F->Fp);
             F->Fp = nullptr;
-            char Msg[PlangFileNameCap + 64];
-            std::snprintf(Msg, sizeof(Msg), "'%s' is a directory, not a file", F->Name);
-            plang_err_cannot_open(Msg); // INTERIM -- see this section's top comment
+            plang_tp_inoutres = 5;
+            return;
         }
     }
     F->Buf      = PlangFileUninit; // left unprimed -- see this section's top comment
@@ -533,9 +648,9 @@ void plang_tp_rewrite(PascalFile *F) {
     } else {
         F->Fp = std::fopen(F->Name, "w");
         if (!F->Fp) {
-            char Msg[PlangFileNameCap + 64];
-            std::snprintf(Msg, sizeof(Msg), "cannot open '%s' for writing", F->Name);
-            plang_err_cannot_open(Msg); // INTERIM -- see this section's top comment
+            const int Err = errno;
+            plang_tp_inoutres = plang_tp_posix_to_run_error(Err);
+            return;
         }
     }
     F->Buf      = PlangFileUninit;
@@ -557,9 +672,9 @@ void plang_tp_append(PascalFile *F) {
     } else {
         F->Fp = std::fopen(F->Name, "a");
         if (!F->Fp) {
-            char Msg[PlangFileNameCap + 64];
-            std::snprintf(Msg, sizeof(Msg), "cannot open '%s' for appending", F->Name);
-            plang_err_cannot_open(Msg); // INTERIM -- see this section's top comment
+            const int Err = errno;
+            plang_tp_inoutres = plang_tp_posix_to_run_error(Err);
+            return;
         }
     }
     F->Buf      = PlangFileUninit;
@@ -603,6 +718,40 @@ int8_t plang_eof_file(PascalFile *F) {
 
 int8_t plang_eoln_file(PascalFile *F) {
     abortIfClosed(F, "eoln");
+    ensurePrimed(F);
+    return (F->Buf == EOF || F->Buf == '\n') ? 1 : 0;
+}
+
+// -std=turbo only: Eof(f)/Eoln(f)'s InOutRes-pending twins of
+// plang_eof_file/plang_eoln_file just above -- real Turbo Pascal / Free
+// Pascal field practice (System.Text's own Eof) reports TRUE the instant an
+// I/O error is PENDING (InOutRes <> 0, not yet read-and-cleared through
+// IOResult), rather than reflecting the file's actual position.  This is
+// what lets `while not Eof(f) do ...` under `{$I-}` actually TERMINATE once
+// a read starts failing, instead of retrying the same broken read forever
+// -- the concrete behavior this item's own manual test (a truncated/
+// malformed record) has to demonstrate.  Checked BEFORE tpFileReady: a file
+// left open but now in an error state must not be treated as merely
+// "closed" (InOutRes 103) just because this asks second -- InOutRes
+// already holds whatever more specific code the failing operation itself
+// set, and this must not stamp over it.  A closed/never-opened file (F->Fp
+// null) reports true either way -- tpFileReady's own 103 assignment makes
+// that fall out of the same InOutRes-pending check on the NEXT call, but
+// the FIRST call still needs its own tpFileReady guard to answer true
+// immediately rather than dereferencing a null F->Fp below.
+int8_t plang_eof_file_turbo(PascalFile *F) {
+    if (plang_tp_inoutres != 0) return 1;
+    if (!tpFileReady(F, "eof")) return 1;
+    // §6.6.5.2: rewrite(f) leaves eof(f) true, and it stays true for as long
+    // as f is being generated -- see plang_eof_file's identical comment.
+    if (!F->Readable) return 1;
+    ensurePrimed(F);
+    return (F->Buf == EOF) ? 1 : 0;
+}
+
+int8_t plang_eoln_file_turbo(PascalFile *F) {
+    if (plang_tp_inoutres != 0) return 1;
+    if (!tpFileReady(F, "eoln")) return 1;
     ensurePrimed(F);
     return (F->Buf == EOF || F->Buf == '\n') ? 1 : 0;
 }
@@ -708,8 +857,30 @@ void plang_readln_file(PascalFile *F) {
     unloadComponent(F);
 }
 
+// -std=turbo only: the fileReady twin of plang_readln_file just above --
+// Readln is an ALL-dialect builtin (Builtins.def), so this is genuinely
+// shared with ISO/EP and needs its own `_turbo` entry point.
+void plang_readln_file_turbo(PascalFile *F) {
+    if (!tpFileReady(F, "readln")) return;
+    ensurePrimed(F);
+    while (F->Buf != EOF && F->Buf != '\n') advance(F);
+    if (F->Buf == '\n') advance(F);
+    unloadComponent(F);
+}
+
 void plang_writeln_file(PascalFile *F) {
     abortIfClosed(F, "writeln");
+    trapOnWrongDirection(F, "writeln", 1);
+    std::fputc('\n', F->Fp);
+    trapOnStreamError(F, "writeln");
+}
+
+// -std=turbo only: the fileReady twin of plang_writeln_file just above --
+// called by BuiltinIO.cpp both for a bare `writeln(f)` and as the trailing
+// newline after every `write(f, ...)`/`writeln(f, ...)` value, so this is
+// one of the most heavily exercised `_turbo` siblings in this file.
+void plang_writeln_file_turbo(PascalFile *F) {
+    if (!tpFileReady(F, "writeln")) return;
     trapOnWrongDirection(F, "writeln", 1);
     std::fputc('\n', F->Fp);
     trapOnStreamError(F, "writeln");
@@ -927,13 +1098,30 @@ void plang_read_file_char(PascalFile *F, int8_t *P) {
     unloadComponent(F);
 }
 
+// -std=turbo only: Read(f, ch: Char)'s fileReady twin of plang_read_file_char
+// just above.  Char reads are the one BuiltinIO.cpp readFnSuffix case with
+// no GRAMMAR difference from ISO/EP (see that function's own comment on why
+// the numeric _i64/_f64/_u64 suffix swap skips char), so this exists purely
+// for the fileReady/InOutRes choke point this item adds, not for a second
+// parsing rule.
+void plang_read_file_char_turbo(PascalFile *F, int8_t *P) {
+    if (!tpFileReady(F, "read")) { *P = 0; return; }
+    trapOnWrongDirection(F, "read", 0);
+    ensurePrimed(F);
+    if (F->Buf == EOF) { *P = 0; return; }
+    const int C = advance(F);
+    trapOnStreamError(F, "read");
+    *P = static_cast<int8_t>(C == '\n' ? ' ' : C);
+    unloadComponent(F);
+}
+
 // ---- Turbo read: whole-token, entire-token-must-parse, with $/0x/&/% radix
 // prefixes -- the file-runtime twins of plang_io.cpp's plang_read_i64_turbo/
 // plang_read_f64_turbo; see their own comments for the `fpc -Mtp` field
 // practice this reproduces.
 
 void plang_read_file_i64_turbo(PascalFile *F, int64_t *P) {
-    abortIfClosed(F, "read");
+    if (!tpFileReady(F, "read")) { *P = 0; return; }
     trapOnWrongDirection(F, "read", 0);
     bool SawAny = false;
     char *Tok = scanTokenTurboFile(F, SawAny);
@@ -954,7 +1142,7 @@ void plang_read_file_i64_turbo(PascalFile *F, int64_t *P) {
 // The file-runtime twin of plang_io.cpp's plang_read_u64_turbo; see its own
 // comment for the QWord-only reason and the leading-'-' rejection.
 void plang_read_file_u64_turbo(PascalFile *F, uint64_t *P) {
-    abortIfClosed(F, "read");
+    if (!tpFileReady(F, "read")) { *P = 0; return; }
     trapOnWrongDirection(F, "read", 0);
     bool SawAny = false;
     char *Tok = scanTokenTurboFile(F, SawAny);
@@ -971,7 +1159,7 @@ void plang_read_file_u64_turbo(PascalFile *F, uint64_t *P) {
 }
 
 void plang_read_file_f64_turbo(PascalFile *F, double *P) {
-    abortIfClosed(F, "read");
+    if (!tpFileReady(F, "read")) { *P = 0.0; return; }
     trapOnWrongDirection(F, "read", 0);
     bool SawAny = false;
     char *Tok = scanTokenTurboFile(F, SawAny);
@@ -1022,9 +1210,54 @@ void plang_str_read_fixed_file(PascalFile *F, void *Buf, int64_t N) {
     for (int64_t I = Len; I < N; ++I) Data[I] = ' ';
 }
 
+// -std=turbo only: the fileReady twin of plang_str_read_fixed_file just
+// above -- reachable under Turbo via ISO §6.4.3.2's dialect-agnostic
+// packed-array-of-char string-type (BuiltinIO.cpp's ExprIsCharStr), unlike
+// plang_str_read_file's own VarString (EP's `string(n)`, whose syntax
+// Parser::parseType gates to Opts.extendedPascal() only -- never
+// constructible under Turbo, so that one reader gets no `_turbo` sibling at
+// all).  On failure, pads Buf with spaces exactly as a zero-length read
+// would -- matching the ISO version's own behavior for an already-blank
+// line, not a new convention.
+void plang_str_read_fixed_file_turbo(PascalFile *F, void *Buf, int64_t N) {
+    auto* Data = static_cast<char*>(Buf);
+    if (!tpFileReady(F, "read")) {
+        for (int64_t I = 0; I < N; ++I) Data[I] = ' ';
+        return;
+    }
+    int64_t Len = 0;
+    trapOnWrongDirection(F, "read", 0);
+    ensurePrimed(F);
+    while (F->Buf != EOF && F->Buf != '\n') {
+        const int C = advance(F);
+        trapOnStreamError(F, "read");
+        if (Len < N) Data[Len] = static_cast<char>(C);
+        ++Len;
+    }
+    for (int64_t I = Len; I < N; ++I) Data[I] = ' ';
+}
+
 /// Writes the string(N) at S, which is not null-terminated.
 void plang_str_write_file(PascalFile *F, const void *S, int64_t /*Cap*/) {
     abortIfClosed(F, "write");
+    const auto* Base = static_cast<const char*>(S);
+    const int64_t Len = *reinterpret_cast<const int64_t*>(Base);
+    if (Len > 0) {
+        trapOnWrongDirection(F, "write", 1);
+        std::fwrite(Base + sizeof(int64_t), 1, static_cast<size_t>(Len), F->Fp);
+        trapOnStreamError(F, "write");
+    }
+}
+
+// -std=turbo only: the fileReady twin of plang_str_write_file just above --
+// reachable under Turbo via ISO §6.4.3.2's dialect-agnostic
+// packed-array-of-char string-type (BuiltinIO.cpp's ExprIsCharStr, marshalled
+// through emitCharStrAsStr into the same {length, bytes} shape a VarString
+// value already has, which is why this writer -- unlike plang_str_read_file
+// on the read side -- is shared by both string shapes and so DOES need a
+// `_turbo` sibling even though VarString itself never reaches Turbo code).
+void plang_str_write_file_turbo(PascalFile *F, const void *S, int64_t /*Cap*/) {
+    if (!tpFileReady(F, "write")) return;
     const auto* Base = static_cast<const char*>(S);
     const int64_t Len = *reinterpret_cast<const int64_t*>(Base);
     if (Len > 0) {
@@ -1064,6 +1297,31 @@ void plang_str_write_file_w(PascalFile *F, const void *S, int64_t /*Cap*/,
     trapOnStreamError(F, "write");
 }
 
+// -std=turbo only: the fileReady twin of plang_str_write_file_w just above
+// -- see plang_str_write_file_turbo's own comment for why the CharStr write
+// path (unlike CharStr's own read) needs one.
+void plang_str_write_file_w_turbo(PascalFile *F, const void *S, int64_t /*Cap*/,
+                                   int64_t W) {
+    if (!tpFileReady(F, "write")) return;
+    if (W == 0) return;
+    trapOnWrongDirection(F, "write", 1);
+    const auto* Base = static_cast<const char*>(S);
+    int64_t Len = *reinterpret_cast<const int64_t*>(Base);
+    if (Len < 0) Len = 0;
+    if (W < 0) {
+        if (Len > 0)
+            std::fwrite(Base + sizeof(int64_t), 1, static_cast<size_t>(Len), F->Fp);
+        trapOnStreamError(F, "write");
+        return;
+    }
+    checkedWidth(W);
+    for (int64_t I = Len; I < W; ++I) std::fputc(' ', F->Fp);
+    if (Len > W) Len = W;
+    if (Len > 0)
+        std::fwrite(Base + sizeof(int64_t), 1, static_cast<size_t>(Len), F->Fp);
+    trapOnStreamError(F, "write");
+}
+
 // ---- Turbo string[N] (ShortString) file I/O ------------------------------
 //
 // plang_sstr.cpp's own comment gives the layout: a ONE-byte length prefix
@@ -1078,8 +1336,23 @@ void plang_str_write_file_w(PascalFile *F, const void *S, int64_t /*Cap*/,
 
 /// Writes the string[N] at S (a ShortString's one-byte length prefix,
 /// followed by its data -- NOT null-terminated).
+///
+/// Uses tpFileReady, not abortIfClosed, DIRECTLY -- with no separate
+/// `_turbo`-suffixed sibling and no codegen dispatch change needed at all,
+/// unlike every other function this item converts.  This is deliberate, not
+/// an inconsistency: ShortString (`string[N]`) is ALREADY Turbo-exclusive at
+/// the parser level (Parser::parseType gates its `[` syntax on Opts.turbo(),
+/// confirmed above plang_read_file_i64_turbo's own forward-declaration
+/// block) -- no ISO 7185 or Extended Pascal program can ever construct a
+/// ShortString-typed expression, so this function is already unreachable
+/// from ISO/EP-compiled code, exactly the same way plang_tp_assign/
+/// plang_tp_reset/... (this file's own "-std=turbo only" section, above)
+/// are.  A `_turbo` sibling here would be a distinction with no call site to
+/// justify it: this project's P7 rule protects a function two DIFFERENT
+/// dialects can both reach; one only Turbo can ever reach needs no second,
+/// identical copy of itself to protect it from.
 void plang_sstr_write_file(PascalFile *F, const void *S, int64_t /*Cap*/) {
-    abortIfClosed(F, "write");
+    if (!tpFileReady(F, "write")) return;
     const auto*   Base = static_cast<const char*>(S);
     const uint8_t Len  = static_cast<uint8_t>(Base[0]);
     if (Len > 0) {
@@ -1093,7 +1366,7 @@ void plang_sstr_write_file(PascalFile *F, const void *S, int64_t /*Cap*/) {
 /// comment for the truncate/pad/negative-W rules this mirrors exactly.
 void plang_sstr_write_file_w(PascalFile *F, const void *S, int64_t /*Cap*/,
                               int64_t W) {
-    abortIfClosed(F, "write");
+    if (!tpFileReady(F, "write")) return;
     if (W == 0) return;
     trapOnWrongDirection(F, "write", 1);
     const auto*   Base = static_cast<const char*>(S);
@@ -1118,8 +1391,8 @@ void plang_sstr_write_file_w(PascalFile *F, const void *S, int64_t /*Cap*/,
 /// lookahead, matching plang_str_read_file's own convention, so a following
 /// readln consumes exactly one line.
 void plang_sstr_read_file(PascalFile *F, void *S, int64_t Cap) {
-    abortIfClosed(F, "read");
     auto*   Base = static_cast<char*>(S);
+    if (!tpFileReady(F, "read")) { Base[0] = 0; return; }
     char*   Data = Base + 1;
     int64_t Len  = 0;
     const int64_t ECap = Cap < 255 ? Cap : 255;
@@ -1140,25 +1413,43 @@ void plang_sstr_read_file(PascalFile *F, void *S, int64_t Cap) {
 void plang_write_file_f64_e(PascalFile *F, double V, int64_t W, int8_t Upper);
 void plang_write_file_f64_f(PascalFile *F, double V, int64_t W, int64_t D, int8_t Upper);
 void plang_write_file_f32_e(PascalFile *F, double V, int64_t W, int8_t Upper);
+// -std=turbo only: the `_turbo` twins of the three just above -- see each
+// one's own definition, alongside its ISO counterpart below, for why every
+// scalar file writer in this section gets one (Write/Writeln are ALL-dialect
+// builtins, so every one of these is genuinely shared with ISO/EP).
+void plang_write_file_f64_e_turbo(PascalFile *F, double V, int64_t W, int8_t Upper);
+void plang_write_file_f64_f_turbo(PascalFile *F, double V, int64_t W, int64_t D, int8_t Upper);
+void plang_write_file_f32_e_turbo(PascalFile *F, double V, int64_t W, int8_t Upper);
 
 // Upper: see plang_io.cpp's plang_write_bool for the convention -- CodeGen
 // resolves Turbo's TRUE/FALSE vs ISO/EP's true/false from LangOptions.turbo()
 // once, at the call site, and passes the answer in as this plain i8 flag.
 void plang_write_file_i64 (PascalFile *F, int64_t     V) { abortIfClosed(F,"write"); trapOnWrongDirection(F, "write", 1); std::fprintf(F->Fp, "%" PRId64, V); trapOnStreamError(F, "write"); }
+void plang_write_file_i64_turbo (PascalFile *F, int64_t V) { if (!tpFileReady(F,"write")) return; trapOnWrongDirection(F, "write", 1); std::fprintf(F->Fp, "%" PRId64, V); trapOnStreamError(F, "write"); }
 // See plang_io.cpp's plang_write_u64 for why QWord (and only QWord) needs its
 // own, unsigned-formatting entry point rather than reusing plang_write_file_i64.
 void plang_write_file_u64 (PascalFile *F, uint64_t    V) { abortIfClosed(F,"write"); trapOnWrongDirection(F, "write", 1); std::fprintf(F->Fp, "%" PRIu64, V); trapOnStreamError(F, "write"); }
+void plang_write_file_u64_turbo (PascalFile *F, uint64_t V) { if (!tpFileReady(F,"write")) return; trapOnWrongDirection(F, "write", 1); std::fprintf(F->Fp, "%" PRIu64, V); trapOnStreamError(F, "write"); }
 void plang_write_file_f64 (PascalFile *F, double      V, int8_t Upper) { plang_write_file_f64_e(F, V, PlangRealWidth, Upper); }
+void plang_write_file_f64_turbo (PascalFile *F, double V, int8_t Upper) { plang_write_file_f64_e_turbo(F, V, PlangRealWidth, Upper); }
 // See plang_io.cpp's plang_write_f32 for why a promoted Single needs its own
 // significant-digit-capped entry point rather than reusing plang_write_file_f64.
 void plang_write_file_f32 (PascalFile *F, double      V, int8_t Upper) { plang_write_file_f32_e(F, V, PlangRealWidth, Upper); }
+void plang_write_file_f32_turbo (PascalFile *F, double V, int8_t Upper) { plang_write_file_f32_e_turbo(F, V, PlangRealWidth, Upper); }
 void plang_write_file_bool(PascalFile *F, int8_t      V, int8_t Upper) {
     abortIfClosed(F,"write"); trapOnWrongDirection(F, "write", 1);
     std::fputs(Upper ? (V ? "TRUE" : "FALSE") : (V ? "true" : "false"), F->Fp);
     trapOnStreamError(F, "write");
 }
+void plang_write_file_bool_turbo(PascalFile *F, int8_t V, int8_t Upper) {
+    if (!tpFileReady(F,"write")) return; trapOnWrongDirection(F, "write", 1);
+    std::fputs(Upper ? (V ? "TRUE" : "FALSE") : (V ? "true" : "false"), F->Fp);
+    trapOnStreamError(F, "write");
+}
 void plang_write_file_char(PascalFile *F, int8_t      V) { abortIfClosed(F,"write"); trapOnWrongDirection(F, "write", 1); std::fputc(static_cast<unsigned char>(V), F->Fp); trapOnStreamError(F, "write"); }
+void plang_write_file_char_turbo(PascalFile *F, int8_t V) { if (!tpFileReady(F,"write")) return; trapOnWrongDirection(F, "write", 1); std::fputc(static_cast<unsigned char>(V), F->Fp); trapOnStreamError(F, "write"); }
 void plang_write_file_str (PascalFile *F, const char *S) { abortIfClosed(F,"write"); trapOnWrongDirection(F, "write", 1); std::fputs(S ? S : "", F->Fp); trapOnStreamError(F, "write"); }
+void plang_write_file_str_turbo (PascalFile *F, const char *S) { if (!tpFileReady(F,"write")) return; trapOnWrongDirection(F, "write", 1); std::fputs(S ? S : "", F->Fp); trapOnStreamError(F, "write"); }
 
 // ---- typed write with a field width (ISO §6.9.3.1) ----
 //
@@ -1193,6 +1484,12 @@ void plang_write_file_i64_w (PascalFile *F, int64_t V, int64_t W) {
     std::fprintf(F->Fp, "%*" PRId64, checkedWidth(W), V);
     trapOnStreamError(F, "write");
 }
+void plang_write_file_i64_w_turbo (PascalFile *F, int64_t V, int64_t W) {
+    if (!tpFileReady(F,"write")) return;
+    trapOnWrongDirection(F, "write", 1);
+    std::fprintf(F->Fp, "%*" PRId64, checkedWidth(W), V);
+    trapOnStreamError(F, "write");
+}
 // See plang_io.cpp's plang_write_u64_w for why QWord needs its own,
 // unsigned-formatting field-width entry point.
 void plang_write_file_u64_w (PascalFile *F, uint64_t V, int64_t W) {
@@ -1201,8 +1498,22 @@ void plang_write_file_u64_w (PascalFile *F, uint64_t V, int64_t W) {
     std::fprintf(F->Fp, "%*" PRIu64, checkedWidth(W), V);
     trapOnStreamError(F, "write");
 }
+void plang_write_file_u64_w_turbo (PascalFile *F, uint64_t V, int64_t W) {
+    if (!tpFileReady(F,"write")) return;
+    trapOnWrongDirection(F, "write", 1);
+    std::fprintf(F->Fp, "%*" PRIu64, checkedWidth(W), V);
+    trapOnStreamError(F, "write");
+}
 void plang_write_file_f64_e (PascalFile *F, double V, int64_t W, int8_t Upper) {
     abortIfClosed(F, "write");
+    trapOnWrongDirection(F, "write", 1);
+    char Buf[PlangRealMaxChars];
+    const std::size_t N = plangFormatReal(Buf, V, W, Upper ? PlangRealProfileTurbo : PlangRealProfileISO);
+    std::fwrite(Buf, 1, N, F->Fp);
+    trapOnStreamError(F, "write");
+}
+void plang_write_file_f64_e_turbo (PascalFile *F, double V, int64_t W, int8_t Upper) {
+    if (!tpFileReady(F, "write")) return;
     trapOnWrongDirection(F, "write", 1);
     char Buf[PlangRealMaxChars];
     const std::size_t N = plangFormatReal(Buf, V, W, Upper ? PlangRealProfileTurbo : PlangRealProfileISO);
@@ -1220,12 +1531,28 @@ void plang_write_file_f32_e (PascalFile *F, double V, int64_t W, int8_t Upper) {
     std::fwrite(Buf, 1, N, F->Fp);
     trapOnStreamError(F, "write");
 }
+void plang_write_file_f32_e_turbo (PascalFile *F, double V, int64_t W, int8_t Upper) {
+    if (!tpFileReady(F, "write")) return;
+    trapOnWrongDirection(F, "write", 1);
+    char Buf[PlangRealMaxChars];
+    const std::size_t N = plangFormatReal(Buf, V, W, Upper ? PlangRealProfileTurbo : PlangRealProfileISO,
+                                           PlangSingleMaxDecPlaces);
+    std::fwrite(Buf, 1, N, F->Fp);
+    trapOnStreamError(F, "write");
+}
 // A negative FracDigits falls back to the same exponential format omitting
 // the decimals clause entirely produces, exactly as plang_write_file_cplx_w's
 // own per-component formatting already did before it started calling this.
 void plang_write_file_f64_f (PascalFile *F, double V, int64_t W, int64_t D, int8_t Upper) {
     abortIfClosed(F,"write");
     if (D < 0) { plang_write_file_f64_e(F, V, W, Upper); return; }
+    trapOnWrongDirection(F, "write", 1);
+    std::fprintf(F->Fp, "%*.*f", checkedWidth(W), checkedWidth(D), V);
+    trapOnStreamError(F, "write");
+}
+void plang_write_file_f64_f_turbo (PascalFile *F, double V, int64_t W, int64_t D, int8_t Upper) {
+    if (!tpFileReady(F,"write")) return;
+    if (D < 0) { plang_write_file_f64_e_turbo(F, V, W, Upper); return; }
     trapOnWrongDirection(F, "write", 1);
     std::fprintf(F->Fp, "%*.*f", checkedWidth(W), checkedWidth(D), V);
     trapOnStreamError(F, "write");
@@ -1267,6 +1594,14 @@ void plang_write_file_bool_w(PascalFile *F, int8_t V, int64_t W, int8_t Upper, i
     abortIfClosed(F,"write");
     writePadded(F, Upper ? (V ? "TRUE" : "FALSE") : (V ? "true" : "false"), W, NoTrunc);
 }
+// writePadded (just above) calls neither abortIfClosed nor tpFileReady
+// itself -- every caller, ISO and Turbo alike, checks first and calls in
+// only once the file is known ready -- so the `_turbo` siblings in this
+// field-width group reuse it directly rather than duplicating its body.
+void plang_write_file_bool_w_turbo(PascalFile *F, int8_t V, int64_t W, int8_t Upper, int8_t NoTrunc) {
+    if (!tpFileReady(F,"write")) return;
+    writePadded(F, Upper ? (V ? "TRUE" : "FALSE") : (V ? "true" : "false"), W, NoTrunc);
+}
 // AlwaysWrite: see plang_io.cpp's plang_write_char_w for the convention
 // (checked against `fpc -Mtp`) -- Turbo's zero-width char write still
 // writes the character, where ISO/EP's writes nothing.
@@ -1282,8 +1617,22 @@ void plang_write_file_char_w(PascalFile *F, int8_t V, int64_t W, int8_t AlwaysWr
     std::fprintf(F->Fp, "%*c", checkedWidth(W), static_cast<unsigned char>(V));
     trapOnStreamError(F, "write");
 }
+void plang_write_file_char_w_turbo(PascalFile *F, int8_t V, int64_t W, int8_t AlwaysWrite) {
+    if (!tpFileReady(F,"write")) return;
+    if (W == 0 && !AlwaysWrite) return;
+    trapOnWrongDirection(F, "write", 1);
+    if (W < 0) {
+        std::fputc(static_cast<unsigned char>(V), F->Fp);
+        trapOnStreamError(F, "write");
+        return;
+    }
+    std::fprintf(F->Fp, "%*c", checkedWidth(W), static_cast<unsigned char>(V));
+    trapOnStreamError(F, "write");
+}
 void plang_write_file_str_w (PascalFile *F, const char *S, int64_t W, int8_t NoTrunc)
     { abortIfClosed(F,"write"); writePadded(F, S, W, NoTrunc); }
+void plang_write_file_str_w_turbo (PascalFile *F, const char *S, int64_t W, int8_t NoTrunc)
+    { if (!tpFileReady(F,"write")) return; writePadded(F, S, W, NoTrunc); }
 
 // EP §6.9.3.6: a complex is written as a parenthesized pair of reals — in the
 // representation reals are written in, which is why each half goes through the
@@ -1333,8 +1682,34 @@ void plang_read_binary(PascalFile *F, void *Buf, int64_t ElemSize) {
     unloadComponent(F);
 }
 
+// -std=turbo only: the fileReady twin of plang_read_binary just above --
+// `file of T` typed binary files carry no dialect gate of their own
+// (Sema::resolveType's FileTypeNode arm), so Read(f, v) on one is reachable
+// from Turbo exactly as it is from ISO/EP, and needs the same choke point
+// every text-file operation in this section gets.
+void plang_read_binary_turbo(PascalFile *F, void *Buf, int64_t ElemSize) {
+    if (ElemSize > 0) std::memset(Buf, 0, static_cast<std::size_t>(ElemSize));
+    if (!tpFileReady(F, "read")) return;
+    trapOnWrongDirection(F, "read", 0);
+    std::fread(Buf, static_cast<std::size_t>(ElemSize), 1, F->Fp);
+    trapOnStreamError(F, "read");
+    prime(F);
+    unloadComponent(F);
+}
+
 void plang_write_binary(PascalFile *F, const void *Buf, int64_t ElemSize) {
     abortIfClosed(F, "write");
+    trapOnWrongDirection(F, "write", 1);
+    std::fwrite(Buf, static_cast<std::size_t>(ElemSize), 1, F->Fp);
+    trapOnStreamError(F, "write");
+    unloadComponent(F);
+}
+
+// -std=turbo only: the fileReady twin of plang_write_binary just above --
+// see plang_read_binary_turbo's own comment for why typed binary files need
+// one at all.
+void plang_write_binary_turbo(PascalFile *F, const void *Buf, int64_t ElemSize) {
+    if (!tpFileReady(F, "write")) return;
     trapOnWrongDirection(F, "write", 1);
     std::fwrite(Buf, static_cast<std::size_t>(ElemSize), 1, F->Fp);
     trapOnStreamError(F, "write");

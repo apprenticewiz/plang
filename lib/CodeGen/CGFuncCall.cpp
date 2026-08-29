@@ -161,11 +161,22 @@ llvm::Value* CGFuncCall::emitBuiltinCall(const std::string& Name,
             ? B.CreateZExtOrTrunc(r, arg->getType(), "random") : r;
     }
     // ---- Boolean file-status built-ins ----
+    //
+    // -std=turbo, file-directed only: dispatches to plang_eof_file_turbo/
+    // plang_eoln_file_turbo (runtime/plang_file.cpp) instead of the ISO/EP
+    // plang_eof_file/plang_eoln_file -- this item's P7-rule choke point
+    // (tpFileReady) AND the InOutRes-pending-means-TRUE behavior real Turbo
+    // field practice requires both live only in the `_turbo` sibling.  The
+    // bare, no-file forms (`eof`/`eoln` alone, meaning `input`) are left
+    // alone: plang_eof_stdin/plang_eoln_stdin have no PascalFile at all, so
+    // neither tpFileReady nor an InOutRes check applies to them.
     if (lo == "eof") {
         if (!Args.empty() && FileVars.isFileVar(*Args[0])) {
             auto* fp  = FileVars.fileVarPtr(*Args[0]);
             auto* raw = B.CreateCall(
-                RtFns.getExternFnN("plang_eof_file", I8Ty, {PtrTy}), {fp}, "eof.raw");
+                RtFns.getExternFnN(RangeGuards.isTurbo() ? "plang_eof_file_turbo"
+                                                          : "plang_eof_file",
+                                    I8Ty, {PtrTy}), {fp}, "eof.raw");
             return EnsureI1(raw);
         }
         auto* raw = B.CreateCall(
@@ -176,7 +187,9 @@ llvm::Value* CGFuncCall::emitBuiltinCall(const std::string& Name,
         if (!Args.empty() && FileVars.isFileVar(*Args[0])) {
             auto* fp  = FileVars.fileVarPtr(*Args[0]);
             auto* raw = B.CreateCall(
-                RtFns.getExternFnN("plang_eoln_file", I8Ty, {PtrTy}), {fp}, "eoln.raw");
+                RtFns.getExternFnN(RangeGuards.isTurbo() ? "plang_eoln_file_turbo"
+                                                          : "plang_eoln_file",
+                                    I8Ty, {PtrTy}), {fp}, "eoln.raw");
             return EnsureI1(raw);
         }
         auto* raw = B.CreateCall(
@@ -645,6 +658,14 @@ llvm::Value* CGFuncCall::emitBuiltinCall(const std::string& Name,
     if (lo == "paramcount") {
         auto* fn = RtFns.getExternFnN("plang_tp_paramcount", I64Ty, {});
         return B.CreateCall(fn, {}, "paramcount");
+    }
+    // IOResult() -- the explicit-call twin of CGExprCore.cpp's bare-identifier
+    // "ioresult" arm; both reach the identical runtime call, which is the one
+    // place the read-and-clear itself happens (plang_tp_ioresult's own
+    // comment, runtime/plang_sys.cpp).
+    if (lo == "ioresult") {
+        auto* fn = RtFns.getExternFnN("plang_tp_ioresult", I64Ty, {});
+        return B.CreateCall(fn, {}, "ioresult");
     }
     // ParamStr(n) -- argv[n] (or '' outside range) as a capacity-255
     // ShortString; plang_tp_paramstr writes directly into the result

@@ -980,6 +980,72 @@ void plang_tp_paramstr(int64_t N, void *Dst, int64_t DstCap) {
 /// a later item is expected to.
 int16_t plang_tp_filemode = 2;
 
+/// TP `InOutRes: Integer` (Sema::registerBuiltins' InOutRes Symbol,
+/// -std=turbo only) -- the hidden global every I/O-performing runtime call is
+/// supposed to set on failure instead of aborting the process (this file's
+/// own plang_tp_getmem/plang_tp_freemem already established that
+/// "non-aborting, Turbo-only" pattern for allocation failure; runtime/
+/// plang_file.cpp's tpFileReady, and the `_turbo`-suffixed entry-point
+/// siblings it backs, are what do it for file I/O).  Zero means "no error
+/// pending" -- Reset/Rewrite/Append/... clear nothing on SUCCESS (matching
+/// real Borland/FPC field practice: InOutRes is not reset to 0 by a
+/// successful call, only by IOResult itself reading it), so a program that
+/// never triggers a failure never sees this become anything but its
+/// zero-initialized default.  Declared, shared, and defined exactly once
+/// here the same way plang_tp_exitcode/plang_tp_randseed/plang_tp_filemode
+/// just above already are -- see plang_tp_exitcode's own comment for the
+/// whole "one definition, every compiled Turbo object only declares"
+/// mechanism (Sema::registerBuiltins' InOutRes Symbol, CodeGenProcs.cpp's
+/// emitPredefinedGlobals) -- reused here rather than reinvented, even
+/// though nothing this item ships actually emits Pascal-level IR that reads
+/// this global directly (only through plang_tp_ioresult, just below, and
+/// runtime/plang_file.cpp's own tpFileReady/plang_eof_file_turbo/
+/// plang_eoln_file_turbo): a later {$I+}/InOutRes item needs to read the
+/// PENDING value WITHOUT clearing it (exactly what IOResult itself must
+/// not do), which a direct load of this global -- already wired as an
+/// LLVM-visible predefined identifier by that shared mechanism -- is the
+/// natural way to give it, rather than a second non-clearing runtime
+/// function invented ahead of the one caller that would actually use it.
+///
+/// int64_t, DELIBERATELY NOT Borland's 16-bit Word (or even ExitCode's own
+/// dialect-width int16_t) -- called out here with the same prominence
+/// ExitCode's own width comment gets, so this does not get "corrected" back
+/// to 16 bits by analogy with ExitCode/FileMode later.  Two independent
+/// reasons, not one: first, InOutRes is read back through IOResult, a
+/// Func registered R_Int (Builtins.def) as Turbo's ordinary 16-bit Integer,
+/// the same as every other Turbo Func's result -- narrowing THIS storage to
+/// 16 bits would buy nothing IOResult's own return-type coercion does not
+/// already provide for free, while WIDENING it costs nothing either way.
+/// Second, and more binding: plang_tp_posix_to_run_error (runtime/
+/// plang_file.cpp) deliberately passes an unmapped errno straight through
+/// unchanged (matching real FPC's own `else` fallback) rather than reducing
+/// it mod 65536 -- a 16-bit InOutRes could silently wrap an unusual but
+/// legitimate large errno into an unrelated, misleadingly-small code, where
+/// this width just keeps whatever plang_tp_posix_to_run_error actually
+/// computed intact.  Zero-initialized: the language default for a global
+/// with no explicit initializer already matches InOutRes's own "no error
+/// pending" zero value, so this needs no `= 0` to say so, but see this
+/// declaration's own top comment for why zero is not merely a convenient
+/// bit pattern here.
+int64_t plang_tp_inoutres = 0;
+
+/// TP `IOResult: Integer` (Builtins.def, `Func, TP, 0, 0, R_Int`) -- reads
+/// InOutRes and CLEARS IT TO ZERO in the same call, real Turbo Pascal's own
+/// read-and-clear contract (confirmed against the local `fpc -Mtp` install's
+/// own system.inc-equivalent behavior: a second, immediately following
+/// IOResult call always reads 0, even with nothing else run in between).
+/// This is the ONE place that read-and-clear happens -- CGExprCore.cpp's
+/// bare-identifier arm and CGFuncCall.cpp's explicit-call arm both just call
+/// straight in here, neither duplicates the clear itself, so there is a
+/// single source of truth for what "reading IOResult" does regardless of
+/// which of the two syntactic forms (`x := IOResult;` vs `x := IOResult();`)
+/// a program actually wrote.
+int64_t plang_tp_ioresult(void) {
+    const int64_t Result = plang_tp_inoutres;
+    plang_tp_inoutres = 0;
+    return Result;
+}
+
 } // extern "C"
 
 } // namespace plang
