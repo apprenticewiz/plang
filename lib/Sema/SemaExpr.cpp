@@ -1043,6 +1043,52 @@ bool Sema::checkEPOnly(const Symbol& Sym, SourceLocation Loc) {
     return false;
 }
 
+// See the declaration (Sema.h) for why this exists.  Deliberately narrow:
+// called only from checkCallExpr's SizeOf/High/Low arm, never from the
+// ordinary checkExpr dispatch, so every other call site's identifier keeps
+// meaning exactly what checkIdent already says it means.
+std::shared_ptr<Type> Sema::resolveTypeArgOrValue(const ExprNode& Arg) {
+    if (auto* Id = llvm::dyn_cast<IdentExpr>(&Arg)) {
+        // The five primitive type keywords: parseSizeHighLowArg hands back a
+        // synthetic IdentExpr carrying the keyword's own spelling for
+        // exactly this argument position, since none of the five is ever
+        // entered in the symbol table under its own name (they are lexer
+        // keywords, not identifiers, and never reach ordinary name lookup).
+        const std::string Lo = toLower(Id->Name);
+        std::shared_ptr<Type> Primitive;
+        if      (Lo == "integer") Primitive = TyInt;
+        else if (Lo == "real")    Primitive = TyReal;
+        else if (Lo == "boolean") Primitive = TyBool;
+        else if (Lo == "char")    Primitive = TyChar;
+        else if (Lo == "string")  Primitive = TyStr;
+        if (Primitive) {
+            Id->ResolvedType = Primitive;
+            return Primitive;
+        }
+        // An ordinary identifier that may name a TYPE (Byte, a user's own
+        // TMyRecord, ...) rather than a variable.  checkIdent's ordinary
+        // rule exists precisely to refuse a type name used as a value
+        // (err_type_name_as_value) -- here, naming a type is exactly what
+        // is wanted, so a TypeAlias symbol is read directly, bypassing
+        // checkIdent rather than teaching it a context it cannot see.
+        // Schema is deliberately not matched here: schemas are EP §6.4.7,
+        // and EP and Turbo are different -std= values, so a Schema symbol
+        // can never actually reach this arm under -std=turbo (the only
+        // dialect SizeOf/High/Low are declared for -- Builtins.def).
+        if (Symbol* Sym = Symtab.lookup(Id->Name);
+                Sym && Sym->Kind == SymbolKind::TypeAlias) {
+            Sym->Referenced = true;
+            Id->UserDeclared = true;
+            Id->ResolvedType = Sym->Ty ? Sym->Ty : TyErr;
+            return Id->ResolvedType;
+        }
+    }
+    // Otherwise this is an ordinary value expression: SizeOf(x) means the
+    // size of x's own type, and High(arr)/Low(arr) mean the bounds of
+    // arr's own index type (checked by the caller once this returns).
+    return checkExpr(Arg);
+}
+
 std::shared_ptr<Type> Sema::checkCallExpr(const CallExpr& E) {
     Symbol* Sym = Symtab.lookup(E.Name);
     if (!Sym) {
@@ -1294,6 +1340,65 @@ std::shared_ptr<Type> Sema::checkCallExpr(const CallExpr& E) {
                 return TyBool;
             }
             return TyBool;
+        }
+        // TP-only: SizeOf(T)/High(T)/Low(T) -- T a type name or a value
+        // expression; see resolveTypeArgOrValue's own comment for the two
+        // shapes this admits.
+        if ((Lo == "sizeof" || Lo == "high" || Lo == "low") && !E.Args.empty()) {
+            auto ArgTy = resolveTypeArgOrValue(*E.Args[0]);
+            for (size_t I = 1; I < E.Args.size(); ++I) (void)checkExpr(*E.Args[I]);
+            if (ArgTy->isError()) return TyErr;
+            if (Lo == "sizeof") {
+                // Sema::byteSizeOf declines only for a conformant array
+                // parameter type or an undiscriminated schema's extent --
+                // neither reachable here today (schemas are EP-only, and a
+                // conformant array TYPE has no denoting keyword or `type`
+                // alias of its own to be named by), but checked rather than
+                // assumed the same way byteSizeOf's every other caller does.
+                if (!Sema::byteSizeOf(*ArgTy)) {
+                    error(E.Args[0]->Loc, diag::err_sizeof_unknown_size, {ArgTy->Name});
+                    return TyErr;
+                }
+                return TyInt;
+            }
+            // High/Low: an ordinal type/value answers directly; an array
+            // type/value answers through its own INDEX type -- High(arr) is
+            // the array's upper subscript, not some ordinal range the array
+            // itself has none of.
+            std::shared_ptr<Type> RangeTy = ArgTy;
+            if (RangeTy->Kind == TypeKind::Array) RangeTy = RangeTy->IndexType;
+            if (!RangeTy || !RangeTy->isOrdinal() || !ordinalRange(*RangeTy)) {
+                error(E.Args[0]->Loc, diag::err_high_low_argument, {Lo, ArgTy->Name});
+                return TyErr;
+            }
+            // The result is a VALUE of the ranged type itself -- High(Byte)
+            // is a Byte, not a bare integer -- the same "stays in the
+            // argument's own type" rule succ/pred already follow above.
+            return RangeTy;
+        }
+        // FPC's size-aware Hi/Lo/Swap -- a DELIBERATE divergence from
+        // literal Turbo Pascal 7, whose Hi/Lo/Swap only ever worked on a
+        // 16-bit value: fpc -Mtp instead sizes all three off the argument's
+        // own width (Hi/Lo of a Word answer in a Byte; Hi/Lo of a LongInt
+        // answer in a Word; Swap keeps the argument's own type both times),
+        // silently changing behavior for any TP7 program that assumed the
+        // old 16-bit-only meaning for something wider.  See CGFuncCall's
+        // identical note on the codegen side.  All three need a real
+        // integer at least 16 bits wide -- Byte/ShortInt (8 bits) has no
+        // separate high and low half to name.
+        if ((Lo == "hi" || Lo == "lo" || Lo == "swap") && !E.Args.empty()) {
+            auto ArgTy = checkExpr(*E.Args[0]);
+            if (ArgTy->isError()) return TyErr;
+            if (ArgTy->Kind != TypeKind::Integer || ArgTy->Width < 16) {
+                error(E.Args[0]->Loc, diag::err_hi_lo_swap_argument, {Lo, ArgTy->Name});
+                return TyErr;
+            }
+            if (Lo == "swap") return ArgTy;
+            // Hi/Lo each answer in an UNSIGNED integer half the argument's
+            // own width -- FPC's actual declared return types (verified
+            // against fpc -Mtp's System unit: Hi/Lo(Word) -> Byte,
+            // Hi/Lo(LongInt) -> Word, Hi/Lo(Int64) -> LongWord).
+            return Ctx_.getInt(ArgTy->Width / 2, /*Signed=*/false);
         }
         // EP §6.7.6.2: math functions extended to complex — return complex when
         // the argument is complex, real otherwise.

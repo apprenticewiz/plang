@@ -1383,6 +1383,108 @@ void Sema::checkCallStmt(const CallStmt& S) {
             return;
         }
 
+        // TP-only: Include(s, x) / Exclude(s, x) -- `s := s + [x]` and
+        // `s := s - [x]` by another name, mutating the set variable s in
+        // place (SetOps::emitSetSingleton/emitSetBinary, CodeGen).  x must
+        // be assignment-compatible with s's own base type -- the identical
+        // requirement checkSetLit's typed-constructor arm already asks of
+        // each member of a literal `[x]`.
+        if ((Lo == "include" || Lo == "exclude") && S.Args.size() == 2) {
+            auto SetTy  = checkExpr(*S.Args[0]);
+            auto ElemTy = checkExpr(*S.Args[1]);
+            if (!SetTy->isError()) {
+                if (SetTy->Kind != TypeKind::Set) {
+                    error(S.Args[0]->Loc, diag::err_set_argument, {Lo, SetTy->Name});
+                } else if (!isLValue(*S.Args[0])) {
+                    error(S.Args[0]->Loc, diag::err_var_param_needs_lvalue,
+                          {std::string_view("1"), std::string_view(Lo)});
+                } else if (!ElemTy->isError() && SetTy->ElemType
+                           && !SetTy->ElemType->isError()
+                           && !isAssignCompatible(*SetTy->ElemType, *ElemTy)) {
+                    error(S.Args[1]->Loc, diag::err_assign_mismatch,
+                          {ElemTy->Name, SetTy->ElemType->Name});
+                }
+            }
+            return;
+        }
+
+        // TP-only: Inc(x[, n]) / Dec(x[, n]) mutate x in place by n
+        // (defaulting to 1) -- EP §6.7.6.5's succ/pred two-argument form by
+        // another name, except succ/pred READ a new value and Inc/Dec WRITE
+        // one back into x.  x is either an ordinary ordinal variable, or,
+        // under -std=turbo, a PChar-like typed pointer (isCharPointerType,
+        // Type.h): Inc/Dec on a pointer go no further than `p + n`/`p - n`
+        // already do (checkBinary, above in this file's SemaExpr.cpp
+        // sibling), so a pointer Inc/Dec refuses is refused the identical
+        // way there. Extending pointer Inc/Dec to every typed pointer, not
+        // just PChar-like ones, would need pointer arithmetic itself to
+        // support that first -- a separate, concurrent, not-yet-landed
+        // change; see CGProcCall's own comment for where this is lowered.
+        if ((Lo == "inc" || Lo == "dec") && !S.Args.empty()) {
+            auto Ty = checkExpr(*S.Args[0]);
+            std::shared_ptr<Type> StepTy;
+            if (S.Args.size() > 1) StepTy = checkExpr(*S.Args[1]);
+            if (!Ty->isError()) {
+                const bool IsPtr = Ty->Kind == TypeKind::Pointer && isCharPointerType(*Ty);
+                if (!Ty->isOrdinal() && !IsPtr) {
+                    error(S.Args[0]->Loc, diag::err_inc_dec_argument, {Lo, Ty->Name});
+                } else if (!isLValue(*S.Args[0])) {
+                    error(S.Args[0]->Loc, diag::err_var_param_needs_lvalue,
+                          {std::string_view("1"), std::string_view(Lo)});
+                }
+            }
+            // Inc/Dec are TP-only to begin with (Builtins.def's own
+            // Dialects mask, already checked above via checkEPOnly), so --
+            // unlike succ/pred's EP-vs-ISO7185 split -- the two-argument
+            // form needs no dialect gate of its own here.
+            if (StepTy && !StepTy->isError() && !StepTy->isIntegral())
+                error(S.Args[1]->Loc, diag::err_step_argument_not_integer,
+                      {Lo, StepTy->Name});
+            return;
+        }
+
+        // TP-only: FillChar(var X; Count: Integer; Value) -- X is "untyped"
+        // the way real Turbo Pascal's is: any variable at all, its own
+        // declared type not otherwise examined, addressed directly and
+        // filled byte-for-byte (CGProcCall lowers this to llvm.memset).
+        if (Lo == "fillchar" && S.Args.size() == 3) {
+            auto XTy    = checkExpr(*S.Args[0]);
+            auto CountTy = checkExpr(*S.Args[1]);
+            auto ValTy   = checkExpr(*S.Args[2]);
+            if (!XTy->isError() && !isLValue(*S.Args[0]))
+                error(S.Args[0]->Loc, diag::err_var_param_needs_lvalue,
+                      {std::string_view("1"), std::string_view(Lo)});
+            if (!CountTy->isError() && !CountTy->isIntegral())
+                error(S.Args[1]->Loc, diag::err_numeric_argument, {Lo, CountTy->Name});
+            // Value is a byte or a char in real Turbo Pascal -- both
+            // ordinal, and only the low 8 bits of either are ever used.
+            if (!ValTy->isError() && !ValTy->isOrdinal())
+                error(S.Args[2]->Loc, diag::err_ordinal_argument, {Lo, ValTy->Name});
+            return;
+        }
+        // TP-only: Move(const Source; var Dest; Count: Integer).  Source and
+        // Dest are "untyped" the same way FillChar's X is above; Count is
+        // again a BYTE count (FPC field practice), not an element count.
+        // Lowered to llvm.memmove specifically, not memcpy -- Source and
+        // Dest may legally overlap and FPC's own Move handles that
+        // correctly, so plang's has to as well; see CGProcCall's own
+        // comment on the argument order, which is the classic place a Move
+        // port gets this backwards.
+        if (Lo == "move" && S.Args.size() == 3) {
+            auto SrcTy   = checkExpr(*S.Args[0]);
+            auto DstTy   = checkExpr(*S.Args[1]);
+            auto CountTy = checkExpr(*S.Args[2]);
+            if (!SrcTy->isError() && !isLValue(*S.Args[0]))
+                error(S.Args[0]->Loc, diag::err_var_param_needs_lvalue,
+                      {std::string_view("1"), std::string_view(Lo)});
+            if (!DstTy->isError() && !isLValue(*S.Args[1]))
+                error(S.Args[1]->Loc, diag::err_var_param_needs_lvalue,
+                      {std::string_view("2"), std::string_view(Lo)});
+            if (!CountTy->isError() && !CountTy->isIntegral())
+                error(S.Args[2]->Loc, diag::err_numeric_argument, {Lo, CountTy->Name});
+            return;
+        }
+
         // Generic: arity was already checked against Builtins.def above.
         // Evaluate arguments for side-effects / type errors and leave the
         // rest -- which argument means what -- to codegen.

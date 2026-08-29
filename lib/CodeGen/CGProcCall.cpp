@@ -7,6 +7,7 @@
 
 #include "plang/AST/Ast.h"
 #include "plang/Basic/StringUtil.h"
+#include "plang/Sema/Type.h"
 
 #include "CodegenICE.h"
 
@@ -277,6 +278,95 @@ void CGProcCall::emitCallStmt(const CallStmt& s) {
         B.CreateUnreachable();
         return;
     }
+
+    // TP-only: Include(s, x) / Exclude(s, x) -- `s := s + [x]` / `s := s -
+    // [x]` by another name, reusing the same set primitives (SetOps) a
+    // written-out set literal and `+`/`-` already lower through: build x's
+    // singleton bitmask (range-checked against s's own declared base type,
+    // same as a literal member would be), OR or AND-NOT it into s's current
+    // value, and store the result back.
+    if ((lo == "include" || lo == "exclude") && s.Args.size() == 2) {
+        auto* addr = EmitLValue(*s.Args[0]);
+        auto* cur  = B.CreateLoad(Sets.setTy(), addr, "set.cur");
+        auto* bit  = Sets.emitSetSingleton(EmitExpr(*s.Args[1]),
+                         Sets.setBaseOf(*s.Args[0]), Sets.declaredRangeOf(*s.Args[0]), s.Loc);
+        auto* next = Sets.emitSetBinary(
+            lo == "include" ? TokenKind::Plus : TokenKind::Minus, cur, bit);
+        B.CreateStore(next, addr);
+        return;
+    }
+
+    // TP-only: Inc(x[, n]) / Dec(x[, n]).  Mirrors CGFuncCall's succ/pred
+    // lowering (widen, add/sub, range-check, narrow back) but STORES the
+    // result into x instead of returning it -- Inc/Dec are statements,
+    // succ/pred are functions, and that is the only difference between the
+    // two.  x's address is computed exactly ONCE (EmitLValue) and read back
+    // through a plain load from that same address, rather than also calling
+    // EmitExpr(*s.Args[0]) separately -- x may be `arr[F()]` or similar,
+    // and evaluating it a second time would run F() (and recompute the GEP)
+    // twice for what has to be a single read-modify-write, the same
+    // single-address discipline read()'s own target already follows
+    // (BuiltinIO::emitReadArg). A PChar-like typed pointer
+    // (isCharPointerType, Type.h) takes the GEP-scaled-by-pointee-size path
+    // CGBinaryOps' own `p + n`/`p - n` already uses -- Sema's checkCallStmt
+    // Inc/Dec arm refuses any OTHER pointer type, so nothing else reaches
+    // this branch.
+    if ((lo == "inc" || lo == "dec") && !s.Args.empty()) {
+        const auto& ty = s.Args[0]->ResolvedType;
+        auto* addr = EmitLValue(*s.Args[0]);
+        if (ty && ty->Kind == TypeKind::Pointer) {
+            auto* cur  = B.CreateLoad(PtrTy, addr, "incdec.cur");
+            auto* step = s.Args.size() > 1 ? ToI64(EmitExpr(*s.Args[1]))
+                                            : llvm::ConstantInt::get(I64Ty, 1);
+            if (lo == "dec") step = B.CreateNeg(step, "dec.step");
+            llvm::Type* elemLLVMTy = Types.llvmTypeOfSemaType(*ty->PointeeType);
+            auto* np = B.CreateGEP(elemLLVMTy, cur, {step}, "incdec.ptr");
+            B.CreateStore(np, addr);
+            return;
+        }
+        auto* llTy = ty ? Types.llvmTypeOfSemaType(*ty) : I64Ty;
+        auto* cur  = B.CreateLoad(llTy, addr, "incdec.cur");
+        auto* v = ToI64(cur);
+        auto* k = s.Args.size() > 1 ? ToI64(EmitExpr(*s.Args[1]))
+                                     : llvm::ConstantInt::get(I64Ty, 1);
+        auto* r = (lo == "inc") ? B.CreateAdd(v, k, "inc") : B.CreateSub(v, k, "dec");
+        if (ty && !ty->isError())
+            if (auto range = ordinalRange(*ty))
+                RangeGuards.emitRangeCheck(r, range->first, range->second,
+                                            /*isIndex=*/false, s.Loc);
+        auto* narrowed = (cur && cur->getType() != I64Ty)
+            ? B.CreateZExtOrTrunc(r, cur->getType(), lo) : r;
+        B.CreateStore(narrowed, addr);
+        return;
+    }
+
+    // TP-only: FillChar(var X; Count: Integer; Value).  X is "untyped" --
+    // any variable at all, addressed directly and filled byte-for-byte with
+    // Value's own low byte, regardless of X's declared type.
+    if (lo == "fillchar" && s.Args.size() == 3) {
+        auto* dst   = EmitLValue(*s.Args[0]);
+        auto* count = ToI64(EmitExpr(*s.Args[1]));
+        auto* val   = B.CreateTrunc(ToI64(EmitExpr(*s.Args[2])), I8Ty, "fillchar.val");
+        B.CreateMemSet(dst, val, count, llvm::MaybeAlign());
+        return;
+    }
+    // TP-only: Move(const Source; var Dest; Count: Integer).  Turbo's own
+    // parameter order is (Source, Dest, Count) -- the REVERSE of
+    // llvm.memmove's (and C memmove's) own (Dest, Src, Len) -- so `src`
+    // below is deliberately read from s.Args[0] and `dst` from s.Args[1],
+    // not in textual left-to-right order, to land each in the position
+    // CreateMemMove actually wants. Lowered to memmove specifically, not
+    // memcpy: Source and Dest may legally overlap (Turbo's own Move is
+    // defined to handle that correctly), and memcpy's behavior on
+    // overlapping ranges is undefined.
+    if (lo == "move" && s.Args.size() == 3) {
+        auto* src   = EmitLValue(*s.Args[0]);
+        auto* dst   = EmitLValue(*s.Args[1]);
+        auto* count = ToI64(EmitExpr(*s.Args[2]));
+        B.CreateMemMove(dst, llvm::MaybeAlign(), src, llvm::MaybeAlign(), count);
+        return;
+    }
+
     if (lo == "new" && !s.Args.empty()) {
         // EP §6.7.5.3: new(p, d1..ds) when p's domain-type is a schema-name.
         if (const auto& pt = s.Args[0]->ResolvedType;

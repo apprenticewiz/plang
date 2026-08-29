@@ -799,3 +799,27 @@ DIAG(err_absolute_target_not_variable, Error,
 DIAG(err_turbo_unsupported_float_type, Error,
      "'%0' is not a supported plang type; plang implements Turbo's Real and "
      "Single floating-point types but not Extended or Comp")
+// TP-only: SizeOf(T)/High(T)/Low(T), T a type name or a value expression
+// (Sema::resolveTypeArgOrValue, SemaExpr.cpp).  err_sizeof_unknown_size is
+// Sema::byteSizeOf declining -- a conformant array parameter type or an
+// undiscriminated schema, neither of which has one fixed size to report;
+// in practice unreachable under -std=turbo today (schemas are EP-only) but
+// checked rather than assumed, the same caution byteSizeOf's other callers
+// already take. err_high_low_argument is High/Low's own argument shape
+// check: an ordinal type/value answers directly and an array answers
+// through its index type (High(arr)), and nothing else has bounds to give.
+DIAG(err_sizeof_unknown_size, Error,
+     "cannot determine the size of type '%0'")
+DIAG(err_high_low_argument, Error,
+     "'%0' requires an ordinal or array type, got '%1'")
+// TP-only: FPC's size-aware Hi/Lo/Swap all read or rearrange an integer
+// value's own bytes, so the argument must be one at least 16 bits wide --
+// Byte/ShortInt (8 bits) has no separate high and low half to name.  See
+// Builtins.def's own comment on these three for the TP7-vs-FPC divergence.
+DIAG(err_hi_lo_swap_argument, Error,
+     "'%0' requires an integer argument of at least 16 bits, got '%1'")
+// TP-only: Inc/Dec's argument must be ordinal or (Turbo, PChar-like) a
+// pointer -- see checkCallStmt's own Inc/Dec arm for why a pointer this
+// narrow rather than any typed pointer.
+DIAG(err_inc_dec_argument, Error,
+     "'%0' requires an ordinal or pointer argument, got '%1'")

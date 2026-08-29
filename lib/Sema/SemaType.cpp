@@ -1521,6 +1521,34 @@ std::optional<int64_t> Sema::constBoundImpl(const ExprNode& E) const {
                      : fold(checkedSub(*V, *K, Width, Signed), checkedSub(*V, *K));
             break;
         }
+        // TP-only: SizeOf(Integer) and the like fold, so that `const BufSize
+        // = 4 * SizeOf(Integer)` -- Sema::byteSizeOf's own doc comment gives
+        // this exact example -- has a value to give a bound or a typed
+        // constant's initializer. checkCallExpr's SizeOf/High/Low arm always
+        // runs first (constBound is asked only once an expression has
+        // already been checked) and left N->Args[0]->ResolvedType holding
+        // exactly the type this builtin answers about, whether Args[0]
+        // named a type or was an ordinary value expression -- so this reads
+        // that back rather than re-deriving it from the AST a second time.
+        case BuiltinID::SizeOf:
+            if (N->Args.size() == 1)
+                if (const auto& T = N->Args[0]->ResolvedType; T && !T->isError())
+                    if (auto Sz = Sema::byteSizeOf(*T))
+                        return static_cast<int64_t>(*Sz);
+            break;
+        case BuiltinID::High:
+        case BuiltinID::Low:
+            if (N->Args.size() == 1) {
+                if (const auto& T = N->Args[0]->ResolvedType; T && !T->isError()) {
+                    std::shared_ptr<Type> RangeTy = T;
+                    if (RangeTy->Kind == TypeKind::Array) RangeTy = RangeTy->IndexType;
+                    if (RangeTy)
+                        if (auto R = ordinalRange(*RangeTy))
+                            return N->ResolvedBuiltin == BuiltinID::High
+                                 ? R->second : R->first;
+                }
+            }
+            break;
         default: break;
         }
     }
