@@ -136,7 +136,8 @@ llvm::Value* CGBinaryOps::emitBinary(const BinaryExpr& e) {
         if (e.ResolvedType && e.ResolvedType->Kind == TypeKind::Integer) {
             auto* fn = RtFns.getExternFnN("plang_ipow", I64Ty, {I64Ty, I64Ty});
             return B.CreateCall(
-                fn, {ToI64(EmitExpr(*e.Left)), ToI64(EmitExpr(*e.Right))}, "ipow");
+                fn, {ToI64(EmitExpr(*e.Left), operandIsSigned(*e.Left)),
+                     ToI64(EmitExpr(*e.Right), operandIsSigned(*e.Right))}, "ipow");
         }
         auto* powFn = RtFns.getExternFnN("pow", DblTy, {DblTy, DblTy});
         auto* base  = ToDouble(EmitExpr(*e.Left));
@@ -521,7 +522,7 @@ llvm::Value* CGBinaryOps::emitBinary(const BinaryExpr& e) {
             const ExprNode& PtrOperand = LPtr ? *e.Left  : *e.Right;
             const ExprNode& IdxOperand = LPtr ? *e.Right : *e.Left;
             auto* base = EmitExpr(PtrOperand);
-            auto* idx  = ToI64(EmitExpr(IdxOperand));
+            auto* idx  = ToI64(EmitExpr(IdxOperand), operandIsSigned(IdxOperand));
             if (e.Op == TokenKind::Minus)
                 idx = B.CreateNeg(idx, "pchar.sub.idx");
             llvm::Type* elemLLVMTy =
@@ -591,16 +592,23 @@ llvm::Value* CGBinaryOps::emitBinary(const BinaryExpr& e) {
     // Two compatible ordinals need not share a width: a subrange is lowered to
     // i64 whatever it was cut from, while char stays i8 and boolean i1, so
     // comparing a subrange of char against char brings an i64 and an i8
-    // together and icmp takes only one type.  The narrow ordinals are all
-    // non-negative, so the widening is a zero-extend.
+    // together and icmp takes only one type.  Each side widens with its OWN
+    // Sema-resolved signedness (operandIsSigned), not a blanket "narrow
+    // ordinals are all non-negative" assumption: that used to be true when
+    // Char/Boolean/plain-signed-Integer were the only narrower-than-i64
+    // ordinals in existence, but Turbo's sized-integer ladder added narrow
+    // UNSIGNED rungs wider than i8 (Word/Cardinal/LongWord) and a narrow
+    // SIGNED rung at i8 (ShortInt) -- e.g. `QWord + Cardinal` sign-extending
+    // the Cardinal here instead of zero-extending it silently subtracted
+    // 2^32 from the result.
     if (!needFP && lv->getType()->isIntegerTy() && rv->getType()->isIntegerTy()
         && lv->getType() != rv->getType()) {
         llvm::Type* const wide = lv->getType()->getIntegerBitWidth()
                                          >= rv->getType()->getIntegerBitWidth()
                                      ? lv->getType()
                                      : rv->getType();
-        lv = CoerceToType(lv, wide);
-        rv = CoerceToType(rv, wide);
+        lv = CoerceToType(lv, wide, operandIsSigned(*e.Left));
+        rv = CoerceToType(rv, wide, operandIsSigned(*e.Right));
     }
 
     // Either side answers this, the two being compatible by now; the right one
@@ -621,19 +629,20 @@ llvm::Value* CGBinaryOps::emitBinary(const BinaryExpr& e) {
         case TokenKind::Divide:
             return B.CreateFDiv(ToDouble(lv), ToDouble(rv), "fdiv");
         case TokenKind::Div: {
-            auto* n = ToI64(lv);
-            auto* d = ToI64(rv);
+            auto* n = ToI64(lv, operandIsSigned(*e.Left));
+            auto* d = ToI64(rv, operandIsSigned(*e.Right));
             // The guards below compare against width-specific constants --
             // emitDivOverflowCheck's minint bit pattern most of all -- so
             // they need operands at the div's REAL width, not n/d above:
             // those are already sign-extended to i64 for the SDiv itself,
             // and MinInt16 sign-extended to i64 does not equal INT64_MIN, so
             // a check run on n/d as-is would never catch a 16-bit Turbo
-            // `MinInt div -1`.  e.ResolvedType->Width is the same TyInt
-            // answer (16 under Turbo, 64 otherwise) the Shl/Shr case below
-            // already re-coerces to, for the identical reason.  Computing
-            // the division itself at i64 stays correct once these guards
-            // pass: for any in-range divisor/dividend pair other than
+            // `MinInt div -1`.  e.ResolvedType->Width is now Sema::
+            // commonIntType's answer -- the WIDER of the two operands' own
+            // Width, not unconditionally the dialect's default TyInt -- so
+            // e.g. `Int64Var div ByteVar` checks at 64 bits, not 16 or 8.
+            // Computing the division itself at i64 stays correct once these
+            // guards pass: for any in-range divisor/dividend pair other than
             // minint/-1 (which the overflow guard below catches first), a
             // narrower SDiv's quotient is exactly what the sign-extended,
             // wider-precision SDiv below computes too.
@@ -645,20 +654,26 @@ llvm::Value* CGBinaryOps::emitBinary(const BinaryExpr& e) {
             // (CodeGenExprs.cpp's coerceToType short-circuits whenever the
             // value's LLVM type already matches dst) rather than emitting a
             // second, redundant conversion of lv/rv that duplicates what
-            // ToI64 above already did.
+            // ToI64 above already did.  The signedness passed to CoerceToType
+            // here is a don't-care either way -- n/d are already i64 and
+            // divBitsTy's width is never wider than 64, so this is always a
+            // narrowing (or exact) *OrTrunc, which does not read it -- but a
+            // real answer is threaded through anyway rather than an
+            // arbitrary placeholder.
             llvm::Type* divBitsTy = llvm::IntegerType::get(
                 Ctx, e.ResolvedType ? e.ResolvedType->Width : 64);
             const unsigned divWidth = divBitsTy->getIntegerBitWidth();
-            RangeGuards.emitDivZeroCheck(CoerceToType(d, divBitsTy), "div", divWidth);
+            const bool nSigned = operandIsSigned(*e.Left), dSigned = operandIsSigned(*e.Right);
+            RangeGuards.emitDivZeroCheck(CoerceToType(d, divBitsTy, dSigned), "div", divWidth);
             // minint div -1: the one nonzero-divisor case that still
             // overflows, since minint's magnitude has no positive int64_t
             // representation (same UB shape as abs(minint)).
-            RangeGuards.emitDivOverflowCheck(CoerceToType(n, divBitsTy),
-                                              CoerceToType(d, divBitsTy), divWidth);
+            RangeGuards.emitDivOverflowCheck(CoerceToType(n, divBitsTy, nSigned),
+                                              CoerceToType(d, divBitsTy, dSigned), divWidth);
             return B.CreateSDiv(n, d, "sdiv");
         }
         case TokenKind::Mod: {
-            auto* d = ToI64(rv);
+            auto* d = ToI64(rv, operandIsSigned(*e.Right));
             // Same Width contract as Div just above -- see its comment.
             // emitModDivisorCheck's own checks (== 0 for Turbo, <= 0
             // otherwise) happen to be sign-extension-invariant on their own
@@ -671,9 +686,10 @@ llvm::Value* CGBinaryOps::emitBinary(const BinaryExpr& e) {
             // true IR no-op instead of a redundant second conversion.
             llvm::Type* modBitsTy = llvm::IntegerType::get(
                 Ctx, e.ResolvedType ? e.ResolvedType->Width : 64);
-            RangeGuards.emitModDivisorCheck(CoerceToType(d, modBitsTy),
-                                             modBitsTy->getIntegerBitWidth());
-            auto* r = B.CreateSRem(ToI64(lv), d, "srem");
+            RangeGuards.emitModDivisorCheck(
+                CoerceToType(d, modBitsTy, operandIsSigned(*e.Right)),
+                modBitsTy->getIntegerBitWidth());
+            auto* r = B.CreateSRem(ToI64(lv, operandIsSigned(*e.Left)), d, "srem");
             // Turbo's mod takes its sign from the DIVIDEND -- exactly what
             // srem already computes -- rather than ISO's "0 <= mod <
             // divisor".  Confirmed against `fpc -Mtp`: (-7) mod 3 is -1,
@@ -717,15 +733,23 @@ llvm::Value* CGBinaryOps::emitBinary(const BinaryExpr& e) {
             // case), so `1 shl 20` under Turbo (both operands literals) had
             // lv/rv already sitting at i64 by the time control reached here,
             // silently computing an unmasked 64-bit shift instead of a
-            // masked 16-bit one. e.ResolvedType->Width is the answer Sema
-            // already committed to (TyInt, i.e. LangOptions::
-            // defaultIntWidth() -- 16 under Turbo, 64 otherwise), so operands
-            // are re-coerced to it explicitly rather than trusting whatever
-            // width they arrived in.
+            // masked 16-bit one. e.ResolvedType->Width is Sema::checkBinary's
+            // Shl/Shr answer -- the LEFT operand's own Width promoted up to
+            // at least the dialect default (`Int64Var shl N` stays 64-bit;
+            // `ByteVar shl N` promotes to the default, both confirmed against
+            // real `fpc -Mtp`) -- so operands are re-coerced to it explicitly
+            // rather than trusting whatever width they arrived in.  `l`'s
+            // signedness genuinely matters here (a signed left operand's
+            // vacated high bits must be sign-extended before the shift, or
+            // e.g. `ShortInt(-1) shl 1` comes out positive instead of -2);
+            // `r`'s does not (the mask below keeps only r's low `width` bits,
+            // which sign- vs. zero-extension never differ on), but is
+            // threaded through anyway rather than passed an arbitrary
+            // placeholder.
             llvm::Type* bitsTy = llvm::IntegerType::get(
                 Ctx, e.ResolvedType ? e.ResolvedType->Width : 64);
-            auto* l = CoerceToType(lv, bitsTy);
-            auto* r = CoerceToType(rv, bitsTy);
+            auto* l = CoerceToType(lv, bitsTy, operandIsSigned(*e.Left));
+            auto* r = CoerceToType(rv, bitsTy, operandIsSigned(*e.Right));
             // LLVM's shl/lshr are POISON (not merely wrong) if the shift
             // amount is >= the operand's bit width -- e.g. `x shl 20` on a
             // 16-bit Turbo Integer -- so the count is masked to (width-1)

@@ -36,8 +36,8 @@ public:
                 std::function<llvm::Value*(const plang::ExprNode&)> EmitLValue,
                 std::function<llvm::Value*(llvm::Value*)> EnsureI1,
                 std::function<llvm::Value*(llvm::Value*)> ToDouble,
-                std::function<llvm::Value*(llvm::Value*)> ToI64,
-                std::function<llvm::Value*(llvm::Value*, llvm::Type*)> CoerceToType,
+                std::function<llvm::Value*(llvm::Value*, bool)> ToI64,
+                std::function<llvm::Value*(llvm::Value*, llvm::Type*, bool)> CoerceToType,
                 std::function<llvm::AllocaInst*(llvm::Type*, const std::string&)> CreateEntryAlloca,
                 std::function<llvm::Value*(llvm::Value*, const std::string&)> CreateDynStrAlloca,
                 std::function<bool(const plang::ExprNode&)> ExprIsVarStr,
@@ -73,6 +73,16 @@ private:
     bool exprIsStringLike(const plang::ExprNode& e);
     /// True if the expression's resolved type is a set.
     static bool exprIsSet(const plang::ExprNode& e);
+
+    /// The operand's actual Sema-resolved signedness (Type::IsSigned),
+    /// consulted -- not guessed from LLVM bit width -- at every
+    /// ToI64/CoerceToType call site in this file's binary-op widening path.
+    /// See CodeGenImpl.h's toI64/coerceToType \c srcSigned parameter for
+    /// why an LLVM-width-alone guess is wrong for Turbo's sized-integer
+    /// ladder's unsigned rungs wider than i8 and its signed 8-bit rung.
+    bool operandIsSigned(const plang::ExprNode& e) const {
+        return !OrdinalIsUnsigned(e.ResolvedType.get());
+    }
 
     /// The two-block-plus-PHI CFG shape shared by every short-circuiting
     /// Boolean binary operator this class lowers: evaluate the left operand;
@@ -117,8 +127,15 @@ private:
     std::function<llvm::Value*(const plang::ExprNode&)> EmitLValue;
     std::function<llvm::Value*(llvm::Value*)> EnsureI1;
     std::function<llvm::Value*(llvm::Value*)> ToDouble;
-    std::function<llvm::Value*(llvm::Value*)> ToI64;
-    std::function<llvm::Value*(llvm::Value*, llvm::Type*)> CoerceToType;
+    /// The bool is the operand's actual Sema-resolved Type::IsSigned --
+    /// Codegen::Impl::toI64's own srcSigned parameter, always passed
+    /// explicitly here (never omitted/defaulted) since every call site in
+    /// CGBinaryOps.cpp has a real Sema-typed operand in hand.  See toI64's
+    /// declaration (CodeGenImpl.h) for why this decides sign- vs.
+    /// zero-extension instead of guessing from LLVM bit width.
+    std::function<llvm::Value*(llvm::Value*, bool)> ToI64;
+    /// CoerceToType's identical bool, for the identical reason.
+    std::function<llvm::Value*(llvm::Value*, llvm::Type*, bool)> CoerceToType;
     std::function<llvm::AllocaInst*(llvm::Type*, const std::string&)> CreateEntryAlloca;
     std::function<llvm::Value*(llvm::Value*, const std::string&)> CreateDynStrAlloca;
     std::function<bool(const plang::ExprNode&)> ExprIsVarStr;

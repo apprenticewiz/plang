@@ -39,7 +39,7 @@ llvm::Value* Codegen::Impl::toDouble(llvm::Value* v) {
     return builder.CreateSIToFP(v, dblTy, "to.dbl");
 }
 
-llvm::Value* Codegen::Impl::toI64(llvm::Value* v) {
+llvm::Value* Codegen::Impl::toI64(llvm::Value* v, std::optional<bool> srcSigned) {
     if (!v) codegenICE("integer conversion of an unlowerable expression");
     if (v->getType()->isIntegerTy(64)) return v;
     // isFloatingPointTy, not isDoubleTy: Turbo's Single (float) needs the
@@ -47,23 +47,30 @@ llvm::Value* Codegen::Impl::toI64(llvm::Value* v) {
     // width -- CreateFPToSI accepts either source width directly.
     if (v->getType()->isFloatingPointTy())
         return builder.CreateFPToSI(v, i64Ty, "to.i64");
-    // Char (i8) and Boolean (i1) are the only narrow ordinals that are
-    // genuinely non-negative; everything else narrower than i64 that reaches
-    // here today is Turbo's own Integer, which is signed (16-bit, IsSigned
-    // true -- see LangOptions::defaultIntWidth()).  Zero-extending it here
-    // silently turned a negative i16 into a huge positive i64 (this used to
-    // do exactly that, unconditionally, before Turbo's Integer existed to
-    // ever be negative at a narrower-than-64 width).  Tier 2's Byte/Word/etc.
-    // ladder will need this decided from the operand's actual Sema
-    // Type::IsSigned instead of LLVM width alone, since an unsigned Byte and
-    // a signed ShortInt will both be i8 -- not needed yet, since nothing
-    // narrower than i64 other than Integer/Char/Boolean exists today.
+    // srcSigned given: consult the operand's actual Sema-resolved
+    // Type::IsSigned directly rather than guessing from LLVM width -- see
+    // the declaration's (CodeGenImpl.h) comment for why the guess below is
+    // wrong for Turbo's sized-integer ladder's unsigned rungs wider than i8
+    // (Word/Cardinal/LongWord/QWord) and its signed 8-bit rung (ShortInt).
+    if (srcSigned.has_value())
+        return *srcSigned ? builder.CreateSExt(v, i64Ty, "to.i64")
+                           : builder.CreateZExt(v, i64Ty, "to.i64");
+    // No operand-type context at this call site (srcSigned omitted): fall
+    // back to the pre-ladder heuristic.  Char (i8) and Boolean (i1) are the
+    // only narrow ordinals that are genuinely non-negative; everything else
+    // narrower than i64 that reaches here today is Turbo's own Integer,
+    // which is signed (16-bit, IsSigned true -- see LangOptions::
+    // defaultIntWidth()).  Zero-extending it here silently turned a negative
+    // i16 into a huge positive i64 (this used to do exactly that,
+    // unconditionally, before Turbo's Integer existed to ever be negative at
+    // a narrower-than-64 width).
     if (v->getType()->isIntegerTy(8) || v->getType()->isIntegerTy(1))
         return builder.CreateZExt(v, i64Ty, "to.i64");
     return builder.CreateSExt(v, i64Ty, "to.i64");
 }
 
-llvm::Value* Codegen::Impl::coerceToType(llvm::Value* v, llvm::Type* dst) {
+llvm::Value* Codegen::Impl::coerceToType(llvm::Value* v, llvm::Type* dst,
+                                          std::optional<bool> srcSigned) {
     if (!v || v->getType() == dst) return v;
     // Widening/narrowing between an ordinal and a floating destination: dst
     // (or v) may now be float (Turbo's Single) as well as double (Real), so
@@ -80,13 +87,19 @@ llvm::Value* Codegen::Impl::coerceToType(llvm::Value* v, llvm::Type* dst) {
     if (dst->isFloatTy() && v->getType()->isDoubleTy())
         return builder.CreateFPTrunc(v, dst, "narrow.fp");
     // Ordinals of different widths meet whenever a char or boolean is stored
-    // where an integer was computed, or the reverse, or (under Turbo) a
-    // 16-bit Integer meets a 64-bit one.  Same signedness judgment as toI64
-    // above: char/boolean zero-extend, everything else (Turbo's signed
-    // Integer, the only other narrow ordinal that exists today) sign-extends.
-    // A narrowing truncation is exact either way, hence *OrTrunc.
+    // where an integer was computed, the reverse, or (under Turbo) two
+    // sized-integer ladder rungs of different widths meet.  A narrowing
+    // truncation is exact regardless of signedness, hence *OrTrunc either
+    // way; only an actual WIDENING needs to get sign- vs. zero-extension
+    // right, which is exactly what srcSigned (see toI64's identical
+    // parameter, just above) is for.
     if (dst->isIntegerTy() && v->getType()->isIntegerTy()) {
-        const bool srcNonNegative = v->getType()->isIntegerTy(8) || v->getType()->isIntegerTy(1);
+        const bool srcNonNegative = srcSigned.has_value()
+            ? !*srcSigned
+            // No operand-type context given: the pre-ladder heuristic --
+            // see toI64's identical fallback for why i8/i1 alone used to be
+            // the whole answer and no longer is in general.
+            : (v->getType()->isIntegerTy(8) || v->getType()->isIntegerTy(1));
         return srcNonNegative ? builder.CreateZExtOrTrunc(v, dst, "conv")
                                : builder.CreateSExtOrTrunc(v, dst, "conv");
     }
