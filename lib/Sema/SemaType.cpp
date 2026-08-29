@@ -454,6 +454,11 @@ std::shared_ptr<Type> Sema::resolveTypeImpl(const TypeNode& Node) {
         T->Anonymous  = true;   // until a declaration names it
         T->Name       = describeValueList(N->Values);
         T->EnumValues = N->Values;
+        // ISO §6.4.2.2 numbers an enumeration's values from zero, so none is
+        // negative; IsSigned is explicitly false rather than left at the
+        // struct default (true), the same fix makeBoolean/makeChar (Type.h)
+        // need for the identical reason.
+        T->IsSigned   = false;
         // Register each value as an EnumValue symbol in the current scope.
         int Ord = 0;
         for (const auto& Val : N->Values) {

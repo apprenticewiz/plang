@@ -316,8 +316,13 @@ struct Type {
     [[nodiscard]] static std::shared_ptr<Type> makeInteger()  { auto T = std::make_shared<Type>(); T->Kind = TypeKind::Integer;  T->Name = "integer"; return T; }
     [[nodiscard]] static std::shared_ptr<Type> makeReal()     { auto T = std::make_shared<Type>(); T->Kind = TypeKind::Real;     T->Name = "real";    return T; }
     [[nodiscard]] static std::shared_ptr<Type> makeComplex()  { auto T = std::make_shared<Type>(); T->Kind = TypeKind::Complex;  T->Name = "complex"; return T; }
-    [[nodiscard]] static std::shared_ptr<Type> makeBoolean()  { auto T = std::make_shared<Type>(); T->Kind = TypeKind::Boolean;  T->Name = "boolean"; T->Width = 8; return T; }
-    [[nodiscard]] static std::shared_ptr<Type> makeChar()     { auto T = std::make_shared<Type>(); T->Kind = TypeKind::Char;     T->Name = "char";    T->Width = 8; return T; }
+    // Boolean and Char are ordinals numbered from zero (ISO §6.4.2.2): neither
+    // has a negative value, so IsSigned is explicitly false rather than left
+    // at the struct default (true).  Nothing consulted IsSigned for these
+    // kinds until ordinalIsUnsigned (CodeGenImpl.h) was taught to read it
+    // instead of dispatching on Kind alone -- see that function's comment.
+    [[nodiscard]] static std::shared_ptr<Type> makeBoolean()  { auto T = std::make_shared<Type>(); T->Kind = TypeKind::Boolean;  T->Name = "boolean"; T->Width = 8; T->IsSigned = false; return T; }
+    [[nodiscard]] static std::shared_ptr<Type> makeChar()     { auto T = std::make_shared<Type>(); T->Kind = TypeKind::Char;     T->Name = "char";    T->Width = 8; T->IsSigned = false; return T; }
     [[nodiscard]] static std::shared_ptr<Type> makeString()   { auto T = std::make_shared<Type>(); T->Kind = TypeKind::String;    T->Name = "string";  return T; }
     [[nodiscard]] static std::shared_ptr<Type> makeVarString(int64_t Cap) {
         auto T = std::make_shared<Type>();

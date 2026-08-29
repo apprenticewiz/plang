@@ -446,6 +446,14 @@ void Sema::checkFor(const ForStmt& S) {
         if (!IsVar) {
             error(S.Loc, diag::err_for_var_not_variable, {S.Var});
         } else {
+            // See ForStmt::VarType's own comment (AstStmt.h): CodeGen needs
+            // the control variable's declared type to pick a signed/unsigned
+            // comparison for the loop condition, and Var (a bare name) has
+            // nowhere else to carry it.  Set even where isOrdinal() is about
+            // to fail below -- codegen never reaches a program Sema rejected,
+            // and the field existing unconditionally here is simpler than
+            // threading the same condition through twice.
+            S.VarType = Sym->Ty;
             if (!Sym->Ty->isOrdinal())
                 error(S.Loc, diag::err_for_var_not_ordinal, {S.Var, Sym->Ty->Name});
 

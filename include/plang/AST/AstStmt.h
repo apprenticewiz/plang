@@ -43,6 +43,27 @@ struct ForStmt : StmtNode {
     std::unique_ptr<ExprNode> From, Limit;    /// initial and terminal values
     bool                      Downto{false};  /// false = to, true = downto
     std::unique_ptr<StmtNode> Body;
+
+    /// The control variable's own declared type, set by Sema::checkFor
+    /// (Sym->Ty) once it has resolved Var to a Var/VarParam symbol; null
+    /// where that lookup failed and a diagnostic already fired.  Var is a
+    /// bare name, not an ExprNode, so unlike From/Limit it has no
+    /// ResolvedType of its own for CodeGen to read -- this is that answer,
+    /// following the same "Sema attaches what CodeGen needs onto the
+    /// statement" precedent as CallStmt::ResolvedType.
+    ///
+    /// CGControlFlow::emitFor needs it for a reason From/Limit's OWN types
+    /// cannot always supply: both bounds are coerced into the control
+    /// variable's storage before the loop ever compares them, so what the
+    /// comparison must respect is the STORAGE's signedness, not either
+    /// bound's pre-coercion one.  Most of the time those agree -- a bound
+    /// that is itself a variable/constant of a compatible type carries the
+    /// same signedness the control variable does -- but a bare integer
+    /// literal bound (`for w := 0 to 65535 do`) is always typed as the
+    /// dialect's plain signed Integer regardless of value, so reading only
+    /// From/Limit's types read Word's own 0..65535 loop as fully signed and
+    /// silently ran zero iterations.
+    mutable std::shared_ptr<Type> VarType;
 };
 
 struct RepeatStmt : StmtNode {
