@@ -360,6 +360,21 @@ BUILTIN(FreeMem,      "freemem",      Proc, TP, 1, 2, R_None)
 BUILTIN(ParamCount,   "paramcount",   Func, TP, 0, 0, R_Int)
 BUILTIN(ParamStr,     "paramstr",     Func, TP, 1, 1, R_Str)
 
+// -std=turbo only: IOResult -- reads InOutRes (Sema::registerBuiltins'
+// InOutRes Symbol, runtime/plang_sys.cpp's plang_tp_inoutres) and CLEARS IT
+// TO ZERO in the same call, real Turbo Pascal's own read-and-clear contract
+// -- see plang_tp_ioresult's own comment (runtime/plang_sys.cpp) for the
+// confirmed field practice and why the read-and-clear itself happens only
+// there, never duplicated in CodeGen.  Zero args, Func, TP-only: the exact
+// same shape ParamCount just above already has, which is what gets a bare,
+// parenthesis-less `x := IOResult;` the correct dialect gating "for free"
+// through Sema::checkIdent's generic SymbolKind::Builtin case (its own
+// checkEPOnly call, closed for exactly this shape of builtin by the fix
+// ParamCount/Random's own arrival there required) -- confirmed for
+// IOResult specifically, not just assumed to transfer, by this item's own
+// dialect-gating lit test.
+BUILTIN(IOResult,     "ioresult",     Func, TP, 0, 0, R_Int)
+
 // -std=turbo only: Assign(var f; const name: string) / Append(var f: Text).
 // TP's own file model, which replaces (not extends) ISO/EP's reset/rewrite/
 // extend/update/bind: Reset/Rewrite/Append here take no filename argument

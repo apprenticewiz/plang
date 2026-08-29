@@ -82,6 +82,19 @@ void Codegen::Impl::emitPredefinedGlobals() {
                                            llvm::GlobalValue::ExternalLinkage,
                                            /*Initializer=*/nullptr, "plang_tp_filemode");
     defVar("FileMode", fmGv, ty, /*typeNode=*/nullptr);
+
+    // InOutRes: see Sema::registerBuiltins' InOutRes Symbol comment for the
+    // whole design -- ExitCode's own mechanism again, but at a fixed i64
+    // rather than langOpts.defaultIntWidth(), the same reason RandSeed's
+    // seedTy just above is a fixed i32 rather than `ty`: the one real
+    // plang_tp_inoutres (runtime/plang_sys.cpp) is int64_t regardless of
+    // Integer's own dialect width, a deliberate divergence from Borland's
+    // 16-bit Word documented at length on that global's own definition.
+    auto* iorTy = llvm::Type::getInt64Ty(ctx);
+    auto* iorGv = new llvm::GlobalVariable(*mod, iorTy, /*isConst=*/false,
+                                            llvm::GlobalValue::ExternalLinkage,
+                                            /*Initializer=*/nullptr, "plang_tp_inoutres");
+    defVar("InOutRes", iorGv, iorTy, /*typeNode=*/nullptr);
 }
 
 // Attaches 'input' and 'output' to the standard streams.  Any other

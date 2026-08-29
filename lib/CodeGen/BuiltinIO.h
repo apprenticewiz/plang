@@ -89,6 +89,19 @@ private:
     static std::string readFnSuffix(llvm::Type* ty, const plang::Type* semaTy);
     void emitReadArg(const plang::ExprNode& arg, llvm::Value* fp);
     void emitSkipLine(llvm::Value* fp);
+    /// Emits the trailing plang_writeln_file(fp) call every write(f,...)/
+    /// writeln(f,...) value (and a bare writeln(f)) needs -- dispatches to
+    /// the `_turbo` sibling (runtime/plang_file.cpp) under -std=turbo, this
+    /// item's P7-rule choke point, instead of inlining the same ternary at
+    /// each of this file's several call sites.
+    void emitWritelnFile(llvm::Value* fp);
+    /// A file-directed runtime function's base (ISO/EP) name, resolved to its
+    /// `_turbo`-suffixed sibling under -std=turbo -- the one-line version of
+    /// emitWritelnFile's own dispatch, for call sites that build the rest of
+    /// their own CreateCall by hand instead of going through a shared helper.
+    std::string fileFn(const std::string& base) const {
+        return Opts.turbo() ? base + "_turbo" : base;
+    }
 
     /// Whether a value should be written as 'true'/'false'.  A boolean is
     /// normally i1, but the predefined TimeStamp holds its two flags as i8 so

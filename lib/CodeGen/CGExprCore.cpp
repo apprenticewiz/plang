@@ -128,6 +128,21 @@ llvm::Value* CGExprCore::emitExpr(const ExprNode& e) {
                 return B.CreateCall(
                     RtFns.getExternFnN("plang_tp_paramcount", I64Ty, {}), {}, lo);
             }
+            // TP-only: IOResult, like ParamCount/Random just above, is real
+            // Turbo Pascal's own idiom used bare, with no parentheses --
+            // Sema::checkIdent's generic SymbolKind::Builtin case types this
+            // correctly already (same checkEPOnly gating ParamCount/Random
+            // get), but nothing before this call routed the read itself
+            // anywhere but the ordinary variable table.
+            // CGFuncCall::emitBuiltinCall's own "ioresult" arm handles the
+            // WITH-parentheses call shape; this is the same runtime call,
+            // reached the other way -- see plang_tp_ioresult's own comment
+            // (runtime/plang_sys.cpp) for why the read-and-clear happens only
+            // in the runtime, not duplicated at either of these two call sites.
+            if (lo == "ioresult" && !n->UserDeclared) {
+                return B.CreateCall(
+                    RtFns.getExternFnN("plang_tp_ioresult", I64Ty, {}), {}, lo);
+            }
         }
         // Function result pseudo-variable (Pascal: assign to function name).
         // n->Resolution == ResultVariable alone is NOT enough: it only says
