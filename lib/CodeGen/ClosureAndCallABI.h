@@ -97,6 +97,21 @@ public:
     llvm::Value* emitProcParamCall(const VarEntry& ve,
                                    std::span<const std::unique_ptr<plang::ExprNode>> argExprs);
 
+    /// Turbo procedural VALUES: the LLVM signature a procedural VARIABLE is
+    /// called through -- exactly \p node's shape (see procParamFnType), but
+    /// with no leading frame parameter, since a procedural variable's
+    /// storage is one flat pointer and Sema::checkRoutineValue has already
+    /// refused any routine that would need a frame at the assignment that
+    /// put it there.
+    llvm::FunctionType* procVarFnType(const plang::ProcedureTypeNode& node);
+    /// Emits a call through procedural variable \p ve.  Returns null for a
+    /// procedural (void) target.  A separate function from emitProcParamCall
+    /// rather than a shared one parameterized over "has a frame or not":
+    /// ISO §6.6.3.1's procedural-parameter ABI is stable, tested foundation
+    /// this feature deliberately builds ALONGSIDE rather than reshapes.
+    llvm::Value* emitProcVarCall(const VarEntry& ve,
+                                 std::span<const std::unique_ptr<plang::ExprNode>> argExprs);
+
 private:
     llvm::LLVMContext& Ctx;
     llvm::Module& Mod;

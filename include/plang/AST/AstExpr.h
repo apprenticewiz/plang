@@ -95,6 +95,21 @@ struct IdentExpr : ExprNode {
         /// ISO 7185/Extended Pascal keep ResultVariable here too, matching
         /// this project's behaviour before this enum existed.
         RecursiveCall,
+        /// Turbo procedural VALUES: this identifier names a declared
+        /// procedure/function (SymbolKind::Proc) and stands for the ROUTINE
+        /// ITSELF -- a flat function-pointer value to store in or compare
+        /// against a procedural variable -- rather than for a call to it.
+        /// Set by Sema::checkRoutineValue, which decides this from the
+        /// SYNTACTIC context the identifier was found in (the direct operand
+        /// of `@`, or the direct RHS of an assignment whose target's type is
+        /// itself callable) -- never from the identifier alone, so this does
+        /// not disturb the ubiquitous "FuncName := ..." result-assignment
+        /// idiom or ISO §6.7.3's implicit zero-argument call for a bare
+        /// function name used any other way.  Read by codegen (CGExprCore's
+        /// emitExpr) BEFORE its ordinary "a bare function identifier is a
+        /// call" dispatch, so a routine reference is never accidentally
+        /// invoked instead of taken.
+        RoutineReference,
     };
     mutable IdentResolution Resolution{IdentResolution::Ordinary};
 };

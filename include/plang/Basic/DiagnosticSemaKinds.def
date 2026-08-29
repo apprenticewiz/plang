@@ -718,3 +718,29 @@ DIAG(err_exit_value_outside_function, Error,
 DIAG(err_turbo_real_mode_facility, Error,
      "'%0' is a real-mode DOS facility and has no meaning under -std=turbo "
      "on this target")
+
+// TP-only: procedural TYPES (`type TProc = procedure(x: integer);`) and
+// VALUES -- variables of one, assignable from and callable through a
+// matching routine -- layered on top of ISO §6.6.3.1's procedural/functional
+// PARAMETER machinery.  A parameter is carried as a {entry point, frame}
+// pair precisely so a nested, capturing routine can be passed through it; a
+// procedural VARIABLE has no frame slot at all (CodeGen lowers it as one
+// flat pointer), so Sema::checkRoutineValue refuses to put either kind of
+// "might carry a frame" value into one: a routine whose own declaration is
+// nested inside another (Symbol::IsNested), or a procedural PARAMETER (bound
+// to who-knows-what at run time).  Real Turbo Pascal disallows both the same
+// way; see checkRoutineValue's own comment for why capture is not analyzed
+// more finely than "nested or not".
+DIAG(err_procval_of_nested_routine, Error,
+     "'%0' is a nested procedure or function and cannot be used as a "
+     "procedural value; it depends on the storage frame of its enclosing "
+     "procedure, which a procedural variable does not carry")
+DIAG(err_procval_of_proc_param, Error,
+     "'%0' is a procedural parameter and cannot be used as a procedural "
+     "value; what routine it is bound to at run time -- possibly a nested "
+     "one -- is not known here")
+// TP-only: Assigned(p) restricts its argument to a pointer or procedural
+// value the same way Card restricts its own to a set (err_set_argument) --
+// an arbitrary expression has no nil to compare against.
+DIAG(err_assigned_argument, Error,
+     "'%0' requires a pointer or procedural argument, got '%1'")

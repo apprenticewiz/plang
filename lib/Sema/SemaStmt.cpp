@@ -283,6 +283,25 @@ void Sema::checkAssign(const AssignStmt& S) {
             S.Value->ResolvedType = Src;
         }
     }
+    // Turbo procedural VALUES: 'f := g' where f's declared type is itself
+    // callable (Procedure/Function -- ISO 7185/Extended Pascal have no
+    // syntax that can make this true, only -std=turbo's own procedural type
+    // denoter, see ParseType.cpp) and g bare-names a routine.  Disambiguates
+    // the two readings a bare Proc-kind identifier can have on the right of
+    // ':=' by the ASSIGNMENT TARGET's type, per this feature's own design:
+    // an ordinary ("f := g" where f is an Integer function, say) target
+    // leaves this branch untaken and falls through to checkExpr below
+    // exactly as before, still reading g as ISO §6.7.3's implicit
+    // zero-argument call -- the ubiquitous "assign a function's own result
+    // via its own name" idiom this must not disturb.  '@g' needs no help
+    // here: checkUnary's own arm resolves it the same way from the operator
+    // alone, so checkExpr(*S.Value) below already gets the right answer for
+    // that spelling once it recurses into checkUnary.
+    if (!Src && isCallable(*Dst)) {
+        if (auto* Id = llvm::dyn_cast<IdentExpr>(S.Value.get());
+                Id && isRoutineNameCandidate(*Id))
+            Src = checkRoutineValue(*Id);
+    }
     if (!Src) Src = checkExpr(*S.Value);
 
     // EP §6.9.2.2: the value has to suit the type of the variable — except for
@@ -852,6 +871,19 @@ void Sema::checkCallStmt(const CallStmt& S) {
             return;
         }
 
+        // TP-only: Assigned(p) called as a statement under `{$X+}` (its
+        // result discarded) -- same shape check as checkCallExpr's own arm,
+        // duplicated here because checkCallExpr is never reached for a
+        // builtin called this way (mirrors eof/eoln/position/... below,
+        // which have the identical split for the same reason).
+        if (Lo == "assigned" && !S.Args.empty()) {
+            auto ArgTy = checkExpr(*S.Args[0]);
+            if (!ArgTy->isError() && ArgTy->Kind != TypeKind::Pointer
+                    && !isCallable(*ArgTy))
+                error(S.Args[0]->Loc, diag::err_assigned_argument, {Lo, ArgTy->Name});
+            return;
+        }
+
         // §6.9.4: page, like readln and writeln, is about lines, and only a
         // text file has any.  The other two are checked where their arguments
         // are already being walked, since checking an expression twice reports
@@ -1349,6 +1381,11 @@ void Sema::checkCallStmt(const CallStmt& S) {
         for (const auto& Arg : S.Args) (void)checkExpr(*Arg);
         return;
     }
+    // Turbo procedural VALUES: see the identical mark in checkCallExpr
+    // (SemaExpr.cpp) -- Phase 7's unused-variable audit only looks at
+    // SymbolKind::Var, so calling f() as a statement is a use of f the same
+    // way calling it in an expression is.
+    if (Sym->Kind == SymbolKind::Var) Sym->Referenced = true;
     // Turbo `{$X+}`: when checkUserDefinedCall lets a function through this
     // way, the type it returns is the callee's real result type -- record it
     // on the CallStmt so codegen's own external-declaration fallback

@@ -1,9 +1,31 @@
 #include "CGSymbolTable.h"
 
+#include "llvm/Support/Casting.h"
+
 #include "plang/AST/Ast.h"
 #include "plang/Basic/StringUtil.h"
 
 using namespace plang;
+
+namespace {
+// Turbo procedural VALUES: \p tn may name a procedural TYPE through any
+// number of `type Alias = OtherAlias;` hops (NamedTypeNode::Denotes, set by
+// Sema::resolveNamed at every one of them) before finally being written out
+// as `procedure(...)`/`function(...): T`.  Resolved once here, at the
+// variable's declaration, so a call through it later (ClosureAndCallABI::
+// emitProcVarCall) does not have to re-walk the chain.  Returns null for
+// anything that is not, eventually, a procedural type -- the overwhelming
+// majority of defVar's callers.
+const ProcedureTypeNode* resolveVarProcType(const TypeNode* tn) {
+    while (tn) {
+        if (auto* pt = llvm::dyn_cast<ProcedureTypeNode>(tn)) return pt;
+        auto* nt = llvm::dyn_cast<NamedTypeNode>(tn);
+        if (!nt || !nt->Denotes) return nullptr;
+        tn = nt->Denotes;
+    }
+    return nullptr;
+}
+} // namespace
 
 void CGSymbolTable::defVar(const std::string& name, llvm::Value* ptr, llvm::Type* type,
                             const TypeNode* typeNode, llvm::Value* debugIndirectPtr,
@@ -37,7 +59,18 @@ void CGSymbolTable::defVar(const std::string& name, llvm::Value* ptr, llvm::Type
     // shadowing declaration somewhere strictly innermost to live instead.
     if (Scopes.back().count(Key))
         DbgInfo.enterShadowScope(typeNode ? typeNode->Loc : plang::SourceLocation{});
-    Scopes.back()[Key] = VarEntry{ ptr, type, typeNode, name };
+    VarEntry VE{ ptr, type, typeNode, name };
+    // Turbo procedural VALUES: a procedural PARAMETER's own {entry point,
+    // frame} cell is registered through this same function but always with
+    // typeNode == nullptr (CodeGenProcs.cpp's parameter loop, which sets
+    // isProcParam/procType itself afterward -- see its own comment for why),
+    // so resolveVarProcType(nullptr) answers null there and this is a no-op
+    // for it; only a genuinely declared VARIABLE reaches this branch.
+    if (const auto* pt = resolveVarProcType(typeNode)) {
+        VE.isProcVar = true;
+        VE.procType  = pt;
+    }
+    Scopes.back()[Key] = std::move(VE);
 
     DbgInfo.declareLocal(name, typeNode, ptr, debugIndirectPtr, suppressDebugDecl);
 }

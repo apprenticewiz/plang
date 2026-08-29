@@ -253,6 +253,13 @@ llvm::Value* CGFuncCall::emitBuiltinCall(const std::string& Name,
         auto* n   = B.CreateCall(fn, {v}, "card");
         return B.CreateZExtOrTrunc(n, I64Ty, "card.i64");
     }
+    // TP-only: Assigned(p) -- p is a pointer or a procedural value (Sema's
+    // dedicated arm already refused anything else), both of which lower to
+    // a flat `ptr`, so this is just a not-nil comparison.
+    if (lo == "assigned") {
+        auto* v = EmitExpr(*Args[0]);
+        return B.CreateICmpNE(v, llvm::ConstantPointerNull::get(PtrTy), "assigned");
+    }
 
     // ---- EP string functions (§6.7.6.7) ----
     // Return (ptr, cap) for a string argument using Sema-annotated type.
@@ -395,6 +402,13 @@ llvm::Value* CGFuncCall::emitUserFuncCall(const CallExpr& e) {
     // arrived as, so there is no name to resolve.
     if (auto* pve = SymTab.findVar(e.Name); pve && pve->isProcParam)
         return ClosureAbi.emitProcParamCall(*pve, e.Args);
+
+    // Turbo procedural VALUES: 'f(...)' where f is an ordinary VARIABLE of
+    // procedural type -- an indirect call through whatever routine f
+    // currently holds, its flat pointer loaded and called through directly
+    // (no frame: see VarEntry::isProcVar's own comment).
+    if (auto* pve = SymTab.findVar(e.Name); pve && pve->isProcVar)
+        return ClosureAbi.emitProcVarCall(*pve, e.Args);
 
     // User-defined function — walk the nesting hierarchy.
     std::string mangledName = Linkage.findMangledProc(e.Name);
