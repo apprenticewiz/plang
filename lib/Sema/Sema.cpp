@@ -1587,9 +1587,12 @@ void Sema::checkProcSignature(const ProcDecl& Proc) {
     // Resolve parameter types and return type.
     std::vector<Type::Param> ResolvedParams;
     for (const auto& Pg : H.Params) {
-        auto T = resolveParamType(*Pg.Type, Pg.IsVar);
+        // Turbo untyped parameter: Pg.Type is deliberately null -- see
+        // ParamGroup::Type's own comment (AstType.h).
+        auto T = Pg.Type ? resolveParamType(*Pg.Type, Pg.IsVar) : nullptr;
         for (const auto& Nm : Pg.Names) {
-            ResolvedParams.push_back({ Pg.IsVar, Nm, T });
+            ResolvedParams.push_back(
+                {Pg.IsVar, Nm, T, Pg.IsConst, /*IsUntyped=*/!Pg.Type});
         }
     }
     std::shared_ptr<Type> Ret;
@@ -1638,6 +1641,26 @@ void Sema::checkProcSignature(const ProcDecl& Proc) {
                        std::to_string(Existing->Params.size())});
             } else {
                 for (size_t I = 0; I < ResolvedParams.size(); ++I) {
+                    // Turbo untyped parameter: one side declared 'var x'
+                    // with no type at all, so there is no Ty to compare --
+                    // and, since IsUntyped disambiguates a deliberately
+                    // untyped parameter from a Ty that is null because some
+                    // OTHER resolution failed (which the `continue` just
+                    // below still guards against), a mismatched pairing
+                    // (one side untyped, the other not) is diagnosed here
+                    // rather than silently accepted the way two
+                    // independently-null Ty's used to be before this flag
+                    // existed to tell them apart.
+                    if (ResolvedParams[I].IsUntyped != Existing->Params[I].IsUntyped) {
+                        error(Proc.Loc, diag::err_forward_param_type,
+                              {ResolvedParams[I].Name, Proc.Name,
+                               ResolvedParams[I].IsUntyped ? "untyped"
+                                   : ResolvedParams[I].Ty->Name,
+                               Existing->Params[I].IsUntyped ? "untyped"
+                                   : Existing->Params[I].Ty->Name});
+                        continue;
+                    }
+                    if (ResolvedParams[I].IsUntyped) continue; // both untyped: nothing more to compare
                     if (!ResolvedParams[I].Ty || !Existing->Params[I].Ty) continue;
                     // Not isIdenticalType: the two headings resolve the same
                     // parameter twice, and the forms that are not interned
@@ -1771,7 +1794,20 @@ void Sema::checkProcBody(const ProcDecl& Proc) {
 
     // Define parameters in the function's own scope.
     for (const auto& Pg : H.Params) {
-        auto T = resolveParamType(*Pg.Type, Pg.IsVar);
+        // Turbo untyped parameter (`procedure P(var x)`): Pg.Type is
+        // deliberately null (ParamGroup::Type's own comment) and
+        // resolveParamType has nothing to resolve -- see checkIdent's own
+        // comment for what a bare use of the resulting Sym->Ty==nullptr
+        // gets, and checkTypeCast's for the one thing it may legally be used
+        // for.
+        auto T = Pg.Type ? resolveParamType(*Pg.Type, Pg.IsVar) : nullptr;
+
+        // Turbo const parameter, structured type: CodeGen passes it by
+        // reference (CodeGenProcs.cpp), so -- like a 'var' parameter -- it
+        // aliases the caller's own storage rather than copying into one of
+        // its own, and is excluded from the gate below for the same reason.
+        const bool ByRefLike = Pg.IsVar
+            || (Pg.IsConst && T && !T->isError() && isStructuredForConstByRef(*T));
 
         // ISO §6.6.3.2: a by-value parameter is a variable of its own that
         // the actual is copied into, so CodeGen gives it exactly the same
@@ -1781,7 +1817,7 @@ void Sema::checkProcBody(const ProcDecl& Proc) {
         // parameter is deliberately excluded: it aliases the caller's own
         // storage rather than copying into one of its own, so no oversized
         // local is ever materialized for it.
-        if (!Pg.IsVar && T && !T->isError()) {
+        if (!ByRefLike && T && !T->isError()) {
             constexpr uint64_t ParamByteLimit = 1ull << 30; // 1 GiB
             if (auto Sz = byteSizeOf(*T); Sz && *Sz > ParamByteLimit) {
                 for (const auto& Nm : Pg.Names)
@@ -1797,16 +1833,20 @@ void Sema::checkProcBody(const ProcDecl& Proc) {
             // diagnostics (e.g. warn_unused_parameter) pointed at its own
             // token rather than at the shared type that follows the group.
             SourceLocation NmLoc =
-                Idx < Pg.NameLocs.size() ? Pg.NameLocs[Idx] : Pg.Type->Loc;
+                Idx < Pg.NameLocs.size() ? Pg.NameLocs[Idx]
+                                        : (Pg.Type ? Pg.Type->Loc : Pg.Loc);
             Symbol S;
             S.Kind        = Pg.IsVar ? SymbolKind::VarParam : SymbolKind::Var;
             S.Name        = Nm;
             S.Ty          = T;
             S.DeclLoc     = NmLoc;
             S.IsProtected = Pg.IsProtected; // EP §6.7.3.1
+            S.IsConstParam = Pg.IsConst;    // Turbo const parameter
             // EP §6.4.1: a parameter whose denoter is bindable stands for a
             // bindable variable, so bind reaches it through the parameter.
-            S.IsBindable  = Pg.IsVar && isBindableDenoter(*Pg.Type);
+            // Pg.Type is null for a Turbo untyped parameter, which has no
+            // denoter to ask isBindableDenoter about at all.
+            S.IsBindable  = Pg.IsVar && Pg.Type && isBindableDenoter(*Pg.Type);
             // ISO §6.6.3.1: inside the body a procedural parameter is called
             // like any other procedure, so it is entered as one.  Ty keeps the
             // signature, which is what a further hand-off is checked against.
@@ -1818,12 +1858,13 @@ void Sema::checkProcBody(const ProcDecl& Proc) {
                 S.ReturnType  = T->RetType;
             }
             if (!Symtab.define(S))
-                error(Pg.Type->Loc, diag::err_duplicate_param, {Nm});
+                error(Pg.Type ? Pg.Type->Loc : Pg.Loc, diag::err_duplicate_param, {Nm});
 
-            // EP §6.7.3.7: for conformant array params, register each lo/hi bound
-            // variable as a Var, typed with the dimension's declared ordinal
-            // type (index-type-specification), in the function scope.  Walk
-            // nested ConformantArray types to register all dimensions.
+            // EP §6.7.3.7 / Turbo open array: for conformant array params,
+            // register each lo/hi bound variable as a Var, typed with the
+            // dimension's declared ordinal type (index-type-specification),
+            // in the function scope.  Walk nested ConformantArray types to
+            // register all dimensions.
             if (T && T->Kind == TypeKind::ConformantArray) {
                 auto* Ct = T.get();
                 while (Ct && Ct->Kind == TypeKind::ConformantArray) {
@@ -1848,8 +1889,24 @@ void Sema::checkProcBody(const ProcDecl& Proc) {
                             if (!Symtab.define(Bs))
                                 error(Pg.Type->Loc, diag::err_duplicate_param, {BoundName});
                         };
-                        definebound(Cb.LoBoundName);
-                        definebound(Cb.HiBoundName);
+                        // Turbo open array: unlike EP's conformant-array
+                        // group semantics, each NAME in a shared 'a, b: array
+                        // of Integer' group needs its OWN independent bound
+                        // pair (confirmed empirically against fpc -Mtp: a and
+                        // b size independently at the call site), so the
+                        // bound names are synthesized fresh per Nm here
+                        // rather than read from Cb.LoBoundName/HiBoundName,
+                        // which for an open array are always empty
+                        // placeholders (parseTurboOpenArrayParamType's own
+                        // comment).  CodeGenProcs.cpp's prologue mirrors this
+                        // exact naming.
+                        if (Ct->IsOpenArray) {
+                            definebound(openArrayLowBoundName(Nm));
+                            definebound(openArrayHighBoundName(Nm));
+                        } else {
+                            definebound(Cb.LoBoundName);
+                            definebound(Cb.HiBoundName);
+                        }
                     }
                     Ct = Ct->ElemType.get();
                 }

@@ -474,10 +474,18 @@ std::vector<ParamGroup> Parser::parseParamList() {
 
 // param-group → ['protected'] ['var'] identifier-list ':' type-expr
 //             | 'var' identifier-list ':' type-expr
+//             | 'const' identifier-list ':' type-expr            (turbo)
+//             | 'var' identifier-list                            (turbo, untyped)
 // EP §6.7.3.1: 'protected' marks value parameters as non-assignable.
 // (protected var is also accepted though unusual; protected applies to the value copy)
+// Turbo: 'const' marks a parameter read-only, passed by reference for a
+// structured type (CodeGenProcs.cpp); a 'var' parameter with no ': type' at
+// all is Turbo's UNTYPED parameter (ParamGroup::Type stays null) -- checked
+// against a local fpc -Mtp build that only this VAR form is legal (a bare
+// name with no 'var' and no type is rejected outright).
 ParamGroup Parser::parseParamGroup() {
     ParamGroup G;
+    G.Loc = Current.Loc;
     // ISO §6.6.3.1: a section that starts with 'procedure' or 'function' is a
     // procedural or functional parameter, written as the whole heading of what
     // it will receive rather than as 'name : type'.
@@ -487,6 +495,12 @@ ParamGroup Parser::parseParamGroup() {
     // mode 'protected' is scanned as Identifier, so this check is safe).
     if (Opts.extendedPascal() && check(TokenKind::Protected)) {
         G.IsProtected = true; advance();
+    }
+    // Turbo's 'const' parameter prefix -- mutually exclusive with 'var' in
+    // real Turbo Pascal, so this is simply an alternative to the 'var' match
+    // just below rather than combined with it.
+    if (Opts.turbo() && check(TokenKind::Const)) {
+        G.IsConst = true; advance();
     }
     G.IsVar = match(TokenKind::Var);
     {
@@ -500,12 +514,29 @@ ParamGroup Parser::parseParamGroup() {
         G.NameLocs.push_back(T.Loc);
     }
     for (const auto& N : G.Names) VarNames_.insert(toLower(N));
+    // Turbo's untyped parameter: 'var x' (or 'var x, y') with no ': type' to
+    // follow at all.  G.Type stays null -- see its own comment (AstType.h)
+    // for the whole design and the audit that keeps every dereference of it
+    // elsewhere in the compiler null-safe.
+    if (Opts.turbo() && G.IsVar && !check(TokenKind::Colon)) {
+        return G;
+    }
     expect(TokenKind::Colon);
-    // ISO §6.6.3.7: a conformant array schema is a parameter type and nothing
-    // else — never a type definition, never a variable.  Both forms of it
-    // begin like an ordinary array, so both are read here.
+    // ISO §6.6.3.7 / Turbo: an array-shaped parameter form.  EP/ISO 7185
+    // Level 1's conformant-array schema (array [lo..hi: T] of E) and
+    // Turbo's own open-array form (array of T) are syntactically
+    // distinguishable -- Turbo's never has a bracket at all -- so this is a
+    // clean per-dialect branch rather than an ambiguous grammar; see
+    // parseTurboOpenArrayParamType's own comment for the Turbo form and
+    // parseConformantOrRegular's for the EP one.  Neither form is legal
+    // outside its own dialect: EP's falls through to parseTypeExpr under
+    // Turbo, which parseTurboOpenArrayParamType itself diagnoses
+    // (err_turbo_conformant_array) rather than silently accepting; Turbo's
+    // falls through to parseConformantOrRegular under EP/ISO 7185, which
+    // fails its own expect(LeftBracket) the ordinary way.
     if (check(TokenKind::Array)) {
-        G.Type = parseConformantOrRegular(/*Packed=*/false);
+        G.Type = Opts.turbo() ? parseTurboOpenArrayParamType()
+                              : parseConformantOrRegular(/*Packed=*/false);
     } else if (check(TokenKind::Packed)) {
         Token PLoc = Current;
         advance();

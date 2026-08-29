@@ -187,8 +187,14 @@ llvm::FunctionType* ClosureAndCallABI::procParamFnType(const ProcedureTypeNode& 
     for (const auto& pg : node.Params) {
         const size_t cdims = conformantDimCount(pg.Type.get());
         const unsigned discs = schemaParamDiscCount(pg.Type.get());
+        // Turbo untyped parameter: pg.Type is deliberately null
+        // (ParamGroup::Type's own comment), so dyn_cast MUST be the
+        // null-safe _or_null form here -- and IsVar is always true for one
+        // (checked against fpc -Mtp: only the 'var' form is legal), so the
+        // *pg.Type dereference in the plain 'else' branch just below is
+        // never reached for it either.
         const bool isProc =
-            llvm::dyn_cast<ProcedureTypeNode>(pg.Type.get()) != nullptr;
+            llvm::dyn_cast_or_null<ProcedureTypeNode>(pg.Type.get()) != nullptr;
 
         for (size_t i = 0; i < pg.Names.size(); ++i) {
             if (cdims) {
@@ -312,7 +318,10 @@ ClosureAndCallABI::emitProcParamCall(const VarEntry& ve,
 
     size_t flat = 0;
     for (const auto& pg : ve.procType->Params) {
-        auto*          inner = llvm::dyn_cast<ProcedureTypeNode>(pg.Type.get());
+        // Turbo untyped parameter: pg.Type is deliberately null; dyn_cast
+        // must be the null-safe _or_null form (ParamGroup::Type's own
+        // comment).
+        auto*          inner = llvm::dyn_cast_or_null<ProcedureTypeNode>(pg.Type.get());
         const size_t   cdims = conformantDimCount(pg.Type.get());
         const unsigned discs = schemaParamDiscCount(pg.Type.get());
 
@@ -337,7 +346,11 @@ ClosureAndCallABI::emitProcParamCall(const VarEntry& ve,
                 // so deriving the base from it directly is equivalent, not a
                 // separate rule to keep in sync.
                 std::optional<int64_t> destSetBase;
-                if (pg.Type->ResolvedType
+                // pg.Type is null only for a Turbo untyped parameter, which
+                // is always IsVar (checked against fpc -Mtp) and so never
+                // reaches this plain-value 'else' branch at all -- guarded
+                // anyway rather than relying on that invariant silently.
+                if (pg.Type && pg.Type->ResolvedType
                     && pg.Type->ResolvedType->Kind == TypeKind::Set)
                     destSetBase = setOffsetOf(*pg.Type->ResolvedType);
                 args.push_back(Sets.alignSetArg(
@@ -384,8 +397,13 @@ llvm::FunctionType* ClosureAndCallABI::procVarFnType(const ProcedureTypeNode& no
     // handled the same ptr+ptr way procParamFnType handles it.
     std::vector<llvm::Type*> params;
     for (const auto& pg : node.Params) {
+        // Turbo untyped parameter: pg.Type is deliberately null
+        // (ParamGroup::Type's own comment); dyn_cast must be the null-safe
+        // _or_null form, and (IsVar always true for one) the plain 'else'
+        // branch's *pg.Type is never reached for it -- same reasoning as
+        // procParamFnType just above.
         const bool isProc =
-            llvm::dyn_cast<ProcedureTypeNode>(pg.Type.get()) != nullptr;
+            llvm::dyn_cast_or_null<ProcedureTypeNode>(pg.Type.get()) != nullptr;
         for (size_t i = 0; i < pg.Names.size(); ++i) {
             if (isProc) {
                 params.push_back(PtrTy); // entry point
@@ -415,7 +433,10 @@ ClosureAndCallABI::emitProcVarCall(const VarEntry& ve,
     std::vector<llvm::Value*> args;
     size_t flat = 0;
     for (const auto& pg : ve.procType->Params) {
-        auto* inner = llvm::dyn_cast<ProcedureTypeNode>(pg.Type.get());
+        // Turbo untyped parameter: pg.Type is deliberately null; dyn_cast
+        // must be the null-safe _or_null form (ParamGroup::Type's own
+        // comment).
+        auto* inner = llvm::dyn_cast_or_null<ProcedureTypeNode>(pg.Type.get());
         for (size_t k = 0; k < pg.Names.size(); ++k, ++flat) {
             if (flat >= argExprs.size()) break;
             const auto& a = *argExprs[flat];
@@ -430,7 +451,11 @@ ClosureAndCallABI::emitProcVarCall(const VarEntry& ve,
                 args.push_back(EmitLValue(a));
             } else {
                 std::optional<int64_t> destSetBase;
-                if (pg.Type->ResolvedType
+                // pg.Type is null only for a Turbo untyped parameter, which
+                // is always IsVar (checked against fpc -Mtp) and so never
+                // reaches this plain-value 'else' branch at all -- guarded
+                // anyway rather than relying on that invariant silently.
+                if (pg.Type && pg.Type->ResolvedType
                     && pg.Type->ResolvedType->Kind == TypeKind::Set)
                     destSetBase = setOffsetOf(*pg.Type->ResolvedType);
                 args.push_back(Sets.alignSetArg(

@@ -785,7 +785,12 @@ Symbol* Sema::protectedBaseOf(const ExprNode& Target) {
     // EP §6.7.3.7.1 NOTE 2: a conformant-array bound identifier is refused an
     // assignment the same way a protected parameter is -- see
     // checkNotProtected, which tells the two apart for the diagnostic.
-    return (Sym && (Sym->IsProtected || Sym->IsConformantBound)) ? Sym : nullptr;
+    // Turbo's own `const` parameter (IsConstParam) is refused the same way
+    // again, for its own reason: see ParamGroup::IsConst's own comment
+    // (AstType.h) for why it is a separate flag from IsProtected rather than
+    // folded into it.
+    return (Sym && (Sym->IsProtected || Sym->IsConformantBound || Sym->IsConstParam))
+        ? Sym : nullptr;
 }
 
 void Sema::checkNotProtected(const ExprNode& Target, SourceLocation Loc) {
@@ -793,6 +798,10 @@ void Sema::checkNotProtected(const ExprNode& Target, SourceLocation Loc) {
     if (!Sym) return;
     if (Sym->IsConformantBound) {
         error(Loc, diag::err_conformant_bound_assigned, {Sym->Name});
+        return;
+    }
+    if (Sym->IsConstParam) {
+        error(Loc, diag::err_const_param_assigned, {Sym->Name});
         return;
     }
     // EP §6.11.2: a variable exported 'protected' is protected in the same way,

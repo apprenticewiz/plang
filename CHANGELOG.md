@@ -10,6 +10,24 @@ version numbers follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 
 ### Added
 
+- **`-std=turbo`: `const` parameters, untyped parameters, and open-array
+  parameters.** `procedure P(const x: SomeRecord)` reads like an ordinary
+  parameter but may not be assigned to (`err_const_param_assigned`,
+  parallel to but distinct from EP's protected-parameter mechanism); a
+  structured actual (record/array/set) is passed BY REFERENCE for the
+  efficiency the feature exists for, rather than copied in the way an
+  ordinary value parameter still is. `procedure P(var x)` -- no type at
+  all -- is the classic memcpy/memcmp idiom: Sema rejects every use of `x`
+  except as the operand of a variable typecast or a direct relay to
+  another untyped formal, both confirmed against a local `fpc -Mtp`
+  build. `procedure Sum(a: array of Integer): Integer` is Turbo's own
+  open-array form (not Extended Pascal's conformant-array syntax, which
+  stays rejected under `-std=turbo` and vice versa) -- any length, always
+  zero-based inside the callee (`Low(a) = 0`, `High(a)` = the actual's own
+  element count minus one) regardless of what bounds the actual was
+  itself declared with, reusing EP's existing conformant-array machinery
+  (ptr+bounds calling convention, by-value copy-on-modify) rather than a
+  new mechanism.
 - **`-std=turbo`: `PChar`/`PAnsiChar`, pointer arithmetic, and `p[i]`
   indexing.** `p + n`, `p - n`, `p1 - p2` (an element count), `p[i]` as
   both a read and a write, and a zero-based `array[0..n] of Char`

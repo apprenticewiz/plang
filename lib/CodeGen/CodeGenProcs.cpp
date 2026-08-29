@@ -366,6 +366,28 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
     std::vector<const plang::Type*> schemaTypes;
 
     for (const auto& pg : hd.Params) {
+        // Turbo untyped parameter (`procedure P(var x)`): pg.Type is
+        // deliberately null (ParamGroup::Type's own comment), so every one
+        // of the dyn_cast<...>(pg.Type.get())/*pg.Type derefs below would
+        // either misfire or crash outright -- handled here, first, before
+        // any of them run.  Always a plain incoming pointer: nothing beyond
+        // an address ever flows through one (Sema rejects every use except
+        // a variable typecast or a relay to another untyped formal --
+        // SemaExpr.cpp's checkCallArgs/checkTypeCast), so there is no
+        // element type to give it beyond an opaque ptr, and no copy to make.
+        if (!pg.Type) {
+            for (const auto& nm : pg.Names) {
+                paramTypes.push_back(ptrTy);
+                paramNames.push_back(nm);
+                paramIsVar.push_back(true);
+                paramValTypes.push_back(ptrTy);
+                paramTypeNodes.push_back(nullptr);
+                paramMeta.push_back(ParamMeta{ .byRef = true });
+                schemaTypes.push_back(nullptr);
+            }
+            continue;
+        }
+
         // ISO §6.6.3.1: a procedural parameter takes two pointers — the entry
         // point and the frame its body reads outer variables through.  Both
         // have to travel together: the frame is built from names visible where
@@ -436,9 +458,16 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
             // innermost concrete element type.
             std::vector<std::pair<std::string,std::string>> dims; // (lo, hi) per dim
             llvm::Type* elemTy = i64Ty; // fallback
+            // Turbo's own open-array form (array of T) -- always exactly one
+            // dimension, whose (never-read) Specs placeholder is overridden
+            // below with a PER-NAME synthesized bound pair rather than
+            // shared across the whole group the way EP's own is; see
+            // ConformantArrayTypeNode::IsOpenArray's own comment for why.
+            bool isOpenArr = false;
             {
                 const TypeNode* cur = pg.Type.get();
                 while (auto* cn = llvm::dyn_cast<ConformantArrayTypeNode>(cur)) {
+                    if (cn->IsOpenArray) isOpenArr = true;
                     for (const auto& spec : cn->Specs)
                         dims.push_back({spec.Lo, spec.Hi});
                     cur = cn->Element.get();
@@ -448,6 +477,16 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
             }
 
             for (const auto& nm : pg.Names) {
+                // Open array: this name's OWN bound pair, independent of any
+                // other name sharing this parameter group (confirmed against
+                // fpc -Mtp: `a, b: array of Integer` size independently at
+                // the call site) -- see openArrayLowBoundName/
+                // openArrayHighBoundName's own comment (AstType.h).  Single
+                // dimension only, matching parseTurboOpenArrayParamType.
+                std::vector<std::pair<std::string,std::string>> nameDims = dims;
+                if (isOpenArr && !nameDims.empty())
+                    nameDims[0] = {openArrayLowBoundName(nm), openArrayHighBoundName(nm)};
+
                 // Array ptr
                 paramTypes.push_back(ptrTy);
                 paramNames.push_back(nm);
@@ -456,7 +495,7 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
                 paramTypeNodes.push_back(pg.Type.get());
 
                 // lo and hi for each dimension
-                for (const auto& [loNm, hiNm] : dims) {
+                for (const auto& [loNm, hiNm] : nameDims) {
                     paramTypes.push_back(i64Ty);
                     paramNames.push_back(loNm + "." + nm); // unique name in LLVM IR
                     paramIsVar.push_back(false);
@@ -471,7 +510,9 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
                 }
 
                 // Record conformant dims for this AST arg position.
-                paramMeta.push_back(ParamMeta{ .conformantDims = dims, .byRef = pg.IsVar });
+                paramMeta.push_back(ParamMeta{ .conformantDims = nameDims,
+                                               .byRef = pg.IsVar,
+                                               .isOpenArray = isOpenArr });
                 schemaTypes.push_back(nullptr);
             }
         } else {
@@ -480,13 +521,28 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
                 (pg.Type->ResolvedType
                  && pg.Type->ResolvedType->Kind == TypeKind::Set)
                     ? setOffsetOf(*pg.Type->ResolvedType) : 0;
+            // Turbo const parameter, structured type (record/array/set):
+            // passed BY REFERENCE like a var parameter's pointer, but
+            // without the ability to write through it -- Sema has already
+            // rejected every assignment to it (checkNotProtected/
+            // IsConstParam), so nothing here needs to re-enforce read-only;
+            // this only has to choose the same efficient calling convention
+            // the feature exists for, rather than copying the whole value in
+            // the way a plain or EP-protected value parameter still does
+            // (see isStructuredForConstByRef's own comment, Sema/Type.h).  A
+            // scalar or string const parameter gets no such treatment: there
+            // is no efficiency to gain, so it stays an ordinary value copy.
+            const bool constByRef = pg.IsConst && pg.Type->ResolvedType
+                && !pg.Type->ResolvedType->isError()
+                && isStructuredForConstByRef(*pg.Type->ResolvedType);
+            const bool passByRef = pg.IsVar || constByRef;
             for (const auto& nm : pg.Names) {
-                paramTypes.push_back(pg.IsVar ? ptrTy : vt);
+                paramTypes.push_back(passByRef ? ptrTy : vt);
                 paramNames.push_back(nm);
-                paramIsVar.push_back(pg.IsVar);
+                paramIsVar.push_back(passByRef);
                 paramValTypes.push_back(vt);
                 paramTypeNodes.push_back(pg.Type.get());
-                paramMeta.push_back(ParamMeta{ .setBase = sb, .byRef = pg.IsVar });
+                paramMeta.push_back(ParamMeta{ .setBase = sb, .byRef = passByRef });
                 schemaTypes.push_back(nullptr);
             }
         }
@@ -875,12 +931,38 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
                     llvm::Value* loArg = &*it; ++it;
                     llvm::Value* hiArg = &*it; ++it;
 
+                    // Turbo open array: this activation's own bound is
+                    // ALWAYS Low=0 / High=(extent-1), whatever lower bound
+                    // the actual itself happened to be declared with --
+                    // confirmed empirically against fpc -Mtp (Sum(x3) where
+                    // x3 is `array[1..3] of Integer` sees Low(a)=0,
+                    // High(a)=2 inside Sum).  Normalized ONCE here, on
+                    // entry, from whatever raw (lo, hi) the caller pushed
+                    // (pushConformantArgs, ClosureAndCallABI.cpp, which
+                    // pushes the actual's own raw declared bounds for a
+                    // plain array, or -- relaying an open array this
+                    // activation already received -- forwards THAT
+                    // parameter's own already-normalized slot, so
+                    // normalizing again here is a no-op the second time,
+                    // not a second subtraction).  The base pointer itself
+                    // (arrPtrArg, below) needs no matching adjustment: it
+                    // already addresses the actual's first stored element
+                    // regardless of what bound it was declared with, and
+                    // emitConformantElemPtr indexes off (subscript - lo),
+                    // which is just the subscript once lo is 0.
+                    llvm::Value* loVal = loArg;
+                    llvm::Value* hiVal = hiArg;
+                    if (paramMeta[ci].isOpenArray) {
+                        hiVal = builder.CreateSub(hiArg, loArg, "oa.high");
+                        loVal = llvm::ConstantInt::get(i64Ty, 0);
+                    }
+
                     auto* loA = createEntryAlloca(i64Ty, loNm + ".addr");
-                    builder.CreateStore(loArg, loA);
+                    builder.CreateStore(loVal, loA);
                     defVar(loNm, loA, i64Ty);
 
                     auto* hiA = createEntryAlloca(i64Ty, hiNm + ".addr");
-                    builder.CreateStore(hiArg, hiA);
+                    builder.CreateStore(hiVal, hiA);
                     defVar(hiNm, hiA, i64Ty);
 
                     dimPtrs.emplace_back(loA, hiA);

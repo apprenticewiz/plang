@@ -594,10 +594,15 @@ static void printParams(const std::vector<ParamGroup>& params, std::ostream& os)
     for (const auto& pg : params) {
         os << psp << "(";
         if (pg.IsVar) os << "var ";
+        if (pg.IsConst) os << "const ";
         Sep nsp;
         for (const auto& name : pg.Names) os << nsp << name;
         os << " ";
-        printType(*pg.Type, os);
+        // Turbo untyped parameter: Type is deliberately null -- see its own
+        // comment (AstType.h) and the audit of every dereference of it this
+        // feature required.
+        if (pg.Type) printType(*pg.Type, os);
+        else         os << "untyped";
         os << ")";
     }
     os << ")";

@@ -309,6 +309,22 @@ std::shared_ptr<Type> Sema::checkIdent(const IdentExpr& E) {
         case SymbolKind::VarParam:
         case SymbolKind::Const:
         case SymbolKind::EnumValue:
+            // Turbo untyped parameter (`procedure P(var x)`) used bare --
+            // Sym->Ty is deliberately null (ParamGroup::Type's own comment).
+            // The two legal uses of one bypass checkIdent entirely rather
+            // than reaching this point: the operand of a variable typecast
+            // (checkTypeCast's own comment) and a direct relay to another
+            // untyped formal (checkCallArgs's own comment).  Every other use
+            // -- arithmetic, field/index access, an ordinary argument, a
+            // bare read -- lands here and gets a real diagnostic instead of
+            // silently becoming TyErr (which, being the generic error
+            // sentinel, would have let every one of those through unchecked
+            // rather than rejecting them the way this feature requires).
+            if (!Sym->Ty && (Sym->Kind == SymbolKind::Var
+                             || Sym->Kind == SymbolKind::VarParam)) {
+                error(E.Loc, diag::err_untyped_param_bare_use, {E.Name});
+                return TyErr;
+            }
             return Sym->Ty ? Sym->Ty : TyErr;
         case SymbolKind::Proc:
             if (Sym->IsFunction) {
@@ -1457,6 +1473,18 @@ std::shared_ptr<Type> Sema::checkCallExpr(const CallExpr& E) {
             // itself has none of.
             std::shared_ptr<Type> RangeTy = ArgTy;
             if (RangeTy->Kind == TypeKind::Array) RangeTy = RangeTy->IndexType;
+            // Turbo open-array parameter: its bound is a RUNTIME value (this
+            // activation's own synthesized bound slot -- CodeGenProcs.cpp's
+            // prologue, openArrayHighBoundName's own comment), not a static
+            // range ordinalRange below can ever answer about, so this is
+            // checked and accepted first.  Low is always 0 and High the
+            // actual's own extent minus one -- both Integer-typed, the same
+            // as ordinalRange's own Integer answers elsewhere in this
+            // function -- confirmed empirically against fpc -Mtp (High = -1
+            // for an empty actual).
+            if (RangeTy && RangeTy->Kind == TypeKind::ConformantArray
+                    && RangeTy->IsOpenArray)
+                return TyInt;
             if (!RangeTy || !RangeTy->isOrdinal() || !ordinalRange(*RangeTy)) {
                 error(E.Args[0]->Loc, diag::err_high_low_argument, {Lo, ArgTy->Name});
                 return TyErr;
@@ -1637,6 +1665,28 @@ std::shared_ptr<Type> Sema::checkTypeCast(const TypeCastExpr& E) {
     TargetNode.Loc  = E.Loc;
     TargetNode.Name = E.TypeName;
     auto TargetTy = resolveNamed(TargetNode);
+
+    // Turbo untyped parameter (`procedure P(var x)`): a variable typecast is
+    // the classic memcpy/memcmp idiom's whole reason to exist
+    // (`FillChar(TByteArray(x), N, 0)`) and the one context checkIdent's own
+    // "used bare" diagnostic must NOT fire in -- checked directly here,
+    // before the ordinary checkExpr(*E.Operand) below would otherwise reach
+    // checkIdent and reject it.  There is no source size to require a match
+    // with (x could be anything at all), so this bypasses BothScalar/
+    // SameSize below entirely and simply accepts TargetTy -- E.Operand's own
+    // ResolvedType is set to TargetTy too, so isLValue's identical
+    // TypeCastExpr case (which reads it back as Src) computes a trivial
+    // same-size match rather than needing its own copy of this special case.
+    if (auto* Id = llvm::dyn_cast<IdentExpr>(E.Operand.get())) {
+        if (Symbol* Sym = Symtab.lookup(Id->Name);
+                Sym && !Sym->Ty
+                && (Sym->Kind == SymbolKind::Var || Sym->Kind == SymbolKind::VarParam)) {
+            Sym->Referenced = true;
+            E.Operand->ResolvedType = TargetTy;
+            if (TargetTy->isError()) return TyErr;
+            return TargetTy;
+        }
+    }
 
     auto SrcTy = checkExpr(*E.Operand);
 
@@ -2247,6 +2297,15 @@ bool Sema::congruousSignature(const Type& A, const Type& B) const {
     if (A.Params.size() != B.Params.size()) return false;
     for (size_t I = 0; I < A.Params.size(); ++I) {
         if (A.Params[I].IsVar != B.Params[I].IsVar) return false;
+        // Turbo untyped parameter: Ty is deliberately null on both sides of
+        // a congruous pair (`procedure(var x)` congruous with
+        // `procedure(var y)`), and sameParamType(nullptr, nullptr) answers
+        // false -- it has no way to tell that apart from a genuine
+        // resolution failure on one or both sides, which IS meant to stay
+        // incongruous. IsUntyped disambiguates the two: an untyped formal is
+        // congruous only with another untyped one, nothing else.
+        if (A.Params[I].IsUntyped != B.Params[I].IsUntyped) return false;
+        if (A.Params[I].IsUntyped) continue;
         if (!sameParamType(A.Params[I].Ty, B.Params[I].Ty)) return false;
     }
     if (static_cast<bool>(A.RetType) != static_cast<bool>(B.RetType)) return false;
@@ -2389,6 +2448,46 @@ void Sema::checkCallArgs(const Symbol& Sym, SourceLocation CallLoc,
         // arguments.  It is matched against the formal before that can happen.
         if (Param.Ty && isCallable(*Param.Ty)) {
             checkProcedureActual(*Param.Ty, Param.Name, ArgNode);
+            continue;
+        }
+
+        // Turbo untyped parameter (`procedure P(var x)`): Param.Ty is
+        // deliberately null (see ParamGroup::Type's own comment) and none of
+        // the Param.Ty-dereferencing branches below can run at all -- this
+        // handles the whole match on its own, before any of them, and
+        // `continue`s so none of them see a null Param.Ty.
+        //
+        // An untyped formal accepts ANY addressable variable (its own
+        // declared type is not otherwise examined -- the callee will
+        // typecast it) -- checked the same way FillChar/Move's own
+        // "untyped" first arguments already are (SemaStmt.cpp) -- with one
+        // extra allowance real Turbo Pascal has that those built-ins don't
+        // need: relaying an untyped parameter THIS activation already has
+        // straight through to another untyped formal, with no typecast,
+        // confirmed against fpc -Mtp (and confirmed, also against fpc,
+        // that relaying one to a TYPED var formal instead is rejected --
+        // so that case is deliberately left to fall through to the ordinary
+        // checkExpr/checkIdent path below, which reports it).
+        if (Param.IsUntyped) {
+            bool RelayedUntyped = false;
+            if (auto* Id = llvm::dyn_cast<IdentExpr>(&ArgNode)) {
+                if (Symbol* ASym = Symtab.lookup(Id->Name);
+                        ASym && !ASym->Ty
+                        && (ASym->Kind == SymbolKind::Var
+                            || ASym->Kind == SymbolKind::VarParam)) {
+                    ASym->Referenced = true;
+                    RelayedUntyped = true;
+                }
+            }
+            if (!RelayedUntyped) {
+                auto AtUntyped = checkExpr(ArgNode);
+                checkNotProtected(ArgNode, ArgNode.Loc);
+                if (!AtUntyped->isError() && !isLValue(ArgNode)) {
+                    auto IdxStr = std::to_string(Idx + 1);
+                    error(ArgNode.Loc, diag::err_var_param_needs_lvalue,
+                          {std::string_view(IdxStr), std::string_view(Sym.Name)});
+                }
+            }
             continue;
         }
 

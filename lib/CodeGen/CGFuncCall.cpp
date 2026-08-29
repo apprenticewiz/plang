@@ -296,6 +296,28 @@ llvm::Value* CGFuncCall::emitBuiltinCall(const std::string& Name,
     }
     if (lo == "high" || lo == "low") {
         std::shared_ptr<Type> RangeTy = Args[0]->ResolvedType;
+        // Turbo open-array parameter: its bound is a RUNTIME value, this
+        // activation's own synthesized bound slot (CodeGenProcs.cpp's
+        // prologue normalizes it to Low=0/High=extent-1 on entry, whatever
+        // the actual's own declared bounds were) -- there is no static
+        // ordinalRange to answer with below, so this is loaded directly
+        // from the slot instead.  Both Low and High are loaded the same way
+        // (rather than shortcutting Low to a literal 0) purely so this does
+        // not need its own special case: the slot already holds exactly 0,
+        // guaranteed by that same prologue normalization.
+        if (RangeTy && RangeTy->Kind == TypeKind::ConformantArray
+                && RangeTy->IsOpenArray) {
+            if (auto* id = llvm::dyn_cast<IdentExpr>(Args[0].get())) {
+                if (const auto* ve = SymTab.findVar(id->Name);
+                        ve && ve->isConformantArray && !ve->conformantDimPtrs.empty()) {
+                    llvm::Value* slot = lo == "high" ? ve->conformantDimPtrs[0].second
+                                                      : ve->conformantDimPtrs[0].first;
+                    if (slot) return B.CreateLoad(I64Ty, slot, "oa." + lo);
+                }
+            }
+            codegenICE("High/Low reached codegen with no bound slot for open "
+                       "array parameter '" + (RangeTy ? RangeTy->Name : std::string("?")) + "'");
+        }
         if (RangeTy && RangeTy->Kind == TypeKind::Array) RangeTy = RangeTy->IndexType;
         const auto Range = RangeTy ? ordinalRange(*RangeTy) : std::nullopt;
         if (!Range)

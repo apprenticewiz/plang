@@ -70,6 +70,17 @@ DIAG(err_ep_underscore_placement, Error,
 DIAG(err_packed_conformant_shape, Error,
      "a packed conformant array parameter has one dimension")
 
+// TP-only: EP/ISO 7185 Level 1's conformant-array-schema form
+// (array [lo..hi: T] of E) never existed in real Turbo Pascal -- confirmed
+// with a local fpc -Mtp check, which rejects it outright -- so it is
+// rejected here too rather than silently accepted the way it would be by
+// falling through to the ordinary array-type-expr parse.  Turbo's OWN open-
+// array parameter form (array of T, no bracket at all) is parsed instead;
+// see parseParamGroup's own comment for how the two are told apart.
+DIAG(err_turbo_conformant_array, Error,
+     "Turbo Pascal has no conformant array parameters (array[lo..hi: T] of "
+     "E); use an open array parameter (array of T) instead")
+
 DIAG(err_expected_type_expr, Error, "expected type expression, got %0")
 DIAG(err_expected_label, Error, "expected label (integer or identifier), got %0")
 DIAG(err_expected_goto_label, Error, "expected label after 'goto', got %0")

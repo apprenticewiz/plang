@@ -590,9 +590,14 @@ std::shared_ptr<Type> Sema::resolveTypeImpl(const TypeNode& Node) {
         // its own Type rather than going through a TypeContext factory.
         T->Width = Ctx_.pointerWidthBits();
         for (const auto& Pg : N->Params) {
-            auto Pt = resolveParamType(*Pg.Type);
+            // Turbo untyped parameter: legal here too (a procedural
+            // parameter or procedural-typed variable may itself take one,
+            // e.g. `type TCompare = function(var A, B): Integer` reads a
+            // pair of untyped var parameters the classic TP way) -- Pg.Type
+            // is deliberately null; see ParamGroup::Type's own comment.
+            auto Pt = Pg.Type ? resolveParamType(*Pg.Type) : nullptr;
             for (const auto& Nm : Pg.Names)
-                T->Params.push_back({Pg.IsVar, Nm, Pt});
+                T->Params.push_back({Pg.IsVar, Nm, Pt, Pg.IsConst, /*IsUntyped=*/!Pg.Type});
         }
         if (N->ReturnType) T->RetType = resolveType(*N->ReturnType);
         T->Name = describeCallable(*T);
@@ -713,6 +718,9 @@ std::shared_ptr<Type> Sema::resolveTypeImpl(const TypeNode& Node) {
         T->Kind    = TypeKind::ConformantArray;
         T->ElemType = Elem;
         T->Packed   = N->Packed;
+        // Turbo's own `array of T` form -- see Type::IsOpenArray's own
+        // comment (Sema/Type.h) for the whole design.
+        T->IsOpenArray = N->IsOpenArray;
 
         for (const auto& Spec : N->Specs) {
             // Resolve the ordinal type name.
@@ -731,7 +739,8 @@ std::shared_ptr<Type> Sema::resolveTypeImpl(const TypeNode& Node) {
         }
 
         // Build a display name for error messages.
-        T->Name = "conformant array of " + Elem->Name;
+        T->Name = (N->IsOpenArray ? "array of " : "conformant array of ")
+                + Elem->Name;
         return T;
     }
     if (auto* N = llvm::dyn_cast<SchemaTypeNode>(&Node)) {
