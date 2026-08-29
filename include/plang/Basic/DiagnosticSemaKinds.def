@@ -523,6 +523,12 @@ DIAG(err_new_arg_not_pointer, Error,
 // verifier abort instead of being rejected here.
 DIAG(err_dispose_arg_not_pointer, Error,
      "'dispose' expects a pointer as its first argument, got '%0'")
+// -std=turbo only: GetMem/FreeMem's own first argument, the same rule as
+// new/dispose just above but shared by both spellings via %0 rather than
+// each getting its own hardcoded-name diagnostic (SemaStmt.cpp's GetMem/
+// FreeMem arm).
+DIAG(err_heap_arg_not_pointer, Error,
+     "'%0' expects a pointer as its first argument, got '%1'")
 // TRANSLATORS: "discriminant(s)" is an English plural dodge.
 DIAG(err_schema_new_needs_discs, Error,
      "'new' for a pointer to schema '%0' needs %1 discriminant(s), got %2")

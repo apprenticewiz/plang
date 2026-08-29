@@ -343,20 +343,21 @@ std::shared_ptr<Type> Sema::checkIdent(const IdentExpr& E) {
                 // Symtab.lookup still finds the always-registered Builtin
                 // Symbol here and this arm is reached regardless) or, like
                 // eof/eoln, is registered in every dialect and so has no
-                // gating to skip.  Random -- Builtins.def, -std=turbo only
-                // -- is the first EXCEPTION to both: it is dialect-
-                // restricted AND takes zero arguments, so `x := Random;`
-                // under -std=iso7185/-std=iso10206 reached this generic
-                // path with nothing here to reject it, silently returning
-                // Sym->ReturnType (TyReal) and letting CodeGen's own bare-
-                // Random case (CGExprCore.cpp, right beside eof/eoln's
-                // identical bare-call handling) actually emit the call --
-                // a silent miscompile, not a diagnostic, for a name the
-                // parenthesized CallExpr path (checkCallExpr's own
-                // checkEPOnly call) already correctly refuses.  Same check,
-                // reused here rather than reinvented, closes it for Random
-                // and for any future dialect-restricted, zero-argument Func
-                // this table gains.
+                // gating to skip.  Random and ParamCount (Builtins.def,
+                // both -std=turbo only, landed independently and at the
+                // same time) are the first two EXCEPTIONS to both: each is
+                // dialect-restricted AND takes zero arguments, so `x :=
+                // Random;`/`writeln(ParamCount)` under -std=iso7185/
+                // -std=iso10206 reached this generic path with nothing here
+                // to reject either, silently returning Sym->ReturnType and
+                // letting CodeGen's own bare-call case for each (CGExprCore.
+                // cpp, right beside eof/eoln's identical bare-call handling)
+                // actually emit the call -- a silent miscompile, not a
+                // diagnostic, for a name the parenthesized CallExpr path
+                // (checkCallExpr's own checkEPOnly call) already correctly
+                // refuses.  Same check, reused here rather than reinvented,
+                // closes it for both and for any future dialect-restricted,
+                // zero-argument Func this table gains.
                 if (!checkEPOnly(*Sym, E.Loc)) return TyErr;
                 return Sym->ReturnType ? Sym->ReturnType : TyErr;
             }
@@ -1732,6 +1733,22 @@ std::shared_ptr<Type> Sema::checkCallExpr(const CallExpr& E) {
             if (!ChT->isError() && ChT->Kind != TypeKind::Char)
                 error(E.Args[0]->Loc, diag::err_string_fn_arg_type, {Lo, ChT->Name});
             return TyChar;
+        }
+        // ParamCount: Integer -- the number of command-line arguments, not
+        // counting argv[0] itself (Builtins.def's own comment).  No
+        // arguments to check.
+        if (Lo == "paramcount") {
+            return TyInt;
+        }
+        // ParamStr(n): a capacity-255 ShortString -- argv[n], or '' for n
+        // outside 0..ParamCount (runtime/plang_sys.cpp's plang_tp_paramstr's
+        // own comment: confirmed against `fpc -Mtp` that an out-of-range
+        // index is not an error).
+        if (Lo == "paramstr" && !E.Args.empty()) {
+            auto NT = checkExpr(*E.Args[0]);
+            if (!NT->isError() && !NT->isIntegral())
+                error(E.Args[0]->Loc, diag::err_numeric_argument, {Lo, NT->Name});
+            return Ctx_.getShortString(PlangMaxStringCapacity);
         }
         for (const auto& Arg : E.Args) (void)checkExpr(*Arg);
         return Sym->ReturnType ? Sym->ReturnType : TyErr;

@@ -80,6 +80,28 @@ version numbers follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html
   than reusing the existing, range-checked `Trunc`/`Round` primitives (which
   would have silently reintroduced their `int64` range check, aborting for
   any `Int`/`Frac` argument with `|x| >= 2^63`).
+- **`-std=turbo`: heap error handling, the exit chain, and program-control
+  argument access.** `GetMem`/`FreeMem` are a wholly separate, NON-ABORTING
+  pair of allocation entry points from `New`/`Dispose` (which keep aborting
+  the process unconditionally on out-of-memory): with no `HeapError`
+  installed, a failing `GetMem` returns `nil` rather than halting the way
+  real Borland's own default does -- a deliberate, documented divergence,
+  chosen so a plang Turbo program can check `GetMem`'s result without
+  installing a handler at all. `HeapError` is a settable procedural VALUE
+  (reusing Tier 2's procedural types/values rather than a new mechanism);
+  returning 1 from it makes `GetMem` return `nil`, anything else reports
+  Runtime error 203. `RunError(code)` turned out to already exist from
+  earlier work. `ExitProc`, another settable procedural value, is hooked
+  into the already-working `plang_module_finals_run`/`plang_halt` chain
+  (issue #242) so it runs on `Halt`, on `RunError`, and on normal program
+  termination alike. `ErrorAddr` is deliberately simplified: set only at
+  `RunError` and at a nonzero-status `Halt`, not wired to every individual
+  runtime-fault call site. Every compiled program's C `main` now takes
+  `(argc, argv)` unconditionally, for every dialect -- ISO 7185 and
+  Extended Pascal programs never read them, but a single, dialect-
+  independent entry-point ABI is what lets `ParamCount`/`ParamStr(n)` read
+  real command-line arguments back via a new `plang_set_args`, called as
+  main's own first instruction.
 
 ### Fixed
 

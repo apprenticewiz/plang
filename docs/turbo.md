@@ -888,6 +888,58 @@ Turbo Pascal's are: any variable, addressed directly, its own declared type
 not otherwise examined. `Count` is a **byte** count in both, matching FPC
 field practice (not an element count).
 
+**`GetMem(var P: Pointer; Size: Int64)`/`FreeMem(P: Pointer[, Size:
+Int64])`** are a wholly separate, **non-aborting** allocation entry point
+pair from `New`/`Dispose`, which keep aborting the process unconditionally
+on out-of-memory. `Size` is `Int64`, not real Borland TP7's 16-bit `Word`:
+`fpc -Mtp`'s own `GetMem` already widened this well past 65535, and
+`HeapError`'s own `Size` parameter (below) matches for the same reason.
+With no `HeapError` installed, a failing `GetMem` returns `nil` rather than
+halting with Runtime error 203 the way real Borland's actual default does —
+a **deliberate, documented divergence** (no local `fpc` build implements
+`HeapError` at all to check against: modern FPC replaced it outright with a
+`TMemoryManager`/`SetMemoryManager` architecture), chosen so a plang Turbo
+program can check `GetMem`'s result for `nil` without installing a handler
+at all, which is this pair's whole reason for existing separately from
+`New`/`Dispose` in the first place.
+
+**`HeapError: function(Size: Int64): Int64`** is a settable **procedural
+value** (reusing the procedural types/values machinery just above, not a
+new function-pointer mechanism) `GetMem` calls through on an allocation
+failure. Returning `1` makes `GetMem` return `nil` (matches real Borland);
+returning anything else reports Runtime error 203, the same way an actual
+numbered range/overflow check does. `Int64`, not Borland's `Word`/`Integer`:
+the runtime calls through this as a raw C function pointer directly, not
+through ordinary generated-IR procedural-value call machinery, and only a
+full 64-bit return is free of the x86-64 SysV ABI's unspecified-upper-bits
+hazard a narrower one would risk.
+
+**`ExitProc: procedure`**, another settable procedural value, is hooked
+into the already-working `plang_module_finals_run`/`Halt` chain (the same
+one issue #242 fixed for a module's `to end do`), so a program's assigned
+handler runs on `Halt`, on `RunError`, and on normal program termination
+alike — with no separate "and also run `ExitProc`" step needed at any of
+the three.
+
+**`ErrorAddr: Pointer`** is **deliberately simplified**: it is set only at
+the two places a plang Turbo program's own control flow reports a genuine
+fault — `RunError` (including every numbered range/overflow/... check,
+which routes through the same reporter) and `Halt` for a **nonzero**
+status only (`Halt(0)` is an ordinary successful exit, not an error) — not
+wired to every individual runtime-error call site. Set *before* the
+`ExitProc` chain above runs, so a custom `ExitProc` — real Turbo Pascal
+field practice's most common reason to read `ErrorAddr` at all — sees the
+right value from inside its own call.
+
+**`ParamCount`/`ParamStr(n)`** read back the real `argc`/`argv` every
+compiled program's C `main` now receives — `int main(int argc, char**
+argv)`, unconditionally, for every dialect, not just Turbo, since ISO 7185
+and Extended Pascal programs compile through the identical `emitMain` --
+via a new `plang_set_args`, called as `main`'s first instruction. `ParamStr` returns
+a capacity-255 `ShortString`; `n` outside `0..ParamCount` answers `''`
+rather than an error, matching `fpc -Mtp`. `ParamCount`, like `eof`/`eoln`,
+may be written bare, with no parentheses at all.
+
 ---
 
 ## Documented deviations from real Turbo Pascal / FPC field practice
