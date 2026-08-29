@@ -927,6 +927,21 @@ std::shared_ptr<Type> Sema::resolveNamedUnrestricted(const NamedTypeNode& N) {
     // than a fresh one per mention — see TypeContext::getText.
     if (Lo == "text") return Ctx_.getText();
 
+    // Turbo: Extended/Comp are real Turbo Pascal type names this compiler
+    // recognizes but does not implement -- see
+    // err_turbo_unsupported_float_type's own comment (DiagnosticSemaKinds.def)
+    // for why they get an explicit refusal instead of the generic
+    // err_undefined_type below.  Gated the opposite way complex/string just
+    // above are: those two are recognized under every dialect and refused
+    // outside EP, while these are recognized ONLY under Turbo -- ISO 7185
+    // and Extended Pascal never had either name as a keyword, so outside
+    // -std=turbo they fall straight through to the ordinary undefined-type
+    // lookup below, exactly as they did before this feature existed.
+    if (Opts.turbo() && (Lo == "extended" || Lo == "comp")) {
+        error(N.Loc, diag::err_turbo_unsupported_float_type, {N.Name});
+        return TyErr;
+    }
+
     // Look up in the symbol table.
     Symbol* Sym = Symtab.lookup(N.Name);
     if (!Sym) {
@@ -1201,7 +1216,21 @@ static_assert(NumSemaTypeKinds == 21,
 void Sema::checkSetBaseRange(const Type& Base, SourceLocation Loc) {
     int64_t Lo = 0, Hi = 0;
     switch (Base.Kind) {
-        case TypeKind::Boolean: return;              // 0..1
+        case TypeKind::Boolean:
+            // Turbo's loose ByteBool/WordBool/LongBool have no {0,1} interval
+            // (Type::IsLooseBool's own comment) and are refused as a set base
+            // type entirely -- checked against real fpc: `set of ByteBool`,
+            // the narrowest of the three, is "illegal type declaration of set
+            // elements" even though its own storage domain (0..255) would
+            // technically fit the 256-element limit.  Reusing
+            // err_set_base_too_wide is the same choice already made for a
+            // bare (equally unbounded, per ordinalRange) Integer just below.
+            if (Base.IsLooseBool) {
+                error(Loc, diag::err_set_base_too_wide,
+                      {Base.Name, std::to_string(PlangMaxSetElements)});
+                return;
+            }
+            return;                                  // strict boolean: 0..1
         case TypeKind::Char:    return;              // 0..255, exactly the width
         case TypeKind::Enum:
             Lo = 0;
@@ -1638,7 +1667,10 @@ uint64_t Sema::byteAlignOf(const Type& T) {
     case TypeKind::Boolean:
         return intAlign(T.Width);
     case TypeKind::Char:        return 1;
-    case TypeKind::Real:        return 8;
+    // Width travels with Real too, now that Single (32) exists alongside
+    // the dialects' own Real (64, the struct default Type::makeReal()
+    // leaves untouched) -- see Type::Width's own comment.
+    case TypeKind::Real:        return T.Width / 8;
     case TypeKind::Complex:     return 8;
     case TypeKind::Set:         return intAlign(PlangMaxSetElements);
     // The target's pointer width (issue #243's follow-up): Type::Width is
@@ -1682,7 +1714,8 @@ std::optional<uint64_t> Sema::byteSizeOf(const Type& T, FieldOffsets* Offsets) {
     case TypeKind::Boolean:
         return intBytes(T.Width);
     case TypeKind::Char:        return 1;
-    case TypeKind::Real:        return 8;
+    // See the identical comment in byteAlignOf just above.
+    case TypeKind::Real:        return T.Width / 8;
     case TypeKind::Complex:     return 16;  // { double, double }
     case TypeKind::Set:         return intBytes(PlangMaxSetElements);
     // The target's pointer width; see the identical case in byteAlignOf.

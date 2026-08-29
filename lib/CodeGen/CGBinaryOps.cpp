@@ -457,8 +457,14 @@ llvm::Value* CGBinaryOps::emitBinary(const BinaryExpr& e) {
         }
     }
 
-    // Integer-to-real promotion.
-    bool needFP = lv->getType()->isDoubleTy() || rv->getType()->isDoubleTy();
+    // Integer-to-real promotion.  isFloatingPointTy, not isDoubleTy: Turbo's
+    // Single (float) is a second floating type alongside Real (double), and
+    // testing isDoubleTy alone let a Single operand miss this gate entirely
+    // -- it fell through to the INTEGER arithmetic further down instead,
+    // silently computing the wrong thing on a value LLVM's verifier does
+    // not reject (float and integer are both "not a pointer", so nothing
+    // catches this at the IR level; it just computes nonsense).
+    bool needFP = lv->getType()->isFloatingPointTy() || rv->getType()->isFloatingPointTy();
     if (needFP) {
         lv = ToDouble(lv);
         rv = ToDouble(rv);
@@ -667,7 +673,10 @@ llvm::Value* CGBinaryOps::emitUnary(const UnaryExpr& e) {
                 return Complex.makeComplex(B.CreateFNeg(re, "neg.re"),
                                    B.CreateFNeg(im, "neg.im"));
             }
-            if (v->getType()->isDoubleTy())
+            // isFloatingPointTy, not isDoubleTy: see emitBinary's needFP
+            // comment -- a Single (float) operand needs the identical FNeg
+            // double already got, not the integer CreateNeg below.
+            if (v->getType()->isFloatingPointTy())
                 return B.CreateFNeg(v, "fneg");
             return B.CreateNeg(v, "neg");
         case TokenKind::Not: {

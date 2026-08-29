@@ -319,9 +319,21 @@ void CGAssign::emitAssignValue(const ExprNode& Target, const ExprNode& Value,
     // EP §6.4.2.2: integer/real → complex widening.
     if (dstTy == Complex.complexTy() && rhs->getType() != Complex.complexTy())
         rhs = Complex.coerceToComplex(rhs);
-    // Implicit integer-to-real widening.
-    if (dstTy->isDoubleTy() && rhs->getType()->isIntegerTy())
-        rhs = B.CreateSIToFP(rhs, DblTy, "widen");
+    // Implicit integer-to-real widening.  dst may be Real (double) or,
+    // since Turbo's Single exists, float -- SIToFP targets whichever
+    // floating type dst actually is rather than always DblTy.
+    if (dstTy->isFloatingPointTy() && rhs->getType()->isIntegerTy())
+        rhs = B.CreateSIToFP(rhs, dstTy, "widen");
+    // Real <-> Single width mismatch, either direction.  numericResult
+    // (SemaExpr.cpp) always answers a Real-kind binary operator with the
+    // wider (double) Real regardless of whether either operand was the
+    // narrower Single, so `s3 := s1 + s2` (s1/s2/s3 all Single) reaches here
+    // with a double rhs and a float dst; the reverse (a bare Single value or
+    // variable assigned to a Real destination) needs the opposite widening.
+    else if (dstTy->isDoubleTy() && rhs->getType()->isFloatTy())
+        rhs = B.CreateFPExt(rhs, dstTy, "widen.fp");
+    else if (dstTy->isFloatTy() && rhs->getType()->isDoubleTy())
+        rhs = B.CreateFPTrunc(rhs, dstTy, "narrow.fp");
     // Integer width mismatch, either direction: i64 -> i8 (e.g. an integer
     // expression stored into a char variable) narrows, but i8/i1 -> i64 (a
     // char or boolean value stored into a subrange slot -- every subrange is

@@ -79,8 +79,21 @@ private:
     /// normally i1, but the predefined TimeStamp holds its two flags as i8 so
     /// that the record matches its C counterpart byte for byte, and at that
     /// width nothing in the IR distinguishes a boolean from a char — only the
-    /// Pascal type does.
+    /// Pascal type does.  i16/i32 are Turbo's loose WordBool/LongBool
+    /// (Type::IsLooseBool); semaTy's own Kind is what tells those apart from
+    /// an equally-wide Word/LongInt.
     static bool writesAsBoolean(const llvm::Type* ty, const plang::Type* semaTy);
+    /// Normalizes any Boolean-shaped value to the single byte
+    /// plang_write(ln)_bool(_w) expects.  i1 (strict Boolean) zero-extends
+    /// directly, and an already-i8 value (ByteBool) is passed through as-is
+    /// -- plang_write_bool does its own C truthiness test on the raw byte,
+    /// so a ByteBool holding a non-canonical value like 200 still prints
+    /// TRUE.  A WIDER loose Boolean (WordBool/LongBool, i16/i32) is NOT
+    /// simply truncated to its low byte first: a genuinely nonzero value
+    /// whose low byte happens to be zero (0x100, say) would truncate to a
+    /// zero byte and misprint FALSE, so the truth test (nonzero-or-not) has
+    /// to run at the value's own full width before narrowing to a byte.
+    llvm::Value* toBoolByte(llvm::Value* val) const;
     /// Whether a value should be written as a character.  A char is normally
     /// i8, but a subrange of char is held in an integer-width slot, and at
     /// that width only the Pascal type says it is not a number.

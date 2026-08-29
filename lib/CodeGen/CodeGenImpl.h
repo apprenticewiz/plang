@@ -194,6 +194,9 @@ struct Codegen::Impl {
     llvm::IntegerType* i32Ty{nullptr};
     llvm::IntegerType* i64Ty{nullptr};
     llvm::Type*        dblTy{nullptr};
+    /// Turbo `Single`'s LLVM lowering; see CGTypes::llvmTypeOfSemaTypeImpl's
+    /// Real case.
+    llvm::Type*        fltTy{nullptr};
     llvm::PointerType* ptrTy{nullptr};
 
     /// A signed i64 constant.  Enough places now pass a capacity or an extent

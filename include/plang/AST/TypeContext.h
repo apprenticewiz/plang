@@ -96,6 +96,12 @@ public:
         TyPointer_->Kind = TypeKind::Pointer;
         TyPointer_->Name = "Pointer";
         TyPointer_->Width = PointerWidthBits_;
+        // Turbo `Single`: Real's own Width default (64, the struct default
+        // Type::makeReal() leaves untouched) is what TyReal_ above already
+        // is, so only this second rung needs its Width set explicitly.
+        TySingle_ = Type::makeReal();
+        TySingle_->Name  = "single";
+        TySingle_->Width = 32;
         TyErr_  = Type::makeError();
         // ISO §6.4.3.5: text is one predefined type, not a fresh type per
         // mention, so `var f: text` and `procedure p(var g: text)` agree.
@@ -153,6 +159,13 @@ public:
     /// Turbo `PChar`/`PAnsiChar`.  See the constructor's comment for why this
     /// is a dedicated object rather than getPointer(getChar()).
     const std::shared_ptr<Type>& getPChar()   const { return TyPChar_; }
+    /// Turbo `Single`: the second floating type, 32 bits wide.  A dedicated
+    /// singleton rather than a {Width}-keyed cache like getInt's integer
+    /// ladder -- unlike Integer's four-plus widths, Real only ever has this
+    /// one other rung (Extended/Comp are refused outright, not implemented;
+    /// see resolveNamedUnrestricted's err_turbo_unsupported_float_type), so
+    /// a cache would buy nothing a second named field does not already give.
+    const std::shared_ptr<Type>& getSingle()  const { return TySingle_; }
 
     /// The canonical integer type of a given width and signedness.
     ///
@@ -191,6 +204,42 @@ public:
             if (Bits != DefaultIntWidth_ || !Signed)
                 if (const char* N = sizedIntegerName(Bits, Signed))
                     T->Name = N;
+            Slot = std::move(T);
+        }
+        return Slot;
+    }
+
+    /// Turbo's loose Boolean-family variants: ByteBool (8), WordBool (16),
+    /// LongBool (32).  Interned like getInt's sized-integer ladder and for
+    /// the same reason -- two `WordBool`s have to be one type -- but keyed
+    /// on Width alone rather than {Width, Signed}: every loose Boolean is
+    /// the same "strictness" (see Type::IsLooseBool), so Width is the only
+    /// axis that varies.
+    ///
+    /// The dialect's own strict `boolean` is NOT minted through here -- see
+    /// getBoolean()/TyBool_ -- so \p Bits is only ever 8, 16 or 32 in
+    /// practice (Sema::registerBuiltins is the only caller).
+    std::shared_ptr<Type> getLooseBoolean(unsigned Bits) {
+        auto& Slot = LooseBoolCache_[Bits];
+        if (!Slot) {
+            auto T = std::make_shared<Type>();
+            T->Kind        = TypeKind::Boolean;
+            T->Width       = Bits;
+            T->IsLooseBool = true;
+            // Every Boolean is an ordinal numbered from zero (ISO §6.4.2.2),
+            // never negative -- the same reasoning Type::makeBoolean's own
+            // comment gives for strict Boolean, which this is not built
+            // through (it needs IsLooseBool, which makeBoolean does not
+            // set), so it has to be repeated here rather than inherited.
+            // Left at the struct default (true) this told
+            // CodegenImpl::ordinalIsUnsigned a WordBool/LongBool holding a
+            // raw value with its top bit set (WordBool(40000) = 0x9C40) was
+            // SIGNED, and a `<`/`>` comparison against one would compare its
+            // bit pattern as a negative i16 instead of the unsigned 40000
+            // the loose family's own "any bit pattern, read as a plain
+            // unsigned magnitude" contract promises.
+            T->IsSigned    = false;
+            T->Name        = looseBooleanName(Bits);
             Slot = std::move(T);
         }
         return Slot;
@@ -452,10 +501,24 @@ private:
         }
     }
 
+    /// getLooseBoolean's display name for a width.  Unlike
+    /// sizedIntegerName, every width the ladder mints has a real name here
+    /// -- there is no "same object as the dialect's own unqualified type"
+    /// collision for Boolean the way SmallInt/LongWord alias Integer/
+    /// Cardinal, so a null fallback is never actually reached.
+    static const char* looseBooleanName(unsigned Bits) {
+        switch (Bits) {
+        case 8:  return "ByteBool";
+        case 16: return "WordBool";
+        case 32: return "LongBool";
+        default: return "boolean";
+        }
+    }
+
     // Scalar singletons
     std::shared_ptr<Type> TyInt_, TyReal_, TyCplx_, TyBool_, TyChar_,
                           TyStr_, TyNil_, TyErr_, TyText_, TyPChar_,
-                          TyPointer_;
+                          TyPointer_, TySingle_;
 
     /// What an unqualified `integer` is, and what an ordinal that is not
     /// narrowed by its host is stored as.
@@ -465,6 +528,8 @@ private:
 
     // Integer types, by width and signedness.
     std::map<std::pair<unsigned, bool>, std::shared_ptr<Type>> IntCache_;
+    // Turbo's loose Boolean-family variants, by width; see getLooseBoolean.
+    std::map<unsigned, std::shared_ptr<Type>> LooseBoolCache_;
 
     // Structural type caches (key → canonical instance)
     std::map<std::string, std::shared_ptr<Type>> SubrangeCache_;

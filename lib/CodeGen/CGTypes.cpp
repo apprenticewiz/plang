@@ -758,11 +758,25 @@ llvm::Type* CGTypes::llvmTypeOfSemaTypeImpl(const Type& T) {
         case TypeKind::Set:
             return Sets.setTy();
         case TypeKind::Real:
-            return dblTy;
+            // Width travels with Real now, the same as it always has for
+            // Integer/Subrange/Enum just above: ISO 7185 and Extended
+            // Pascal stamp 64 on their one Real (Type::makeReal()'s struct
+            // default, never overwritten for them), so this is the dblTy
+            // they have always emitted, and Turbo's Single (Width 32,
+            // TypeContext::getSingle) is the only type that ever reaches
+            // the other arm.
+            return T.Width == 32 ? fltTy : dblTy;
         case TypeKind::Complex:
             return Complex.complexTy(); // EP §6.4.2.2: { double, double }
         case TypeKind::Boolean:
-            return i1Ty;
+            // Every dialect's own strict `boolean` stays i1 exactly as
+            // before, regardless of its own Width field (always 8, but
+            // meaningless here -- see Type::IsLooseBool's own comment on
+            // why strictness, not storage width, is what decides this).
+            // Turbo's loose ByteBool/WordBool/LongBool (IsLooseBool set)
+            // need a real integer type wide enough to hold any bit pattern,
+            // not just 0/1 -- an i1 cannot represent `ByteBool(200)`.
+            return T.IsLooseBool ? llvm::Type::getIntNTy(Ctx, T.Width) : i1Ty;
         case TypeKind::Char:
             return i8Ty;
         case TypeKind::String:

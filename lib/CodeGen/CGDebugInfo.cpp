@@ -172,10 +172,18 @@ llvm::DIType* CGDebugInfo::debugTypeOfSemaType(const Type& T) {
                 T.IsSigned ? llvm::dwarf::DW_ATE_signed : llvm::dwarf::DW_ATE_unsigned);
             break;
         case TypeKind::Real:
-            DT = DBuilder->createBasicType("real", 64, llvm::dwarf::DW_ATE_float);
+            // Width-aware the same way the Integer case just above is, now
+            // that Single (32) exists alongside the dialects' own Real (64):
+            // matches the llvm::Type CGTypes::llvmTypeOfSemaTypeImpl actually
+            // builds for the same T (float vs. double) instead of always
+            // claiming a 64-bit value regardless of the real one.
+            DT = DBuilder->createBasicType("real", T.Width, llvm::dwarf::DW_ATE_float);
             break;
         case TypeKind::Boolean:
-            DT = DBuilder->createBasicType("boolean", 8, llvm::dwarf::DW_ATE_boolean);
+            // Width-aware for the same reason: Turbo's loose ByteBool/
+            // WordBool/LongBool are 8/16/32-bit storage (Type::IsLooseBool),
+            // not the strict Boolean's always-8-bit i1.
+            DT = DBuilder->createBasicType("boolean", T.Width, llvm::dwarf::DW_ATE_boolean);
             break;
         case TypeKind::Char:
             DT = DBuilder->createBasicType("char", 8, llvm::dwarf::DW_ATE_unsigned_char);
