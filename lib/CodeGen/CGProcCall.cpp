@@ -128,37 +128,63 @@ void CGProcCall::emitCallStmt(const CallStmt& s) {
     // -std=turbo only: Reset/Rewrite/Append's own binding comes from
     // whatever Assign(f, name) last bound f to -- an empty bound name
     // meaning "the console" (stdin for Reset, stdout for Rewrite/Append).
-    // The pre-Assign 2-argument form (`reset(f, 'name.txt')`) is still
-    // accepted here too (PR #475's own Sema-level type check, and its
-    // "still works under -std=turbo" non-regression test, both confirm
-    // this form must go on compiling under Turbo) -- when a second
-    // argument IS given, this is an IMPLICIT Assign: bind f to that name
-    // first (the identical plang_tp_assign call the explicit `assign` arm
-    // above makes, including the identical ShortString/string(n) C-string
-    // marshalling), THEN open it, rather than silently discarding the
-    // argument and falling through to whatever f.Name was left holding
-    // from a stale or absent prior Assign (previously a real bug: a
-    // 2-argument `rewrite(f, 'name.txt')` under Turbo silently wrote to
-    // the console instead of the named file, since nothing ever told f
-    // what to bind to). Second argument here is never a RecSize integer --
-    // that overload is Sema-rejected before codegen ever sees it (this
-    // item does not wire RecSize up; a later item does), so the only
-    // shape reaching here is a filename.  A genuinely separate runtime
-    // function family (plang_tp_reset/plang_tp_rewrite/plang_tp_append,
-    // runtime/plang_file.cpp), not the ISO ones below with a flag --
-    // this project's P7 rule that dialect selection happens at the
-    // CALL-SITE, since an ISO and a Turbo object file can be linked into
-    // one program.
-    if ((lo == "reset" || lo == "rewrite" || lo == "append")
-            && !s.Args.empty() && RangeGuards.isTurbo()) {
+    //
+    // Cluster A item 4 retired the PR #475/#478 "2-argument reset/rewrite is
+    // an implicit Assign" convenience: real Turbo Pascal's second argument
+    // is an INTEGER RecSize for an untyped file (confirmed against
+    // `fpc -Mtp`), not a filename, and Sema now enforces exactly that (see
+    // err_turbo_reset_rewrite_recsize_type, SemaStmt.cpp) -- so the only
+    // shape reaching here for a 2-argument Reset/Rewrite is a RecSize int,
+    // never a filename, and there is no implicit Assign to perform anymore.
+    // Append is unaffected either way: real Turbo Pascal's Append is always
+    // 1-arg (Builtins.def's own TP entry has MaxArgs 1), so it never reaches
+    // the `s.Args.size() > 1` arm below.
+    //
+    // RecSize itself: a typed file's (`file of T`) is SizeOf(T), computed
+    // here from the element type and NEVER from a user-supplied argument
+    // (the roadmap's own rule) -- any explicit integer argument on a typed
+    // file is still evaluated, for its side effects, but its value is
+    // discarded. An untyped file's (`var f: file;`) is the given argument,
+    // or TP's own documented default of 128 when none is given. A `text`
+    // file has no RecSize concept at all (no such Reset/Rewrite overload in
+    // real Turbo Pascal), so it skips the _sized wrapper entirely and calls
+    // plang_tp_reset/plang_tp_rewrite directly, same as Append always does.
+    // See plang_tp_reset_sized/plang_tp_rewrite_sized (runtime/
+    // plang_file.cpp) for what a RecSize of 0 does (InOutRes 2, real
+    // Borland/FPC field practice).  A genuinely separate runtime function
+    // family, not the ISO ones below with a flag -- this project's P7 rule
+    // that dialect selection happens at the CALL-SITE, since an ISO and a
+    // Turbo object file can be linked into one program.
+    if ((lo == "reset" || lo == "rewrite") && !s.Args.empty() && RangeGuards.isTurbo()) {
         auto* fp = FileVars.fileVarPtr(*s.Args[0]);
-        if (s.Args.size() > 1) {
-            auto* nm = StrCall.emitCStrArg(*s.Args[1]);
-            auto* assignFn = RtFns.getExternFnN("plang_tp_assign",
-                llvm::Type::getVoidTy(Ctx), {PtrTy, PtrTy});
-            B.CreateCall(assignFn, {fp, nm});
+        if (FileVars.isTypedBinaryFileVar(*s.Args[0])) {
+            if (s.Args.size() > 1) (void)EmitExpr(*s.Args[1]); // side effects only
+            auto* recSize = llvm::ConstantInt::get(I64Ty,
+                FileVars.getFileElemSize(*s.Args[0]));
+            auto* fn = RtFns.getExternFnN("plang_tp_" + lo + "_sized",
+                llvm::Type::getVoidTy(Ctx), {PtrTy, I64Ty});
+            B.CreateCall(fn, {fp, recSize});
+        } else if (FileVars.isUntypedFileVar(*s.Args[0])) {
+            auto* recSize = s.Args.size() > 1
+                ? ToI64(EmitExpr(*s.Args[1]))
+                : llvm::ConstantInt::get(I64Ty, 128); // TP's own default
+            auto* fn = RtFns.getExternFnN("plang_tp_" + lo + "_sized",
+                llvm::Type::getVoidTy(Ctx), {PtrTy, I64Ty});
+            B.CreateCall(fn, {fp, recSize});
+        } else {
+            // A `text` file: no RecSize overload in real Turbo Pascal.  Any
+            // argument given still has to be evaluated for its side effects.
+            if (s.Args.size() > 1) (void)EmitExpr(*s.Args[1]);
+            auto* fn = RtFns.getExternFnN("plang_tp_" + lo,
+                llvm::Type::getVoidTy(Ctx), {PtrTy});
+            B.CreateCall(fn, {fp});
         }
-        auto* fn = RtFns.getExternFnN("plang_tp_" + lo,
+        emitIoCheckIfNeeded(s.Loc);
+        return;
+    }
+    if (lo == "append" && !s.Args.empty() && RangeGuards.isTurbo()) {
+        auto* fp = FileVars.fileVarPtr(*s.Args[0]);
+        auto* fn = RtFns.getExternFnN("plang_tp_append",
             llvm::Type::getVoidTy(Ctx), {PtrTy});
         B.CreateCall(fn, {fp});
         emitIoCheckIfNeeded(s.Loc);

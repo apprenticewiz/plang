@@ -43,6 +43,17 @@ public:
     /// Whether the file holds records or characters -- two unrelated
     /// representations, decided by the denoter rather than a type name.
     bool isTypedBinaryFileVar(const plang::ExprNode& e);
+    /// TP RecSize wiring only: whether `e` is a genuinely UNTYPED file
+    /// (`var f: file;`, no `of` clause) rather than `text` -- both have a
+    /// null ElemType (see isTypedBinaryFileVar's own "untyped: byte-level"
+    /// comment), so ElemType alone cannot tell them apart.  TypeContext
+    /// mints `text` as its own singleton (Name "text") and an untyped file
+    /// through the ordinary getFile(nullptr, ...) path (Name "file" --
+    /// see TypeContext::getFile), so the Type's own Name is what
+    /// distinguishes them.  Real Turbo Pascal's RecSize default (128) is an
+    /// untyped-file-only concept; a `text` file has no RecSize overload of
+    /// Reset/Rewrite at all.
+    bool isUntypedFileVar(const plang::ExprNode& e);
     /// `f^`'s buffer pointer via plang_file_buffer.
     llvm::Value* fileBufferPtr(const plang::ExprNode& fileExpr);
     llvm::Type* getFileElemType(const plang::ExprNode& fileExpr);

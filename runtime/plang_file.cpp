@@ -733,6 +733,40 @@ void plang_tp_append(PascalFile *F) {
     unloadComponent(F);
 }
 
+/// TP Reset/Rewrite's RecSize wiring (Cluster A item 4): a typed file's
+/// RecSize is SizeOf(its element), computed by codegen and always nonzero
+/// (Sema's err_file_component_zero_size already forbids a zero-size
+/// component); an untyped file's RecSize is either an explicit, valid
+/// integer second argument, or -- when none is given -- TP's own documented
+/// default of 128.  Either way codegen always has a concrete int64_t RecSize
+/// by the time it reaches here, so plang_tp_reset/plang_tp_rewrite
+/// themselves stay untouched (and are still called directly for a `text`
+/// file, which has no RecSize concept of its own at all -- see
+/// FileVarHelpers::isUntypedFileVar's own comment) -- these two wrap them.
+///
+/// A RecSize of 0 is real Borland/FPC field practice's own special case: it
+/// sets InOutRes to 2 ("file not found") WITHOUT attempting to open
+/// anything, exactly the way a genuinely missing file would.  F->RecSize is
+/// left at whatever it already was (0 from a fresh file, or a still-good
+/// prior value) rather than overwritten with the rejected 0, so a caller
+/// that clears IOResult and retries with a sane RecSize is not left with a
+/// stale 0 haunting a later BlockRead/BlockWrite that has not been wired up
+/// yet (a later Cluster C item's job -- see PascalFileLayout.h's own
+/// RecSize field comment).
+void plang_tp_reset_sized(PascalFile *F, int64_t RecSize) {
+    if (RecSize == 0) { setInOutResIfClear(2); return; }
+    F->RecSize = RecSize;
+    plang_tp_reset(F);
+}
+
+/// TP Rewrite's RecSize wiring -- see plang_tp_reset_sized just above for
+/// the full rationale, identical here but for Rewrite.
+void plang_tp_rewrite_sized(PascalFile *F, int64_t RecSize) {
+    if (RecSize == 0) { setInOutResIfClear(2); return; }
+    F->RecSize = RecSize;
+    plang_tp_rewrite(F);
+}
+
 /// TP Close(f): closes the underlying stream with none of ISO plang_close's
 /// three extra steps -- no closeFinalLine (see this section's top comment),
 /// no std::free(F->Comp) (nothing on the TP open/close path above ever

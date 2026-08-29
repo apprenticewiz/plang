@@ -68,6 +68,11 @@ bool FileVarHelpers::isTypedBinaryFileVar(const ExprNode& e) {
     return T->ElemType->Kind != TypeKind::Char;
 }
 
+bool FileVarHelpers::isUntypedFileVar(const ExprNode& e) {
+    const Type* T = fileTypeOf(e);
+    return T && !T->ElemType && T->Name != "text";
+}
+
 llvm::Value* FileVarHelpers::fileBufferPtr(const ExprNode& fileExpr) {
     auto* fp = fileVarPtr(fileExpr);
     if (!fp) return nullptr;

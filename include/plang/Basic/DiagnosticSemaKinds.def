@@ -358,6 +358,14 @@ DIAG(err_line_proc_not_text, Error, "'%0' applies to a text file only, not to 'f
 // compiler, not a diagnostic -- rather than plang ever refusing the program.
 DIAG(err_reset_rewrite_arg_type, Error,
      "'%0' external file name must be char or string, got '%1'")
+// -std=turbo only: the mirror image of err_reset_rewrite_arg_type just
+// above.  Real Turbo Pascal's Reset/Rewrite second argument is an INTEGER
+// RecSize for an untyped file, not a filename -- confirmed against
+// `fpc -Mtp`, which rejects `reset(f, 'x.txt')` with an incompatible-type
+// error of its own.  See this diagnostic's call site (SemaStmt.cpp) for why
+// plang used to accept a string here under Turbo and no longer does.
+DIAG(err_turbo_reset_rewrite_recsize_type, Error,
+     "'%0' record-size argument must be an integer, got '%1'")
 DIAG(err_assign_file, Error, "a variable of a file type, or with a file component, cannot be assigned")
 DIAG(err_function_result_type, Error, "a function result must be a simple or pointer type, not '%0'")
 DIAG(err_duplicate_enum_value, Error, "duplicate enumeration value '%0'")
