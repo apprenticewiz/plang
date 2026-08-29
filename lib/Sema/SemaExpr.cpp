@@ -361,6 +361,20 @@ std::shared_ptr<Type> Sema::checkIndex(const IndexExpr& E) {
             error(E.Loc, diag::err_index_not_ordinal, {IdxTy->Name});
         return TyChar;
     }
+    // Turbo: `p[i]` on a PChar-like pointer indexes through it, zero-based,
+    // with no declared extent to range-check against -- the same "pointee is
+    // Char" gate checkBinary's pointer-arithmetic case uses (see
+    // isCharPointerType's comment in Type.h for the fpc -Mtp field-practice
+    // trail), and the same Opts.turbo() gate keeping an ISO/EP `^char`
+    // untouched.  Confirmed against real fpc: a user's own `type P = ^Char`
+    // indexes exactly like PChar does, both for a read and -- since
+    // isLValue/checkAssign route straight back through this same function --
+    // `p[0] := 'H'` as a write.
+    if (Opts.turbo() && isCharPointerType(*ArrTy)) {
+        if (!IdxTy->isError() && !IdxTy->isOrdinal())
+            error(E.Loc, diag::err_index_not_ordinal, {IdxTy->Name});
+        return TyChar;
+    }
     // EP §6.7.3.7: conformant arrays are indexed like regular arrays.
     if (ArrTy->Kind == TypeKind::ConformantArray) {
         const bool IdxNotOrdinal = !IdxTy->isError() && !IdxTy->isOrdinal();
@@ -557,7 +571,39 @@ std::shared_ptr<Type> Sema::checkBinary(const BinaryExpr& E) {
             }
         }
             [[fallthrough]];
-        case TokenKind::Minus:
+        case TokenKind::Minus: {
+            // Turbo: PChar-like pointer arithmetic -- `p + n`, `p - n` and
+            // `p1 - p2` -- intercepted before the generic numeric gate below,
+            // the same shape the string-concat block above and the set
+            // union/difference/intersection block just below already use.
+            //
+            // Gated on Opts.turbo() *and* isCharPointerType, not on identity
+            // to the PChar singleton: see isCharPointerType's own comment
+            // (Type.h) for the empirical fpc -Mtp field-practice trail this
+            // follows -- a user's own `type P = ^Char` gets exactly the same
+            // arithmetic PChar does on a real Turbo/Delphi/FPC compiler.
+            // Opts.turbo() is what keeps an ISO 7185/EP `^char` untouched:
+            // every dialect that can declare one has Opts.turbo() false.
+            //
+            // Checked against real fpc (not just assumed): `p + q` (two
+            // pointers), `n - p` and `n + p` (integer first) are ALL refused
+            // by fpc 3.2.2 -- only pointer-then-integer commutes here, unlike
+            // ordinary '+'.
+            if (Opts.turbo() && (isCharPointerType(*Lt) || isCharPointerType(*Rt))) {
+                const bool LPtr = isCharPointerType(*Lt);
+                const bool RPtr = isCharPointerType(*Rt);
+                if (E.Op == TokenKind::Plus) {
+                    if (LPtr && !RPtr && Rt->isIntegral()) return Lt;
+                } else { // Minus
+                    if (LPtr && RPtr) return TyInt; // p1 - p2: element count
+                    if (LPtr && !RPtr && Rt->isIntegral()) return Lt; // p - n
+                }
+                error(E.Loc, diag::err_op_numeric,
+                      {opSpelling(E.Op), Lt->Name, Rt->Name});
+                return TyErr;
+            }
+        }
+            [[fallthrough]];
         case TokenKind::Times:
             // ISO §6.7.2.4: '+' is set union, '-' set difference and '*' set
             // intersection when both operands are sets.
@@ -2440,6 +2486,32 @@ bool Sema::isAssignCompatible(const Type& Dst, const Type& Src,
     if (Dst.Kind == TypeKind::Char
             && (isVarStringLike(&Src) || isCharStringType(Src)
                 || Src.Kind == TypeKind::String))
+        return true;
+
+    // Turbo: a zero-based array of Char decays to the ADDRESS of its first
+    // element when assigned to a PChar-like pointer -- `p := buf` for
+    // `buf: array[0..9] of Char`, no `@` needed.  Confirmed against real
+    // `fpc -Mtp`, gated the same "pointee is Char" way as the arithmetic and
+    // indexing rules above (isCharPointerType, Type.h) plus Opts.turbo().
+    //
+    // Deliberately does NOT touch isCharStringType just above: that is ISO
+    // §6.4.3.2's canonical string-type, `packed array[1..n] of char` with
+    // SubLo == 1, and it keeps meaning "this is a Pascal string value" here
+    // exactly as it always has -- a 1-based char array is still refused as a
+    // PChar source (real fpc refuses the identical program: "Incompatible
+    // types: got array[1..9] Of Char expected PChar").  The rule below is
+    // therefore checked independently and structurally rather than by
+    // widening isCharStringType's own SubLo == 1 condition, which must stay
+    // untouched for every OTHER caller (string concatenation, comparison,
+    // length/substr/trim -- ISO 10206 §6.4.3.3.1's "canonical-string-type"
+    // machinery) that still means exactly what it always has.  `packed` is
+    // not required either, matching fpc: an unpacked zero-based char array
+    // decays too.
+    if (Opts.turbo() && isCharPointerType(Dst)
+            && Src.Kind == TypeKind::Array && Src.ElemType
+            && Src.ElemType->Kind == TypeKind::Char
+            && Src.IndexType && Src.IndexType->Kind == TypeKind::Subrange
+            && Src.IndexType->SubLo == 0)
         return true;
     return false;
 }

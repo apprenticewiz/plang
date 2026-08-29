@@ -5,6 +5,8 @@
 
 #include "plang/AST/Ast.h"
 #include "plang/Basic/Token.h"
+#include "plang/Sema/Sema.h"
+#include "plang/Sema/Type.h"
 
 #include "CodegenICE.h"
 
@@ -334,6 +336,80 @@ llvm::Value* CGBinaryOps::emitBinary(const BinaryExpr& e) {
         b = Sets.alignSet(b, Sets.setBaseOf(*e.Right), Base);
         if (auto* r = Sets.emitSetBinary(e.Op, a, b)) return r;
         codegenICE("unhandled set operator '" + std::string(opSpelling(e.Op)) + "'");
+    }
+
+    // Turbo: PChar-like pointer arithmetic -- `p + n`, `p - n`, `p1 - p2`.
+    // Sema::checkBinary (SemaExpr.cpp) is the only thing that accepts one of
+    // these operator/operand shapes at all, and only under -std=turbo for a
+    // pointer whose pointee is Char (isCharPointerType, Type.h), so reaching
+    // here already means Sema approved it -- an ISO/EP `^char` never gets
+    // this far with a Plus/Minus BinaryExpr, and no further gating belongs
+    // here.  Intercepted before the generic scalar path below the same way
+    // the set-binary block just above intercepts before the generic path's
+    // integer instructions would treat two bitmasks as numbers -- the
+    // generic path's CreateAdd/CreateSub would otherwise run on a raw
+    // pointer SSA value as though it were an integer.
+    if (e.Op == TokenKind::Plus || e.Op == TokenKind::Minus) {
+        auto isCharPtr = [](const ExprNode& X) {
+            const Type* T = X.ResolvedType.get();
+            return T && T->Kind == TypeKind::Pointer && T->PointeeType
+                && T->PointeeType->Kind == TypeKind::Char;
+        };
+        const bool LPtr = isCharPtr(*e.Left);
+        const bool RPtr = isCharPtr(*e.Right);
+        if (LPtr || RPtr) {
+            if (LPtr && RPtr) {
+                // p1 - p2: byte difference divided by the pointee's byte
+                // size.  Char is always 1 today, but this is written off
+                // Sema::byteSizeOf rather than hardcoded so the same shape
+                // still works if a future pointee besides Char ever reuses
+                // this path.
+                //
+                // Result width: FPC's own answer here is Longint (32-bit
+                // signed), which plang cannot name yet -- the Turbo sized-
+                // integer ladder (Byte/Word/ShortInt/LongInt) is separate,
+                // concurrent work that has not landed.  This yields plang's
+                // `integer` instead (Turbo's 16-bit Integer -- the exact TyInt
+                // Sema::checkBinary's own p1-p2 case returns, see its
+                // comment), a documented interim choice to widen once the
+                // ladder lands rather than mint an unnamed wider type here
+                // that Sema's declared result type would not match.
+                auto* lp = EmitExpr(*e.Left);
+                auto* rp = EmitExpr(*e.Right);
+                auto* li = B.CreatePtrToInt(lp, I64Ty, "pdiff.l");
+                auto* ri = B.CreatePtrToInt(rp, I64Ty, "pdiff.r");
+                auto* byteDiff = B.CreateSub(li, ri, "pdiff.bytes");
+                const uint64_t ElemSz =
+                    Sema::byteSizeOf(*e.Left->ResolvedType->PointeeType).value_or(1);
+                llvm::Value* diff = byteDiff;
+                if (ElemSz > 1)
+                    diff = B.CreateSDiv(byteDiff,
+                        llvm::ConstantInt::get(I64Ty, ElemSz), "pdiff.elems");
+                llvm::Type* resTy = e.ResolvedType
+                    ? Types.llvmTypeOfSemaType(*e.ResolvedType) : I64Ty;
+                return B.CreateTrunc(diff, resTy, "pdiff");
+            }
+            // p + n or p - n: a GEP scaled by the pointee LLVM type's own
+            // ABI size -- the identical implicit scaling every other typed
+            // GEP in this codebase already relies on (see e.g.
+            // CGIndexAccess::emitIndexGEP's array-element GEPs), so no
+            // explicit byte-size multiply is needed for this direction.
+            // Sema has already refused every shape but pointer-then-integer
+            // (LPtr with an integral right operand for Plus; either LPtr
+            // with an integral right operand or LPtr&&RPtr, just handled
+            // above, for Minus) -- see checkBinary's own comment for why
+            // `n + p`/`n - p` are refused even though fpc allows ordinary
+            // `+` to commute.
+            const ExprNode& PtrOperand = LPtr ? *e.Left  : *e.Right;
+            const ExprNode& IdxOperand = LPtr ? *e.Right : *e.Left;
+            auto* base = EmitExpr(PtrOperand);
+            auto* idx  = ToI64(EmitExpr(IdxOperand));
+            if (e.Op == TokenKind::Minus)
+                idx = B.CreateNeg(idx, "pchar.sub.idx");
+            llvm::Type* elemLLVMTy =
+                Types.llvmTypeOfSemaType(*PtrOperand.ResolvedType->PointeeType);
+            return B.CreateGEP(elemLLVMTy, base, {idx}, "pchar.add");
+        }
     }
 
     // ISO §6.7.2.5: membership takes an ordinal on the left, so exprIsSet is

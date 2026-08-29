@@ -8,6 +8,24 @@ version numbers follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 
 ## [Unreleased]
 
+### Added
+
+- **`-std=turbo`: `PChar`/`PAnsiChar`, pointer arithmetic, and `p[i]`
+  indexing.** `p + n`, `p - n`, `p1 - p2` (an element count), `p[i]` as
+  both a read and a write, and a zero-based `array[0..n] of Char`
+  decaying to its address with no `@` needed (`p := buf`). Gated
+  structurally on "pointer whose pointee is Char" rather than nominally on
+  the name `PChar`, matching real `fpc -Mtp` field practice verified
+  directly against `fpc` 3.2.2: a user's own `type P = ^Char` gets
+  exactly the same arithmetic and indexing PChar does, on a real Turbo
+  compiler, not only the predefined name. ISO 7185 and Extended Pascal
+  `^char` are unaffected (`=`/`<>` only, ISO §6.7.2.5); the gate is
+  `Opts.turbo()` everywhere this applies, checked independently at each
+  of the three call sites (`Sema::checkBinary`, `Sema::checkIndex`,
+  `Sema::isAssignCompatible`). ISO §6.4.3.2's canonical `array[1..n] of
+  char` string-type is untouched and does not decay: only a 0-based array
+  does, matching fpc's own refusal of the 1-based case.
+
 ### Fixed
 
 - Turbo constant-expression folding now bounds-checks against the expression's

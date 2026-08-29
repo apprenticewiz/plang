@@ -203,6 +203,30 @@ void Sema::registerBuiltins() {
         (void)Symtab.define(std::move(Pi));
     }
 
+    // -std=turbo only: PChar/PAnsiChar -- both names the one dedicated
+    // TypeContext::getPChar() singleton (NOT the getPointer(TyChar) any
+    // literal `^Char` in the program resolves to; see that accessor's own
+    // comment for why the two must not be the same object).  PAnsiChar is
+    // registered as a plain synonym, the same one-Type-two-names shape FPC
+    // itself uses when Char is the single-byte AnsiChar (i.e. always, since
+    // plang has no WideChar): declaring `p: PChar` and `q: PAnsiChar` gives
+    // two variables of the identical type, not two merely-compatible ones.
+    if (Opts.turbo()) {
+        Symbol PCharSym;
+        PCharSym.Kind = SymbolKind::TypeAlias;
+        PCharSym.Name = "PChar";
+        PCharSym.Ty   = TyPChar;
+        PCharSym.IsRequiredIdentifier = true;
+        (void)Symtab.define(std::move(PCharSym));
+
+        Symbol PAnsiCharSym;
+        PAnsiCharSym.Kind = SymbolKind::TypeAlias;
+        PAnsiCharSym.Name = "PAnsiChar";
+        PAnsiCharSym.Ty   = TyPChar;
+        PAnsiCharSym.IsRequiredIdentifier = true;
+        (void)Symtab.define(std::move(PAnsiCharSym));
+    }
+
     // -std=turbo only: ExitCode -- the value emitMain (CodeGenProcs.cpp)
     // returns to the OS when the program block ends normally, rather than
     // through Halt(n) (which takes its own status and never touches this).

@@ -162,6 +162,9 @@ private:
     const std::shared_ptr<Type>& TyStr     = Ctx_.getString();
     const std::shared_ptr<Type>& TyNil     = Ctx_.getNil();
     const std::shared_ptr<Type>& TyErr     = Ctx_.getError();
+    // -std=turbo only: PChar/PAnsiChar name this same singleton; see
+    // TypeContext::getPChar's comment for why it is not getPointer(TyChar).
+    const std::shared_ptr<Type>& TyPChar   = Ctx_.getPChar();
 
     // EP §6.4.3.4: BindingType — populated by registerBuiltins() in EP mode.
     std::shared_ptr<Type> TyBindingType;

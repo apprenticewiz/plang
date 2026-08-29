@@ -63,6 +63,31 @@ public:
         TyStr_->Width = PointerWidthBits_;
         TyNil_  = Type::makeNil();
         TyNil_->Width = PointerWidthBits_;
+        // Turbo `PChar`/`PAnsiChar`: a DEDICATED singleton, deliberately NOT
+        // minted through getPointer(TyChar_) below.  getPointer interns by
+        // pointee identity, so a getPointer(TyChar_)-built PChar would be the
+        // exact same Type* as whatever `^Char` written anywhere in the
+        // program resolves to (SemaType.cpp's PointerTypeNode case calls
+        // getPointer(Base) for every `^T` a program writes, PChar included if
+        // it were minted that way) -- a distinct object here is what a
+        // pointer-identity Sema gate would need to tell "the type spelled
+        // PChar" apart from "some Pointer whose pointee happens to be Char".
+        //
+        // In the end Sema's actual PChar-arithmetic gate (SemaExpr.cpp) does
+        // NOT key off this object's identity -- see its own comment for why:
+        // real `fpc -Mtp` was checked empirically and grants +/-/indexing to
+        // ANY pointer-to-Char, including a user's own `type P = ^Char`, not
+        // only to the name `PChar`.  This singleton exists anyway, both
+        // because a dedicated Type* is what plang's diagnostics show ("PChar"
+        // rather than "^char") for a variable declared with this exact
+        // spelling, and because it keeps the identity route available should
+        // a future dialect (Delphi's `{$POINTERMATH ON}` semantics differ
+        // from Turbo's) need to draw the nominal distinction after all.
+        TyPChar_ = std::make_shared<Type>();
+        TyPChar_->Kind        = TypeKind::Pointer;
+        TyPChar_->Name        = "PChar";
+        TyPChar_->PointeeType = TyChar_;
+        TyPChar_->Width       = PointerWidthBits_;
         TyErr_  = Type::makeError();
         // ISO §6.4.3.5: text is one predefined type, not a fresh type per
         // mention, so `var f: text` and `procedure p(var g: text)` agree.
@@ -117,6 +142,9 @@ public:
     const std::shared_ptr<Type>& getNil()     const { return TyNil_;  }
     const std::shared_ptr<Type>& getError()   const { return TyErr_;  }
     const std::shared_ptr<Type>& getText()    const { return TyText_; }
+    /// Turbo `PChar`/`PAnsiChar`.  See the constructor's comment for why this
+    /// is a dedicated object rather than getPointer(getChar()).
+    const std::shared_ptr<Type>& getPChar()   const { return TyPChar_; }
 
     /// The canonical integer type of a given width and signedness.
     ///
@@ -357,7 +385,7 @@ private:
 
     // Scalar singletons
     std::shared_ptr<Type> TyInt_, TyReal_, TyCplx_, TyBool_, TyChar_,
-                          TyStr_, TyNil_, TyErr_, TyText_;
+                          TyStr_, TyNil_, TyErr_, TyText_, TyPChar_;
 
     /// What an unqualified `integer` is, and what an ordinal that is not
     /// narrowed by its host is stored as.
