@@ -1,6 +1,7 @@
 #include "plang/Sema/Sema.h"
 
 #include "plang/AST/Ast.h"
+#include "plang/Basic/Arith.h"
 #include "plang/Basic/Diagnostic.h"
 #include "plang/Basic/Diagnostic.h"
 #include "plang/Basic/RequiredRecordLayouts.h"
@@ -1019,12 +1020,33 @@ void Sema::checkBlock(const BlockNode& Block,
         auto ValType = checkExpr(*Cd.Value);
         Symbol S;
         S.Kind = SymbolKind::Const;
-        if (const auto V = constBound(*Cd.Value)) {
+        // Whether constBound below declined ONLY because Cd.Value's own
+        // resolved type is a genuinely narrow Turbo Integer that rejected a
+        // result the natural 64-bit width would have accepted -- see
+        // NarrowFoldOverflow_'s comment (Sema.h).  Every OTHER caller of
+        // constBound (array/subrange bounds, case labels, ...) already has
+        // its own "not a constant expression" diagnostic for a plain
+        // decline; a `const` declaration has none, so
+        // `const Big = 30000 + 30000;` under -std=turbo used to silently
+        // define a constant with no known ordinal value at all, the same
+        // way a genuinely non-constant initializer still does (and must
+        // keep doing, for ISO 7185/EP as much as for Turbo -- that decline
+        // stays silent here exactly as it always has).
+        const bool SavedNarrowOverflow = NarrowFoldOverflow_;
+        NarrowFoldOverflow_   = false;
+        const auto V          = constBound(*Cd.Value);
+        const bool Overflowed = NarrowFoldOverflow_;
+        NarrowFoldOverflow_   = SavedNarrowOverflow;
+        if (V) {
             S.ConstOrdinal    = *V;
             S.HasConstOrdinal = true;
         } else if (const auto R = constRealBound(*Cd.Value)) {
             S.ConstReal    = *R;
             S.HasConstReal = true;
+        } else if (Overflowed) {
+            const auto [Lo, Hi] = narrowIntBounds(ValType->Width, ValType->IsSigned);
+            error(Cd.Value->Loc, diag::err_const_expr_out_of_range,
+                  {ValType->Name, std::to_string(Lo), std::to_string(Hi)});
         }
         S.Name    = Cd.Name;
         S.Ty    = ValType;

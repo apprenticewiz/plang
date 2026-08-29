@@ -592,6 +592,19 @@ DIAG(err_protected_import_assigned, Error,
 // where it was made.
 DIAG(err_module_interface_without_implementation, Error,
      "module '%0' has an interface part but no matching implementation part")
+// Turbo's Integer/Byte/ShortInt/Word/LongInt are genuinely narrower than the
+// one 64-bit Integer ISO 7185/EP always have (Type::Width, see its comment),
+// so an arithmetic constant-expression that is a perfectly ordinary fold
+// under those dialects can still overflow the narrower type it targets under
+// Turbo -- `30000 + 30000` is nowhere near int64's range but is 27233 past
+// Integer's.  Every OTHER place a folded constant is required already has
+// its own "not a constant expression" diagnostic for a decline (e.g.
+// err_array_lower_bound_not_const); this is the one for a plain `const`
+// declaration, which has none, so it used to silently define a constant
+// with no known ordinal value -- and every place that read it back, if
+// nothing else needed the value to be constant, saw no error at all.
+DIAG(err_const_expr_out_of_range, Error,
+     "constant expression is out of range for type '%0' (must be between %1 and %2)")
 
 // --------------------------------------------------------------------------
 // Warnings

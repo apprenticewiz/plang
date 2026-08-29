@@ -1312,9 +1312,14 @@ std::optional<int64_t> Sema::constBound(const ExprNode& E) const {
     // earlier did.
     const bool SavedUsed = SchemaBindingUsed_;
     SchemaBindingUsed_   = false;
+    // Whether THIS fold declined only because of Turbo-narrow width
+    // narrowing; see NarrowFoldOverflow_'s comment (Sema.h).
+    const bool SavedNarrowOverflow = NarrowFoldOverflow_;
+    NarrowFoldOverflow_  = false;
     const auto V         = constBoundImpl(E);
     const bool UsedProbe = SchemaBindingUsed_;
     SchemaBindingUsed_   = SavedUsed || SchemaBindingUsed_;
+    NarrowFoldOverflow_  = SavedNarrowOverflow || NarrowFoldOverflow_;
     // Recorded for codegen, except where the value came from a probe binding:
     // a bound over a discriminant is a different constant in every instance,
     // and the one folded here belongs to none of them.
@@ -1323,6 +1328,36 @@ std::optional<int64_t> Sema::constBound(const ExprNode& E) const {
 }
 
 std::optional<int64_t> Sema::constBoundImpl(const ExprNode& E) const {
+    // The Width/Signed this fold's arithmetic must respect -- E's own
+    // Sema-resolved type (checkExpr always runs before constBound reaches
+    // it) when that type is a genuine Integer, the natural 64-bit-signed
+    // default otherwise.  ISO 7185/EP's one Integer type is always Width==64
+    // (TypeContext, see Type::Width's comment), so this is a no-op default
+    // there whatever E is; only Turbo's narrower Integer kinds (Byte,
+    // ShortInt, Word, Integer, LongInt) ever produce Width < 64 here.  Not
+    // "else 64/true" for every non-Integer kind by accident: Char's ordinal
+    // range is 0..255 (unsigned, 8 wide) but Type::IsSigned defaults true on
+    // it, so running Char through narrowIntBounds the way an actual narrow
+    // Integer is would reject succ('z') and the like for the wrong reason --
+    // ordinalRange (Type.h) already special-cases Char on its own terms, and
+    // this fold has to leave it alone the same way it always has.
+    unsigned Width  = 64;
+    bool     Signed = true;
+    if (E.ResolvedType && E.ResolvedType->Kind == TypeKind::Integer) {
+        Width  = E.ResolvedType->Width;
+        Signed = E.ResolvedType->IsSigned;
+    }
+    // Applies the narrow (Width/Signed) result of a checked op, and records
+    // (NarrowFoldOverflow_, see its comment in Sema.h) whether narrowing --
+    // and only narrowing -- is why it declined: Wide is the same op at the
+    // natural 64-bit width, computed by every call site below regardless, so
+    // "Narrow is nullopt but Wide is not" isolates exactly the new Turbo
+    // case from a genuine int64 overflow, which stays a silent decline
+    // exactly as it always has (issue #202).
+    auto fold = [&](std::optional<int64_t> Narrow, std::optional<int64_t> Wide) {
+        if (!Narrow && Width < 64 && Wide) NarrowFoldOverflow_ = true;
+        return Narrow;
+    };
     if (auto* N = llvm::dyn_cast<IntLitExpr>(&E))  return N->Value;
     if (auto* N = llvm::dyn_cast<BoolLitExpr>(&E)) return N->Value ? 1 : 0;
     // ISO §6.1.7: a one-character string is a char-type constant, so it is an
@@ -1353,7 +1388,8 @@ std::optional<int64_t> Sema::constBoundImpl(const ExprNode& E) const {
         // maxint); checkedNeg (Arith.h) declines the fold instead of
         // computing the UB, wrapped result.
         if (N->Op == TokenKind::Minus)
-            if (auto Inner = constBound(*N->Operand)) return checkedNeg(*Inner);
+            if (auto Inner = constBound(*N->Operand))
+                return fold(checkedNeg(*Inner, Width, Signed), checkedNeg(*Inner));
         if (N->Op == TokenKind::Plus)
             return constBound(*N->Operand);
     }
@@ -1370,9 +1406,9 @@ std::optional<int64_t> Sema::constBoundImpl(const ExprNode& E) const {
             // though it were the constant the source actually named (and
             // from there into whatever array bound, case label or
             // initializer read this constant).
-            case TokenKind::Plus:  return checkedAdd(*L, *R);
-            case TokenKind::Minus: return checkedSub(*L, *R);
-            case TokenKind::Times: return checkedMul(*L, *R);
+            case TokenKind::Plus:  return fold(checkedAdd(*L, *R, Width, Signed), checkedAdd(*L, *R));
+            case TokenKind::Minus: return fold(checkedSub(*L, *R, Width, Signed), checkedSub(*L, *R));
+            case TokenKind::Times: return fold(checkedMul(*L, *R, Width, Signed), checkedMul(*L, *R));
             // Issue #201: divOverflows (Arith.h) is minint div/mod -1, the
             // one pair with a nonzero divisor and still no representable
             // result -- signed-overflow UB that SIGFPE-traps this hardware's
@@ -1390,7 +1426,9 @@ std::optional<int64_t> Sema::constBoundImpl(const ExprNode& E) const {
             // a bound.  A negative exponent is not, and is left to the check on
             // the expression itself to report.  isoPow itself now declines on
             // overflow (Arith.h), the same as checkedMul just above.
-            case TokenKind::Pow:   if (*R >= 0) return isoPow(*L, *R); break;
+            case TokenKind::Pow:
+                if (*R >= 0) return fold(isoPow(*L, *R, Width, Signed), isoPow(*L, *R));
+                break;
             default: break;
             }
         }
@@ -1411,10 +1449,11 @@ std::optional<int64_t> Sema::constBoundImpl(const ExprNode& E) const {
         // sqr is `*V * *V`, checked the same way Times is above.
         case BuiltinID::Abs:
             if (auto V = constBound(*N->Args[0]))
-                return *V < 0 ? checkedNeg(*V) : V;
+                return *V < 0 ? fold(checkedNeg(*V, Width, Signed), checkedNeg(*V)) : V;
             break;
         case BuiltinID::Sqr:
-            if (auto V = constBound(*N->Args[0])) return checkedMul(*V, *V);
+            if (auto V = constBound(*N->Args[0]))
+                return fold(checkedMul(*V, *V, Width, Signed), checkedMul(*V, *V));
             break;
         // ord and chr both represent their value as its plain ordinal here,
         // the same as the single-character StringLitExpr case above.
@@ -1436,7 +1475,8 @@ std::optional<int64_t> Sema::constBoundImpl(const ExprNode& E) const {
             // another name.
             if (V && K)
                 return N->ResolvedBuiltin == BuiltinID::Succ
-                     ? checkedAdd(*V, *K) : checkedSub(*V, *K);
+                     ? fold(checkedAdd(*V, *K, Width, Signed), checkedAdd(*V, *K))
+                     : fold(checkedSub(*V, *K, Width, Signed), checkedSub(*V, *K));
             break;
         }
         default: break;

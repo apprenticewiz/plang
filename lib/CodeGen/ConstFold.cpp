@@ -4,9 +4,26 @@
 #include "plang/Basic/Arith.h"
 #include "plang/Basic/StringUtil.h"
 #include "plang/Basic/Token.h"
+#include "plang/Sema/Type.h"
 #include "llvm/Support/Casting.h"
 
 using namespace plang;
+
+namespace {
+// The Width/IsSigned an int64 arithmetic fold here must respect -- e's own
+// Sema-resolved type when it is a genuine Integer, the natural 64-bit-signed
+// default otherwise.  Sema::constBoundImpl (SemaType.cpp) computes this
+// identically and for the identical reason; see its comment for why only
+// TypeKind::Integer answers here (Char's Type::IsSigned default would make
+// narrowIntBounds check the wrong range for it, for one) and why ISO 7185/EP
+// -- whose one Integer type is always Width==64 -- never take the narrow
+// branch below whatever e is.
+std::pair<unsigned, bool> foldWidth(const ExprNode& e) {
+    if (e.ResolvedType && e.ResolvedType->Kind == TypeKind::Integer)
+        return {e.ResolvedType->Width, e.ResolvedType->IsSigned};
+    return {64, true};
+}
+} // namespace
 
 // The value of a constant expression, or nothing when it is not one this can
 // work out.  'known' maps lowercase names to LLVM Values (may be null).
@@ -61,7 +78,10 @@ std::optional<int64_t> tryEvalConstInt(
         // maxint); checkedNeg (Arith.h) declines rather than compute the
         // wrapped result, the same as Sema's own fold (SemaType.cpp).
         if (n->Op == TokenKind::Minus)
-            if (auto v = tryEvalConstInt(*n->Operand, known)) return checkedNeg(*v);
+            if (auto v = tryEvalConstInt(*n->Operand, known)) {
+                const auto [Width, Signed] = foldWidth(e);
+                return checkedNeg(*v, Width, Signed);
+            }
         if (n->Op == TokenKind::Plus)
             return tryEvalConstInt(*n->Operand, known);
         return std::nullopt;
@@ -70,12 +90,15 @@ std::optional<int64_t> tryEvalConstInt(
         const auto l = tryEvalConstInt(*n->Left,  known);
         const auto r = tryEvalConstInt(*n->Right, known);
         if (!l || !r) return std::nullopt;
+        const auto [Width, Signed] = foldWidth(e);
         switch (n->Op) {
         // Issue #202: checked the same way Sema's own fold is -- nullopt on
         // overflow rather than a wrapped value handed back as the constant.
-        case TokenKind::Plus:  return checkedAdd(*l, *r);
-        case TokenKind::Minus: return checkedSub(*l, *r);
-        case TokenKind::Times: return checkedMul(*l, *r);
+        // Width/Signed narrow this the same way Sema's fold does under
+        // Turbo (SemaType.cpp); ISO 7185/EP's Width==64 makes it a no-op.
+        case TokenKind::Plus:  return checkedAdd(*l, *r, Width, Signed);
+        case TokenKind::Minus: return checkedSub(*l, *r, Width, Signed);
+        case TokenKind::Times: return checkedMul(*l, *r, Width, Signed);
         // Issue #201: divOverflows is minint div/mod -1, the one nonzero
         // divisor with no representable result -- it SIGFPE-traps this
         // hardware's `idiv` the same way a zero divisor already does, so it
@@ -129,8 +152,10 @@ llvm::Constant* evalConst(
         if (auto* vi = dyn_cast<llvm::ConstantInt>(vc)) {
             // Issue #202: -minint overflows; decline (null, the same answer
             // as every other expression this cannot fold) instead of
-            // computing the wrapped result.
-            auto neg = checkedNeg(vi->getSExtValue());
+            // computing the wrapped result.  Width/Signed narrow this under
+            // Turbo the same way Sema's own fold does; see foldWidth above.
+            const auto [Width, Signed] = foldWidth(e);
+            auto neg = checkedNeg(vi->getSExtValue(), Width, Signed);
             return neg ? llvm::ConstantInt::get(
                              i64Ty, static_cast<uint64_t>(*neg), true)
                        : nullptr;
@@ -158,10 +183,11 @@ llvm::Constant* evalConst(
             auto asConst = [&](std::optional<int64_t> v) -> llvm::Constant* {
                 return v ? llvm::ConstantInt::get(i64Ty, *v, true) : nullptr;
             };
+            const auto [Width, Signed] = foldWidth(e);
             switch (n->Op) {
-            case TokenKind::Plus:  return asConst(checkedAdd(l, r));
-            case TokenKind::Minus: return asConst(checkedSub(l, r));
-            case TokenKind::Times: return asConst(checkedMul(l, r));
+            case TokenKind::Plus:  return asConst(checkedAdd(l, r, Width, Signed));
+            case TokenKind::Minus: return asConst(checkedSub(l, r, Width, Signed));
+            case TokenKind::Times: return asConst(checkedMul(l, r, Width, Signed));
             case TokenKind::Div:
                 return (r && !divOverflows(l, r))
                      ? llvm::ConstantInt::get(i64Ty, l / r, true) : nullptr;

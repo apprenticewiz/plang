@@ -360,6 +360,20 @@ private:
     // body's extent depends on them.
     mutable bool SchemaBindingUsed_{false};
 
+    // Set by constBoundImpl whenever an application of checkedAdd/Sub/Mul/
+    // Neg/isoPow declined SPECIFICALLY because the expression's own
+    // (possibly Turbo-narrow) resolved width rejected a result that the
+    // natural 64-bit width -- what ISO 7185/EP's one Integer type always is
+    // -- would have accepted.  Saved/reset/restored around a top-level
+    // constBound call the exact same way SchemaBindingUsed_ is: a caller
+    // with no bound-specific "not a constant expression" diagnostic of its
+    // own (defineConst, Sema.cpp) reads this to tell that apart from a
+    // genuinely non-constant expression, which must stay a silent decline
+    // exactly as it always has (issue #202) -- only the width-narrowing
+    // decline is new, and only Turbo's narrower Integer kinds can trigger it
+    // (ISO 7185/EP's Integer is always 64-bit, so this is never set there).
+    mutable bool NarrowFoldOverflow_{false};
+
     // One undiscriminated Type per schema definition; see
     // resolveUndiscriminatedSchema for the key.
     std::unordered_map<std::string, std::shared_ptr<Type>> UndiscSchemaTypes_;
