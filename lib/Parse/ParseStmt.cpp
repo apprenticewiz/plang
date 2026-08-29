@@ -235,8 +235,14 @@ std::unique_ptr<StmtNode> Parser::parseStatement() {
                         std::string Lo = Id->Name;
                         for (auto& C : Lo) C = static_cast<char>(std::tolower(
                                                   static_cast<unsigned char>(C)));
+                        // TP-only: Str(x [:width[:decimals]], var s) formats
+                        // its FIRST argument the same way write/writestr's
+                        // value arguments do; the second (destination) never
+                        // has a colon suffix, but parseWriteArg is safe to
+                        // apply to it too since the ':' is only consumed
+                        // when actually present (checked, not assumed).
                         bool IsWrite = (Lo == "write" || Lo == "writeln"
-                                        || Lo == "writestr");
+                                        || Lo == "writestr" || Lo == "str");
                         Node->Args.push_back(IsWrite ? parseWriteArg() : parseExpression());
                         while (match(TokenKind::Comma)) {
                             Node->Args.push_back(IsWrite ? parseWriteArg() : parseExpression());

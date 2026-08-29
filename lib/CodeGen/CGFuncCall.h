@@ -58,7 +58,8 @@ public:
                std::function<bool(const plang::ExprNode&)> ExprIsCharStr,
                std::function<int64_t(const plang::ExprNode&)> ExprCharStrLen,
                std::function<int64_t(const plang::ExprNode&)> ExprStrCapStatic,
-               std::function<bool(const plang::ExprNode&)> ExprIsShortStr)
+               std::function<bool(const plang::ExprNode&)> ExprIsShortStr,
+               std::function<int64_t(const plang::ExprNode&)> ExprShortStrCap)
         : Ctx(Ctx), Mod(Mod), B(B), RtFns(RtFns), Sets(Sets), Complex(Complex),
           FileVars(FileVars), Types(Types), Schema(Schema), Strings(Strings),
           StrCall(StrCall), Linkage(Linkage), SymTab(SymTab), ClosureAbi(ClosureAbi),
@@ -74,7 +75,7 @@ public:
           ProcParamArg(std::move(ProcParamArg)), ParamIsByRef(std::move(ParamIsByRef)),
           ExprIsVarStr(std::move(ExprIsVarStr)), ExprIsCharStr(std::move(ExprIsCharStr)),
           ExprCharStrLen(std::move(ExprCharStrLen)), ExprStrCapStatic(std::move(ExprStrCapStatic)),
-          ExprIsShortStr(std::move(ExprIsShortStr)) {}
+          ExprIsShortStr(std::move(ExprIsShortStr)), ExprShortStrCap(std::move(ExprShortStrCap)) {}
 
     llvm::Value* emitCallExpr(const plang::CallExpr& e);
     llvm::Value* emitUserFuncCall(const plang::CallExpr& e);
@@ -146,6 +147,13 @@ private:
     /// argument at all, so they need no ShortString capacity query to match
     /// ExprStrCapStatic's VarString one.
     std::function<bool(const plang::ExprNode&)> ExprIsShortStr;
+    /// Turbo string[N]'s own capacity query -- the ShortString sibling of
+    /// ExprStrCapStatic, needed by the Turbo System-unit string routines
+    /// (Copy/Pos/Concat/StringOfChar/UpCase, CGFuncCall.cpp) to size a
+    /// result temporary or shape a ShortString operand the same way
+    /// CGBinaryOps' own local sstrOperand lambda already does for `+`/
+    /// comparison.  See exprShortStrCap's own doc comment (CodeGenImpl.h).
+    std::function<int64_t(const plang::ExprNode&)> ExprShortStrCap;
 
     llvm::Constant* i64c(int64_t v) const {
         return llvm::ConstantInt::get(I64Ty, v, true);

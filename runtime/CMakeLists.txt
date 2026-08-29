@@ -18,6 +18,7 @@ set(PLANG_RUNTIME_SOURCES
     plang_file.cpp
     plang_str.cpp
     plang_sstr.cpp
+    plang_val.cpp
     plang_time.cpp
 )
 add_library(plang_runtime        STATIC ${PLANG_RUNTIME_SOURCES})

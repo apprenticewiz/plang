@@ -401,6 +401,17 @@ llvm::Value* CGFuncCall::emitBuiltinCall(const std::string& Name,
         return {CreateEntryAlloca(Types.strStructType(c), name), i64c(c)};
     };
     if (lo == "length") {
+        // Turbo string[N]: Length(s) reads s's own one-byte length prefix
+        // back as an Integer -- checked ahead of getStrArgPtr, which knows
+        // nothing about ShortString's layout and would otherwise fall
+        // through to the raw-strlen fallback below, reading a ShortString's
+        // struct address as if it were a NUL-terminated C string (it is
+        // neither NUL-terminated nor does its length end where a NUL
+        // would happen to appear).
+        if (ExprIsShortStr(*Args[0])) {
+            auto* addr = StrCall.emitStrAddr(*Args[0]);
+            return B.CreateZExt(Strings.sstrLoadLen(addr), I64Ty, "length");
+        }
         auto [ptr, cap] = getStrArgPtr(0);
         if (ptr) {
             auto* fn = Strings.getStrFn("plang_str_length", I64Ty, {PtrTy, I64Ty});
@@ -464,6 +475,116 @@ llvm::Value* CGFuncCall::emitBuiltinCall(const std::string& Name,
                 return EnsureI1(raw);
             }
         }
+    }
+
+    // ---- Turbo System-unit ShortString routines (Copy/Pos/Concat/
+    // StringOfChar/UpCase) -- gated TP in Builtins.def, so reaching any of
+    // these arms already means -std=turbo.  Genuinely separate runtime
+    // entry points from the EP string-function block just above (plang_sstr_*
+    // in plang_sstr.cpp, not plang_str_*): different struct layout (one-byte
+    // length prefix, not eight) and different semantics even where the shape
+    // looks similar -- Pos('', s) is 0, EP's index('', s) is 1; Copy CLAMPS
+    // an out-of-range request, EP's substr RAISES.
+    //
+    // sstrArgPtr mirrors CGBinaryOps.cpp's own local sstrOperand/toSstrPtr
+    // lambdas (its own doc comment explains why each file keeps its own
+    // copy rather than sharing one): a ShortString expression's address and
+    // static capacity directly, or a fresh capacity-sized temporary for a
+    // Char/literal operand -- every argument of every routine below is
+    // "turbo-string-like" in exactly this sense (Sema's own isTurboStringLike,
+    // SemaExpr.cpp, already refused anything else).
+    auto sstrArgPtr = [&](const ExprNode& x) -> std::pair<llvm::Value*, llvm::Value*> {
+        if (ExprIsShortStr(x)) return {StrCall.emitStrAddr(x), i64c(ExprShortStrCap(x))};
+        // A literal's OWN length is the byte count to copy -- NOT the
+        // capacity floor below, which exists only so a 0-length literal ('',
+        // legal under Turbo too) still gets a real (1-byte-minimum) alloca
+        // to point at.  See CGBinaryOps.cpp's sstrOperand for the identical
+        // fix and the bug this avoids repeating (an empty-literal argument
+        // reading one stray byte off its own zero-length interned data).
+        int64_t litLen = 0;
+        bool isLit = false;
+        if (auto* sl = llvm::dyn_cast<StringLitExpr>(&x)) {
+            isLit  = true;
+            litLen = static_cast<int64_t>(sl->Value.size());
+        }
+        const int64_t cap = isLit ? std::max<int64_t>(1, litLen) : 1;
+        auto* val = EmitExpr(x);
+        auto* tmp = CreateEntryAlloca(Types.sstrStructType(cap), "sstr.arg");
+        if (val && val->getType()->isIntegerTy(8))
+            Strings.emitSstrFromChar(tmp, i64c(cap), val);
+        else if (isLit)
+            Strings.emitSstrFromBytes(tmp, i64c(cap), val, i64c(litLen));
+        else if (val)
+            Strings.emitSstrFromBytes(tmp, i64c(cap), val, i64c(cap));
+        return {tmp, i64c(cap)};
+    };
+    // Copy(s, index, count) -- always a capacity-255 result (Builtins.def's
+    // own comment on why, regardless of s's own declared capacity).
+    if (lo == "copy" && Args.size() == 3) {
+        auto [sp, sc] = sstrArgPtr(*Args[0]);
+        auto* idx  = ToI64(EmitExpr(*Args[1]));
+        auto* cnt  = ToI64(EmitExpr(*Args[2]));
+        auto* resPtr = CreateEntryAlloca(Types.sstrStructType(PlangMaxStringCapacity), "copy.res");
+        auto* fn = Strings.getStrFn("plang_sstr_copy", llvm::Type::getVoidTy(Ctx),
+            {PtrTy, I64Ty, PtrTy, I64Ty, I64Ty, I64Ty});
+        B.CreateCall(fn, {resPtr, i64c(PlangMaxStringCapacity), sp, sc, idx, cnt});
+        return resPtr;
+    }
+    // Pos(substr, s) -- 1-based index of the first match, 0 if none or if
+    // substr is empty (Builtins.def's own comment: confirmed against
+    // `fpc -Mtp`, the OPPOSITE of EP's index('', s) = 1).
+    if (lo == "pos" && Args.size() == 2) {
+        auto [pp, pc] = sstrArgPtr(*Args[0]);
+        auto [sp, sc] = sstrArgPtr(*Args[1]);
+        auto* fn = Strings.getStrFn("plang_sstr_pos", I64Ty, {PtrTy, I64Ty, PtrTy, I64Ty});
+        return B.CreateCall(fn, {pp, pc, sp, sc}, "pos");
+    }
+    // Concat(s1, ..., sn) -- always a capacity-255 result, built by chaining
+    // the SAME plang_sstr_concat the `+` operator's own ShortString arm
+    // already calls (CGBinaryOps.cpp), starting from an empty accumulator --
+    // no new runtime entry point needed.  A fresh temporary per step rather
+    // than a ping-pong pair: Concat's argument count is always small in
+    // practice, and this keeps the loop free of any alias/ordering hazard
+    // with plang_sstr_concat's own dst/src aliasing assumptions (see its own
+    // header comment in plang_sstr.cpp: dst is never also a or b there).
+    if (lo == "concat" && !Args.empty()) {
+        auto* concatFn = Strings.getStrFn("plang_sstr_concat", llvm::Type::getVoidTy(Ctx),
+            {PtrTy, I64Ty, PtrTy, I64Ty, PtrTy, I64Ty});
+        auto* acc = CreateEntryAlloca(Types.sstrStructType(PlangMaxStringCapacity), "concat.acc0");
+        // Byte offset 0 of a ShortString struct IS its length prefix (see
+        // CGIndexAccess.cpp's identical s[0] aliasing and plang_sstr.cpp's
+        // own layout comment) -- storing a plain 0 there directly is an
+        // empty ShortString, with no runtime call needed to build one.
+        B.CreateStore(llvm::ConstantInt::get(I8Ty, 0), acc);
+        auto* accCap = i64c(PlangMaxStringCapacity);
+        for (const auto& Arg : Args) {
+            auto [ap, ac] = sstrArgPtr(*Arg);
+            auto* next = CreateEntryAlloca(Types.sstrStructType(PlangMaxStringCapacity), "concat.acc");
+            B.CreateCall(concatFn, {next, accCap, acc, accCap, ap, ac});
+            acc = next;
+        }
+        return acc;
+    }
+    // StringOfChar(ch, count) -- count copies of ch, capacity-255 result.
+    if (lo == "stringofchar" && Args.size() == 2) {
+        auto* ch    = EmitExpr(*Args[0]);
+        auto* count = ToI64(EmitExpr(*Args[1]));
+        auto* resPtr = CreateEntryAlloca(Types.sstrStructType(PlangMaxStringCapacity), "sof.res");
+        auto* fn = Strings.getStrFn("plang_sstr_of_char", llvm::Type::getVoidTy(Ctx),
+            {PtrTy, I64Ty, I8Ty, I64Ty});
+        B.CreateCall(fn, {resPtr, i64c(PlangMaxStringCapacity), ch, count});
+        return resPtr;
+    }
+    // UpCase(ch): Char -- real Turbo Pascal 7's single-character form
+    // (Builtins.def's own comment).  Simple enough to keep inline, the same
+    // way chr/ord/odd above are: only 'a'..'z' change.
+    if (lo == "upcase" && !Args.empty()) {
+        auto* ch  = EmitExpr(*Args[0]);
+        auto* ge  = B.CreateICmpUGE(ch, llvm::ConstantInt::get(I8Ty, 'a'), "upcase.ge");
+        auto* le  = B.CreateICmpULE(ch, llvm::ConstantInt::get(I8Ty, 'z'), "upcase.le");
+        auto* isLower = B.CreateAnd(ge, le, "upcase.islower");
+        auto* upped = B.CreateSub(ch, llvm::ConstantInt::get(I8Ty, 32), "upcase.upped");
+        return B.CreateSelect(isLower, upped, ch, "upcase");
     }
 
     // Every Func-kind row in Builtins.def has a named arm above; reaching

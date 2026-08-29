@@ -1522,6 +1522,131 @@ void Sema::checkCallStmt(const CallStmt& S) {
             return;
         }
 
+        // TP-only: the System-unit ShortString routines that mutate a var
+        // parameter -- Delete/Insert/SetLength/Str/Val.  isTurboStringLike
+        // mirrors checkCallExpr's identical local lambda (SemaExpr.cpp) for
+        // Copy/Pos/Concat/StringOfChar: ShortString, Char or a plain
+        // literal/String, deliberately NOT the ISO/EP char-array shape
+        // (isCharStringType) Turbo's own operators never widen for either.
+        auto isTurboStringLike = [](const std::shared_ptr<Type>& T) {
+            return isShortStringLike(T.get()) || T->Kind == TypeKind::Char
+                || T->Kind == TypeKind::String;
+        };
+        // Delete(var s: string; index, count: Integer) -- mutates s in
+        // place; Builtins.def's own comment on the out-of-range-index
+        // no-op rule (which, unlike Copy, is NOT a clamp).
+        if (Lo == "delete" && S.Args.size() == 3) {
+            auto ST = checkExpr(*S.Args[0]);
+            auto IT = checkExpr(*S.Args[1]);
+            auto CT = checkExpr(*S.Args[2]);
+            if (!ST->isError()) {
+                if (!isShortStringLike(ST.get()))
+                    error(S.Args[0]->Loc, diag::err_string_fn_arg_type, {Lo, ST->Name});
+                else if (!isLValue(*S.Args[0]))
+                    error(S.Args[0]->Loc, diag::err_var_param_needs_lvalue,
+                          {std::string_view("1"), std::string_view(Lo)});
+            }
+            if (!IT->isError() && !IT->isIntegral())
+                error(S.Args[1]->Loc, diag::err_numeric_argument, {Lo, IT->Name});
+            if (!CT->isError() && !CT->isIntegral())
+                error(S.Args[2]->Loc, diag::err_numeric_argument, {Lo, CT->Name});
+            return;
+        }
+        // Insert(source: string; var s: string; index: Integer) -- mutates s
+        // in place; source is a plain (value) argument, s is the var one.
+        if (Lo == "insert" && S.Args.size() == 3) {
+            auto SrcT = checkExpr(*S.Args[0]);
+            auto ST   = checkExpr(*S.Args[1]);
+            auto IT   = checkExpr(*S.Args[2]);
+            if (!SrcT->isError() && !isTurboStringLike(SrcT))
+                error(S.Args[0]->Loc, diag::err_string_fn_arg_type, {Lo, SrcT->Name});
+            if (!ST->isError()) {
+                if (!isShortStringLike(ST.get()))
+                    error(S.Args[1]->Loc, diag::err_string_fn_arg_type, {Lo, ST->Name});
+                else if (!isLValue(*S.Args[1]))
+                    error(S.Args[1]->Loc, diag::err_var_param_needs_lvalue,
+                          {std::string_view("2"), std::string_view(Lo)});
+            }
+            if (!IT->isError() && !IT->isIntegral())
+                error(S.Args[2]->Loc, diag::err_numeric_argument, {Lo, IT->Name});
+            return;
+        }
+        // SetLength(var s: string; newLength: Integer) -- sets s's own
+        // length byte, clamped to s's declared capacity.
+        if (Lo == "setlength" && S.Args.size() == 2) {
+            auto ST = checkExpr(*S.Args[0]);
+            auto LT = checkExpr(*S.Args[1]);
+            if (!ST->isError()) {
+                if (!isShortStringLike(ST.get()))
+                    error(S.Args[0]->Loc, diag::err_string_fn_arg_type, {Lo, ST->Name});
+                else if (!isLValue(*S.Args[0]))
+                    error(S.Args[0]->Loc, diag::err_var_param_needs_lvalue,
+                          {std::string_view("1"), std::string_view(Lo)});
+            }
+            if (!LT->isError() && !LT->isIntegral())
+                error(S.Args[1]->Loc, diag::err_numeric_argument, {Lo, LT->Name});
+            return;
+        }
+        // Str(x [: width [: decimals]]; var s: string) -- formats x the same
+        // way write(x [: width [: decimals]]) does (reusing that machinery,
+        // BuiltinIO.cpp), into ShortString destination s.  x's writable-type
+        // set mirrors the write/writeln check above exactly (ParseStmt.cpp's
+        // parser already attaches width/decimals to a WriteParam the same
+        // way, so the value to check is Wp->Value, not the WriteParam itself).
+        if (Lo == "str" && S.Args.size() == 2) {
+            const ExprNode* XArg = S.Args[0].get();
+            if (auto* Wp = llvm::dyn_cast<WriteParam>(XArg)) XArg = Wp->Value.get();
+            auto XT = checkExpr(*S.Args[0]);
+            auto ST = checkExpr(*S.Args[1]);
+            if (!XT->isError()) {
+                switch (XT->Kind) {
+                case TypeKind::Integer: case TypeKind::Real:
+                case TypeKind::Boolean: case TypeKind::Char:
+                case TypeKind::Subrange: case TypeKind::Enum:
+                    break;
+                default:
+                    error(XArg->Loc, diag::err_write_param_type, {XT->Name});
+                }
+            }
+            if (!ST->isError()) {
+                if (!isShortStringLike(ST.get()))
+                    error(S.Args[1]->Loc, diag::err_string_fn_arg_type, {Lo, ST->Name});
+                else if (!isLValue(*S.Args[1]))
+                    error(S.Args[1]->Loc, diag::err_var_param_needs_lvalue,
+                          {std::string_view("2"), std::string_view(Lo)});
+            }
+            return;
+        }
+        // Val(s: string; var v; var code: Integer) -- parses s into v (an
+        // Integer- or Real-kind variable, any width; NOT Char/Boolean/Enum --
+        // confirmed against `fpc -Mtp`: "Integer or real expression
+        // expected" for any other destination type) and sets code to 0 on
+        // success or the 1-based index of the first bad character on
+        // failure.  s is a plain value argument (may be a literal); v and
+        // code are both var parameters.
+        if (Lo == "val" && S.Args.size() == 3) {
+            auto ST = checkExpr(*S.Args[0]);
+            auto VT = checkExpr(*S.Args[1]);
+            auto CT = checkExpr(*S.Args[2]);
+            if (!ST->isError() && !isTurboStringLike(ST))
+                error(S.Args[0]->Loc, diag::err_string_fn_arg_type, {Lo, ST->Name});
+            if (!VT->isError()) {
+                if (!VT->isIntegral() && VT->Kind != TypeKind::Real)
+                    error(S.Args[1]->Loc, diag::err_val_argument, {VT->Name});
+                else if (!isLValue(*S.Args[1]))
+                    error(S.Args[1]->Loc, diag::err_var_param_needs_lvalue,
+                          {std::string_view("2"), std::string_view(Lo)});
+            }
+            if (!CT->isError()) {
+                if (!CT->isIntegral())
+                    error(S.Args[2]->Loc, diag::err_numeric_argument, {Lo, CT->Name});
+                else if (!isLValue(*S.Args[2]))
+                    error(S.Args[2]->Loc, diag::err_var_param_needs_lvalue,
+                          {std::string_view("3"), std::string_view(Lo)});
+            }
+            return;
+        }
+
         // Generic: arity was already checked against Builtins.def above.
         // Evaluate arguments for side-effects / type errors and leave the
         // rest -- which argument means what -- to codegen.

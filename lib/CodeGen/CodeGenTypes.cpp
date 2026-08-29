@@ -323,12 +323,16 @@ void Codegen::Impl::init(const std::string& progName) {
     procCall_ = std::make_unique<CGProcCall>(ctx, *mod, builder,
         *fileVarHelpers_, *runtimeFns_, *builtinIO_, *closureAbi_,
         *schemaAccess_, *cgTypes_, *symTab_, *linkage_, *setOps_,
-        *strCallMarshal_, *packUnpack_, *rangeGuards_, *assign_,
-        i8Ty, i64Ty, ptrTy,
+        *strCallMarshal_, *packUnpack_, *rangeGuards_, *assign_, *strings_,
+        i8Ty, i64Ty, ptrTy, dblTy,
         [this](const ExprNode& e){ return emitExpr(e); },
         [this](const ExprNode& e){ return emitLValue(e); },
         [this](llvm::Value* v){ return toI64(v); },
         [this](llvm::Value* v){ return ensureI1(v); },
+        [this](llvm::Value* v, llvm::Type* t){ return coerceToType(v, t); },
+        [this](llvm::Type* t, const std::string& n){ return createEntryAlloca(t, n); },
+        [](const ExprNode& e){ return exprShortStrCap(e); },
+        [](const ExprNode& e){ return exprIsShortStr(e); },
         [this](const TypeNode* tn){ return initialStateShapeOf(tn); },
         [this](const TypeNode* tn){ return hasInitialState(tn); },
         [this](llvm::Value* ptr, llvm::Type* ty, const TypeNode* tn){
@@ -474,7 +478,8 @@ void Codegen::Impl::init(const std::string& progName) {
         [](const ExprNode& e){ return exprIsCharStr(e); },
         [](const ExprNode& e){ return exprCharStrLen(e); },
         [](const ExprNode& e){ return exprStrCapStatic(e); },
-        [](const ExprNode& e){ return exprIsShortStr(e); });
+        [](const ExprNode& e){ return exprIsShortStr(e); },
+        [](const ExprNode& e){ return exprShortStrCap(e); });
     // ISO §6.7.1 expression emission -- the central recursive-descent
     // dispatcher every other extracted unit already reaches via its own
     // EmitExpr/EmitLValue closure (unaffected by this move, since those

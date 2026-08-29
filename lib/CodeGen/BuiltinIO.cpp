@@ -45,9 +45,10 @@ void BuiltinIO::emitBuiltinWrite(const std::vector<std::unique_ptr<ExprNode>>& a
 /// writestr, which supplies its own destination and no file.
 void BuiltinIO::emitWriteArgs(
         const std::vector<std::unique_ptr<ExprNode>>& args, size_t start,
-        bool newline, llvm::Value* fp, bool binaryTyped) {
-    for (size_t i = start; i < args.size(); ++i) {
-        bool addNl = newline && (i == args.size() - 1);
+        bool newline, llvm::Value* fp, bool binaryTyped, size_t end) {
+    if (end > args.size()) end = args.size();
+    for (size_t i = start; i < end; ++i) {
+        bool addNl = newline && (i == end - 1);
         // Check for WriteParam (field-width formatting)
         const ExprNode* argExpr = args[i].get();
         llvm::Value*    width   = nullptr;
@@ -833,6 +834,35 @@ void BuiltinIO::emitBuiltinReadStr(
     for (size_t i = 1; i < args.size(); ++i) emitReadArg(*args[i], /*fp=*/nullptr);
 
     B.CreateCall(RtFns.getExternFnN("plang_readstr_end", voidTy, {}), {});
+}
+
+/// TP-only: Str(x [: width [: decimals]], var s).  Same writestr-capture
+/// bracketing emitBuiltinWriteStr uses above, but reversed (x is FIRST, not
+/// the destination) and ShortString-shaped at the far end: plang_writestr_end
+/// writes an EP eight-byte length header, which is why this calls a THIRD
+/// sibling, plang_writestr_end_sstr (plang_io.cpp, beside plang_writestr_end/
+/// _end_fixed), rather than either existing one -- ShortString's one-byte
+/// header is a different geometry from both.
+void BuiltinIO::emitBuiltinStr(
+        const std::vector<std::unique_ptr<ExprNode>>& args) {
+    const ExprNode& dest = *args[1];
+    if (dest.ResolvedType->Kind != TypeKind::ShortString)
+        codegenICE("Str destination is not a ShortString variable");
+    auto* sPtr = EmitLValue(dest);
+    if (!sPtr) codegenICE("Str destination is not assignable");
+
+    auto* voidTy = llvm::Type::getVoidTy(Ctx);
+    B.CreateCall(RtFns.getExternFnN("plang_writestr_begin", voidTy, {}), {});
+
+    // Format ONLY args[0] (the value) -- args[1] is the destination, never a
+    // value to write, which is why this passes end=1 rather than emitting
+    // the whole argument list the way write/writestr's own calls do.
+    emitWriteArgs(args, /*start=*/0, /*newline=*/false, /*fp=*/nullptr,
+                  /*binaryTyped=*/false, /*end=*/1);
+
+    B.CreateCall(
+        RtFns.getExternFnN("plang_writestr_end_sstr", voidTy, {PtrTy, I64Ty}),
+        {sPtr, i64c(dest.ResolvedType->StrCapacity)});
 }
 
 bool BuiltinIO::writesAsBoolean(const llvm::Type* ty, const plang::Type* semaTy) {

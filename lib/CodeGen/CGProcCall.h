@@ -26,6 +26,7 @@
 #include "SchemaAccess.h"
 #include "SetOps.h"
 #include "StringCallMarshalling.h"
+#include "StringRuntime.h"
 
 namespace llvm { class BasicBlock; class Module; class Value; }
 namespace plang {
@@ -41,12 +42,17 @@ public:
                SchemaAccess& Schema, CGTypes& Types, CGSymbolTable& SymTab,
                CGLinkage& Linkage, SetOps& Sets, StringCallMarshalling& StrCall,
                CGPackUnpack& PackUnpack, RangeCheckGuards& RangeGuards,
-               CGAssign& Assign,
+               CGAssign& Assign, StringRuntime& Strings,
                llvm::IntegerType* I8Ty, llvm::IntegerType* I64Ty, llvm::PointerType* PtrTy,
+               llvm::Type* DblTy,
                std::function<llvm::Value*(const plang::ExprNode&)> EmitExpr,
                std::function<llvm::Value*(const plang::ExprNode&)> EmitLValue,
                std::function<llvm::Value*(llvm::Value*)> ToI64,
                std::function<llvm::Value*(llvm::Value*)> EnsureI1,
+               std::function<llvm::Value*(llvm::Value*, llvm::Type*)> CoerceToType,
+               std::function<llvm::AllocaInst*(llvm::Type*, const std::string&)> CreateEntryAlloca,
+               std::function<int64_t(const plang::ExprNode&)> ExprShortStrCap,
+               std::function<bool(const plang::ExprNode&)> ExprIsShortStr,
                std::function<const plang::TypeNode*(const plang::TypeNode*)> InitialStateShapeOf,
                std::function<bool(const plang::TypeNode*)> HasInitialState,
                std::function<void(llvm::Value*, llvm::Type*, const plang::TypeNode*)> EmitInitialState,
@@ -69,9 +75,14 @@ public:
           Builtins(Builtins), ClosureAbi(ClosureAbi), Schema(Schema), Types(Types),
           SymTab(SymTab), Linkage(Linkage), Sets(Sets), StrCall(StrCall),
           PackUnpack(PackUnpack), RangeGuards(RangeGuards), Assign(Assign),
-          I8Ty(I8Ty), I64Ty(I64Ty), PtrTy(PtrTy),
+          Strings(Strings),
+          I8Ty(I8Ty), I64Ty(I64Ty), PtrTy(PtrTy), DblTy(DblTy),
           EmitExpr(std::move(EmitExpr)), EmitLValue(std::move(EmitLValue)),
           ToI64(std::move(ToI64)), EnsureI1(std::move(EnsureI1)),
+          CoerceToType(std::move(CoerceToType)),
+          CreateEntryAlloca(std::move(CreateEntryAlloca)),
+          ExprShortStrCap(std::move(ExprShortStrCap)),
+          ExprIsShortStr(std::move(ExprIsShortStr)),
           InitialStateShapeOf(std::move(InitialStateShapeOf)),
           HasInitialState(std::move(HasInitialState)),
           EmitInitialState(std::move(EmitInitialState)),
@@ -113,9 +124,20 @@ private:
     /// see emitAssignValue's own doc comment for why this is reused rather
     /// than reimplemented here.
     CGAssign& Assign;
+    /// The Turbo System-unit string routines that mutate a ShortString var
+    /// parameter in place (Delete/Insert/SetLength) and Str/Val (CGProcCall.cpp)
+    /// call plang_sstr_*/plang_val_* runtime entry points directly through
+    /// this, the same way StringRuntime already serves CGFuncCall/CGBinaryOps
+    /// -- CGProcCall had no need of it before these five, everything else it
+    /// lowers going through StrCall (StringCallMarshalling) instead.
+    StringRuntime& Strings;
     llvm::IntegerType* I8Ty;
     llvm::IntegerType* I64Ty;
     llvm::PointerType* PtrTy;
+    /// double -- Val(s, v, code)'s own runtime result cell for a Real
+    /// destination, and CoerceToType's target/source when v is Turbo's
+    /// Single (float) instead.
+    llvm::Type* DblTy;
     std::function<llvm::Value*(const plang::ExprNode&)> EmitExpr;
     std::function<llvm::Value*(const plang::ExprNode&)> EmitLValue;
     std::function<llvm::Value*(llvm::Value*)> ToI64;
@@ -124,6 +146,26 @@ private:
     /// widening every OTHER boolean-condition call site (emitIf, emitWhile,
     /// ...) already goes through, needed here for Assert's own condition.
     std::function<llvm::Value*(llvm::Value*)> EnsureI1;
+    /// Widens/narrows a loaded scalar to another LLVM type -- Val(s, v, code)
+    /// needs it to store its runtime-parsed int64/double result into v's own
+    /// (possibly narrower, possibly Single-not-double) declared width, the
+    /// same coercion emitReadArg's own "convert" path already applies for an
+    /// ordinary read() target.
+    std::function<llvm::Value*(llvm::Value*, llvm::Type*)> CoerceToType;
+    /// A stack temporary, sized and named -- Val's own int64_t/double result
+    /// cells before CoerceToType narrows them into v's address.
+    std::function<llvm::AllocaInst*(llvm::Type*, const std::string&)> CreateEntryAlloca;
+    /// Turbo string[N]'s own capacity query -- see exprShortStrCap's own doc
+    /// comment (CodeGenImpl.h) and CGFuncCall.h's identical bridge, needed
+    /// here for the same reason: Delete/Insert/SetLength/Str/Val all size a
+    /// ShortString operand or result by it.
+    std::function<int64_t(const plang::ExprNode&)> ExprShortStrCap;
+    /// Turbo string[N]'s own predicate -- see exprIsShortStr's doc comment
+    /// (CodeGenImpl.h) and CGFuncCall.h's identical bridge.  Delete/Insert/
+    /// SetLength/Str/Val's local sstrArgPtr lambda (CGProcCall.cpp) uses this
+    /// to tell an already-ShortString operand (address + capacity, taken
+    /// directly) from a Char/literal one (materialized into a fresh temp).
+    std::function<bool(const plang::ExprNode&)> ExprIsShortStr;
     std::function<const plang::TypeNode*(const plang::TypeNode*)> InitialStateShapeOf;
     std::function<bool(const plang::TypeNode*)> HasInitialState;
     std::function<void(llvm::Value*, llvm::Type*, const plang::TypeNode*)> EmitInitialState;
