@@ -197,11 +197,26 @@ llvm::DIType* CGDebugInfo::debugTypeOfSemaType(const Type& T) {
             for (size_t I = 0; I < T.EnumValues.size(); ++I)
                 Elements.push_back(DBuilder->createEnumerator(
                     T.EnumValues[I], static_cast<uint64_t>(I)));
+            // T.Width/T.IsSigned, not a hardcoded 64/signed: ISO 7185 and
+            // Extended Pascal stamp 64/true on every Enum (Type's own struct
+            // defaults -- SemaType.cpp's EnumTypeNode arm never touches
+            // either field for them), so this reproduces the old hardcoded
+            // output for those two exactly.  Turbo narrows both by member
+            // count (see TypeContext::narrowestStorage, applied in that same
+            // arm), and the llvm::Type CGTypes::llvmTypeOfSemaTypeImpl builds
+            // for the same T is already getIntNTy(Ctx, T.Width) -- leaving
+            // this at a hardcoded 64 the way TypeKind::Integer used to would
+            // describe a narrowed Turbo enum as 8x wider than the value
+            // actually stored, which a real debugger reads back wrong (see
+            // the identical reasoning for TypeKind::Integer above).
             DT = DBuilder->createEnumerationType(
                 DebugFile, T.Name, DebugFile, /*LineNumber=*/0,
-                /*SizeInBits=*/64, /*AlignInBits=*/64,
+                /*SizeInBits=*/T.Width, /*AlignInBits=*/T.Width,
                 DBuilder->getOrCreateArray(Elements),
-                DBuilder->createBasicType("integer", 64, llvm::dwarf::DW_ATE_signed));
+                DBuilder->createBasicType(
+                    "integer", T.Width,
+                    T.IsSigned ? llvm::dwarf::DW_ATE_signed
+                               : llvm::dwarf::DW_ATE_unsigned));
             break;
         }
         case TypeKind::Subrange:
@@ -209,7 +224,31 @@ llvm::DIType* CGDebugInfo::debugTypeOfSemaType(const Type& T) {
             // subrange encoding: enough to print a value correctly, which
             // is the bar this pass clears; the bound information itself
             // is a nice-to-have left for a future pass.
-            DT = T.SubBase ? debugTypeOfSemaType(*T.SubBase) : nullptr;
+            //
+            // Recursing into SubBase reuses ITS representation (char,
+            // boolean, enum, or -- pre-Turbo-narrowing -- an integer of the
+            // identical width), which used to be safe because a subrange's
+            // Width/IsSigned were always copied verbatim from its host's.
+            // Under -std=turbo, TypeContext::getSubrange can now narrow an
+            // Integer-hosted subrange BELOW its host's own width from the
+            // subrange's own bounds (`type Grade = 1..100` is a byte even
+            // though `integer` -- Grade's SubBase -- is 16 bits): recursing
+            // in that case would describe the value as wider than the
+            // llvm::Type CGTypes actually built for it, so build directly
+            // from this type's own Width/IsSigned instead, exactly as the
+            // Integer case above does.  A Char/Boolean/Enum-hosted subrange
+            // is unaffected -- getSubrange stamps it at exactly its host's
+            // own (possibly Turbo-narrowed) Width, so the two never diverge
+            // and recursion is still both correct and reuses the richer
+            // enum-with-enumerators / boolean / char representation.
+            if (T.SubBase && T.SubBase->Kind == TypeKind::Integer
+                    && T.SubBase->Width != T.Width)
+                DT = DBuilder->createBasicType(
+                    "integer", T.Width,
+                    T.IsSigned ? llvm::dwarf::DW_ATE_signed
+                               : llvm::dwarf::DW_ATE_unsigned);
+            else
+                DT = T.SubBase ? debugTypeOfSemaType(*T.SubBase) : nullptr;
             break;
         case TypeKind::Pointer: {
             // No cycle risk despite the direct (non-RAUW) recursion: a

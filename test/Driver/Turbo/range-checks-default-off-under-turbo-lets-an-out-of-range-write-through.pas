@@ -19,6 +19,14 @@ deterministic with checking off, exactly like the -fno-range-checks
 sibling this mirrors (test/CodeGen/RuntimeChecks/
 no-range-checks-flag-omits-them.pas) -- except THIS file asks for no flag
 at all, so what actually decides the outcome is -std=turbo's own default.
+
+500 truncates to 244 (500 mod 256) rather than passing through unchanged:
+TP7 ch.19's storage-width-selection rule (TypeContext::getSubrange,
+-std=turbo only) narrows `1..10` to its own bounds' narrowest storage --
+an unsigned byte -- rather than inheriting plain Integer's 16 bits the way
+it did before that rule existed, and `i := 500; s := i;` with checking off
+stores through that byte-wide slot verbatim.  Confirmed against a real
+Turbo-Pascal-mode compiler (`fpc -Mtp -R-`), which prints the identical 244.
 *)
 
 (*
@@ -27,7 +35,7 @@ RUN: %run %t | FileCheck --strict-whitespace --match-full-lines %s
 *)
 
 (*
-CHECK:written through: 500
+CHECK:written through: 244
 *)
 
 program rangechecksdefaultoff;

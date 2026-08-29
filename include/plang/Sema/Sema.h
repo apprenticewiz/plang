@@ -150,7 +150,7 @@ private:
     /// unqualified `integer` is depends on the dialect, and what a pointer is
     /// (Type::Width, for Pointer/Nil/String -- see TypeContext's constructor)
     /// depends on --target.
-    TypeContext Ctx_{Opts.defaultIntWidth(), Opts.PointerWidthBits};
+    TypeContext Ctx_{Opts.defaultIntWidth(), Opts.PointerWidthBits, Opts.turbo()};
 
     // Convenience aliases that forward to TypeContext singletons.
     // Kept for backward compat with existing Sema implementation code.

@@ -45,8 +45,16 @@ public:
     /// those three kinds -- see its comment) the same way DefaultIntWidth is
     /// stamped onto Integer, so that Sema::byteSizeOf/byteAlignOf read a
     /// target-correct answer for `^T` without themselves depending on LLVM.
+    /// \p Turbo gates TP7 chapter 19's storage-width-selection rule in
+    /// getSubrange (and, via its narrowestStorage helper, an enum's own
+    /// width by member count in SemaType.cpp's EnumTypeNode arm) -- see
+    /// getSubrange's own comment.  ISO 7185 and Extended Pascal must answer
+    /// exactly as they always have (Width=64, IsSigned=true for every
+    /// subrange, whatever its host), so this defaults to false and every
+    /// dialect other than Turbo must pass false explicitly.
     explicit TypeContext(unsigned DefaultIntWidth = 64,
-                         unsigned PointerWidthBits = 64) {
+                         unsigned PointerWidthBits = 64,
+                         bool Turbo = false) {
         // Through the cache, not beside it.  Sema binds TyInt as a *reference*
         // to the member this returns, and `identical` is a pointer comparison,
         // so an `integer` minted here and an `integer` handed out by getInt
@@ -54,6 +62,7 @@ public:
         // other -- silently, since neither is wrong on its own.
         DefaultIntWidth_   = DefaultIntWidth;
         PointerWidthBits_  = PointerWidthBits;
+        Turbo_             = Turbo;
         TyInt_  = getInt(DefaultIntWidth, /*Signed=*/true);
         TyReal_ = Type::makeReal();
         TyCplx_ = Type::makeComplex();
@@ -260,6 +269,41 @@ public:
     /// How an ordinal type reads in a diagnostic.
     static std::string describeOrdinal(const Type& T) { return T.Name; }
 
+    /// TP7 chapter 19's storage-width-selection rule (-std=turbo only): the
+    /// narrowest of {8, 16, 32}-bit signed or unsigned storage that holds
+    /// both \p Lo and \p Hi, unsigned tried first at each width (so a
+    /// non-negative range never picks a signed class it does not need), and
+    /// falling back to signed 64-bit -- the same width/signedness ISO 7185
+    /// and Extended Pascal always answer, see DefaultIntWidth_ -- when
+    /// nothing narrower fits; Lo/Hi are already int64_t, so that fallback
+    /// always holds them.
+    ///
+    /// Used for a numeric subrange's own declared bounds in getSubrange
+    /// below, and, at Lo=0, for an enum's own width by member count
+    /// (SemaType.cpp's EnumTypeNode arm: an N-member enum's ordinals are
+    /// always 0..N-1, ISO §6.4.2.2) -- one rule, two call sites, since an
+    /// enum's implicit range is exactly the same shape of question a written
+    /// subrange's bounds are.
+    ///
+    /// Verified empirically against `fpc -Mtp` (Free Pascal's Turbo-Pascal
+    /// mode) on a local install: `1..100` -> 1 byte; `-100..100` -> 1 byte
+    /// signed (-100 needs the sign bit even though 100 alone would not);
+    /// `-200..200` -> 2 bytes signed (-200 does not fit signed-8's
+    /// -128..127); `0..1000000` -> 4 bytes; `0..255` -> 1 byte unsigned;
+    /// `0..256` -> 2 bytes; a 3-member enum -> 1 byte; a 300-member enum ->
+    /// 2 bytes.
+    static std::pair<unsigned, bool> narrowestStorage(int64_t Lo, int64_t Hi) {
+        for (unsigned W : {8u, 16u, 32u}) {
+            if (Lo >= 0 && static_cast<uint64_t>(Hi) <= (uint64_t{1} << W) - 1)
+                return {W, false};
+            const int64_t SMin = -(int64_t{1} << (W - 1));
+            const int64_t SMax = (int64_t{1} << (W - 1)) - 1;
+            if (Lo >= SMin && Hi <= SMax)
+                return {W, true};
+        }
+        return {64, true};
+    }
+
     /// Canonical subrange type.
     std::shared_ptr<Type> getSubrange(std::shared_ptr<Type> base,
                                       int64_t lo, int64_t hi) {
@@ -281,27 +325,61 @@ public:
             // As wide as its host type where the host is an integer, which is
             // where narrowing means anything: a subrange of Byte is a byte.
             //
-            // Over a char or a boolean it is a full ordinal instead, which is
-            // what plang has always stored one as -- `packed array['a'..'z']`
-            // holds i64 components today even though a char is an i8.  That is
-            // inconsistent, and narrowing it is a change to how ISO 7185 and
-            // Extended Pascal lay memory out, so it does not belong in the
-            // change that merely makes width a property types carry.  Turbo,
-            // where a char subrange really is one byte, is when to revisit it.
+            // Over a char or a boolean it is a full ordinal instead outside
+            // Turbo, which is what plang has always stored one as -- `packed
+            // array['a'..'z']` holds i64 components under ISO 7185/EP even
+            // though a char is an i8.  That is inconsistent, and narrowing it
+            // is a change to how ISO 7185 and Extended Pascal lay memory out,
+            // so it does not belong in the change that merely makes width a
+            // property types carry -- ISO 7185/EP keep the wide default
+            // below unconditionally, gated on Turbo_ being false.
             if (base && base->Kind == TypeKind::Integer) {
+                if (Turbo_) {
+                    // TP7 ch.19: narrow to THESE bounds, not to the host's
+                    // own width -- `type Grade = 1..100` fits a byte even
+                    // though the bounds' own type (whatever `integer` means
+                    // in this dialect) is wider.  See narrowestStorage.
+                    const auto W = narrowestStorage(lo, hi);
+                    T->Width     = W.first;
+                    T->IsSigned  = W.second;
+                } else {
+                    T->Width    = base->Width;
+                    T->IsSigned = base->IsSigned;
+                }
+            } else if (Turbo_ && base &&
+                       (base->Kind == TypeKind::Char ||
+                        base->Kind == TypeKind::Boolean ||
+                        base->Kind == TypeKind::Enum)) {
+                // Turbo's own natural host width, not DefaultIntWidth_ below:
+                // a char or boolean host is always 8 bits (Type::makeChar/
+                // makeBoolean), and an enum host's Width was already narrowed
+                // by its own member count (SemaType.cpp's EnumTypeNode arm)
+                // by the time anything can write a subrange over it -- ISO
+                // §6.4.2.2 requires the enumeration declared before use.
+                // Before this rule, a Char/Boolean/Enum-hosted subrange under
+                // Turbo fell into the DefaultIntWidth_ branch below and got
+                // stamped 16 (Turbo's own `integer` width) instead of the
+                // natural 8-bit -- or an enum's own narrower-than-16 width --
+                // its host actually has; that was a known, previously
+                // deferred anomaly this rule also fixes.
                 T->Width    = base->Width;
-                T->IsSigned = base->IsSigned;
+                T->IsSigned = false;
             } else {
-                // Over a char, a boolean or an enumeration.  ISO §6.4.2.2
-                // numbers those from zero, so their values are never negative
-                // and the subrange's are not either -- `'a'..'z'` holds 97..122
-                // however its bounds are written.
+                // ISO 7185/EP always land here (Turbo_ is false for both, see
+                // the constructor), whatever the host is.  So does Turbo over
+                // a host this rule does not otherwise special-case.  ISO
+                // §6.4.2.2 numbers a char/boolean/enum host from zero, so
+                // their values -- and a subrange's -- are never negative:
+                // `'a'..'z'` holds 97..122 however its bounds are written.
                 //
-                // Saying so matters: IsSigned defaults to true, and a rule that
-                // widens by it would sign-extend a char subrange.  Nothing
-                // reads IsSigned yet; the widening rule the Turbo runtime
-                // boundary needs is the first thing that will, and it must not
-                // inherit a field that is wrong for a third of the ordinals.
+                // Saying so matters even though Type::makeChar/makeBoolean
+                // and the Enum construction site (SemaType.cpp) now also set
+                // their own IsSigned to false for the identical reason: this
+                // line is written independently of theirs (Width, right
+                // above, has to be -- DefaultIntWidth_ is not any host's own
+                // Width), so a rule that instead widened by whatever the host
+                // answered would be one accidental IsSigned=true away from
+                // sign-extending a char subrange.
                 T->Width    = DefaultIntWidth_;
                 T->IsSigned = false;
             }
@@ -538,6 +616,9 @@ private:
     unsigned DefaultIntWidth_{64};
     /// What --target= resolves a pointer to, in bits; see the constructor.
     unsigned PointerWidthBits_{64};
+    /// Gates TP7 ch.19 storage-width narrowing in getSubrange; see the
+    /// constructor's comment.  False for every dialect but Turbo.
+    bool Turbo_{false};
 
     // Integer types, by width and signedness.
     std::map<std::pair<unsigned, bool>, std::shared_ptr<Type>> IntCache_;
