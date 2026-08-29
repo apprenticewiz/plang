@@ -879,6 +879,21 @@ private:
                                                        const std::shared_ptr<Type>& TargetHint = nullptr);
     [[nodiscard]] std::shared_ptr<Type> checkStructuredValue(const StructuredValueExpr& E);
 
+    /// TP-only: a typed constant's initializer must be a compile-time
+    /// constant -- CodeGen bakes it into a real llvm::Constant, not code that
+    /// runs to compute it (see CGTypedConst.cpp).  Walks \p E, which has
+    /// already been through checkExpr/checkStructuredValue (so every arm's
+    /// ResolvedType is set), and for each SCALAR leaf calls constBound /
+    /// constRealBound -- exactly the same fold CodeGen will read back off
+    /// ConstVal/ConstRealVal, so "Sema accepted it" and "CodeGen can lower
+    /// it" cannot disagree.  Recurses into a StructuredValueExpr's own arms
+    /// (record and array alike), and for an array whose element count is
+    /// known, additionally checks that a purely positional literal (Turbo's
+    /// own array-literal form -- no EP-style index label) supplies exactly
+    /// that many elements.  \p Name is the constant's own name, for the
+    /// diagnostic.
+    void checkTypedConstFoldable(const ExprNode& E, const std::string& Name);
+
     /// The span of a set-constructor's ordinals, when they all fold; nothing
     /// otherwise.  See checkSetLit.
     [[nodiscard]] std::optional<std::pair<int64_t, int64_t>>

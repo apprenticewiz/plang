@@ -598,6 +598,13 @@ void Sema::checkDefiniteAssignment(const BlockNode& Block) {
             // address of is the only kind the walk can speak for.
             if (!Sym || Sym->Kind != SymbolKind::Var) continue;
             if (Sym->IsBindable) continue;
+            // TP-only: 'absolute' (AstDecl.h's VarGroup::AbsoluteExpr) gives
+            // this variable's storage to whatever the overlaid variable
+            // already holds, the same as a bindable variable's storage comes
+            // from outside the program -- this walk cannot see whether THAT
+            // storage was assigned, so it does not try, exactly the way it
+            // already declines to for a bindable variable just above.
+            if (Vg.AbsoluteExpr) continue;
             if (!isSimpleValue(Sym->Ty.get())) continue;
             FlowTracked_.insert(Key);
             if (HasInit) PreAssigned.insert(Key);

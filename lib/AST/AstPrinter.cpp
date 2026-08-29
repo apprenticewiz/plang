@@ -598,7 +598,13 @@ static void printBlock(const BlockNode& node, std::ostream& os, int depth) {
     }
 
     for (const auto& cd : node.Consts) {
-        os << ind(depth) << "(const " << cd.Name << " ";
+        os << ind(depth) << "(const " << cd.Name;
+        // Turbo's typed-constant form; see ConstDef::Type's own comment.
+        if (cd.Type) {
+            os << " : ";
+            printType(*cd.Type, os);
+        }
+        os << " ";
         printExpr(*cd.Value, os);
         os << ")\n";
     }
@@ -621,6 +627,12 @@ static void printBlock(const BlockNode& node, std::ostream& os, int depth) {
         if (vg.InitExpr) {
             os << " value ";
             printExpr(*vg.InitExpr, os);
+        }
+        // Turbo's 'absolute' directive; see VarGroup::AbsoluteExpr's own
+        // comment.
+        if (vg.AbsoluteExpr) {
+            os << " absolute ";
+            printExpr(*vg.AbsoluteExpr, os);
         }
         os << ")\n";
     }

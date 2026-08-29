@@ -14,6 +14,14 @@ namespace plang {
 struct ConstDef {
     std::string               Name;   /// constant name
     std::unique_ptr<ExprNode> Value;  /// value expression
+    /// Turbo's "typed constant" form: `identifier ':' type-expr '=' value`.
+    /// Null for a plain, untyped ISO/EP `const` (the common case, every
+    /// dialect).  When set, this is NOT a real constant at all -- TP7 gives
+    /// it static storage and a one-time initializer, and it may be assigned
+    /// to like a variable; Sema reflects that by registering it as a
+    /// SymbolKind::Var (see Symbol::IsTypedConst) rather than
+    /// SymbolKind::Const.
+    std::unique_ptr<TypeNode>  Type;
 };
 
 /// One group of discriminant parameters sharing a type (EP §6.4.7).
@@ -41,6 +49,13 @@ struct VarGroup {
     std::unique_ptr<TypeNode> Type;
     /// EP §6.4.1: optional 'value expr' initializer; null if absent.
     std::unique_ptr<ExprNode> InitExpr;
+    /// Turbo's 'absolute' directive: `var W: Word absolute B;` overlays this
+    /// declaration's storage directly onto the variable (or component, e.g.
+    /// `absolute B[0]`) this expression names, instead of allocating storage
+    /// of its own.  Null when no 'absolute' clause was written.  Only ever
+    /// set for a single-name group -- real Turbo Pascal writes 'absolute' on
+    /// one variable at a time, and Sema rejects it on a multi-name group.
+    std::unique_ptr<ExprNode> AbsoluteExpr;
 };
 
 // ParamGroup lives in AstType.h: a procedural parameter's type is written as a

@@ -1701,6 +1701,48 @@ std::shared_ptr<Type> Sema::checkStructuredValue(const StructuredValueExpr& E) {
 }
 
 // ---------------------------------------------------------------------------
+// TP-only: typed-constant initializer foldability (see this method's own
+// declaration, Sema.h, for the overall design)
+// ---------------------------------------------------------------------------
+
+void Sema::checkTypedConstFoldable(const ExprNode& E, const std::string& Name) {
+    if (auto* SV = llvm::dyn_cast<StructuredValueExpr>(&E)) {
+        // Turbo's own array literal is purely positional -- '(1, 2, 3)', no
+        // EP-style index label -- so an all-unlabeled constructor over an
+        // array whose extent folds is checked for supplying exactly that
+        // many elements.  A labeled or partially-labeled constructor is not
+        // Turbo's own literal form (nothing parseTurboConstValue builds looks
+        // like that); left alone here, the way checkStructuredValue already
+        // checked it stands.
+        if (SV->ResolvedType && SV->ResolvedType->Kind == TypeKind::Array
+                && SV->ResolvedType->IndexType
+                && !SV->ResolvedType->IndexType->isError()) {
+            bool AllPositional = true;
+            for (const auto& Arm : SV->Arms)
+                if (!Arm.Labels.empty() || Arm.IsOtherwise) { AllPositional = false; break; }
+            if (AllPositional) {
+                const int64_t Lo = SV->ResolvedType->IndexType->SubLo;
+                const int64_t Hi = SV->ResolvedType->IndexType->SubHi;
+                if (Hi >= Lo) {
+                    const uint64_t Count =
+                        static_cast<uint64_t>(Hi) - static_cast<uint64_t>(Lo) + 1;
+                    if (SV->Arms.size() != Count)
+                        error(SV->Loc, diag::err_typed_const_array_count_mismatch,
+                              {Name, std::to_string(SV->Arms.size()),
+                               std::to_string(Count)});
+                }
+            }
+        }
+        for (const auto& Arm : SV->Arms)
+            if (Arm.Value) checkTypedConstFoldable(*Arm.Value, Name);
+        return;
+    }
+    if (constBound(E)) return;
+    if (constRealBound(E)) return;
+    error(E.Loc, diag::err_typed_const_not_constant, {Name});
+}
+
+// ---------------------------------------------------------------------------
 // Call argument checking
 // ---------------------------------------------------------------------------
 

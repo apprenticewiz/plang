@@ -744,3 +744,41 @@ DIAG(err_procval_of_proc_param, Error,
 // an arbitrary expression has no nil to compare against.
 DIAG(err_assigned_argument, Error,
      "'%0' requires a pointer or procedural argument, got '%1'")
+// TP-only: typed constants (`const X: Integer = 0;`).  Real TP7 requires the
+// initializer to be a compile-time constant expression -- it is baked into
+// the program's data segment once, not computed at start-up -- so an
+// initializer that will not fold (a variable read, a function call, ...) is
+// refused here the same way every other "wants a constant" site already is
+// (see err_array_lower_bound_not_const and neighbors).
+DIAG(err_typed_const_not_constant, Error,
+     "initializer for typed constant '%0' is not a constant expression")
+DIAG(err_typed_const_type_mismatch, Error,
+     "initializer type '%0' is not compatible with typed constant '%1' of type '%2'")
+// Turbo array literals `(1, 2, 3)` are positional, unlike EP's labeled
+// `[1: 1; 2: 2; 3: 3]` -- so, unlike an EP array constructor, one that
+// supplies too few or too many elements for the array's own declared extent
+// has no bound left unwritten to default and no label to say which extra
+// element was unwanted; it is simply wrong.
+DIAG(err_typed_const_array_count_mismatch, Error,
+     "typed constant '%0' initializes %1 element(s) but its array type has %2")
+// Scope line for this first implementation of typed constants: a scalar
+// (Integer/Real/Boolean/Char/enum) or a fixed (non-variant) record or array
+// built from those lowers to a real compile-time llvm::Constant aggregate.
+// A variant part has no one fixed layout to fold a literal into ahead of
+// time, and string/set/file/pointer/procedural-typed constants need their
+// own dedicated lowering this first pass does not attempt; cleanly refusing
+// them is preferable to silently emitting a zero-filled or partial constant.
+DIAG(err_typed_const_unsupported_type, Error,
+     "typed constant '%0' has type '%1', which is not yet supported as a "
+     "typed constant's type")
+
+// TP-only: 'absolute' overlays a new variable's storage directly onto an
+// existing one's -- `var W: Word absolute B;` -- rather than allocating
+// storage of its own.  Not a reserved word (checkVarAbsolute's caller only
+// recognizes it by spelling right after a var-declaration's type), so a
+// program that happens to declare its own identifier called 'absolute' is
+// completely unaffected outside that one position.
+DIAG(err_absolute_multiple_names, Error,
+     "'absolute' may overlay only a single variable, not a name list")
+DIAG(err_absolute_target_not_variable, Error,
+     "'absolute' must name a variable or a component of one")

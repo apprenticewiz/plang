@@ -1467,6 +1467,47 @@ struct Codegen::Impl {
     llvm::Type* structuredConstType(const ConstDef& cd, const TypeNode*& tn);
     /// Those constants, in the order they were declared.
     std::vector<const ConstDef*> structuredConsts_;
+
+    // ====================================================================
+    // TP-only: typed constants (CGTypedConst.cpp)
+    // ====================================================================
+    /// Folds \p value -- a typed constant's initializer, Sema having already
+    /// required (checkTypedConstFoldable) that it fold -- into a compile-time
+    /// llvm::Constant of LLVM type \p ty.  \p denoter is the AST shape \p
+    /// value is being matched against (the constant's own declared type at
+    /// the top level, an array's element type or a record field's type when
+    /// recursing into an aggregate) -- the same role `denoter` plays in
+    /// CGStructuredValue::emitStructuredValue, whose comment explains why a
+    /// foreign denoter has to be followed through initialStateShapeOf rather
+    /// than read as-is.  An internal error, not a null return: Sema's
+    /// typedConstTypeSupported/checkTypedConstFoldable are meant to have
+    /// already refused anything that would reach here unable to fold.
+    llvm::Constant* buildTypedConstInit(const ExprNode& value, const TypeNode* denoter,
+                                        llvm::Type* ty);
+    /// A global-scope typed constant: real storage, initialized once, at
+    /// module load.  Shares its mangled name and linkage with an ordinary
+    /// global (globalPrefix + cd.Name, ExternalLinkage) -- see
+    /// emitLocalStaticConst's own comment for the local counterpart.
+    void emitGlobalTypedConst(const ConstDef& cd);
+    /// A typed constant declared inside a procedure or function body.  TP7's
+    /// defining rule (see ConstDef::Type's own comment) is that it keeps its
+    /// value across calls, like a C 'static' local -- so, unlike every other
+    /// local (CodeGenProcs.cpp's emitBlockAllocas gives each of those a fresh
+    /// per-activation stack alloca), it gets its own INTERNAL-linkage
+    /// llvm::GlobalVariable instead, mangled with the enclosing procedure's
+    /// scope the same way a nested procedure's own name is (namePrefix,
+    /// PlangScopeSep) -- so two procedures each declaring their own local
+    /// typed constant of the same spelling get two distinct symbols.
+    ///
+    /// Also reached (redundantly, and safely so: findVar's guard at the call
+    /// site makes the second call a no-op) when emitMain calls emitBlockDecls
+    /// a second time over the program's own top-level block -- see
+    /// emitBlockDecls's own comment on why that second call exists at all for
+    /// every other constant kind.  namePrefix is still at its default there
+    /// ("pas_", no scope suffix), which makes the mangled name this produces
+    /// come out identical to what emitGlobalTypedConst already gave the same
+    /// declaration the first time.
+    void emitLocalStaticConst(const ConstDef& cd);
     /// The capacity of a string-typed declaration, resolving a type written
     /// through a name; 0 when the declaration is not a string.
     int64_t declaredStrCapacity(const TypeNode* tn);

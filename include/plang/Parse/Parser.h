@@ -161,6 +161,23 @@ private:
         ~ValueDepthScope() { if (--N == 0) LimitHit = false; }
     };
 
+    // Turbo's parseTurboConstValue (ParseDecl.cpp) is its own single-function
+    // recursion -- through a record arm's value and through an array
+    // element, both written '(...)' -- separate from EP's own
+    // parseComponentValue cycle above (different syntax, different grammar),
+    // so it gets its own counter rather than sharing ValueDepth.  Same shape
+    // as ValueDepth/ValueDepthScope; see that one's comment for why a
+    // ceiling belongs here at all.
+    unsigned                 TurboConstValueDepth{};
+    bool                     TurboConstValueDepthLimitHit{};
+    struct TurboConstValueDepthScope {
+        unsigned& N;
+        bool&     LimitHit;
+        explicit TurboConstValueDepthScope(unsigned& Counter, bool& LimitHitFlag)
+            : N(Counter), LimitHit(LimitHitFlag) { ++N; }
+        ~TurboConstValueDepthScope() { if (--N == 0) LimitHit = false; }
+    };
+
     // Appends an error diagnostic to the shared vector.
     void emitError(SourceLocation Loc, std::string Msg);
     void emitError(SourceLocation Loc, DiagID ID,
@@ -302,7 +319,28 @@ private:
     void                          parseConstSection(BlockNode& Block);
 
     // const-def → identifier '=' simple-expr ';'
+    //           | identifier ':' type-expr '=' turbo-const-value ';'   (-std=turbo)
     ConstDef                      parseConstDef();
+
+    // Turbo typed-constant value: a plain expression, or a parenthesized
+    // aggregate -- '(' value (',' value)* ')' for an array (purely
+    // positional -- Turbo has no EP-style index label), or
+    // '(' identifier ':' value (';' identifier ':' value)* ')' for a record.
+    // Which of the two a '(' begins is not known from the declared type (the
+    // parser tracks no shape for a named type), so it is read the way EP's
+    // own structured-value-constructor grammar is (parseComponentValue,
+    // ParseInit.cpp): generically, deferring the real type-directed
+    // interpretation to Sema's checkStructuredValue.  Reused here as the same
+    // StructuredValueExpr node EP's constructors already build -- an array
+    // arm carries no label at all (EP's always does; checkStructuredValue's
+    // array case already tolerates an empty label list -- it only checks
+    // labels that are there -- so no Sema change was needed to type-check
+    // this positional form), a record arm's one label is the field name.
+    // CodeGen's own lowering for a typed constant is new regardless (see
+    // buildTypedConstInit, CGTypedConst.cpp): it folds straight to a
+    // compile-time llvm::Constant rather than the runtime store/GEP/memcpy
+    // sequence EP's own emitStructuredValue builds.
+    std::unique_ptr<ExprNode>     parseTurboConstValue();
 
     // type-section → 'type' type-def+
     void                          parseTypeSection(BlockNode& Block);
