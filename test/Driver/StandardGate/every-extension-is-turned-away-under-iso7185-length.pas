@@ -12,7 +12,7 @@ RUN: FileCheck %s < %t.err
 *)
 
 (*
-CHECK: Extended Pascal extension
+CHECK: 'length' is available under -std=iso10206 and -std=turbo, but not under -std=iso7185
 *)
 
 program p;

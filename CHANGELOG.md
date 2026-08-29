@@ -118,6 +118,35 @@ version numbers follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html
   compiled and ran `Random`'s own generator instead of being refused the
   way the parenthesized `Random(5)` already correctly was. `checkIdent`
   now calls `checkEPOnly` too.
+- `-std=turbo` accepted the buffer-variable dereference `f^` for a `File`-
+  typed variable with no diagnostic at all (`Sema::checkDeref`'s `File` arm
+  had no dialect check whatsoever), even though real Turbo Pascal has no
+  buffer variable -- it replaces ISO 7185's whole get/put/page file-buffer
+  model with `Assign`/`Seek` instead. Both a read (`x := f^`) and a write
+  (`f^ := ...`) position are now refused under `-std=turbo`
+  (`err_turbo_file_buffer_var`); `-std=iso7185` and `-std=iso10206` are
+  unaffected, and so is an ordinary `^SomeType` pointer dereference or an
+  Extended Pascal schema-typed pointer's own dereference form under any
+  dialect -- the new check is scoped to `PtrTy->Kind == TypeKind::File`
+  alone, a branch structurally separate from both.
+- `get`/`put`/`page`/`pack`/`unpack` refused under `-std=turbo` (correctly
+  gated in `Builtins.def` since they are the other half of the same
+  file-buffer model `f^` belongs to, above) reported "is an Extended Pascal
+  extension and is not available under -std=iso7185" -- backwards twice
+  over: these five are ISO 7185's own required procedures, not an Extended
+  Pascal extension, and the dialect actually refusing them was `-std=turbo`,
+  not `-std=iso7185`, whichever one happened to be hardcoded into the
+  message. `Sema::checkEPOnly` now picks among four dialect-aware
+  diagnostics by asking `Builtins.def`'s own dialect mask which dialect(s)
+  a name actually belongs to, rather than assuming: a new
+  `err_turbo_file_model_name` ("'get' is part of Pascal's file-buffer model,
+  which -std=turbo replaces with Assign and Seek") for this group; a
+  reworded `err_ep_required_name` ("only available under -std=iso10206",
+  dropping the wrong assumption that `-std=iso7185` is always the dialect
+  asking) for Extended-Pascal-only names like `card`, refused under either
+  `-std=iso7185` or `-std=turbo`; and a new `err_ep_turbo_required_name` for
+  the two names (`Halt`, `Length`) both Extended Pascal and Turbo have,
+  which only `-std=iso7185` can ever refuse.
 - `writeln`/`write` treated any 8-bit integer as a `Char` (`BuiltinIO::
   writesAsChar` matched on LLVM width alone before consulting the Sema
   type), which was unreachable before the sized-integer ladder above since

@@ -868,14 +868,20 @@ private:
     /// Diagnoses use of a built-in name the active dialect does not declare
     /// (Sym.NotInDialect, set at registration from Builtins.def's own
     /// Dialects mask -- see registerBuiltins).  Named checkEPOnly from when
-    /// every such name was Extended Pascal's alone; picks between
-    /// err_ep_required_name and err_turbo_required_name by asking
+    /// every such name was Extended Pascal's alone; picks among
+    /// err_ep_required_name, err_turbo_required_name,
+    /// err_ep_turbo_required_name and err_turbo_file_model_name by asking
     /// builtinDialects(Sym.BuiltinKind) which dialect(s) the name is
-    /// ACTUALLY declared for, rather than assuming, so a Turbo-only name
-    /// (Assert, the first one) is not told it is an Extended Pascal
-    /// extension -- which would also be wrong in the specific way that
-    /// implies -std=iso10206 accepts it, when no dialect but Turbo does.
-    /// Returns false when a diagnostic was emitted.
+    /// ACTUALLY declared for, rather than assuming.  Each DIAG names the
+    /// dialect(s) that DO have the name instead of guessing which one
+    /// refused it: a Turbo-only name (Assert, the first one) is not told it
+    /// is an Extended Pascal extension, which would wrongly promise
+    /// -std=iso10206 accepts it; an Extended-Pascal-only name (Card, ...) is
+    /// not told "-std=iso7185" is the (only) dialect refusing it, which was
+    /// wrong once -std=turbo could refuse it too; and get/put/page/pack/
+    /// unpack -- iso7185's own file-buffer model, which only -std=turbo
+    /// lacks -- are not called an "Extended Pascal extension" at all, since
+    /// iso7185 has them too.  Returns false when a diagnostic was emitted.
     [[nodiscard]] bool checkEPOnly(const Symbol& Sym, SourceLocation Loc);
     /// Diagnoses a name from Turbo Pascal's real-mode DOS surface (Seg, Ofs,
     /// Mem, Intr, ...; the full list is isRealModeDosName's, in SemaExpr.cpp)
