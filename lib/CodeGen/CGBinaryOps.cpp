@@ -423,16 +423,56 @@ llvm::Value* CGBinaryOps::emitBinary(const BinaryExpr& e) {
         case TokenKind::Div: {
             auto* n = ToI64(lv);
             auto* d = ToI64(rv);
-            RangeGuards.emitDivZeroCheck(d, "div");
+            // The guards below compare against width-specific constants --
+            // emitDivOverflowCheck's minint bit pattern most of all -- so
+            // they need operands at the div's REAL width, not n/d above:
+            // those are already sign-extended to i64 for the SDiv itself,
+            // and MinInt16 sign-extended to i64 does not equal INT64_MIN, so
+            // a check run on n/d as-is would never catch a 16-bit Turbo
+            // `MinInt div -1`.  e.ResolvedType->Width is the same TyInt
+            // answer (16 under Turbo, 64 otherwise) the Shl/Shr case below
+            // already re-coerces to, for the identical reason.  Computing
+            // the division itself at i64 stays correct once these guards
+            // pass: for any in-range divisor/dividend pair other than
+            // minint/-1 (which the overflow guard below catches first), a
+            // narrower SDiv's quotient is exactly what the sign-extended,
+            // wider-precision SDiv below computes too.
+            //
+            // Coerced from n/d (already i64) rather than the original lv/rv:
+            // for ISO 7185 and Extended Pascal, divBitsTy is i64Ty already
+            // (their one Integer is always Width 64), so CoerceToType is a
+            // true no-op there -- it returns n/d themselves unchanged
+            // (CodeGenExprs.cpp's coerceToType short-circuits whenever the
+            // value's LLVM type already matches dst) rather than emitting a
+            // second, redundant conversion of lv/rv that duplicates what
+            // ToI64 above already did.
+            llvm::Type* divBitsTy = llvm::IntegerType::get(
+                Ctx, e.ResolvedType ? e.ResolvedType->Width : 64);
+            const unsigned divWidth = divBitsTy->getIntegerBitWidth();
+            RangeGuards.emitDivZeroCheck(CoerceToType(d, divBitsTy), "div", divWidth);
             // minint div -1: the one nonzero-divisor case that still
             // overflows, since minint's magnitude has no positive int64_t
             // representation (same UB shape as abs(minint)).
-            RangeGuards.emitDivOverflowCheck(n, d);
+            RangeGuards.emitDivOverflowCheck(CoerceToType(n, divBitsTy),
+                                              CoerceToType(d, divBitsTy), divWidth);
             return B.CreateSDiv(n, d, "sdiv");
         }
         case TokenKind::Mod: {
             auto* d = ToI64(rv);
-            RangeGuards.emitModDivisorCheck(d);
+            // Same Width contract as Div just above -- see its comment.
+            // emitModDivisorCheck's own checks (== 0 for Turbo, <= 0
+            // otherwise) happen to be sign-extension-invariant on their own
+            // (a value's zero-ness and sign never change under sign
+            // extension), unlike emitDivOverflowCheck's minint compare, but
+            // the guard's operand type must still match its Width parameter
+            // exactly (RangeCheckGuards.h) or building the icmp crashes.
+            // Coerced from d (already i64), not rv -- see Div's identical
+            // comment just above for why that keeps ISO/EP's Width=64 case a
+            // true IR no-op instead of a redundant second conversion.
+            llvm::Type* modBitsTy = llvm::IntegerType::get(
+                Ctx, e.ResolvedType ? e.ResolvedType->Width : 64);
+            RangeGuards.emitModDivisorCheck(CoerceToType(d, modBitsTy),
+                                             modBitsTy->getIntegerBitWidth());
             auto* r = B.CreateSRem(ToI64(lv), d, "srem");
             // Turbo's mod takes its sign from the DIVIDEND -- exactly what
             // srem already computes -- rather than ISO's "0 <= mod <
