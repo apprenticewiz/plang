@@ -159,7 +159,17 @@ llvm::DIType* CGDebugInfo::debugTypeOfSemaType(const Type& T) {
     llvm::DIType* DT = nullptr;
     switch (T.Kind) {
         case TypeKind::Integer:
-            DT = DBuilder->createBasicType("integer", 64, llvm::dwarf::DW_ATE_signed);
+            // The width and signedness travel with the type; see Type::Width's
+            // own comment.  ISO 7185 and Extended Pascal stamp 64/signed on
+            // every Integer, so this reproduces the old hardcoded 64/signed
+            // output for them exactly; Turbo's Integer (16-bit signed) and any
+            // other width TypeContext::getInt mints now get DWARF that matches
+            // the llvm::Type CGTypes::llvmTypeOfSemaTypeImpl actually builds
+            // for the same T (getIntNTy(Ctx, T.Width)), instead of always
+            // claiming a 64-bit value regardless of the real one.
+            DT = DBuilder->createBasicType(
+                "integer", T.Width,
+                T.IsSigned ? llvm::dwarf::DW_ATE_signed : llvm::dwarf::DW_ATE_unsigned);
             break;
         case TypeKind::Real:
             DT = DBuilder->createBasicType("real", 64, llvm::dwarf::DW_ATE_float);
