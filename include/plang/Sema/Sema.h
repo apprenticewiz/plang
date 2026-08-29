@@ -728,6 +728,25 @@ private:
     void checkProcedureActual(const Type& Formal, const std::string& ParamName,
                               const ExprNode& Arg);
 
+    // ---- Turbo procedural TYPES and VALUES ----
+    // Whether \p Id is a bare identifier that may stand for the routine it
+    // names (rather than for a call to it): true only when Symtab finds a
+    // non-parameter, non-nested SymbolKind::Proc under that name.  Used to
+    // decide, from syntax alone, whether a caller should route through
+    // checkRoutineValue instead of the ordinary checkExpr/checkIdent call
+    // reading.
+    [[nodiscard]] bool isRoutineNameCandidate(const IdentExpr& Id) const;
+    // \p Id is being used where a routine's own value is wanted -- the direct
+    // operand of `@`, or the direct RHS of an assignment to a procedural
+    // variable.  Resolves it to that routine's own callable Type (marking
+    // Id.Resolution = RoutineReference), or reports why it cannot be one --
+    // a procedural PARAMETER (its capture status is not known here) or a
+    // NESTED routine (no frame slot exists to carry one) -- and returns
+    // TyErr.  Caller-checked (isRoutineNameCandidate) rather than
+    // self-guarding with a null return, so every call site is explicit about
+    // when it is and is not asking this question.
+    [[nodiscard]] std::shared_ptr<Type> checkRoutineValue(const IdentExpr& Id);
+
     // Folds both bounds of an index type or subrange, reporting ID against
     // whichever is not constant.  Nothing means the type cannot be formed.
     [[nodiscard]] std::optional<std::pair<int64_t, int64_t>>

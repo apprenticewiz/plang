@@ -1494,6 +1494,12 @@ void Sema::checkProcSignature(const ProcDecl& Proc) {
     S.ReturnType = Ret;
     S.Decl       = &Proc;
     S.DeclLoc    = Proc.Loc;
+    // Turbo procedural VALUES (see Symbol::IsNested's own comment): this
+    // Proc's signature is being checked while CurrentProc is whatever
+    // ENCLOSING routine's block Proc was declared inside, or null at the
+    // program's own top level -- checkProcBody does not set CurrentProc to
+    // &Proc itself until Phase 5b reaches this same Proc's own body, later.
+    S.IsNested   = (CurrentProc != nullptr);
     (void)Symtab.define(std::move(S));
 }
 

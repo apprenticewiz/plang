@@ -831,6 +831,22 @@ std::shared_ptr<Type> Sema::checkBinary(const BinaryExpr& E) {
 }
 
 std::shared_ptr<Type> Sema::checkUnary(const UnaryExpr& E) {
+    // Turbo `@g` where g bare-names a routine: real Turbo Pascal's `@` on a
+    // procedure/function identifier always yields a reference to the
+    // routine itself, regardless of where the result is used -- unlike
+    // `f := g` (checkAssign's own arm), this needs no destination-type
+    // context to disambiguate, since '@' is itself the unambiguous marker.
+    // Decided before the generic checkExpr(*E.Operand) just below, which
+    // would otherwise apply checkIdent's ordinary rule to a bare Proc-kind
+    // identifier -- an implicit zero-argument call for a function, or
+    // err_proc_as_value outright for a procedure -- to what is written here
+    // as this operator's OWN operand, not an ordinary read.
+    if (E.Op == TokenKind::At) {
+        if (auto* Id = llvm::dyn_cast<IdentExpr>(E.Operand.get());
+                Id && isRoutineNameCandidate(*Id))
+            return checkRoutineValue(*Id);
+    }
+
     auto T = checkExpr(*E.Operand);
     if (T->isError()) return TyErr;
     if (T->isRestricted()) {
@@ -1211,6 +1227,20 @@ std::shared_ptr<Type> Sema::checkCallExpr(const CallExpr& E) {
             }
             return Sym->ReturnType ? Sym->ReturnType : TyErr;
         }
+        // TP-only: Assigned(p) -- p must be a pointer or a procedural value;
+        // anything else has no nil to compare against.  Mirrors card's own
+        // shape check just above (issue #261's own class of gap: an argument
+        // that type-checked regardless reached codegen with nothing there to
+        // lower it correctly).
+        if (Lo == "assigned" && !E.Args.empty()) {
+            auto ArgTy = checkExpr(*E.Args[0]);
+            if (ArgTy->isError()) return TyBool;
+            if (ArgTy->Kind != TypeKind::Pointer && !isCallable(*ArgTy)) {
+                error(E.Args[0]->Loc, diag::err_assigned_argument, {Lo, ArgTy->Name});
+                return TyBool;
+            }
+            return TyBool;
+        }
         // EP §6.7.6.2: math functions extended to complex — return complex when
         // the argument is complex, real otherwise.
         if (!E.Args.empty() && (Lo == "sqrt" || Lo == "sin" || Lo == "cos"
@@ -1268,6 +1298,12 @@ std::shared_ptr<Type> Sema::checkCallExpr(const CallExpr& E) {
         for (const auto& Arg : E.Args) (void)checkExpr(*Arg);
         return Sym->ReturnType ? Sym->ReturnType : TyErr;
     }
+    // Turbo procedural VALUES: checkUserDefinedCall's own Var-kind arm reads
+    // this as an indirect call, but Sym here is 'f' itself -- Phase 7's
+    // unused-variable audit (Sema.cpp) only ever looks at SymbolKind::Var,
+    // so without this, calling f and never otherwise reading it warned f
+    // unused despite the call being exactly a use of it.
+    if (Sym->Kind == SymbolKind::Var) Sym->Referenced = true;
     return checkUserDefinedCall(*Sym, E.Loc, E.Args, /*expectFunction=*/true);
 }
 
@@ -1691,6 +1727,26 @@ std::shared_ptr<Type>
 Sema::checkUserDefinedCall(const Symbol& Sym, SourceLocation CallLoc,
                            std::span<const std::unique_ptr<ExprNode>> Args,
                            bool ExpectFunction) {
+    // Turbo procedural VALUES: 'f(...)' where f names a procedural VARIABLE
+    // (an ordinary Var, not a declared routine -- SymbolKind::Proc is a
+    // DECLARATION, and f is not one) is an indirect call through whatever
+    // routine f currently holds.  Sym itself carries none of
+    // IsFunction/Params/ReturnType -- those live on Sym.Ty, the Procedure/
+    // Function Type SemaType.cpp's ProcedureTypeNode arm built when f's
+    // procedural type was resolved -- so they are borrowed into a
+    // routine-shaped stand-in and this same function is asked again with
+    // it, once, so every check below (arity, argument congruity, the
+    // {$X+}/ExpectFunction discard rule) runs exactly as it does for a
+    // genuinely declared routine, with no second copy of any of it.
+    if (Sym.Kind == SymbolKind::Var && Sym.Ty && isCallable(*Sym.Ty)) {
+        Symbol Indirect;
+        Indirect.Kind       = SymbolKind::Proc;
+        Indirect.Name       = Sym.Name;
+        Indirect.IsFunction = Sym.Ty->Kind == TypeKind::Function;
+        Indirect.Params     = Sym.Ty->Params;
+        Indirect.ReturnType = Sym.Ty->RetType;
+        return checkUserDefinedCall(Indirect, CallLoc, Args, ExpectFunction);
+    }
     if (Sym.Kind != SymbolKind::Proc) {
         error(CallLoc, diag::err_not_callable, {Sym.Name});
         for (const auto& A : Args) (void)checkExpr(*A);
@@ -1835,6 +1891,63 @@ void Sema::checkProcedureActual(const Type& Formal, const std::string& ParamName
         error(Arg.Loc, diag::err_proc_param_not_congruous,
               {Id->Name, Got, ParamName, Want});
     }
+}
+
+// ---------------------------------------------------------------------------
+// Turbo procedural TYPES and VALUES
+// ---------------------------------------------------------------------------
+
+bool Sema::isRoutineNameCandidate(const IdentExpr& Id) const {
+    const Symbol* S = Symtab.lookup(Id.Name);
+    return S && S->Kind == SymbolKind::Proc;
+}
+
+std::shared_ptr<Type> Sema::checkRoutineValue(const IdentExpr& Id) {
+    // Callers only reach here once isRoutineNameCandidate (or an equivalent
+    // direct lookup) has already found a SymbolKind::Proc under this name;
+    // re-looked-up rather than passed in so this function is self-contained
+    // and every call site reads the same way.
+    Symbol* Sym = Symtab.lookup(Id.Name);
+    if (!Sym || Sym->Kind != SymbolKind::Proc) {
+        // Not reachable through either call site below, but a defensive
+        // answer costs nothing and keeps this function total.
+        error(Id.Loc, diag::err_undefined_identifier, {Id.Name});
+        return TyErr;
+    }
+    Sym->Referenced = true;
+
+    // A procedural PARAMETER is itself a {entry point, frame} pair received
+    // at run time, and what it is bound to -- possibly a nested, capturing
+    // routine from some other activation entirely -- is not knowable here.
+    // Storing just its entry point into a procedural variable's flat pointer
+    // would silently drop that frame, so this is refused outright rather
+    // than only for a parameter PROVEN to be bound to something that
+    // captures -- symmetrical with the nested-routine refusal just below,
+    // and for the same reason (err on the side of rejecting more).
+    if (Sym->IsProcParam) {
+        error(Id.Loc, diag::err_procval_of_proc_param, {Id.Name});
+        Id.Resolution = IdentExpr::IdentResolution::RoutineReference;
+        return TyErr;
+    }
+    // See Symbol::IsNested's own comment: a nested routine may read/write its
+    // enclosing activation's variables through a static link that a
+    // procedural variable -- one flat pointer, no frame slot -- cannot
+    // carry.  Assigning one in here would compile cleanly and dangle the
+    // moment the defining activation returns; real Turbo Pascal disallows
+    // this outright, and so does plang.
+    if (Sym->IsNested) {
+        error(Id.Loc, diag::err_procval_of_nested_routine, {Id.Name});
+        Id.Resolution = IdentExpr::IdentResolution::RoutineReference;
+        return TyErr;
+    }
+
+    Id.Resolution = IdentExpr::IdentResolution::RoutineReference;
+    auto T  = std::make_shared<Type>();
+    T->Kind = Sym->IsFunction ? TypeKind::Function : TypeKind::Procedure;
+    T->Params  = Sym->Params;
+    T->RetType = Sym->ReturnType;
+    T->Name    = describeCallable(*T);
+    return T;
 }
 
 /// The ordinal index type of \p T's outermost dimension, for an actual that
@@ -2381,6 +2494,25 @@ bool Sema::isAssignCompatible(const Type& Dst, const Type& Src,
                 return isIdenticalType(Dst.PointeeType, Src.PointeeType)
                     || schemaInstMatch(*Dst.PointeeType, *Src.PointeeType);
 
+            // Turbo procedural VALUES: ISO §6.6.3.6's own congruity rule --
+            // same parameter shapes and, for a function, the same result
+            // type -- is exactly what a procedural VARIABLE's assignment
+            // needs too, and congruousSignature already implements it
+            // (recursing through sameParamType for a nested procedural
+            // parameter).  Not reached for a procedural PARAMETER's own
+            // congruity check, which calls congruousSignature directly
+            // (checkProcedureActual) rather than through an assignment;
+            // this arm exists for isAssignCompatible's OWN callers --
+            // checkAssign chief among them, once Dst.Kind/Src.Kind are both
+            // Procedure or both Function -- which had no case here at all
+            // before procedural VARIABLES existed to reach it, and fell to
+            // the default `Dst.Name == Src.Name` string comparison below,
+            // a strictly weaker and coincidence-prone stand-in for the real
+            // structural check.
+            case TypeKind::Procedure:
+            case TypeKind::Function:
+                return congruousSignature(Dst, Src);
+
             default:
                 return Dst.Name == Src.Name;
         }
@@ -2392,6 +2524,11 @@ bool Sema::isAssignCompatible(const Type& Dst, const Type& Src,
     if (Dst.Kind == TypeKind::Complex && Src.Kind == TypeKind::Complex) return true;
     if (Dst.Kind == TypeKind::String  && Src.Kind == TypeKind::Char)    return true;
     if (Dst.Kind == TypeKind::Pointer && Src.Kind == TypeKind::Nil)     return true;
+    // Turbo procedural VALUES: 'f := nil' clears a procedural variable, and
+    // is what Assigned(f) then reports false for -- the same relationship
+    // Pointer/Nil just above already has.
+    if ((Dst.Kind == TypeKind::Procedure || Dst.Kind == TypeKind::Function)
+            && Src.Kind == TypeKind::Nil) return true;
     // A set literal is compatible with any set destination type.
     if (Dst.Kind == TypeKind::Set && Src.Kind == TypeKind::Set
         && (Src.Name == "set literal" || Src.Name == "[]")) return true;

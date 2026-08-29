@@ -214,6 +214,18 @@ public:
         return buildArray(std::move(idx), std::move(elem), packed);
     }
 
+    /// What --target= (LangOptions::PointerWidthBits) resolved to, or 64 when
+    /// none was given -- the same width stamped onto every Pointer, Nil and
+    /// String Type this context mints (see this class's own constructor
+    /// comment).  Exposed so a caller that mints its OWN Type object for a
+    /// pointer-shaped kind TypeContext has no factory for -- Procedure/
+    /// Function, resolved directly in SemaType.cpp's ProcedureTypeNode arm
+    /// rather than through a getXxx() here (ISO §6.6.3.6 congruity compares
+    /// these structurally, so interning would buy nothing) -- can stamp the
+    /// same target-correct width rather than leaving Type::Width at its
+    /// struct-default.
+    unsigned pointerWidthBits() const { return PointerWidthBits_; }
+
     /// Canonical pointer type.
     std::shared_ptr<Type> getPointer(std::shared_ptr<Type> base) {
         std::string k = "ptr:" + addrKey(base);

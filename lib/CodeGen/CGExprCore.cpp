@@ -55,6 +55,27 @@ llvm::Value* CGExprCore::emitExpr(const ExprNode& e) {
     }
 
     if (auto* n = llvm::dyn_cast<IdentExpr>(&e)) {
+        // Turbo procedural VALUES: Sema (checkRoutineValue) has already
+        // decided this exact occurrence names a non-nested, non-parameter
+        // routine used for ITS OWN VALUE -- the direct operand of `@`, or
+        // the direct RHS of an assignment to a procedural variable -- not a
+        // call.  Ahead of every other IdentExpr case in this function,
+        // including the ordinary "bare function identifier is an implicit
+        // call" ones below: those apply to how a name reads in an ordinary
+        // expression, and this one is not that; it is the one syntactic
+        // position where a bare routine name is a reference instead.  What
+        // it produces is the routine's own LLVM Function*, which as a bare
+        // Value* already has the flat pointer shape (`ptr` under opaque
+        // pointers) a procedural variable's storage holds -- no closure
+        // cell, no frame, matching CGTypes::llvmTypeOfSemaTypeImpl's
+        // Procedure/Function case.
+        if (n->Resolution == IdentExpr::IdentResolution::RoutineReference) {
+            const std::string mangled = Linkage.findMangledProc(n->Name);
+            if (auto* fn = Mod.getFunction(mangled)) return fn;
+            codegenICE("routine '" + n->Name + "' resolved to a procedural "
+                       "value but has no definition ('" + mangled
+                       + "') in this module");
+        }
         // In Pascal, eof and eoln may appear without parentheses.
         // The parser sees them as IdentExpr; route them to the runtime here.
         // A program that declares the name means its own, so what it declared

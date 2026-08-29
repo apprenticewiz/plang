@@ -562,6 +562,14 @@ std::shared_ptr<Type> Sema::resolveTypeImpl(const TypeNode& Node) {
         // nothing and the cache key would have to encode the whole signature.
         auto T  = std::make_shared<Type>();
         T->Kind = N->IsFunction ? TypeKind::Function : TypeKind::Procedure;
+        // Turbo procedural VALUES: CodeGen lowers a VARIABLE of this type as
+        // one flat function pointer (never the {entry point, frame} pair a
+        // PARAMETER of the same denoter gets -- see ClosureAndCallABI's own
+        // comment), so Sema::byteSizeOf/byteAlignOf need a real width here
+        // the same way TypeContext::getPointer already gives Pointer/Nil/
+        // String -- see pointerWidthBits' own comment for why this mints
+        // its own Type rather than going through a TypeContext factory.
+        T->Width = Ctx_.pointerWidthBits();
         for (const auto& Pg : N->Params) {
             auto Pt = resolveParamType(*Pg.Type);
             for (const auto& Nm : Pg.Names)
@@ -1636,6 +1644,13 @@ uint64_t Sema::byteAlignOf(const Type& T) {
     case TypeKind::String:
     case TypeKind::Pointer:
     case TypeKind::Nil:         return T.Width / 8;
+    // Turbo procedural VALUES: a flat function pointer (T.Width stamped the
+    // same way, in SemaType.cpp's ProcedureTypeNode arm -- see its own
+    // comment); a PARAMETER of this same denoter never reaches byteSizeOf/
+    // byteAlignOf at all, being sized by its own {entry point, frame}
+    // ClosureAndCallABI ABI instead.
+    case TypeKind::Procedure:
+    case TypeKind::Function:    return T.Width / 8;
     case TypeKind::VarString:   return 8;   // the length field leads it
     case TypeKind::File:        return 8;   // a pointer leads PascalFile
     case TypeKind::Array:       return T.ElemType ? byteAlignOf(*T.ElemType) : 1;
@@ -1669,6 +1684,9 @@ std::optional<uint64_t> Sema::byteSizeOf(const Type& T, FieldOffsets* Offsets) {
     case TypeKind::String:
     case TypeKind::Pointer:
     case TypeKind::Nil:         return T.Width / 8;
+    // Turbo procedural VALUES; see the identical case in byteAlignOf.
+    case TypeKind::Procedure:
+    case TypeKind::Function:    return T.Width / 8;
     // EP §6.4.3.3: { i64 length, [capacity x i8] }.
     case TypeKind::VarString:
         return roundUp(8 + static_cast<uint64_t>(T.StrCapacity > 0 ? T.StrCapacity

@@ -23,6 +23,14 @@ void CGProcCall::emitCallStmt(const CallStmt& s) {
         return;
     }
 
+    // Turbo procedural VALUES: see CGFuncCall::emitUserFuncCall's identical
+    // arm -- an indirect call through whatever routine s.Name's variable
+    // currently holds.
+    if (auto* pve = SymTab.findVar(s.Name); pve && pve->isProcVar) {
+        (void)ClosureAbi.emitProcVarCall(*pve, s.Args);
+        return;
+    }
+
     // ISO §6.2.2.10: a required procedure identifier may be redeclared, and
     // then it denotes what the program declared and not the required one.  The
     // chain below dispatches on spelling alone, so without this a program that

@@ -79,6 +79,29 @@ struct Symbol {
     /// is not a name codegen can resolve to a function — the value arrives at
     /// run time — and it cannot itself be redeclared or forward-declared.
     bool IsProcParam{false};
+    /// Turbo procedural VALUES: true when this Proc symbol's own declaration
+    /// is textually nested inside another procedure or function's block --
+    /// i.e. NOT declared at the enclosing program/module's top level.  Set
+    /// once, in Sema::checkProcSignature, from whether CurrentProc is
+    /// non-null at the point this symbol is defined (CurrentProc is the
+    /// ENCLOSING routine whose block is being checked, saved/restored by
+    /// checkProcBody around each nested one's own body -- so this is exactly
+    /// "was CurrentProc already someone else's activation when this name was
+    /// declared", with no capture analysis needed).
+    ///
+    /// A nested routine may read and write its enclosing activation's
+    /// variables through a static link, which is why a procedural PARAMETER
+    /// (IsProcParam above) is carried as a {entry point, frame} pair -- see
+    /// ClosureAndCallABI.  A procedural VARIABLE has no frame slot at all: it
+    /// lowers as one flat pointer.  Assigning a nested routine's reference to
+    /// one would compile cleanly and crash or corrupt memory the first time
+    /// it is called after the defining activation has returned (a dangling
+    /// static link), so Sema::checkRoutineValue refuses it outright here,
+    /// rather than only for a routine PROVEN to capture something -- every
+    /// nested routine is refused, capturing or not, since that is the
+    /// simplest rule that is never wrong.  Real Turbo Pascal disallows this
+    /// the same way.
+    bool IsNested{false};
     /// Parameters of the procedure or function.
     std::vector<plang::Type::Param> Params;
     /// Return type; null for procedures.

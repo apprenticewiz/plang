@@ -369,6 +369,96 @@ ClosureAndCallABI::emitProcParamCall(const VarEntry& ve,
     return call;
 }
 
+llvm::FunctionType* ClosureAndCallABI::procVarFnType(const ProcedureTypeNode& node) {
+    // No leading frame parameter -- the one difference from procParamFnType,
+    // whose own comment explains why every OTHER shape (a conformant array's
+    // pointer + lo/hi pair per dimension, a schema's body pointer + one i64
+    // per discriminant, a nested procedural parameter's own {entry point,
+    // frame} pair) is identical: those are properties of an ARGUMENT, and a
+    // procedural variable's parameter list takes arguments the same way any
+    // other routine's does. -std=turbo has no conformant-array or schema
+    // syntax at all (Opts.extendedPascal() gates both, and procedural TYPES
+    // are Opts.turbo()-gated), so unlike procParamFnType this never has to
+    // build those two shapes; a nested procedural parameter is still
+    // possible (ISO §6.6.3.1's own parameter form is not turbo-gated) and is
+    // handled the same ptr+ptr way procParamFnType handles it.
+    std::vector<llvm::Type*> params;
+    for (const auto& pg : node.Params) {
+        const bool isProc =
+            llvm::dyn_cast<ProcedureTypeNode>(pg.Type.get()) != nullptr;
+        for (size_t i = 0; i < pg.Names.size(); ++i) {
+            if (isProc) {
+                params.push_back(PtrTy); // entry point
+                params.push_back(PtrTy); // its own frame
+            } else {
+                params.push_back(pg.IsVar ? PtrTy : Types.llvmTypeOfNode(*pg.Type));
+            }
+        }
+    }
+    llvm::Type* ret = node.ReturnType ? Types.llvmTypeOfNode(*node.ReturnType)
+                                      : llvm::Type::getVoidTy(Ctx);
+    return llvm::FunctionType::get(ret, params, false);
+}
+
+llvm::Value*
+ClosureAndCallABI::emitProcVarCall(const VarEntry& ve,
+                                    std::span<const std::unique_ptr<ExprNode>> argExprs) {
+    if (!ve.procType)
+        codegenICE("call through a procedural variable with no signature");
+
+    auto* fnTy   = procVarFnType(*ve.procType);
+    // ve.ptr is the variable's OWN storage (an ordinary flat-pointer slot,
+    // never a {entry point, frame} cell -- see VarEntry::isProcVar's own
+    // comment), so the callee address is simply what is stored there.
+    auto* callee = B.CreateLoad(PtrTy, ve.ptr, "procvar.fn");
+
+    std::vector<llvm::Value*> args;
+    size_t flat = 0;
+    for (const auto& pg : ve.procType->Params) {
+        auto* inner = llvm::dyn_cast<ProcedureTypeNode>(pg.Type.get());
+        for (size_t k = 0; k < pg.Names.size(); ++k, ++flat) {
+            if (flat >= argExprs.size()) break;
+            const auto& a = *argExprs[flat];
+            if (inner) {
+                // Relaying a routine name (or an already-received procedural
+                // parameter) into a nested procedural-parameter slot of this
+                // variable's own signature -- exactly what a direct call's
+                // identical arm (CGFuncCall/CGProcCall's ProcParamArg check)
+                // does, reused rather than reimplemented.
+                pushProcParamArgs(args, a, *inner);
+            } else if (pg.IsVar) {
+                args.push_back(EmitLValue(a));
+            } else {
+                std::optional<int64_t> destSetBase;
+                if (pg.Type->ResolvedType
+                    && pg.Type->ResolvedType->Kind == TypeKind::Set)
+                    destSetBase = setOffsetOf(*pg.Type->ResolvedType);
+                args.push_back(Sets.alignSetArg(
+                    EmitCallArg(a,
+                        args.size() < fnTy->getNumParams()
+                            ? fnTy->getParamType(args.size())
+                            : nullptr,
+                        /*byRef=*/false),
+                    a, destSetBase));
+            }
+        }
+    }
+
+    auto* call = B.CreateCall(fnTy, callee, args);
+    if (fnTy->getReturnType()->isVoidTy()) return nullptr;
+    // A string result comes back as the whole { length, bytes } struct; see
+    // emitProcParamCall's identical spill for why every consumer of a string
+    // expression instead expects its address.
+    const Type* retTy = ve.procType->ReturnType
+                       ? ve.procType->ReturnType->ResolvedType.get() : nullptr;
+    if (varStrTypeOf(retTy) && call->getType()->isStructTy()) {
+        auto* tmp = CreateEntryAlloca(call->getType(), "str.ret");
+        B.CreateStore(call, tmp);
+        return tmp;
+    }
+    return call;
+}
+
 unsigned ClosureAndCallABI::schemaParamDiscCount(const TypeNode* t) const {
     if (!t || !t->ResolvedType || t->ResolvedType->Kind != TypeKind::Schema)
         return 0;

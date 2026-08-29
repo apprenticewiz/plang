@@ -176,6 +176,13 @@ BUILTIN(Exit,         "exit",         Proc, TP, 0, 1, R_None)
 BUILTIN(Break,        "break",        Proc, TP, 0, 0, R_None)
 BUILTIN(Continue,     "continue",     Proc, TP, 0, 0, R_None)
 
+// -std=turbo only: Assigned(p) -- true iff p, a pointer or a procedural
+// value, is not nil.  Real Borland/FPC's own Assigned; plang's checkCallExpr/
+// checkCallStmt each have a dedicated arm restricting the argument to a
+// pointer or procedural (Procedure/Function) type, matching the shape check
+// every other single-typed-argument builtin above (Card, Odd, ...) gets.
+BUILTIN(Assigned,     "assigned",     Func, TP, 1, 1, R_Bool)
+
 #undef ALL
 #undef TP
 #undef EP

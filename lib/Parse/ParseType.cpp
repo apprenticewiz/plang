@@ -258,6 +258,43 @@ std::unique_ptr<TypeNode> Parser::parseTypeExpr() {
             return Node;
         }
 
+        // Turbo procedural TYPE denoter: `type TProc = procedure(x: integer);`
+        // / `function(...): T`, written wherever any other type-denoter could
+        // be -- a type declaration, a var/field/array-element type, and so on.
+        // ISO §6.6.3.1's own `procedure`/`function` case (a procedural or
+        // functional PARAMETER, written as the whole heading of what it will
+        // receive) is parsed by parseProcedureParamGroup, reached from
+        // parseParamGroup BEFORE this switch is ever entered for a
+        // parameter's own heading -- so this arm is reached only for a
+        // procedural VALUE's own type, which ISO 7185/Extended Pascal have no
+        // syntax for at all (only the parameter form).  Gated to -std=turbo,
+        // the same way TokenKind::Bindable above is gated to extendedPascal():
+        // under any other dialect this falls through to the same
+        // err_expected_type_expr the default arm gives every unrecognized
+        // leading token.
+        case TokenKind::Procedure:
+        case TokenKind::Function: {
+            if (!Opts.turbo()) {
+                emitError(Loc.toLoc(), diag::err_expected_type_expr, {describe(Current.Kind)});
+                advance();
+                auto Node  = std::make_unique<NamedTypeNode>();
+                Node->Loc  = Loc;
+                Node->Name = "<error>";
+                return Node;
+            }
+            const bool IsFunction = check(TokenKind::Function);
+            advance();
+            auto PT        = std::make_unique<ProcedureTypeNode>();
+            PT->Loc        = Loc;
+            PT->IsFunction = IsFunction;
+            PT->Params     = parseParamList();
+            if (IsFunction) {
+                expect(TokenKind::Colon);
+                PT->ReturnType = parseTypeExpr();
+            }
+            return PT;
+        }
+
         default: {
             emitError(Loc.toLoc(), diag::err_expected_type_expr, {describe(Current.Kind)});
             advance(); // consume unknown token to prevent loops

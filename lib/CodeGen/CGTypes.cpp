@@ -364,6 +364,16 @@ llvm::Type* CGTypes::llvmTypeOfNode(const TypeNode& node) {
         return structTypeFor(*n);
 
     if (llvm::dyn_cast<PointerTypeNode>(&node))   return ptrTy;
+    // Turbo procedural VALUES: this arm is reached only for a procedural
+    // TYPE'S own denoter -- a variable, a record field, an array element,
+    // and so on -- never for a procedural PARAMETER's ProcedureTypeNode,
+    // which CodeGenProcs.cpp's parameter loop matches and lowers to its own
+    // {entry point, frame} ABI shape BEFORE ever calling llvmTypeOfNode on
+    // it (see the `if (auto* pt = llvm::dyn_cast<ProcedureTypeNode>(...))`
+    // arm there, which `continue`s past the rest of that loop).  A
+    // procedural VARIABLE has no frame slot to carry, so it lowers as one
+    // flat pointer, same as PointerTypeNode just above.
+    if (llvm::dyn_cast<ProcedureTypeNode>(&node)) return ptrTy;
     // A subrange and an enumeration are as wide as Sema resolved them to be.
     // Answering i64 here regardless is what would make the two readings of a
     // narrow type disagree, and the check at the end of llvmTypeOfNodeChecked
@@ -475,6 +485,8 @@ bool CGTypes::canLowerSemaType(const Type& T) {
     case TypeKind::Pointer:  case TypeKind::Nil:      case TypeKind::VarString:
     case TypeKind::File:     case TypeKind::Array:    case TypeKind::Record:
     case TypeKind::ConformantArray:
+    // Turbo procedural VALUES: see llvmTypeOfSemaTypeImpl's identical case.
+    case TypeKind::Procedure: case TypeKind::Function:
         return true;
     case TypeKind::SchemaInstance:
         return T.SchemaBody && canLowerSemaType(*T.SchemaBody);
@@ -830,6 +842,13 @@ llvm::Type* CGTypes::llvmTypeOfSemaTypeImpl(const Type& T) {
             codegenICE("schema instance '" + T.Name + "' has no resolved body");
         case TypeKind::ConformantArray:
             // Passed by reference; the bounds travel alongside as separate args.
+            return ptrTy;
+        // Turbo procedural VALUES: a flat function pointer, never the
+        // {entry point, frame} pair a PARAMETER of this same denoter gets
+        // (see llvmTypeOfNode's identical ProcedureTypeNode arm, and
+        // ClosureAndCallABI's own top comment for why the two ABIs differ).
+        case TypeKind::Procedure:
+        case TypeKind::Function:
             return ptrTy;
         default:
             codegenICE("no LLVM type for semantic type '" + T.Name + "'");

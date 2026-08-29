@@ -78,6 +78,20 @@ struct VarEntry {
     // to another activation is not something this one may name.
     bool                       isProcParam{false};
     const plang::ProcedureTypeNode* procType{nullptr};
+    /// Turbo procedural VALUES: set for a VARIABLE (not a formal parameter --
+    /// isProcParam above, and this flag, are never both true) whose declared
+    /// type is itself callable.  Unlike isProcParam's {entry point, frame}
+    /// cell, ptr here is the address of an ordinary flat-pointer slot (`ptr`
+    /// itself, loaded/stored exactly like any other pointer-shaped
+    /// variable) holding just the entry point -- no frame, since a
+    /// procedural variable is never assigned a nested/capturing routine
+    /// (Sema::checkRoutineValue refuses that at the assignment).  procType
+    /// (shared with isProcParam, mutually exclusive at any one VarEntry) is
+    /// still the routine's own signature, resolved once at this variable's
+    /// declaration by CGSymbolTable::defVar walking NamedTypeNode::Denotes,
+    /// and is what an indirect call through it (ClosureAndCallABI::
+    /// emitProcVarCall) builds its LLVM FunctionType from.
+    bool                       isProcVar{false};
     /// EP §6.4.7: a `with`-bound field of a run-time-laid-out record has a
     /// capacity its object carries, and once bound it is an ordinary name
     /// with no path back to the object.  Recorded here so that
