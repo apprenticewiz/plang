@@ -87,7 +87,19 @@ void CGControlFlow::emitFor(const ForStmt& s) {
 
     B.CreateBr(condBB);
 
-    const bool uns = OrdinalIsUnsigned(s.From->ResolvedType.get())
+    // s.VarType (the control variable's own declared type; see its comment,
+    // AstStmt.h) has to be consulted too, not just the bounds: both fromVal
+    // and limitVal above are already coerced into the CONTROL VARIABLE's
+    // storage width before the compare below ever runs, so what the compare
+    // must respect is that storage's signedness.  From/Limit's own types
+    // are ordinarily the same signedness (a bound that is itself a variable
+    // or typed constant matches the loop variable it is assignment-
+    // compatible with), but a bare integer literal bound is always the
+    // dialect's plain signed Integer regardless of value -- `for w := 0 to
+    // 65535 do` with `w: Word` used to read 65535 (truncated into Word's
+    // 16 bits, the all-ones bit pattern) as -1 and run zero iterations.
+    const bool uns = OrdinalIsUnsigned(s.VarType.get())
+                     || OrdinalIsUnsigned(s.From->ResolvedType.get())
                      || OrdinalIsUnsigned(s.Limit->ResolvedType.get());
 
     B.SetInsertPoint(condBB);
