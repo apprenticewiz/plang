@@ -25,8 +25,8 @@ RUN: %run %t | FileCheck --strict-whitespace --match-full-lines %s
 
 (*
 CHECK:6
-CHECK-NEXT:false
-CHECK-NEXT:true
+CHECK-NEXT:FALSE
+CHECK-NEXT:TRUE
 CHECK-NEXT:7
 *)
 

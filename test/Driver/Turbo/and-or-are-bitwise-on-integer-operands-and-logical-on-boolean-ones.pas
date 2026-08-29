@@ -21,10 +21,10 @@ RUN: %run %t | FileCheck --strict-whitespace --match-full-lines %s
 (*
 CHECK:1
 CHECK-NEXT:7
-CHECK-NEXT:false
-CHECK-NEXT:true
-CHECK-NEXT:true
-CHECK-NEXT:false
+CHECK-NEXT:FALSE
+CHECK-NEXT:TRUE
+CHECK-NEXT:TRUE
+CHECK-NEXT:FALSE
 *)
 
 program bitwise_and_or;

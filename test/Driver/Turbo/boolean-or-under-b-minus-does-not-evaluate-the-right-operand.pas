@@ -11,7 +11,7 @@ RUN: %run %t | FileCheck --strict-whitespace --match-full-lines %s
 *)
 
 (*
-CHECK:b=true
+CHECK:b=TRUE
 *)
 
 program or_short_circuit;

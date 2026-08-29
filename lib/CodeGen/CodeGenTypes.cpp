@@ -216,6 +216,7 @@ void Codegen::Impl::init(const std::string& progName) {
     builtinIO_ = std::make_unique<BuiltinIO>(ctx, *mod, builder,
         *fileVarHelpers_, *runtimeFns_, *strings_, *schemaAccess_,
         *strCallMarshal_, *complexOps_, *symTab_, *rangeGuards_, *cgTypes_,
+        langOpts,
         i8Ty, i64Ty, dblTy, ptrTy,
         [this](const ExprNode& e){ return emitExpr(e); },
         [this](const ExprNode& e){ return emitLValue(e); },

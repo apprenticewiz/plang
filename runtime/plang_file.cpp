@@ -87,6 +87,11 @@ static void setBinding(PascalFile *F, const char *Name);
 [[noreturn]] void plang_err_seek_failed(const char *Op, int64_t N);
 [[noreturn]] void plang_err_read_format(const char *Op);
 [[noreturn]] void plang_err_read_int_range(const char *Op, const char *Tok);
+/// Turbo's own numbered run-time error reporter -- see plang_io.cpp's own
+/// comment on this (shared with plang_sys.cpp's RangeCheckGuards precedent)
+/// for why plang_read_file_i64_turbo/plang_read_file_f64_turbo below call it
+/// directly instead of going through a CodeGen-emitted guard.
+[[noreturn]] void plang_tp_runerror(int64_t Code);
 
 /// Look at the next character without consuming it.
 static void prime(PascalFile *F) {
@@ -650,6 +655,54 @@ static char *scanNumberFile(PascalFile *F, bool Real, bool &SawAny) {
     return NumTokBuf;
 }
 
+/// Turbo's whole-token file reader -- the file-runtime twin of
+/// plang_io.cpp's scanTokenTurbo, against the file's own lookahead window
+/// instead of plangInCh/plangInUnget, for the same "text-file reads and
+/// stdin/readstr reads are two independent implementations" reason
+/// scanNumberFile's own comment gives.  Skips leading blanks, then collects
+/// the WHOLE next whitespace-delimited token with no number-shaped
+/// filtering, so plang_read_file_i64_turbo/plang_read_file_f64_turbo can
+/// require the entire token to parse rather than just its longest
+/// number-shaped prefix.
+static char *scanTokenTurboFile(PascalFile *F, bool &SawAny) {
+    std::size_t N = 0;
+    auto reserve = [&](std::size_t Need) {
+        if (Need <= NumTokCap) return;
+        std::size_t NewCap = NumTokCap ? NumTokCap : 64;
+        while (NewCap < Need) NewCap *= 2;
+        if (char *P = static_cast<char *>(std::realloc(NumTokBuf, NewCap))) {
+            NumTokBuf = P;
+            NumTokCap = NewCap;
+        }
+    };
+    auto put = [&](int C) {
+        reserve(N + 2);
+        if (N + 1 < NumTokCap) NumTokBuf[N++] = static_cast<char>(C);
+    };
+
+    reserve(1);
+    skipBlanksFile(F);
+    SawAny = (F->Buf != EOF);
+    while (F->Buf != EOF && F->Buf != ' ' && F->Buf != '\t'
+           && F->Buf != '\n' && F->Buf != '\r') {
+        const int C = advance(F);
+        trapOnStreamError(F, "read");
+        put(C);
+    }
+    if (NumTokBuf) NumTokBuf[N] = '\0';
+    return NumTokBuf;
+}
+
+/// The file-runtime twin of plang_io.cpp's turboRadixPrefix; see its own
+/// comment for why a sign is deliberately not part of this.
+static int turboRadixPrefixFile(const char *&Tok) {
+    if (Tok[0] == '$') { ++Tok; return 16; }
+    if (Tok[0] == '0' && (Tok[1] == 'x' || Tok[1] == 'X')) { Tok += 2; return 16; }
+    if (Tok[0] == '&') { ++Tok; return 8; }
+    if (Tok[0] == '%') { ++Tok; return 2; }
+    return 10;
+}
+
 void plang_read_file_i64(PascalFile *F, int64_t *P) {
     abortIfClosed(F, "read");
     trapOnWrongDirection(F, "read", 0);
@@ -693,6 +746,46 @@ void plang_read_file_char(PascalFile *F, int8_t *P) {
     trapOnStreamError(F, "read");
     *P = static_cast<int8_t>(C == '\n' ? ' ' : C);
     unloadComponent(F);
+}
+
+// ---- Turbo read: whole-token, entire-token-must-parse, with $/0x/&/% radix
+// prefixes -- the file-runtime twins of plang_io.cpp's plang_read_i64_turbo/
+// plang_read_f64_turbo; see their own comments for the `fpc -Mtp` field
+// practice this reproduces.
+
+void plang_read_file_i64_turbo(PascalFile *F, int64_t *P) {
+    abortIfClosed(F, "read");
+    trapOnWrongDirection(F, "read", 0);
+    bool SawAny = false;
+    char *Tok = scanTokenTurboFile(F, SawAny);
+    unloadComponent(F);
+    if (!SawAny) { *P = 0; return; }                                // issue #284
+    const char *Digits = Tok ? Tok : "";
+    const int Radix = turboRadixPrefixFile(Digits);
+    char *End = const_cast<char *>(Digits);
+    errno = 0;
+    const long long V = *Digits ? std::strtoll(Digits, &End, Radix) : 0;
+    // See plang_io.cpp's plang_read_i64_turbo for why ERANGE gets the same
+    // error as a malformed token, and why a value that fits int64_t but
+    // overflows Turbo's own 16-bit Integer is not checked here at all.
+    if (!*Digits || *End != '\0' || errno == ERANGE) plang_tp_runerror(106);
+    *P = static_cast<int64_t>(V);
+}
+
+void plang_read_file_f64_turbo(PascalFile *F, double *P) {
+    abortIfClosed(F, "read");
+    trapOnWrongDirection(F, "read", 0);
+    bool SawAny = false;
+    char *Tok = scanTokenTurboFile(F, SawAny);
+    unloadComponent(F);
+    if (!SawAny) { *P = 0.0; return; }                              // issue #284
+    const char *Digits = Tok ? Tok : "";
+    char *End = const_cast<char *>(Digits);
+    const double V = *Digits ? std::strtod(Digits, &End) : 0.0;
+    if (!*Digits || *End != '\0') plang_tp_runerror(106);
+    // A real that overflows to +/-HUGE_VAL is left alone -- see the matching
+    // note in plang_io.cpp's plang_read_f64_turbo.
+    *P = V;
 }
 
 /// Fills the string(N) at S with the rest of the current line.  Excess input
@@ -777,12 +870,19 @@ void plang_str_write_file_w(PascalFile *F, const void *S, int64_t /*Cap*/,
 
 // Defined below with the rest of the field-width forms; the real writer with no
 // width is the same one with the default.
-void plang_write_file_f64_e(PascalFile *F, double V, int64_t W);
-void plang_write_file_f64_f(PascalFile *F, double V, int64_t W, int64_t D);
+void plang_write_file_f64_e(PascalFile *F, double V, int64_t W, int8_t Upper);
+void plang_write_file_f64_f(PascalFile *F, double V, int64_t W, int64_t D, int8_t Upper);
 
+// Upper: see plang_io.cpp's plang_write_bool for the convention -- CodeGen
+// resolves Turbo's TRUE/FALSE vs ISO/EP's true/false from LangOptions.turbo()
+// once, at the call site, and passes the answer in as this plain i8 flag.
 void plang_write_file_i64 (PascalFile *F, int64_t     V) { abortIfClosed(F,"write"); trapOnWrongDirection(F, "write", 1); std::fprintf(F->Fp, "%" PRId64, V); trapOnStreamError(F, "write"); }
-void plang_write_file_f64 (PascalFile *F, double      V) { plang_write_file_f64_e(F, V, PlangRealWidth); }
-void plang_write_file_bool(PascalFile *F, int8_t      V) { abortIfClosed(F,"write"); trapOnWrongDirection(F, "write", 1); std::fputs(V ? "true" : "false", F->Fp); trapOnStreamError(F, "write"); }
+void plang_write_file_f64 (PascalFile *F, double      V, int8_t Upper) { plang_write_file_f64_e(F, V, PlangRealWidth, Upper); }
+void plang_write_file_bool(PascalFile *F, int8_t      V, int8_t Upper) {
+    abortIfClosed(F,"write"); trapOnWrongDirection(F, "write", 1);
+    std::fputs(Upper ? (V ? "TRUE" : "FALSE") : (V ? "true" : "false"), F->Fp);
+    trapOnStreamError(F, "write");
+}
 void plang_write_file_char(PascalFile *F, int8_t      V) { abortIfClosed(F,"write"); trapOnWrongDirection(F, "write", 1); std::fputc(static_cast<unsigned char>(V), F->Fp); trapOnStreamError(F, "write"); }
 void plang_write_file_str (PascalFile *F, const char *S) { abortIfClosed(F,"write"); trapOnWrongDirection(F, "write", 1); std::fputs(S ? S : "", F->Fp); trapOnStreamError(F, "write"); }
 
@@ -819,20 +919,20 @@ void plang_write_file_i64_w (PascalFile *F, int64_t V, int64_t W) {
     std::fprintf(F->Fp, "%*" PRId64, checkedWidth(W), V);
     trapOnStreamError(F, "write");
 }
-void plang_write_file_f64_e (PascalFile *F, double V, int64_t W) {
+void plang_write_file_f64_e (PascalFile *F, double V, int64_t W, int8_t Upper) {
     abortIfClosed(F, "write");
     trapOnWrongDirection(F, "write", 1);
     char Buf[PlangRealMaxChars];
-    const std::size_t N = plangFormatReal(Buf, V, W);
+    const std::size_t N = plangFormatReal(Buf, V, W, Upper ? PlangRealProfileTurbo : PlangRealProfileISO);
     std::fwrite(Buf, 1, N, F->Fp);
     trapOnStreamError(F, "write");
 }
 // A negative FracDigits falls back to the same exponential format omitting
 // the decimals clause entirely produces, exactly as plang_write_file_cplx_w's
 // own per-component formatting already did before it started calling this.
-void plang_write_file_f64_f (PascalFile *F, double V, int64_t W, int64_t D) {
+void plang_write_file_f64_f (PascalFile *F, double V, int64_t W, int64_t D, int8_t Upper) {
     abortIfClosed(F,"write");
-    if (D < 0) { plang_write_file_f64_e(F, V, W); return; }
+    if (D < 0) { plang_write_file_f64_e(F, V, W, Upper); return; }
     trapOnWrongDirection(F, "write", 1);
     std::fprintf(F->Fp, "%*.*f", checkedWidth(W), checkedWidth(D), V);
     trapOnStreamError(F, "write");
@@ -841,8 +941,12 @@ void plang_write_file_f64_f (PascalFile *F, double V, int64_t W, int64_t D) {
 // tail; the `%*s` a width otherwise maps onto pads but never truncates.
 // §6.9.3.5 writes a boolean as its char-string would be written, truncation
 // included.  A negative W is written in full, as if no width had been given.
-static void writePadded(PascalFile *F, const char *S, int64_t W) {
-    if (W == 0) return;
+// Every rule here is ISO/EP's; Turbo reverses the truncating part -- \p
+// NoTrunc (see plang_io.cpp's plangOutPadded for the full rationale, checked
+// against `fpc -Mtp`) makes W a MINIMUM instead: the value is always written
+// in full, and W only ever adds padding, even when W is 0.
+static void writePadded(PascalFile *F, const char *S, int64_t W, int8_t NoTrunc) {
+    if (!NoTrunc && W == 0) return;
     trapOnWrongDirection(F, "write", 1);
     const std::size_t Len = S ? std::strlen(S) : 0;
     if (W < 0) {
@@ -850,20 +954,32 @@ static void writePadded(PascalFile *F, const char *S, int64_t W) {
         trapOnStreamError(F, "write");
         return;
     }
-    // W > 0 here: same reasoning as plang_io.cpp's plangOutPadded -- this
-    // paces its own padding loop rather than handing W to printf's `%*d`/
-    // `%*c`, so without checkedWidth's INT32_MAX trap an oversized W just
-    // pads one character at a time until it gets there (issue #247).
+    // W > 0 here (or W == 0 under NoTrunc, where checkedWidth(0) == 0 and the
+    // pad loop below simply does not run): same reasoning as plang_io.cpp's
+    // plangOutPadded -- this paces its own padding loop rather than handing W
+    // to printf's `%*d`/`%*c`, so without checkedWidth's INT32_MAX trap an
+    // oversized W just pads one character at a time until it gets there
+    // (issue #247).
     const auto Width = static_cast<std::size_t>(checkedWidth(W));
     for (std::size_t I = Len; I < Width; ++I) std::fputc(' ', F->Fp);
+    if (NoTrunc) {
+        if (Len) std::fwrite(S, 1, Len, F->Fp);
+        trapOnStreamError(F, "write");
+        return;
+    }
     if (Len) std::fwrite(S, 1, Len < Width ? Len : Width, F->Fp);
     trapOnStreamError(F, "write");
 }
-void plang_write_file_bool_w(PascalFile *F, int8_t V, int64_t W)
-    { abortIfClosed(F,"write"); writePadded(F, V ? "true" : "false", W); }
-void plang_write_file_char_w(PascalFile *F, int8_t V, int64_t W) {
+void plang_write_file_bool_w(PascalFile *F, int8_t V, int64_t W, int8_t Upper, int8_t NoTrunc) {
     abortIfClosed(F,"write");
-    if (W == 0) return;
+    writePadded(F, Upper ? (V ? "TRUE" : "FALSE") : (V ? "true" : "false"), W, NoTrunc);
+}
+// AlwaysWrite: see plang_io.cpp's plang_write_char_w for the convention
+// (checked against `fpc -Mtp`) -- Turbo's zero-width char write still
+// writes the character, where ISO/EP's writes nothing.
+void plang_write_file_char_w(PascalFile *F, int8_t V, int64_t W, int8_t AlwaysWrite) {
+    abortIfClosed(F,"write");
+    if (W == 0 && !AlwaysWrite) return;
     trapOnWrongDirection(F, "write", 1);
     if (W < 0) {
         std::fputc(static_cast<unsigned char>(V), F->Fp);
@@ -873,36 +989,36 @@ void plang_write_file_char_w(PascalFile *F, int8_t V, int64_t W) {
     std::fprintf(F->Fp, "%*c", checkedWidth(W), static_cast<unsigned char>(V));
     trapOnStreamError(F, "write");
 }
-void plang_write_file_str_w (PascalFile *F, const char *S, int64_t W)
-    { abortIfClosed(F,"write"); writePadded(F, S, W); }
+void plang_write_file_str_w (PascalFile *F, const char *S, int64_t W, int8_t NoTrunc)
+    { abortIfClosed(F,"write"); writePadded(F, S, W, NoTrunc); }
 
 // EP §6.9.3.6: a complex is written as a parenthesized pair of reals — in the
 // representation reals are written in, which is why each half goes through the
 // real writer rather than being formatted alongside the parentheses.
-void plang_write_file_cplx (PascalFile *F, double Re, double Im) {
+void plang_write_file_cplx (PascalFile *F, double Re, double Im, int8_t Upper) {
     abortIfClosed(F, "write");
     trapOnWrongDirection(F, "write", 1);
     std::fputc('(', F->Fp);
     trapOnStreamError(F, "write");
-    plang_write_file_f64(F, Re);
+    plang_write_file_f64(F, Re, Upper);
     std::fputc(',', F->Fp);
     trapOnStreamError(F, "write");
-    plang_write_file_f64(F, Im);
+    plang_write_file_f64(F, Im, Upper);
     std::fputc(')', F->Fp);
     trapOnStreamError(F, "write");
 }
 void plang_write_file_cplx_w(PascalFile *F, double Re, double Im,
-                             int64_t W, int64_t D) {
+                             int64_t W, int64_t D, int8_t Upper) {
     abortIfClosed(F,"write");
     trapOnWrongDirection(F, "write", 1);
     // plang_write_file_f64_f already picks between "%*.*f" and the
     // exponential fallback on D's sign, which used to be duplicated here.
     std::fputc('(', F->Fp);
     trapOnStreamError(F, "write");
-    plang_write_file_f64_f(F, Re, W, D);
+    plang_write_file_f64_f(F, Re, W, D, Upper);
     std::fputc(',', F->Fp);
     trapOnStreamError(F, "write");
-    plang_write_file_f64_f(F, Im, W, D);
+    plang_write_file_f64_f(F, Im, W, D, Upper);
     std::fputc(')', F->Fp);
     trapOnStreamError(F, "write");
 }

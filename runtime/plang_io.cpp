@@ -184,6 +184,49 @@ void scanNumber(bool Real, bool &SawAny) {
     if (TokBuf) TokBuf[N] = '\0';
 }
 
+/// Turbo's read/readln reverse scanNumber's "longest prefix that parses"
+/// rule: skip leading blanks, then collect the WHOLE next whitespace-
+/// delimited token with no number-shaped filtering at all, so
+/// plang_read_i64_turbo/plang_read_f64_turbo can reject anything that is not
+/// ENTIRELY a number -- `read(i)` on "12abc" reports Borland/FPC's own
+/// "Runtime error 106: Invalid numeric format" (confirmed against
+/// `fpc -Mtp`) rather than silently taking 12 -- and can see a leading
+/// $/0x/&/% radix prefix before it, which no number-shaped scan would ever
+/// let through in the first place.  Shares TokBuf/tokReserve with scanNumber
+/// above: the two are never active at once (one read call uses exactly one
+/// dialect's scanner), so there is nothing to keep separate.
+void scanTokenTurbo(bool &SawAny) {
+    std::size_t N = 0;
+    auto put = [&](int C) {
+        tokReserve(N + 2);
+        if (N + 1 < TokCap) TokBuf[N++] = static_cast<char>(C);
+    };
+
+    tokReserve(1);
+    int C = skipBlanks();
+    SawAny = (C != EOF);
+    while (C != EOF && C != ' ' && C != '\t' && C != '\n' && C != '\r') {
+        put(C);
+        C = plangInCh();
+    }
+    plangInUnget(C);
+    if (TokBuf) TokBuf[N] = '\0';
+}
+
+/// Strips a Turbo radix prefix from the front of \p Tok, if any, and reports
+/// the radix to parse what is left at.  A sign is deliberately not part of
+/// this: `fpc -Mtp` reports "Runtime error 106" for "-$FF" exactly as it
+/// does for any other malformed token, so a prefix is only ever recognized
+/// at the very front, before any sign -- decimal's own leading -/+ is left
+/// to strtoll/strtod, which already handle it.
+int turboRadixPrefix(const char *&Tok) {
+    if (Tok[0] == '$') { ++Tok; return 16; }
+    if (Tok[0] == '0' && (Tok[1] == 'x' || Tok[1] == 'X')) { Tok += 2; return 16; }
+    if (Tok[0] == '&') { ++Tok; return 8; }
+    if (Tok[0] == '%') { ++Tok; return 2; }
+    return 10;
+}
+
 void consumeLine() {
     int C;
     while ((C = plangInCh()) != EOF && C != '\n') {}
@@ -195,13 +238,23 @@ extern "C" {
 
 // The width-taking real writers are defined further down with the rest of the
 // field-width forms; the ones without a width are those with the default.
-void plang_write_f64_e(double V, int64_t W);
-void plang_write_f64_f(double V, int64_t W, int64_t D);
+void plang_write_f64_e(double V, int64_t W, int8_t Upper);
+void plang_write_f64_f(double V, int64_t W, int64_t D, int8_t Upper);
 
 /// Defined with the other runtime error reporters in plang_sys.cpp.
 [[noreturn]] void plang_err_field_width(int64_t W);
 [[noreturn]] void plang_err_read_format(const char *Op);
 [[noreturn]] void plang_err_read_int_range(const char *Op, const char *Tok);
+/// Turbo's own numbered run-time error reporter (plang_sys.cpp) -- see
+/// RangeCheckGuards.cpp's own comment on why the div/mod/range checks route
+/// through this instead of the ISO/EP plang_err_* family: the runtime cannot
+/// hold a "which dialect" global (an ISO object and a Turbo one can be
+/// linked into one program), so CodeGen decides which reporter a call site
+/// reaches, never a flag this checks itself.  plang_read_i64_turbo/
+/// plang_read_f64_turbo below use it directly rather than through CodeGen,
+/// since the "12abc"/malformed-token check happens inside the scan itself,
+/// not at a point CodeGen ever emits a guard around.
+[[noreturn]] void plang_tp_runerror(int64_t Code);
 
 // ISO §6.10.3.1 calls a negative TotalWidth or FracDigits "an error" (§3.2's
 // weaker class, which a processor may leave undetected) rather than saying
@@ -228,46 +281,55 @@ static int checkedWidth(int64_t W) {
 
 // ---- write (no trailing newline) ----
 
+// Upper (below, and throughout this file): Turbo writes TRUE/FALSE where
+// ISO/EP §6.9.3.5 writes true/false, and CodeGen resolves which spelling a
+// call site wants from LangOptions.turbo() -- a compile-time-constant fact
+// about the whole call site, not a runtime dialect check -- and passes it in
+// as this plain i8 flag, the same way it already passes a field width or a
+// real's format profile.  0 keeps every existing (pre-Turbo) call site's
+// output byte-for-byte unchanged.
 void plang_write_i64 (int64_t     V) { plangOutFmt("%" PRId64, V); }
-void plang_write_f64 (double      V) { plang_write_f64_e(V, PlangRealWidth); }
-void plang_write_bool(int8_t      V) { plangOutStr(V ? "true" : "false"); }
+void plang_write_f64 (double      V, int8_t Upper) { plang_write_f64_e(V, PlangRealWidth, Upper); }
+void plang_write_bool(int8_t      V, int8_t Upper) {
+    plangOutStr(Upper ? (V ? "TRUE" : "FALSE") : (V ? "true" : "false"));
+}
 void plang_write_char(int8_t      V) { plangOutCh(static_cast<unsigned char>(V)); }
 void plang_write_str (const char *S) { plangOutStr(S ? S : ""); }
 
 // ---- writeln (with trailing newline) ----
 
 void plang_writeln_i64 (int64_t     V) { plangOutFmt("%" PRId64, V); plangOutCh('\n'); }
-void plang_writeln_f64 (double      V) { plang_write_f64(V);         plangOutCh('\n'); }
-void plang_writeln_bool(int8_t      V) { plangOutStr(V ? "true" : "false"); plangOutCh('\n'); }
+void plang_writeln_f64 (double      V, int8_t Upper) { plang_write_f64(V, Upper); plangOutCh('\n'); }
+void plang_writeln_bool(int8_t      V, int8_t Upper) { plang_write_bool(V, Upper); plangOutCh('\n'); }
 void plang_writeln_char(int8_t      V) { plangOutCh(static_cast<unsigned char>(V)); plangOutCh('\n'); }
 void plang_writeln_str (const char *S) { plangOutStr(S ? S : ""); plangOutCh('\n'); }
 void plang_writeln     ()              { plangOutCh('\n'); }
 
 // ---- EP §6.9.3.6: a complex value is written as a parenthesized real pair ----
 
-void plang_write_cplx  (double Re, double Im) {
+void plang_write_cplx  (double Re, double Im, int8_t Upper) {
     plangOutCh('(');
-    plang_write_f64(Re);
+    plang_write_f64(Re, Upper);
     plangOutCh(',');
-    plang_write_f64(Im);
+    plang_write_f64(Im, Upper);
     plangOutCh(')');
 }
-void plang_writeln_cplx(double Re, double Im)
-    { plang_write_cplx(Re, Im); plangOutCh('\n'); }
-void plang_write_cplx_w(double Re, double Im, int64_t W, int64_t D) {
+void plang_writeln_cplx(double Re, double Im, int8_t Upper)
+    { plang_write_cplx(Re, Im, Upper); plangOutCh('\n'); }
+void plang_write_cplx_w(double Re, double Im, int64_t W, int64_t D, int8_t Upper) {
     // The width applies to each component, as it does for the two reals the
     // pair is written from — and so does the representation, which is why this
     // goes through the real writers rather than formatting the pair itself.
     // plang_write_f64_f already picks between "%*.*f" and the exponential
     // fallback on D's sign, which used to be duplicated here inline.
     plangOutCh('(');
-    plang_write_f64_f(Re, W, D);
+    plang_write_f64_f(Re, W, D, Upper);
     plangOutCh(',');
-    plang_write_f64_f(Im, W, D);
+    plang_write_f64_f(Im, W, D, Upper);
     plangOutCh(')');
 }
-void plang_writeln_cplx_w(double Re, double Im, int64_t W, int64_t D)
-    { plang_write_cplx_w(Re, Im, W, D); plangOutCh('\n'); }
+void plang_writeln_cplx_w(double Re, double Im, int64_t W, int64_t D, int8_t Upper)
+    { plang_write_cplx_w(Re, Im, W, D, Upper); plangOutCh('\n'); }
 
 // ---- read ----
 
@@ -298,6 +360,52 @@ void plang_read_f64 (double  *P) {
 void plang_read_char(int8_t  *P) {
     const int C = plangInCh();
     *P = (C == EOF) ? 0 : static_cast<int8_t>(C);
+}
+
+// ---- Turbo read: whole-token, entire-token-must-parse, with $/0x/&/% radix
+// prefixes (confirmed against `fpc -Mtp`; see scanTokenTurbo's own comment) --
+
+void plang_read_i64_turbo(int64_t *P) {
+    bool SawAny = false;
+    scanTokenTurbo(SawAny);
+    if (!SawAny) { *P = 0; return; }               // issue #284: past EOF is a defined, consistent zero
+    const char *Tok = TokBuf ? TokBuf : "";
+    const int Radix = turboRadixPrefix(Tok);
+    char *End = const_cast<char *>(Tok);
+    errno = 0;
+    const long long V = *Tok ? std::strtoll(Tok, &End, Radix) : 0;
+    // The ENTIRE token must parse -- not just a prefix of it (scanNumber's
+    // own ISO/EP rule, reversed here) -- so *End must land on the token's own
+    // terminating NUL, not partway through it.  A magnitude beyond int64_t
+    // (ERANGE) gets the same numbered error as a malformed token: `fpc -Mtp`
+    // reports 106 for "99999999999999999999" too, not a distinct overflow
+    // code, since its own integer parser has nowhere else to put a value
+    // that big either.  A magnitude that fits int64_t but not Turbo's own
+    // 16-bit Integer (e.g. "40000") is NOT an error here -- checked against
+    // `fpc -Mtp`, that wraps to -25536 rather than trapping -- so no range
+    // check happens in this function at all; CoerceToType's ordinary
+    // truncation on the way into a narrower destination (BuiltinIO.cpp's
+    // emitReadArg) reproduces the wraparound on its own.
+    if (!*Tok || *End != '\0' || errno == ERANGE) plang_tp_runerror(106);
+    *P = static_cast<int64_t>(V);
+}
+
+void plang_read_f64_turbo(double *P) {
+    bool SawAny = false;
+    scanTokenTurbo(SawAny);
+    if (!SawAny) { *P = 0.0; return; }              // issue #284
+    const char *Tok = TokBuf ? TokBuf : "";
+    // No radix prefix for a real read: `fpc -Mtp` reports 106 for a real
+    // read given "$FF" too, which strtod already refuses on its own (nothing
+    // starting with '$' is a valid C float), so there is nothing to strip
+    // here the way plang_read_i64_turbo strips one.
+    char *End = const_cast<char *>(Tok);
+    const double V = *Tok ? std::strtod(Tok, &End) : 0.0;
+    if (!*Tok || *End != '\0') plang_tp_runerror(106);
+    // A real that overflows to +/-HUGE_VAL is left alone, matching the ISO/EP
+    // reader's own policy just above (and the runtime's policy for real
+    // arithmetic generally): an IEEE infinity or NaN, not a trap.
+    *P = V;
 }
 
 // ---- readln ----
@@ -343,58 +451,83 @@ void plang_page() { plangOutCh('\f'); }
 void plang_write_i64_w (int64_t V, int64_t W) {
     plangOutFmt("%*" PRId64, checkedWidth(W), V);
 }
-void plang_write_f64_e (double  V, int64_t W) {
+void plang_write_f64_e (double  V, int64_t W, int8_t Upper) {
     char Buf[PlangRealMaxChars];
-    plangOutN(Buf, plangFormatReal(Buf, V, W));
+    plangOutN(Buf, plangFormatReal(Buf, V, W, Upper ? PlangRealProfileTurbo : PlangRealProfileISO));
 }
 // A negative FracDigits falls back to the same exponential format omitting
 // the decimals clause entirely produces, exactly as plang_write_cplx_w's own
 // per-component formatting already did before it started calling this.
-void plang_write_f64_f (double  V, int64_t W, int64_t D) {
-    if (D < 0) { plang_write_f64_e(V, W); return; }
+void plang_write_f64_f (double  V, int64_t W, int64_t D, int8_t Upper) {
+    if (D < 0) { plang_write_f64_e(V, W, Upper); return; }
     plangOutFmt("%*.*f", checkedWidth(W), checkedWidth(D), V);
 }
 // §6.9.3.6: the field is exactly TotalWidth characters wide, so a string
 // longer than the field loses its tail rather than widening it — the `%*s` a
 // field width otherwise maps onto pads but never truncates.  A negative width
 // truncates nothing and pads nothing: the value is written in full, as if no
-// width had been given at all.
-static void plangOutPadded(const char* S, int64_t W) {
-    if (W == 0) return;
+// width had been given at all.  Every rule above is ISO/EP's; Turbo reverses
+// the "loses its tail" part -- \p NoTrunc, another CodeGen-resolved i8 flag
+// (see plang_write_bool's own comment on the convention), makes W a MINIMUM
+// instead: the value is always written in full, and W only ever adds padding,
+// never removes text.  Checked directly against `fpc -Mtp`: `'hello':2`
+// writes "hello" whole, and even `'hello':0` -- the one case ISO/EP write
+// NOTHING for -- writes "hello" too, since a minimum of zero is trivially
+// met.  A negative W is unaffected by NoTrunc: it already means "write the
+// value in full, unpadded" for both dialects (see noPadIfNegative above),
+// which is exactly what NoTrunc would ask for anyway.
+static void plangOutPadded(const char* S, int64_t W, int8_t NoTrunc) {
     const size_t Len = S ? std::strlen(S) : 0;
+    if (!NoTrunc && W == 0) return;
     if (W < 0) { if (Len) plangOutN(S, Len); return; }
-    // W > 0 here: the numeric/char writers above hand W to printf's `%*d`/
-    // `%*c`, so checkedWidth's INT32_MAX trap guards their width argument
-    // from silently truncating (issue #15). This writer paces its own
-    // padding loop by hand instead of going through printf, so without the
-    // same call an oversized W (write(s:maxint)) just pads one character at
-    // a time until it gets there -- no truncation to guard against, but an
-    // unbounded amount of CPU and output for a value nothing could ever
-    // read (issue #247).
+    // W > 0 here (or W == 0 under NoTrunc, where checkedWidth(0) == 0 and the
+    // pad loop below simply does not run): the numeric/char writers above
+    // hand W to printf's `%*d`/`%*c`, so checkedWidth's INT32_MAX trap guards
+    // their width argument from silently truncating (issue #15). This writer
+    // paces its own padding loop by hand instead of going through printf, so
+    // without the same call an oversized W (write(s:maxint)) just pads one
+    // character at a time until it gets there -- no truncation to guard
+    // against, but an unbounded amount of CPU and output for a value nothing
+    // could ever read (issue #247).
     const auto Width = static_cast<size_t>(checkedWidth(W));
     for (size_t I = Len; I < Width; ++I) plangOutCh(' ');
+    if (NoTrunc) { if (Len) plangOutN(S, Len); return; }
     if (Len) plangOutN(S, Len < Width ? Len : Width);
 }
 
-// §6.9.3.5 writes a boolean as the char-string 'true' or 'false' would be
-// written, which is why it truncates too.
-void plang_write_bool_w(int8_t      V, int64_t W) { plangOutPadded(V ? "true" : "false", W); }
-void plang_write_char_w(int8_t      V, int64_t W) {
-    if (W == 0) return;
+// §6.9.3.5 writes a boolean as the char-string 'true'/'false' ('TRUE'/'FALSE'
+// under Turbo -- Upper, see plang_write_bool's own comment) would be written,
+// which is why it truncates (or, under Turbo's NoTrunc, does not) too.
+void plang_write_bool_w(int8_t V, int64_t W, int8_t Upper, int8_t NoTrunc) {
+    plangOutPadded(Upper ? (V ? "TRUE" : "FALSE") : (V ? "true" : "false"), W, NoTrunc);
+}
+// AlwaysWrite (another CodeGen-resolved i8 flag): ISO §6.10.3.1(u) makes a
+// zero char width write nothing; Turbo's own zero-width char write still
+// writes the character (checked directly against `fpc -Mtp`: `write('x':0)`
+// writes "x"), consistent with field widths being minimums there generally
+// (plangOutPadded's own NoTrunc, just applied to a type padding never
+// truncates for in the first place -- a char is always exactly one
+// character, so the only thing a width can ever do to it is this all-or-
+// nothing zero case).
+void plang_write_char_w(int8_t V, int64_t W, int8_t AlwaysWrite) {
+    if (W == 0 && !AlwaysWrite) return;
     if (W < 0) { plangOutCh(static_cast<unsigned char>(V)); return; }
     plangOutFmt("%*c", checkedWidth(W), static_cast<unsigned char>(V));
 }
-void plang_write_str_w (const char *S, int64_t W) { plangOutPadded(S, W); }
+void plang_write_str_w (const char *S, int64_t W, int8_t NoTrunc) { plangOutPadded(S, W, NoTrunc); }
 
 // ---- writeln with field-width ----
 
 void plang_writeln_i64_w (int64_t V, int64_t W) { plang_write_i64_w(V, W); plangOutCh('\n'); }
-void plang_writeln_f64_e (double  V, int64_t W) { plang_write_f64_e(V, W); plangOutCh('\n'); }
-void plang_writeln_f64_f (double  V, int64_t W, int64_t D)
-    { plang_write_f64_f(V, W, D); plangOutCh('\n'); }
-void plang_writeln_bool_w(int8_t      V, int64_t W) { plang_write_bool_w(V, W); plangOutCh('\n'); }
-void plang_writeln_char_w(int8_t      V, int64_t W) { plang_write_char_w(V, W); plangOutCh('\n'); }
-void plang_writeln_str_w (const char *S, int64_t W) { plang_write_str_w(S, W); plangOutCh('\n'); }
+void plang_writeln_f64_e (double  V, int64_t W, int8_t Upper) { plang_write_f64_e(V, W, Upper); plangOutCh('\n'); }
+void plang_writeln_f64_f (double  V, int64_t W, int64_t D, int8_t Upper)
+    { plang_write_f64_f(V, W, D, Upper); plangOutCh('\n'); }
+void plang_writeln_bool_w(int8_t V, int64_t W, int8_t Upper, int8_t NoTrunc)
+    { plang_write_bool_w(V, W, Upper, NoTrunc); plangOutCh('\n'); }
+void plang_writeln_char_w(int8_t V, int64_t W, int8_t AlwaysWrite)
+    { plang_write_char_w(V, W, AlwaysWrite); plangOutCh('\n'); }
+void plang_writeln_str_w (const char *S, int64_t W, int8_t NoTrunc)
+    { plang_write_str_w(S, W, NoTrunc); plangOutCh('\n'); }
 
 // ---- EP §6.7.5.5 string transfer procedures ----
 //

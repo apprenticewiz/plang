@@ -7,16 +7,22 @@
 
 namespace plang {
 
-std::size_t plangFormatReal(char* Buf, double V, int64_t TotalWidth) {
+std::size_t plangFormatReal(char* Buf, double V, int64_t TotalWidth,
+                             const PlangRealProfile& Profile) {
     // §6.9.3.4.1: ActWidth is the width asked for, or the narrowest the
     // representation fits in when less was asked for.  DecPlaces is then
     // whatever is left once the fixed parts have taken their columns, which is
     // why a wider field is written to more decimal places rather than padded.
-    int64_t ActWidth = TotalWidth >= PlangRealMinWidth ? TotalWidth
-                                                       : PlangRealMinWidth;
+    // MinWidth is derived from Profile.ExpDigits rather than reusing the
+    // PlangRealMinWidth constant: the two happen to agree for every profile
+    // that exists today (both ISO's and Turbo's ExpDigits are PlangExpDigits),
+    // but a profile whose ExpDigits genuinely differed would need its own
+    // minimum, not the ISO one.
+    const int64_t MinWidth = Profile.ExpDigits + 6;
+    int64_t ActWidth = TotalWidth >= MinWidth ? TotalWidth : MinWidth;
     if (ActWidth > static_cast<int64_t>(PlangRealMaxChars) - 2)
         ActWidth = static_cast<int64_t>(PlangRealMaxChars) - 2;
-    const int DecPlaces = static_cast<int>(ActWidth) - PlangExpDigits - 5;
+    const int DecPlaces = static_cast<int>(ActWidth) - Profile.ExpDigits - 5;
 
     // printf's %e is the same shape with a different exponent convention: it
     // writes as many exponent digits as the value needs, with a minimum of two,
@@ -56,12 +62,12 @@ std::size_t plangFormatReal(char* Buf, double V, int64_t TotalWidth) {
     Buf[P++] = Negative ? '-' : ' ';
     std::memcpy(Buf + P, Digits, MantLen);
     P += MantLen;
-    Buf[P++] = 'e';
+    Buf[P++] = Profile.ExpChar;
     Buf[P++] = ExpNeg ? '-' : '+';
     // Exactly ExpDigits of them, with leading zeros.  An exponent needing more
     // cannot arise for a double, but were the constant ever lowered, writing
     // the value in full and overrunning the field beats writing another value.
-    for (std::size_t I = ExpLen; I < static_cast<std::size_t>(PlangExpDigits); ++I)
+    for (std::size_t I = ExpLen; I < static_cast<std::size_t>(Profile.ExpDigits); ++I)
         Buf[P++] = '0';
     std::memcpy(Buf + P, Exp, ExpLen);
     P += ExpLen;

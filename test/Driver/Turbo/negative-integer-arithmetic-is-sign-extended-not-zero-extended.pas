@@ -16,8 +16,8 @@ RUN: %run %t | FileCheck --strict-whitespace --match-full-lines %s
 (*
 CHECK:-10
 CHECK-NEXT:-4
-CHECK-NEXT:true
-CHECK-NEXT:false
+CHECK-NEXT:TRUE
+CHECK-NEXT:FALSE
 *)
 
 program p;
