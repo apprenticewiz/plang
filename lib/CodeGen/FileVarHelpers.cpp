@@ -7,6 +7,7 @@
 
 #include "plang/AST/Ast.h"
 #include "plang/Basic/StringUtil.h"
+#include "plang/Sema/Type.h"
 
 using namespace plang;
 
@@ -64,8 +65,13 @@ bool FileVarHelpers::isTypedBinaryFileVar(const ExprNode& e) {
     // digits, and read them back as one number with the digits run together.
     const Type* T = fileTypeOf(e);
     if (!T || !T->ElemType) return false;   // untyped: byte-level
-    // ISO §6.4.3.5: a file of char is a text file.
-    return T->ElemType->Kind != TypeKind::Char;
+    // isTextFile (Sema/Type.h) is dialect-aware: ISO §6.4.3.5 makes a file
+    // of char a text file, so it stays on the text path there -- but real
+    // Turbo Pascal gives `text` its own distinct predefined identity and
+    // treats `file of char` as an ordinary typed BINARY file (each Char one
+    // raw byte, no line-ending/formatting convention).  See that function's
+    // own comment for the full ISO-vs-Turbo contrast.
+    return !isTextFile(*T, LangOpts);
 }
 
 bool FileVarHelpers::isUntypedFileVar(const ExprNode& e) {

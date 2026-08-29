@@ -208,7 +208,7 @@ void Codegen::Impl::init(const std::string& progName) {
     // File-variable address/type/size helpers.  EmitLValue is the one
     // dependency not yet extracted (still CodeGenExprs.cpp).
     fileVarHelpers_ = std::make_unique<FileVarHelpers>(*mod, builder,
-        *symTab_, *cgTypes_, *runtimeFns_, i64Ty, i8Ty, ptrTy,
+        *symTab_, *cgTypes_, *runtimeFns_, langOpts, i64Ty, i8Ty, ptrTy,
         [this](const ExprNode& e){ return emitLValue(e); });
     // Built-in write/writeln/read/readln/writestr/readstr.  EmitExpr/
     // EmitLValue/ToI64/CoerceToType/CreateEntryAlloca are narrow closures

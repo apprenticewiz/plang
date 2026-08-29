@@ -12,6 +12,8 @@
 #include "CGTypes.h"
 #include "RuntimeFunctionCache.h"
 
+#include "plang/Basic/LangOptions.h"
+
 namespace llvm {
 class Module;
 class Value;
@@ -27,9 +29,10 @@ class FileVarHelpers {
 public:
     FileVarHelpers(llvm::Module& Mod, llvm::IRBuilder<>& B,
                     CGSymbolTable& SymTab, CGTypes& Types, RuntimeFunctionCache& RtFns,
+                    const plang::LangOptions& LangOpts,
                     llvm::IntegerType* I64Ty, llvm::IntegerType* I8Ty, llvm::PointerType* PtrTy,
                     std::function<llvm::Value*(const plang::ExprNode&)> EmitLValue)
-        : Mod(Mod), B(B), SymTab(SymTab), Types(Types), RtFns(RtFns),
+        : Mod(Mod), B(B), SymTab(SymTab), Types(Types), RtFns(RtFns), LangOpts(LangOpts),
           I64Ty(I64Ty), I8Ty(I8Ty), PtrTy(PtrTy), EmitLValue(std::move(EmitLValue)) {}
 
     static bool isTextTypeName(const plang::TypeNode* tn);
@@ -66,6 +69,7 @@ private:
     CGSymbolTable& SymTab;
     CGTypes& Types;
     RuntimeFunctionCache& RtFns;
+    const plang::LangOptions& LangOpts;
     llvm::IntegerType* I64Ty;
     llvm::IntegerType* I8Ty;
     llvm::PointerType* PtrTy;

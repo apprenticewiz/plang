@@ -923,10 +923,15 @@ void Sema::checkCallStmt(const CallStmt& S) {
         // anything wrong with it twice.
         if (Lo == "page" && !S.Args.empty()) {
             auto T = checkExpr(*S.Args[0]);
-            if (T->Kind == TypeKind::File && T->ElemType
-                && T->ElemType->Kind != TypeKind::Char)
+            // isTextFile (Type.h) is dialect-aware: under -std=turbo a
+            // `file of char` is a binary file, not text, so `page` on one is
+            // refused exactly like `page` on `file of integer` always has
+            // been -- and a genuinely untyped `file` (also null ElemType,
+            // like `text`) is now correctly refused too instead of silently
+            // passing as if it were text (see Type.h's isTextFile comment).
+            if (T->Kind == TypeKind::File && !isTextFile(*T, Opts))
                 error(S.Args[0]->Loc, diag::err_line_proc_not_text,
-                      {Lo, T->ElemType->Name});
+                      {Lo, T->Name});
             return;
         }
 
@@ -994,12 +999,36 @@ void Sema::checkCallStmt(const CallStmt& S) {
         // textfile path, where plang formats what it is given.
         if (Lo == "write" && S.Args.size() >= 2) {
             auto T = checkExpr(*S.Args[0]);
-            if (T->Kind == TypeKind::File && T->ElemType
-                && T->ElemType->Kind != TypeKind::Char) {
+            if (T->Kind == TypeKind::File && !isTextFile(*T, Opts)) {
+                // -std=turbo: an untyped `file` has no component type to
+                // write, and real Turbo Pascal has no plain Write on one at
+                // all -- only BlockWrite (not yet implemented) transfers an
+                // untyped file's bytes.  Confirmed against `fpc -Mtp`.
+                // Without this, T->ElemType below is null and every
+                // *T->ElemType dereference just past it is undefined
+                // behavior -- this is a genuine crash fix, not just a nicer
+                // diagnostic, now that isTextFile (unlike the old inline
+                // `T->ElemType &&` guard) no longer excludes an untyped file
+                // from this branch.
+                if (Opts.turbo() && !T->ElemType) {
+                    error(S.Loc, diag::err_turbo_untyped_file_read_write, {Lo});
+                    for (size_t I = 1; I < S.Args.size(); ++I) (void)checkExpr(*S.Args[I]);
+                    return;
+                }
+                if (!T->ElemType) return; // untyped file, non-Turbo: unreachable today (no ISO/EP untyped file), but stay safe.
                 for (size_t I = 1; I < S.Args.size(); ++I) {
                     auto At = checkExpr(*S.Args[I]);
-                    if (!At->isError() && !T->ElemType->isError()
-                        && !isAssignCompatible(*T->ElemType, *At))
+                    if (At->isError() || T->ElemType->isError()) continue;
+                    // -std=turbo: exact type identity, no implicit
+                    // assignment-compatible widening -- see
+                    // err_turbo_typed_file_exact_type's own comment.
+                    if (Opts.turbo()) {
+                        if (!isIdenticalType(T->ElemType, At))
+                            error(S.Args[I]->Loc, diag::err_turbo_typed_file_exact_type,
+                                  {Lo, T->ElemType->Name, At->Name});
+                        continue;
+                    }
+                    if (!isAssignCompatible(*T->ElemType, *At))
                         error(S.Args[I]->Loc, diag::err_write_type_mismatch,
                               {T->ElemType->Name, At->Name});
                 }
@@ -1020,11 +1049,14 @@ void Sema::checkCallStmt(const CallStmt& S) {
                 // being a value to write.
                 if (I == 0 && T->Kind == TypeKind::File) {
                     // §6.9.5: writeln ends a line, and only a text file has
-                    // lines to end.
-                    if (Lo == "writeln" && T->ElemType
-                            && T->ElemType->Kind != TypeKind::Char)
+                    // lines to end.  isTextFile (Type.h) is dialect-aware --
+                    // see its comment for why a `file of char` is text under
+                    // ISO/EP but not Turbo, and why an untyped `file` is
+                    // correctly refused here too now instead of silently
+                    // passing.
+                    if (Lo == "writeln" && !isTextFile(*T, Opts))
                         error(S.Args[0]->Loc, diag::err_line_proc_not_text,
-                              {Lo, T->ElemType->Name});
+                              {Lo, T->Name});
                     continue;
                 }
                 // EP §6.4.2.5: a restricted value is not one of the types
@@ -1104,8 +1136,27 @@ void Sema::checkCallStmt(const CallStmt& S) {
             // A file as the first argument names where to read from rather
             // than what to read into.
             const bool HasFile  = !Ts.empty() && Ts[0]->Kind == TypeKind::File;
-            const bool FromText = !HasFile || !Ts[0]->ElemType
-                                  || Ts[0]->ElemType->Kind == TypeKind::Char;
+            // isTextFile (Type.h) is dialect-aware -- see its comment.  It
+            // also fixes a real bug here: the old `!Ts[0]->ElemType` half of
+            // this test made a genuinely untyped `file` (ElemType null,
+            // exactly like `text`'s) silently take the textfile read path
+            // too.  isTextFile tells the two apart by name, so an untyped
+            // file no longer reads FromText == true.
+            const bool FromText = !HasFile || isTextFile(*Ts[0], Opts);
+
+            // -std=turbo: real Turbo Pascal has no plain Read on an untyped
+            // file at all -- only BlockRead (not yet implemented) transfers
+            // its bytes.  Confirmed against `fpc -Mtp`
+            // ("Can't use read or write on untyped file").  Without this,
+            // an untyped file's `read(f, v)` would fall neither into the
+            // FromText path above (now false) nor the typed-component path
+            // below (T->ElemType is null there too), so it would silently
+            // compile to nothing meaningful rather than being refused.
+            if (Lo == "read" && HasFile && Opts.turbo() && Ts[0]->Kind == TypeKind::File
+                    && !Ts[0]->ElemType && !Ts[0]->isPredefinedText()) {
+                error(S.Loc, diag::err_turbo_untyped_file_read_write, {Lo});
+                return;
+            }
 
             for (size_t I = 0; I < Ts.size(); ++I) {
                 const auto& T = *Ts[I];
@@ -1153,10 +1204,13 @@ void Sema::checkCallStmt(const CallStmt& S) {
         if (Lo == "readln") {
             if (!S.Args.empty()) {
                 const auto& T = S.Args[0]->ResolvedType;
-                if (T && T->Kind == TypeKind::File && T->ElemType
-                    && T->ElemType->Kind != TypeKind::Char)
+                // isTextFile (Type.h) is dialect-aware -- see its comment
+                // for why this also now refuses readln on an untyped file
+                // (previously silently accepted, ElemType null like text's)
+                // and on `file of char` under -std=turbo (now binary).
+                if (T && T->Kind == TypeKind::File && !isTextFile(*T, Opts))
                     error(S.Args[0]->Loc, diag::err_line_proc_not_text,
-                          {Lo, T->ElemType->Name});
+                          {Lo, T->Name});
             }
             return;
         }
@@ -1167,14 +1221,26 @@ void Sema::checkCallStmt(const CallStmt& S) {
         // calling checkExpr on them again here reported anything wrong with an
         // argument -- e.g. an undefined identifier -- a second time (issue #272).
         // Read the cached type instead, the same way the readln arm just above
-        // already does for S.Args[0].
+        // already does for S.Args[0].  The untyped-file-under-Turbo case
+        // (T->ElemType null, not `text`) already returned above (the loop's
+        // own err_turbo_untyped_file_read_write check) and never reaches
+        // here.
         if (Lo == "read" && !S.Args.empty()) {
             const auto& T = S.Args[0]->ResolvedType;
             if (T && T->Kind == TypeKind::File && T->ElemType && S.Args.size() >= 2) {
                 for (size_t I = 1; I < S.Args.size(); ++I) {
                     const auto& At = S.Args[I]->ResolvedType;
-                    if (At && !At->isError() && !T->ElemType->isError()
-                        && !isAssignCompatible(*At, *T->ElemType))
+                    if (!At || At->isError() || T->ElemType->isError()) continue;
+                    // -std=turbo: exact type identity for typed-file
+                    // Read/Write, no implicit assignment-compatible
+                    // widening -- see err_turbo_typed_file_exact_type.
+                    if (Opts.turbo()) {
+                        if (!isIdenticalType(T->ElemType, At))
+                            error(S.Args[I]->Loc, diag::err_turbo_typed_file_exact_type,
+                                  {Lo, T->ElemType->Name, At->Name});
+                        continue;
+                    }
+                    if (!isAssignCompatible(*At, *T->ElemType))
                         error(S.Args[I]->Loc, diag::err_read_type_mismatch,
                               {T->ElemType->Name, At->Name});
                 }
