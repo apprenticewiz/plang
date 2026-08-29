@@ -782,3 +782,20 @@ DIAG(err_absolute_multiple_names, Error,
      "'absolute' may overlay only a single variable, not a name list")
 DIAG(err_absolute_target_not_variable, Error,
      "'absolute' must name a variable or a component of one")
+
+// TP-only: Extended (80-bit) and Comp (64-bit, fixed-point "currency")
+// are real Turbo Pascal floating-family type names -- unlike a misspelled
+// or simply nonexistent identifier, resolveNamedUnrestricted (SemaType.cpp)
+// recognizes both by name under -std=turbo and refuses them explicitly
+// here, rather than letting them fall into the generic err_undefined_type a
+// program might mistake for a typo.  Real (64-bit) and, alongside it,
+// Single (32-bit) are the only floating types this compiler can lower (see
+// CGTypes::llvmTypeOfSemaTypeImpl's Real case) -- Extended's 80-bit x87
+// format and Comp's distinct fixed-point representation each need a
+// lowering and a runtime formatter of their own that do not exist.  Only
+// under -std=turbo: ISO 7185/Extended Pascal never had these names as
+// keywords at all, so outside Turbo they stay simply undefined, exactly as
+// they were before this diagnostic existed.
+DIAG(err_turbo_unsupported_float_type, Error,
+     "'%0' is not a supported plang type; plang implements Turbo's Real and "
+     "Single floating-point types but not Extended or Comp")

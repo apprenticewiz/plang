@@ -55,8 +55,14 @@ llvm::Value* CGFuncCall::emitBuiltinCall(const std::string& Name,
             auto* fn = RtFns.getExternFnN("plang_abs_cplx", DblTy, {DblTy, DblTy});
             return B.CreateCall(fn, {re, im}, "abs_cplx");
         }
-        if (v->getType()->isDoubleTy())
-            return B.CreateCall(RtFns.getRTMathRR("plang_abs_real"), {v}, "abs");
+        // isFloatingPointTy, not isDoubleTy: Turbo's Single (float) needs
+        // the same real-valued plang_abs_real double already gets -- ToDouble
+        // promotes it first, the same "promote rather than duplicate" shim
+        // used throughout for Single (see e.g. BuiltinIO::emitWriteValue).
+        // Without this, a Single argument fell through to the INTEGER path
+        // below, which called ToI64 on a float value.
+        if (v->getType()->isFloatingPointTy())
+            return B.CreateCall(RtFns.getRTMathRR("plang_abs_real"), {ToDouble(v)}, "abs");
         return B.CreateCall(RtFns.getRTMathII("plang_abs_int"), {ToI64(v)}, "abs");
     }
     if (lo == "sqr") {
@@ -64,8 +70,9 @@ llvm::Value* CGFuncCall::emitBuiltinCall(const std::string& Name,
         // EP §6.7.6.2: sqr(complex) → complex = z * z
         if (v->getType() == Complex.complexTy())
             return Complex.emitComplexMul(v, v);
-        if (v->getType()->isDoubleTy())
-            return B.CreateCall(RtFns.getRTMathRR("plang_sqr_real"), {v}, "sqr");
+        // See abs's identical comment just above.
+        if (v->getType()->isFloatingPointTy())
+            return B.CreateCall(RtFns.getRTMathRR("plang_sqr_real"), {ToDouble(v)}, "sqr");
         return B.CreateCall(RtFns.getRTMathII("plang_sqr_int"), {ToI64(v)}, "sqr");
     }
     // EP §6.7.6.3: cmplx(x, y) constructor

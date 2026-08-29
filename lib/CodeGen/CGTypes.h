@@ -55,11 +55,11 @@ public:
             std::unordered_map<std::string, llvm::Value*>& Consts,
             llvm::IntegerType* I1Ty, llvm::IntegerType* I8Ty,
             llvm::IntegerType* I32Ty, llvm::IntegerType* I64Ty,
-            llvm::Type* DblTy, llvm::PointerType* PtrTy)
+            llvm::Type* DblTy, llvm::Type* FltTy, llvm::PointerType* PtrTy)
         : Ctx(Ctx), Mod(Mod), Opts(Opts), SchemaLayout(SchemaLayout),
           Complex(Complex), Sets(Sets), TypeAliases(TypeAliases),
           Consts(Consts), i1Ty(I1Ty), i8Ty(I8Ty), i32Ty(I32Ty), i64Ty(I64Ty),
-          dblTy(DblTy), ptrTy(PtrTy) {}
+          dblTy(DblTy), fltTy(FltTy), ptrTy(PtrTy) {}
 
     /// Where one field of a record lives.  A field of the fixed part is an
     /// element of the struct.  ISO §6.4.3.3 has at most one variant active
@@ -150,6 +150,9 @@ private:
     llvm::IntegerType* i32Ty;
     llvm::IntegerType* i64Ty;
     llvm::Type*        dblTy;
+    /// Turbo `Single`'s LLVM lowering (llvm::Type::getFloatTy); see
+    /// llvmTypeOfSemaTypeImpl's Real case.
+    llvm::Type*        fltTy;
     llvm::PointerType* ptrTy;
 
     std::map<std::string, llvm::StructType*> structTypes_;

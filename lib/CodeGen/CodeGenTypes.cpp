@@ -111,6 +111,7 @@ void Codegen::Impl::init(const std::string& progName) {
     i32Ty = llvm::Type::getInt32Ty(ctx);
     i64Ty = llvm::Type::getInt64Ty(ctx);
     dblTy = llvm::Type::getDoubleTy(ctx);
+    fltTy = llvm::Type::getFloatTy(ctx);
     ptrTy = llvm::PointerType::get(ctx, 0); // opaque ptr (LLVM 15+)
 
     // ComplexOps needs dblTy/ptrTy by value, so it's constructed here rather
@@ -134,7 +135,7 @@ void Codegen::Impl::init(const std::string& progName) {
     // SchemaBindingScope, both from outside this unit.
     cgTypes_ = std::make_unique<CGTypes>(ctx, *mod, langOpts, *schemaLayout_,
         *complexOps_, *setOps_, typeAliases, consts,
-        i1Ty, i8Ty, i32Ty, i64Ty, dblTy, ptrTy);
+        i1Ty, i8Ty, i32Ty, i64Ty, dblTy, fltTy, ptrTy);
     // -g: Record/Array/String DIType construction reads field layout out of
     // cgTypes_ (see CGDebugInfo::setCGTypes's own comment for why this
     // can't be a constructor argument -- dbgInfo_ is built before this

@@ -115,6 +115,46 @@ struct Type {
     unsigned Width{64};
     bool     IsSigned{true};
 
+    /// Boolean only: true for Turbo's "loose" Boolean-family variants --
+    /// ByteBool (8), WordBool (16) and LongBool (32) -- false for every
+    /// dialect's own strict `Boolean` (always Width 8 regardless of which of
+    /// the four this is; see Type::Width's own comment on Width meaning
+    /// "storage width", not "how strict").
+    ///
+    /// Real Turbo/FPC field practice (checked against `fpc -Mtp`): a strict
+    /// Boolean only ever holds 0 or 1 by construction -- nothing in the
+    /// language can put another value in one without an unchecked back door
+    /// (a typecast, an `absolute` overlay, ...) -- while ByteBool/WordBool/
+    /// LongBool are explicitly the "any bit pattern is legal, nonzero reads
+    /// as true" widened family: `var b: ByteBool; b := ByteBool(200); if b
+    /// then` prints true, and reads back ord(b) = 200, not 1.  A strict
+    /// Boolean given the same treatment (`Boolean(200)`) behaves identically
+    /// at the bit level -- fpc does not range-check a TYPECAST result for
+    /// either family -- so the real difference is not "does this width ever
+    /// hold a non-canonical value", it is "is that value meaningful as this
+    /// type's ordinal range for the purposes ordinalRange answers": a
+    /// bounded {0,1} interval for strict Boolean (usable as a set base type,
+    /// an array index type, ...; ISO §6.4.2.2 numbers it from zero the same
+    /// as every other ordinal), and no defined interval at all for the loose
+    /// family (confirmed empirically: `fpc -Mtp` refuses both `set of
+    /// ByteBool` -- "illegal type declaration of set elements" -- and
+    /// `array[ByteBool] of T` -- "Data element too large", i.e. it is
+    /// treated as unbounded, the same as a bare Integer already is).
+    ///
+    /// This is the flag ordinalRange (below), checkSetBaseRange
+    /// (SemaType.cpp) and the array-index-type gate (SemaType.cpp's
+    /// ArrayTypeNode arm) read to draw exactly that line, without touching
+    /// strict Boolean's existing {0,1} behavior at all.  Chosen over a new
+    /// TypeKind for the same reason the Turbo sized-integer ladder reuses
+    /// TypeKind::Integer with a Width/IsSigned pair rather than minting one
+    /// Kind per width: ByteBool/WordBool/LongBool are "the same kind of
+    /// thing, different width and strictness" as Boolean, not a different
+    /// kind of type, and every switch that already has a `case
+    /// TypeKind::Boolean:` keeps working for them with no
+    /// NumSemaTypeKinds-sentinel churn -- it is reviewed by hand instead
+    /// (done for this feature; see the PR description for the list).
+    bool     IsLooseBool{false};
+
     /// Enum and Record only: written inline rather than declared, so it has no
     /// declared name to be identified by.  See isAnonymousNominal.
     bool        Anonymous{false};
@@ -377,7 +417,16 @@ struct Type {
 [[nodiscard]] inline std::optional<std::pair<int64_t, int64_t>>
 ordinalRange(const Type& T) {
     switch (T.Kind) {
-    case TypeKind::Boolean:  return std::pair<int64_t, int64_t>{0, 1};
+    case TypeKind::Boolean:
+        // Turbo's loose ByteBool/WordBool/LongBool have no {0,1} interval to
+        // report -- see Type::IsLooseBool's own comment for the empirical
+        // fpc trail behind treating them as unbounded, the same as a bare
+        // Integer just below.  Strict Boolean (every dialect's own
+        // `boolean`, and this is unconditional on Width so a future width
+        // change to it would not silently gain this exemption) keeps
+        // exactly the {0,1} answer it has always had.
+        if (T.IsLooseBool) return std::nullopt;
+        return std::pair<int64_t, int64_t>{0, 1};
     case TypeKind::Char:     return std::pair<int64_t, int64_t>{0, 255};
     case TypeKind::Subrange: return std::pair<int64_t, int64_t>{T.SubLo, T.SubHi};
     case TypeKind::Enum:

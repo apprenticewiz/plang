@@ -183,6 +183,14 @@ void BuiltinIO::emitWriteArgs(
 void BuiltinIO::emitWriteValue(llvm::Value* val, bool newline, llvm::Value* fp,
                                    const plang::Type* semaTy) {
     llvm::Type* ty  = val->getType();
+    // Turbo `Single` reuses the f64 writers Real (64-bit) already has,
+    // promoted here rather than duplicating plang_real.cpp's formatting
+    // logic for a second width -- the runtime never sees anything but a
+    // double.
+    if (ty->isFloatTy()) {
+        val = B.CreateFPExt(val, DblTy, "single.widen");
+        ty  = val->getType();
+    }
     // EP §6.9.3.6: a complex is written as its two components, so it needs a
     // writer of its own rather than one of the scalar ones.
     if (ty == Complex.complexTy()) {
@@ -249,8 +257,7 @@ void BuiltinIO::emitWriteValue(llvm::Value* val, bool newline, llvm::Value* fp,
             B.CreateCall(RtFns.getExternFnN(std::string("plang_write") + (newline?"ln":"") + "_f64",
                              voidTy, {DblTy, I8Ty}), {val, upper});
     } else if (isBool) {
-        auto* ext = ty->isIntegerTy(1)
-            ? B.CreateZExt(val, I8Ty, "bool.ext") : val;
+        auto* ext = toBoolByte(val);
         auto* upper = turboFlag();
         if (fp)
             B.CreateCall(RtFns.getExternFnN("plang_write_file_bool", voidTy, {PtrTy, I8Ty, I8Ty}),
@@ -278,6 +285,12 @@ void BuiltinIO::emitWriteValueFormatted(llvm::Value* val, llvm::Value* w, llvm::
     auto* voidTy = llvm::Type::getVoidTy(Ctx);
     std::string nl = newline ? "ln" : "";
     llvm::Type* ty = val->getType();
+    // See the identical promotion in emitWriteValue: Single reuses Real's
+    // f64 writers rather than a dedicated f32 formatter.
+    if (ty->isFloatTy()) {
+        val = B.CreateFPExt(val, DblTy, "single.widen");
+        ty  = val->getType();
+    }
     if (ty == Complex.complexTy()) {
         auto* re = B.CreateExtractValue(val, 0, "cplx.re");
         auto* im = B.CreateExtractValue(val, 1, "cplx.im");
@@ -340,8 +353,7 @@ void BuiltinIO::emitWriteValueFormatted(llvm::Value* val, llvm::Value* w, llvm::
             if (d) callFile("plang_write_file_f64_f", {DblTy, I64Ty, I64Ty, I8Ty}, {val, w, d, turbo});
             else   callFile("plang_write_file_f64_e", {DblTy, I64Ty, I8Ty}, {val, w, turbo});
         } else if (isBool) {
-            auto* ext = ty->isIntegerTy(1)
-                ? B.CreateZExt(val, I8Ty, "bool.ext") : val;
+            auto* ext = toBoolByte(val);
             callFile("plang_write_file_bool_w", {I8Ty, I64Ty, I8Ty, I8Ty}, {ext, w, turbo, turbo});
         } else if (ty->isIntegerTy(8)) {
             callFile("plang_write_file_char_w", {I8Ty, I64Ty, I8Ty}, {val, w, turbo});
@@ -365,8 +377,7 @@ void BuiltinIO::emitWriteValueFormatted(llvm::Value* val, llvm::Value* w, llvm::
             B.CreateCall(RtFns.getExternFnN("plang_write" + nl + "_f64_e", voidTy, {DblTy, I64Ty, I8Ty}),
                                {val, w, turbo});
     } else if (isBool) {
-        auto* ext = ty->isIntegerTy(1)
-            ? B.CreateZExt(val, I8Ty, "bool.ext") : val;
+        auto* ext = toBoolByte(val);
         B.CreateCall(RtFns.getExternFnN("plang_write" + nl + "_bool_w", voidTy, {I8Ty, I64Ty, I8Ty, I8Ty}),
                            {ext, w, turbo, turbo});
     } else if (ty->isIntegerTy(8)) {
@@ -683,7 +694,22 @@ void BuiltinIO::emitBuiltinReadStr(
 
 bool BuiltinIO::writesAsBoolean(const llvm::Type* ty, const plang::Type* semaTy) {
     if (ty->isIntegerTy(1)) return true;
-    return ty->isIntegerTy(8) && semaTy && semaTy->Kind == TypeKind::Boolean;
+    // i16/i32 are only ever WordBool/LongBool (Type::IsLooseBool) reaching
+    // here as semaTy->Kind == Boolean; nothing else plang stores at those
+    // widths is a Boolean-shaped value, so the Kind check alone (matching
+    // the pre-existing i8 case just below) is enough to tell them apart from
+    // an equally-wide Word/LongInt.
+    return semaTy && semaTy->Kind == TypeKind::Boolean
+        && (ty->isIntegerTy(8) || ty->isIntegerTy(16) || ty->isIntegerTy(32));
+}
+
+llvm::Value* BuiltinIO::toBoolByte(llvm::Value* val) const {
+    llvm::Type* ty = val->getType();
+    if (ty->isIntegerTy(8)) return val;
+    llvm::Value* nz = ty->isIntegerTy(1)
+        ? val
+        : B.CreateICmpNE(val, llvm::ConstantInt::get(ty, 0), "bool.nz");
+    return B.CreateZExt(nz, I8Ty, "bool.ext");
 }
 
 bool BuiltinIO::writesAsChar(const llvm::Type* ty, const plang::Type* semaTy) {

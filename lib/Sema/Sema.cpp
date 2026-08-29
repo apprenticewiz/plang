@@ -323,6 +323,18 @@ void Sema::registerBuiltins() {
         declareTypeAlias("QWord",    Ctx_.getInt(64, /*Signed=*/false));
         declareTypeAlias("AnsiChar", TyChar);
         declareTypeAlias("Pointer",  Ctx_.getGenericPointer());
+
+        // -std=turbo only: the loose Boolean-family widths and Single, the
+        // second floating type.  ByteBool/WordBool/LongBool reuse
+        // TypeKind::Boolean with IsLooseBool set (see that field's own
+        // comment for the strict-vs-loose distinction and the empirical
+        // fpc trail behind it) the same way the sized-integer ladder just
+        // above reuses TypeKind::Integer; Single reuses TypeKind::Real with
+        // Width=32.  Neither trips a NumSemaTypeKinds sentinel, by design.
+        declareTypeAlias("ByteBool", Ctx_.getLooseBoolean(8));
+        declareTypeAlias("WordBool", Ctx_.getLooseBoolean(16));
+        declareTypeAlias("LongBool", Ctx_.getLooseBoolean(32));
+        declareTypeAlias("Single",   Ctx_.getSingle());
     }
 
     // EP §6.4.2.2: predefined constants
