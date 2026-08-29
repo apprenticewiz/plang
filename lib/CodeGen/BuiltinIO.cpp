@@ -28,6 +28,13 @@ void BuiltinIO::emitWritelnFile(llvm::Value* fp) {
         llvm::Type::getVoidTy(Ctx), {PtrTy}), {fp});
 }
 
+/// -std=turbo only: see this method's own declaration (BuiltinIO.h).
+llvm::Value* BuiltinIO::turboStdFilePtr(bool isInput) const {
+    if (!Opts.turbo()) return nullptr;
+    auto* ve = SymTab.findVar(isInput ? "Input" : "Output");
+    return ve ? ve->ptr : nullptr;
+}
+
 void BuiltinIO::emitBuiltinWrite(const std::vector<std::unique_ptr<ExprNode>>& args, bool newline) {
     // Detect file variable as first argument: write(f, ...) vs write(...)
     size_t start = 0;
@@ -37,6 +44,16 @@ void BuiltinIO::emitBuiltinWrite(const std::vector<std::unique_ptr<ExprNode>>& a
         fp          = FileVars.fileVarPtr(*args[0]);
         start       = 1;
         binaryTyped = FileVars.isTypedBinaryFileVar(*args[0]);
+    } else {
+        // -std=turbo only: a bare write/writeln with no explicit file
+        // argument now means the predefined Output variable, which
+        // Assign/Rewrite may have redirected away from stdout -- routing
+        // it through fp (Output's own storage), the SAME file-pointer-
+        // taking codepath every other file write already uses below,
+        // rather than leaving fp null (which every helper in this file
+        // still reads as "write straight to the console", ISO/EP's own
+        // unredirectable case, left completely untouched by this branch).
+        fp = turboStdFilePtr(/*isInput=*/false);
     }
 
     if (start >= args.size()) {
@@ -735,6 +752,12 @@ void BuiltinIO::emitBuiltinRead(const std::vector<std::unique_ptr<ExprNode>>& ar
         fp          = FileVars.fileVarPtr(*args[0]);
         start       = 1;
         binaryTyped = FileVars.isTypedBinaryFileVar(*args[0]);
+    } else {
+        // -std=turbo only: see emitBuiltinWrite's identical branch -- a
+        // bare read/readln with no explicit file argument now means the
+        // predefined Input variable, which Assign/Reset may have
+        // redirected away from stdin.
+        fp = turboStdFilePtr(/*isInput=*/true);
     }
 
     for (size_t i = start; i < args.size(); ++i) {
@@ -788,7 +811,13 @@ void BuiltinIO::emitBuiltinRead(const std::vector<std::unique_ptr<ExprNode>>& ar
 void BuiltinIO::emitBuiltinReadln(const std::vector<std::unique_ptr<ExprNode>>& args) {
     size_t start = 0;
     llvm::Value* fp = nullptr;
-    if (!args.empty() && FileVars.isFileVar(*args[0])) { fp = FileVars.fileVarPtr(*args[0]); start = 1; }
+    if (!args.empty() && FileVars.isFileVar(*args[0])) {
+        fp = FileVars.fileVarPtr(*args[0]);
+        start = 1;
+    } else {
+        // -std=turbo only: see emitBuiltinWrite's identical branch.
+        fp = turboStdFilePtr(/*isInput=*/true);
+    }
 
     for (size_t i = start; i < args.size(); ++i) emitReadArg(*args[i], fp);
     emitSkipLine(fp);

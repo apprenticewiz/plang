@@ -437,6 +437,55 @@ void Sema::registerBuiltins() {
         (void)Symtab.define(std::move(InOutResSym));
     }
 
+    // -std=turbo only: Input/Output as predefined text-file VARIABLES,
+    // registered here -- BEFORE check() below ever reaches the
+    // Prog.FileParams loop that gives ISO 7185/Extended Pascal's own
+    // `program p(input, output);` heading its implicit Vars -- rather than
+    // only when a program's heading actually lists them.  Real Turbo Pascal
+    // needs neither an ISO-style program heading nor any declaration at all
+    // to use Input/Output; they are simply always there.  Registering them
+    // unconditionally here, rather than teaching this function to consult
+    // Prog.FileParams and register them only when the heading does NOT
+    // already list them, is the cleaner of the two shapes the collision
+    // this creates could be resolved by: registerBuiltins() has never taken
+    // the ProgramNode (only check(), below, sees it), and threading it
+    // through would make every OTHER registerBuiltins() call site --
+    // there is more than one test and tool entry point that calls this to
+    // populate a fresh Symtab without a full program in hand -- either
+    // fabricate a ProgramNode or grow a second overload.  Instead, the
+    // Prog.FileParams loop in check() itself is the one taught to
+    // recognize that 'input'/'output' already exist under Turbo and skip
+    // redefining them rather than treating the ISO heading syntax as a
+    // duplicate-parameter error -- see that loop's own comment for the
+    // other half of this.
+    //
+    // Ty is Ctx_.getText(), the exact type the Prog.FileParams loop below
+    // gives 'input'/'output' under ISO/EP -- so code that reads or writes
+    // through either name type-checks identically under every dialect.
+    // LinkName follows ExitCode's own mechanism (this function's own
+    // comment on that Symbol) with one difference: Input/Output are
+    // WHOLE-STRUCT globals (PascalFile, not a scalar), so
+    // Codegen::Impl::emitPredefinedGlobals declares each under
+    // fileStructType() rather than a scalar LLVM type -- see that
+    // function's own comment for the rest.
+    if (Opts.turbo()) {
+        Symbol InputSym;
+        InputSym.Kind     = SymbolKind::Var;
+        InputSym.Name     = "Input";
+        InputSym.Ty       = Ctx_.getText();
+        InputSym.LinkName = "plang_input";
+        InputSym.IsRequiredIdentifier = true;
+        (void)Symtab.define(std::move(InputSym));
+
+        Symbol OutputSym;
+        OutputSym.Kind     = SymbolKind::Var;
+        OutputSym.Name     = "Output";
+        OutputSym.Ty       = Ctx_.getText();
+        OutputSym.LinkName = "plang_output";
+        OutputSym.IsRequiredIdentifier = true;
+        (void)Symtab.define(std::move(OutputSym));
+    }
+
     // -std=turbo only: the sized-integer ladder, AnsiChar, and the untyped
     // Pointer type -- the type names the rest of Tier 2 is written against.
     //
@@ -567,7 +616,28 @@ bool Sema::check(const ProgramNode& Prog) {
     // BeforePop hook below for the check that it did.  A name repeated in the
     // list collides right here, in this same scope, so report the failure
     // Symtab.define already detects instead of discarding it as before.
+    // -std=turbo only: 'input'/'output' were already registered above, by
+    // registerBuiltins() itself, as predefined text-file Vars -- see that
+    // registration's own comment for why unconditionally, rather than only
+    // when this program's own heading lists them.  Real Turbo Pascal does
+    // not forbid the ISO heading syntax, it simply does not require it, so
+    // a Turbo program that still writes `program p(input, output);` is
+    // naming something that is already there, not colliding with
+    // anything: Symtab.define would fail on either name here (it is
+    // already taken in this same scope) and, unless skipped, that failure
+    // would be reported as though the heading itself repeated a name --
+    // exactly the spurious err_duplicate_param a program that did nothing
+    // wrong must not get.  A literal repeat within the heading itself
+    // (`program p(input, input);`) is still caught, via TurboSkippedNames
+    // below, so this loosening does not also swallow an actual mistake.
+    std::set<std::string> TurboSkippedNames;
     for (const auto& Name : Prog.FileParams) {
+        const std::string Lower = toLower(Name);
+        if (Opts.turbo() && (Lower == "input" || Lower == "output")) {
+            if (!TurboSkippedNames.insert(Lower).second)
+                error(Prog.Loc, diag::err_duplicate_param, {Name});
+            continue;
+        }
         Symbol S;
         S.Kind = SymbolKind::Var;
         S.Name = Name;

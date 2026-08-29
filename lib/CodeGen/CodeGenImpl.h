@@ -1446,6 +1446,11 @@ struct Codegen::Impl {
     /// module or the program's own body is emitted, so that a module
     /// procedure can reference ExitCode exactly as the program body can.
     void emitPredefinedGlobals();
+    /// -std=turbo only: binds the predefined Input/Output Vars to
+    /// stdin/stdout, unconditionally -- see this method's own definition
+    /// (CodeGenProcs.cpp) for why this exists separately from
+    /// emitFileParamBinds, which stays ISO/EP-only.
+    void emitTurboStdIOBinds();
 
     // ====================================================================
     // Procedures and functions

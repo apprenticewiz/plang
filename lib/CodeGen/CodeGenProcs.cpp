@@ -11,6 +11,20 @@ using namespace plang;
 // fails to resolve during lowering.
 void Codegen::Impl::emitFileParams(const std::vector<std::string>& names) {
     for (const auto& nm : names) {
+        // -std=turbo only: 'input'/'output' already have shared storage
+        // from emitPredefinedGlobals (the runtime's own plang_input/
+        // plang_output, called before this from Codegen::emit) -- a
+        // program that still writes the legal-but-unusual ISO heading
+        // `program p(input, output);` under Turbo must not get a SECOND,
+        // per-object global here, which would silently detach this
+        // object's own 'input'/'output' from the shared storage every
+        // other Turbo mechanism (plang_bind_std, Assign/Reset/Rewrite)
+        // reads and writes -- see Sema::registerBuiltins' Input/Output
+        // comment for the matching reconciliation on the Sema side.
+        if (langOpts.turbo()) {
+            const std::string lo = toLower(nm);
+            if (lo == "input" || lo == "output") continue;
+        }
         auto* ty   = fileStructType();
         auto* zero = llvm::Constant::getNullValue(ty);
         auto* gv   = new llvm::GlobalVariable(*mod, ty, /*isConst=*/false,
@@ -95,12 +109,43 @@ void Codegen::Impl::emitPredefinedGlobals() {
                                             llvm::GlobalValue::ExternalLinkage,
                                             /*Initializer=*/nullptr, "plang_tp_inoutres");
     defVar("InOutRes", iorGv, iorTy, /*typeNode=*/nullptr);
+
+    // Input/Output: see Sema::registerBuiltins' own comment on these two
+    // Symbols for the whole design -- ExitCode's exact "one real definition
+    // in the runtime (runtime/plang_sys.cpp's plang_input/plang_output),
+    // every compiled Turbo object only DECLARES it" mechanism, but under
+    // fileStructType() (a whole PascalFile struct) rather than a scalar
+    // LLVM type like every other entry in this function.  typeNode is
+    // null, exactly like emitFileParams gives ISO/EP's own 'input'/
+    // 'output' storage just below (there is no Sema-type table CodeGen can
+    // hand a real FileTypeNode from here, and nothing downstream needs
+    // one -- FileVarHelpers::isFileVar's own fallback to `ve->type ==
+    // fileStructType()` is what a null typeNode still resolves through).
+    auto* fileTy = fileStructType();
+    auto* inGv = new llvm::GlobalVariable(*mod, fileTy, /*isConst=*/false,
+                                           llvm::GlobalValue::ExternalLinkage,
+                                           /*Initializer=*/nullptr, "plang_input");
+    defVar("Input", inGv, fileTy, /*typeNode=*/nullptr);
+    auto* outGv = new llvm::GlobalVariable(*mod, fileTy, /*isConst=*/false,
+                                            llvm::GlobalValue::ExternalLinkage,
+                                            /*Initializer=*/nullptr, "plang_output");
+    defVar("Output", outGv, fileTy, /*typeNode=*/nullptr);
 }
 
 // Attaches 'input' and 'output' to the standard streams.  Any other
 // file-parameter is left closed, so rewrite/reset give it temporary storage
 // like an internal file.
+//
+// -std=turbo: a no-op for 'input'/'output' regardless of what this
+// program's own heading lists -- emitTurboStdIOBinds, just below, is what
+// binds THOSE two under Turbo, unconditionally, since Turbo needs them
+// bound whether or not the heading ever mentions them at all.  Binding
+// them here too (this loop's ISO/EP behavior, unchanged below) would just
+// be a second, redundant plang_bind_std call on the exact same shared
+// storage -- harmless, but this skip keeps the "who binds Input/Output
+// under Turbo" answer in exactly one place.
 void Codegen::Impl::emitFileParamBinds(const std::vector<std::string>& names) {
+    if (langOpts.turbo()) return;
     for (const auto& nm : names) {
         std::string lo = toLower(nm);
         if (lo != "input" && lo != "output") continue;
@@ -111,6 +156,25 @@ void Codegen::Impl::emitFileParamBinds(const std::vector<std::string>& names) {
         builder.CreateCall(fn, {ve->ptr,
             llvm::ConstantInt::get(i8Ty, lo == "input" ? 1 : 0)});
     }
+}
+
+// -std=turbo only: binds the predefined Input/Output variables
+// (Sema::registerBuiltins, emitPredefinedGlobals just above) to
+// stdin/stdout, unconditionally -- whether or not this program's own
+// heading lists 'input'/'output' at all (see emitFileParamBinds' own
+// comment for why that loop skips them entirely under Turbo instead).
+// Reuses plang_bind_std, the exact runtime entry point ISO/EP's own
+// file-parameter mechanism already calls for the identical purpose.
+void Codegen::Impl::emitTurboStdIOBinds() {
+    if (!langOpts.turbo()) return;
+    auto* fn = getExternFnN("plang_bind_std", llvm::Type::getVoidTy(ctx), {ptrTy, i8Ty});
+    auto bind = [&](const char* nm, int8_t isInput) {
+        auto* ve = findVar(nm);
+        if (!ve) codegenICE(std::string("predefined '") + nm + "' has no storage");
+        builder.CreateCall(fn, {ve->ptr, llvm::ConstantInt::get(i8Ty, isInput)});
+    };
+    bind("Input", 1);
+    bind("Output", 0);
 }
 
 // The value a named constant stands for, or null when it needs a basic block
@@ -1975,6 +2039,11 @@ void Codegen::Impl::emitMain(const BlockNode& block,
     // by a procedure would not be visible to the program body and vice versa.
     emitBlockDecls(block);
     emitFileParamBinds(fileParams);
+    // -std=turbo only: Input/Output are bound unconditionally, whether or
+    // not this program's own heading lists them -- see this function's own
+    // comment (CodeGenProcs.cpp) for why it is separate from
+    // emitFileParamBinds just above, which is a no-op under Turbo.
+    emitTurboStdIOBinds();
     // The constants first, as emitModuleGlobalInits already does for a
     // module: a variable's initial value may be written in terms of one, and
     // any constant emitGlobals could not fold at compile time (registered by

@@ -167,9 +167,18 @@ llvm::Value* CGFuncCall::emitBuiltinCall(const std::string& Name,
     // plang_eof_file/plang_eoln_file -- this item's P7-rule choke point
     // (tpFileReady) AND the InOutRes-pending-means-TRUE behavior real Turbo
     // field practice requires both live only in the `_turbo` sibling.  The
-    // bare, no-file forms (`eof`/`eoln` alone, meaning `input`) are left
-    // alone: plang_eof_stdin/plang_eoln_stdin have no PascalFile at all, so
-    // neither tpFileReady nor an InOutRes check applies to them.
+    // bare, no-file forms (`eof`/`eoln` alone, meaning `input`) used to be
+    // left alone entirely (plang_eof_stdin/plang_eoln_stdin, which read
+    // stdin directly and have no PascalFile at all) -- but under Turbo,
+    // `input` is now a real, addressable PascalFile (Sema::registerBuiltins'
+    // Input Symbol) that Assign/Reset may have redirected away from stdin,
+    // so a bare `eof`/`eoln` has to route through ITS storage the same way
+    // an explicit `eof(input)` already would, not silently keep reading the
+    // real stdin regardless of any redirection.  ISO/EP are untouched:
+    // neither dialect ever gives 'input' real PascalFile storage this way
+    // (see the Prog.FileParams loop's own comment, Sema.cpp), so
+    // RangeGuards.isTurbo() being false always takes the plang_eof_stdin/
+    // plang_eoln_stdin path exactly as before.
     if (lo == "eof") {
         if (!Args.empty() && FileVars.isFileVar(*Args[0])) {
             auto* fp  = FileVars.fileVarPtr(*Args[0]);
@@ -178,6 +187,14 @@ llvm::Value* CGFuncCall::emitBuiltinCall(const std::string& Name,
                                                           : "plang_eof_file",
                                     I8Ty, {PtrTy}), {fp}, "eof.raw");
             return EnsureI1(raw);
+        }
+        if (RangeGuards.isTurbo()) {
+            if (auto* ve = SymTab.findVar("Input")) {
+                auto* raw = B.CreateCall(
+                    RtFns.getExternFnN("plang_eof_file_turbo", I8Ty, {PtrTy}),
+                    {ve->ptr}, "eof.raw");
+                return EnsureI1(raw);
+            }
         }
         auto* raw = B.CreateCall(
             RtFns.getRuntimeBoolFn("plang_eof_stdin"), {}, "eof.raw");
@@ -191,6 +208,14 @@ llvm::Value* CGFuncCall::emitBuiltinCall(const std::string& Name,
                                                           : "plang_eoln_file",
                                     I8Ty, {PtrTy}), {fp}, "eoln.raw");
             return EnsureI1(raw);
+        }
+        if (RangeGuards.isTurbo()) {
+            if (auto* ve = SymTab.findVar("Input")) {
+                auto* raw = B.CreateCall(
+                    RtFns.getExternFnN("plang_eoln_file_turbo", I8Ty, {PtrTy}),
+                    {ve->ptr}, "eoln.raw");
+                return EnsureI1(raw);
+            }
         }
         auto* raw = B.CreateCall(
             RtFns.getRuntimeBoolFn("plang_eoln_stdin"), {}, "eoln.raw");
