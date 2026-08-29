@@ -138,7 +138,7 @@ std::filesystem::path CGDebugInfo::schemaSidecarPath() const {
 }
 
 // -g.  Every TypeKind that reaches codegen gets a real DIType now (Record/
-// Array/Set/Complex/String/VarString/Procedure/Function/Schema/
+// Array/Set/Complex/String/VarString/ShortString/Procedure/Function/Schema/
 // SchemaInstance below, alongside the seven scalar/pointer kinds this
 // switch always had).  File and ConformantArray still fall through to
 // null -- a file variable's own storage is an implementation-defined
@@ -233,6 +233,9 @@ llvm::DIType* CGDebugInfo::debugTypeOfSemaType(const Type& T) {
             break;
         case TypeKind::VarString:
             DT = buildStringDIType(T.StrCapacity);
+            break;
+        case TypeKind::ShortString:
+            DT = buildShortStringDIType(T.StrCapacity);
             break;
         case TypeKind::String:
             // ISO 7185 unbounded string: a pointer at the LLVM level (see
@@ -354,6 +357,32 @@ llvm::DIType* CGDebugInfo::buildStringDIType(int64_t cap) {
                                     llvm::DINode::FlagZero, DataTy),
     };
     return DBuilder->createStructType(DebugFile, "string", DebugFile, 0, 64 + capBits, 64,
+                                       llvm::DINode::FlagZero, nullptr,
+                                       DBuilder->getOrCreateArray(Elems));
+}
+
+llvm::DIType* CGDebugInfo::buildShortStringDIType(int64_t cap) {
+    // CGTypes::sstrStructType's own shape: PACKED { i8 length; [cap x i8]
+    // data }, one-byte-aligned throughout -- Turbo's string[N], laid out
+    // with a ONE-BYTE length prefix, unlike EP's VarString just above (eight
+    // bytes).  cap<=0 should not arise in practice -- a string[N] denoter
+    // always resolves a positive capacity before this is ever reached,
+    // unlike VarString's bare-`string`/probe-type routes -- but falls back
+    // to PlangMaxStringCapacity the same defensively-honest way
+    // buildStringDIType does, rather than emitting a zero-element array type.
+    if (cap <= 0) cap = PlangMaxStringCapacity;
+    const uint64_t capBits = static_cast<uint64_t>(cap) * 8;
+    auto* CharTy = DBuilder->createBasicType("char", 8, llvm::dwarf::DW_ATE_unsigned_char);
+    auto* LenTy  = DBuilder->createBasicType("byte", 8, llvm::dwarf::DW_ATE_unsigned);
+    auto* Sub    = DBuilder->getOrCreateSubrange(0, cap);
+    auto* DataTy = DBuilder->createArrayType(capBits, 8, CharTy, DBuilder->getOrCreateArray({Sub}));
+    std::vector<llvm::Metadata*> Elems{
+        DBuilder->createMemberType(DebugFile, "length", DebugFile, 0, 8, 8, 0,
+                                    llvm::DINode::FlagZero, LenTy),
+        DBuilder->createMemberType(DebugFile, "data", DebugFile, 0, capBits, 8, 8,
+                                    llvm::DINode::FlagZero, DataTy),
+    };
+    return DBuilder->createStructType(DebugFile, "string", DebugFile, 0, 8 + capBits, 8,
                                        llvm::DINode::FlagZero, nullptr,
                                        DBuilder->getOrCreateArray(Elems));
 }

@@ -96,6 +96,13 @@ public:
     };
 
     llvm::StructType* strStructType(int64_t cap);
+    /// Turbo string[N]'s PACKED <{i8 length, [cap x i8] data}>.  A SEPARATE
+    /// cache from strStructType's above (strStructTypes_ is keyed on
+    /// capacity alone, an int64_t, with no way to tell "EP capacity" from
+    /// "Turbo capacity" apart) -- sharing one would silently hand back
+    /// VarString's i64-headed struct for a ShortString(N) of the same N, a
+    /// serious, silent layout corruption rather than a mere cache collision.
+    llvm::StructType* sstrStructType(int64_t cap);
     llvm::Type*        llvmTypeOfName(const std::string& name);
     llvm::Type*        variantBlobType(uint64_t size, uint64_t align);
     llvm::Type*        semaFieldType(const plang::Type* semaRec, const std::string& nm);
@@ -167,6 +174,9 @@ private:
     /// body.
     std::string schemaCtx_;
     std::map<int64_t, llvm::StructType*> strStructTypes_;
+    /// Turbo string[N]; see sstrStructType's own comment for why this is a
+    /// separate cache and not a slot shared with strStructTypes_ above.
+    std::map<int64_t, llvm::StructType*> sstrStructTypes_;
     llvm::StructType* fileStructTy_{nullptr};
     llvm::StructType* timestampTy_{nullptr};
     /// Name (lowercased) -> field, memoized per Sema record.  semaFieldType

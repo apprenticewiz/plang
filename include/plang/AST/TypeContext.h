@@ -130,6 +130,7 @@ public:
                             &SetCache_, &FileCache_})
             for (auto& [K, T] : *Cache) collect(T, Seen, Alive);
         for (auto& [Cap, T] : VarStringCache_) collect(T, Seen, Alive);
+        for (auto& [Cap, T] : ShortStringCache_) collect(T, Seen, Alive);
         for (const auto& Sp : Alive) {
             Type* T = Sp.get();
             T->SubBase.reset();
@@ -417,6 +418,18 @@ public:
         return slot;
     }
 
+    /// Canonical Turbo string[N] type.  A SEPARATE cache from VarString's
+    /// above, keyed the same way (by capacity alone) but never sharing a slot
+    /// with it: the two have different, incompatible binary layouts (see
+    /// TypeKind::ShortString), so interning them together would hand back
+    /// VarString's i64-headed struct for a ShortString(N) of the same N --
+    /// silent, serious corruption rather than a mere naming collision.
+    std::shared_ptr<Type> getShortString(int64_t capacity) {
+        auto& slot = ShortStringCache_[capacity];
+        if (!slot) slot = Type::makeShortString(capacity);
+        return slot;
+    }
+
     /// Canonical set type.
     std::shared_ptr<Type> getSet(std::shared_ptr<Type> elem, bool packed) {
         std::string k = "set:" + addrKey(elem) + ":" + (packed ? "P" : "U");
@@ -538,6 +551,9 @@ private:
     std::map<std::string, std::shared_ptr<Type>> SetCache_;
     std::map<std::string, std::shared_ptr<Type>> FileCache_;
     std::map<int64_t,     std::shared_ptr<Type>> VarStringCache_;
+    /// Turbo string[N]; see getShortString's own comment for why this is a
+    /// separate cache and not a slot shared with VarStringCache_ above.
+    std::map<int64_t,     std::shared_ptr<Type>> ShortStringCache_;
 };
 
 } // namespace plang

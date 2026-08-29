@@ -58,6 +58,15 @@ llvm::Value* StringRuntime::strDataPtr(llvm::Value* strPtr) {
     return i8Ptr;
 }
 
+llvm::Value* StringRuntime::sstrLoadLen(llvm::Value* strPtr) {
+    return B.CreateLoad(i8Ty(), strPtr, "sstr.len8");
+}
+
+llvm::Value* StringRuntime::sstrDataPtr(llvm::Value* strPtr) {
+    // data is at byte offset 1 (after the i8 length field)
+    return B.CreateConstGEP1_64(i8Ty(), strPtr, 1, "sstr.data");
+}
+
 void StringRuntime::emitStrAssign(llvm::Value* dst, llvm::Value* capDst,
                                    llvm::Value* src, llvm::Value* capSrc) {
     auto* fn = getStrFn("plang_str_assign",

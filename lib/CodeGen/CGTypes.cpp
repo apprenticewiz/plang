@@ -33,6 +33,21 @@ llvm::StructType* CGTypes::strStructType(int64_t cap) {
     return st;
 }
 
+llvm::StructType* CGTypes::sstrStructType(int64_t cap) {
+    auto it = sstrStructTypes_.find(cap);
+    if (it != sstrStructTypes_.end()) return it->second;
+    auto* arr = llvm::ArrayType::get(i8Ty, static_cast<uint64_t>(cap));
+    // PACKED, unlike strStructType above: a ShortString's ENTIRE point is a
+    // one-byte length prefix with SizeOf(string[N]) == N+1 exactly.  i8
+    // followed by [N x i8] would already come out unpadded on every target
+    // this project builds for, but isPacked=true makes that a guarantee
+    // rather than an accident of the current DataLayout, and matches
+    // byteAlignOf's ShortString case (SemaType.cpp), which answers 1.
+    auto* st  = llvm::StructType::get(Ctx, {i8Ty, arr}, /*isPacked=*/true);
+    sstrStructTypes_[cap] = st;
+    return st;
+}
+
 llvm::Type* CGTypes::llvmTypeOfName(const std::string& name) {
     std::string lo = toLower(name);
     // As wide as the dialect makes it; see Type::Width.  Answering i64
@@ -297,6 +312,13 @@ llvm::Type* CGTypes::llvmTypeOfNode(const TypeNode& node) {
         // cannot tell the two apart, so a resolved capacity wins over it.
         if (node.ResolvedType && node.ResolvedType->Kind == TypeKind::VarString)
             return strStructType(node.ResolvedType->StrCapacity);
+        // Turbo: a NAMED alias of string[N] (`type Foo = string[10];`)
+        // reaches here as a bare NamedTypeNode the identical way an alias of
+        // EP's string(N) does above -- same reasoning, dedicated cache (see
+        // sstrStructType's own comment for why it must not share
+        // strStructType's).
+        if (node.ResolvedType && node.ResolvedType->Kind == TypeKind::ShortString)
+            return sstrStructType(node.ResolvedType->StrCapacity);
         // A record's struct is reached through Type::RecordDecl, a pointer to
         // the declaration it came from, while llvmTypeOfName below goes through
         // a table rebuilt per procedure and answered by SPELLING.  A procedure
@@ -380,6 +402,20 @@ llvm::Type* CGTypes::llvmTypeOfNode(const TypeNode& node) {
     // would then fire on every one of them.
     if (llvm::dyn_cast<SubrangeTypeNode>(&node))  return ordinalTyOf(node);
     if (auto* n = llvm::dyn_cast<StringTypeNode>(&node)) {
+        // Turbo string[N] -- a distinct branch from EP's string(N) below,
+        // into the SEPARATE ShortString cache (see sstrStructType's own
+        // comment for why the two must never share one).  No schema-probe
+        // fallback to make here: Turbo has no schemas (EP §6.4.7), so the
+        // capacity is always either what Sema resolved or a plain
+        // compile-time constant, never a probe's stand-in answer.
+        if (n->IsShortString) {
+            if (node.ResolvedType && node.ResolvedType->Kind == TypeKind::ShortString)
+                return sstrStructType(node.ResolvedType->StrCapacity);
+            if (auto Cap = tryEvalConstInt(*n->Capacity, &Consts))
+                return sstrStructType(*Cap);
+            codegenICE("a ShortString capacity that is neither resolved nor "
+                       "constant-foldable");
+        }
         // R2.  The capacity Sema resolved, then the capacity the syntax folds
         // to.  This used to fold first and fall back to 255 -- the very thing
         // tryEvalConstInt's own comment says must never be done, because a
@@ -469,7 +505,7 @@ CGTypes::arrayIndexRange(const ArrayTypeNode& n) const {
 // reaches debugTypeOfSemaType and is silently given no DIType at all,
 // which is the *correct*, deliberate answer for a composite kind but a
 // silent gap for a new scalar-like kind that should have gotten one.
-static_assert(NumSemaTypeKinds == 21,
+static_assert(NumSemaTypeKinds == 22,
               "a new semantic type kind needs a case in canLowerSemaType, "
               "llvmTypeOfSemaType, and (if it is scalar-like) "
               "debugTypeOfSemaType");
@@ -483,6 +519,7 @@ bool CGTypes::canLowerSemaType(const Type& T) {
     case TypeKind::Set:      case TypeKind::Real:     case TypeKind::Complex:
     case TypeKind::Boolean:  case TypeKind::Char:     case TypeKind::String:
     case TypeKind::Pointer:  case TypeKind::Nil:      case TypeKind::VarString:
+    case TypeKind::ShortString:
     case TypeKind::File:     case TypeKind::Array:    case TypeKind::Record:
     case TypeKind::ConformantArray:
     // Turbo procedural VALUES: see llvmTypeOfSemaTypeImpl's identical case.
@@ -785,6 +822,11 @@ llvm::Type* CGTypes::llvmTypeOfSemaTypeImpl(const Type& T) {
             return ptrTy;
         case TypeKind::VarString:
             return strStructType(T.StrCapacity > 0 ? T.StrCapacity : 255);
+        // Turbo string[N]: the SEPARATE, packed one-byte-header struct --
+        // see sstrStructType's own comment for why this must never fold
+        // into the VarString case just above.
+        case TypeKind::ShortString:
+            return sstrStructType(T.StrCapacity > 0 ? T.StrCapacity : 255);
         case TypeKind::File:
             return fileStructType();
         case TypeKind::Array: {

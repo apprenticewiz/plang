@@ -47,6 +47,21 @@ public:
     llvm::Value* strLoadLen(llvm::Value* strPtr);
     /// The address of the bytes following the length field.
     llvm::Value* strDataPtr(llvm::Value* strPtr);
+
+    /// Turbo string[N]'s ONE-byte length prefix at \p strPtr -- deliberately
+    /// a SEPARATE pair of accessors from strLoadLen/strDataPtr above rather
+    /// than a shared, parameterized one: the two layouts differ (i8 header
+    /// here vs. i64 there), and a single function trying to serve both is
+    /// exactly the kind of subtle-bug risk this pair avoids by being
+    /// obviously, structurally distinct instead. Returns the raw i8 --
+    /// unlike strLoadLen's i64, this is NOT widened here, so a future caller
+    /// that wants the byte itself (e.g. reading s[0] as TP does) is not
+    /// forced through an i64 round-trip first; a caller that wants an i64
+    /// count zero-extends it themselves.
+    llvm::Value* sstrLoadLen(llvm::Value* strPtr);
+    /// The address of the bytes following the one-byte length field (offset
+    /// +1, not strDataPtr's +8).
+    llvm::Value* sstrDataPtr(llvm::Value* strPtr);
     void emitStrAssign(llvm::Value* dst, llvm::Value* capDst,
                        llvm::Value* src, llvm::Value* capSrc);
     void emitStrFromCStr(llvm::Value* dst, llvm::Value* cap, llvm::Value* cstr);
