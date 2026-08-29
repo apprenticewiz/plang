@@ -930,6 +930,36 @@ void Sema::checkCallStmt(const CallStmt& S) {
             return;
         }
 
+        // EP §6.7.5.2: reset/rewrite/extend/update's optional second argument
+        // names the external file, and CodeGen's marshalling
+        // (StringCallMarshalling::emitCStrArg) only has cases for a char
+        // value, an EP string(n), and a plain ISO 7185 String -- every one of
+        // those turns into a `const char *` cleanly.  Nothing checked the
+        // argument's type before it reached codegen, so `reset(f, 42)` (or a
+        // Boolean, a record, an array, ...) arrived at emitCStrArg shaped
+        // nothing like a string and made LLVM's own IR verifier abort the
+        // whole compiler with an internal error instead of plang ever
+        // refusing the program.  isCharStringType (a declared `packed
+        // array[1..n] of char`) and Turbo's ShortString/PChar are
+        // deliberately NOT accepted here even though they read as
+        // string-like: emitCStrArg has no marshalling case for any of them
+        // either (confirmed empirically -- a ShortString actual compiles but
+        // silently opens the wrong file, no diagnostic), so admitting them
+        // would just move the crash/silent-corruption to a different actual
+        // rather than remove it.  Widening this accept-list is separate,
+        // larger work (teaching emitCStrArg the missing cases), not this fix.
+        if ((Lo == "reset" || Lo == "rewrite" || Lo == "extend" || Lo == "update")
+                && S.Args.size() == 2) {
+            (void)checkExpr(*S.Args[0]);
+            auto NameTy = checkExpr(*S.Args[1]);
+            if (!NameTy->isError() && NameTy->Kind != TypeKind::Char
+                    && NameTy->Kind != TypeKind::String
+                    && !isVarStringLike(NameTy.get()))
+                error(S.Args[1]->Loc, diag::err_reset_rewrite_arg_type,
+                      {Lo, NameTy->Name});
+            return;
+        }
+
         // write() with no arguments is an error (ISO §6.9.3).
         if (Lo == "write" && S.Args.empty()) {
             error(S.Loc, diag::err_write_requires_args);
