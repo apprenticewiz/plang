@@ -155,7 +155,24 @@ part of a case-statement, and the rest \(em are rejected under this dialect.
 ISO 10206 Extended Pascal (implemented).
 .TP
 .B turbo
-Turbo Pascal extensions (in development; not all features are implemented yet).
+Turbo Pascal extensions: the dialect's own 16-bit
+.BR Integer ,
+its keywords and operators, its literal syntax, its case-statement and
+text-formatting rules, and a
+.B "{$...}"
+compiler-directive system with no equivalent in ISO 7185 or Extended Pascal.
+Not the real-mode DOS surface
+.RB ( Seg / Ofs / Mem / Intr ),
+which targets a machine this compiler does not build for and is rejected by
+name, and not object types.  See
+.I docs/turbo.md
+for the compiler-directive system in full \(em every accepted directive, the
+predefined
+.B "{$IFDEF}"
+symbols, how
+.B "{$I file}"
+resolves a path, and every point where this dialect is known to diverge from
+real Turbo Pascal / FPC field practice.
 .TP
 .B delphi
 Delphi / Object Pascal (planned; not yet implemented).
