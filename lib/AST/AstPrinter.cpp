@@ -793,6 +793,14 @@ void plang::printAst(const ProgramNode& program, std::ostream& os) {
         for (const auto& ic : program.Imports)
             os << " (import " << ic.ModuleName << ")";
     }
+    // Turbo Tier 4, Cluster A item 1: a program's own top-level 'uses'
+    // clause, printed the same '(uses A B ...)' shape printUnit already uses
+    // for a unit's own InterfaceUses/ImplementationUses just above.
+    if (!program.Uses.empty()) {
+        os << " (uses";
+        for (const auto& u : program.Uses) os << " " << u.Name;
+        os << ")";
+    }
     os << "\n";
     printBlock(*program.Block, os, 1);
     os << ")\n";

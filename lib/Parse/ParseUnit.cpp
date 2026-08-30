@@ -31,6 +31,7 @@
 #include "ParserInternal.h"
 #include "plang/AST/Ast.h"
 #include "plang/Basic/Diagnostic.h"
+#include "plang/Basic/StringUtil.h"
 #include "plang/Basic/Token.h"
 
 using namespace plang;
@@ -83,6 +84,19 @@ std::unique_ptr<ProgramNode> Parser::parseUnitFile() {
 }
 
 // uses-clause → 'uses' identifier (',' identifier)* ';'
+//
+// Every name here goes into QualifiedModules_ unconditionally -- Turbo has
+// no 'qualified' keyword the way EP's own import does (QualifiedModules_'s
+// other populator, ParseModule.cpp), so a Turbo `uses` clause is always
+// "qualified" in that sense: `UnitName.Identifier` has to parse (fold to one
+// dotted IdentExpr, see ParseExpr.cpp/ParseStmt.cpp/ParseType.cpp's own
+// QualifiedModules_ checks) for EVERY unit ever named in ANY uses clause --
+// a program's own, or a unit's interface/implementation uses -- because
+// Cluster A item 1's own shadowing design lets a later `uses` hide an
+// earlier one's same-named export, and UnitName.Identifier is how a caller
+// reaches the SHADOWED one explicitly.  This is shared by every caller of
+// this function, so it lives here rather than being repeated at each of the
+// three call sites (program heading, interface uses, implementation uses).
 std::vector<UsedUnit> Parser::parseUsesClause() {
     std::vector<UsedUnit> Units;
     expect(TokenKind::Uses);
@@ -90,6 +104,7 @@ std::vector<UsedUnit> Parser::parseUsesClause() {
         UsedUnit U;
         U.Loc  = Current;
         U.Name = expect(TokenKind::Identifier).Lexeme;
+        QualifiedModules_.insert(toLower(U.Name));
         Units.push_back(std::move(U));
     } while (match(TokenKind::Comma));
     expect(TokenKind::Semicolon);

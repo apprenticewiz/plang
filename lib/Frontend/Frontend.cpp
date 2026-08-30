@@ -1265,13 +1265,19 @@ int frontendPC1Main(int Argc, char *Argv[]) {
     if (DumpParseTree)
         return withOutput([&](std::ostream& Os) { printAst(*Program, Os); });
 
-    // Turbo Tier 4, Cluster A item 0: parsing a standalone unit file is all
-    // that is wired up so far -- Sema/CodeGen have never been taught what a
-    // UnitNode is (that's Cluster A items 1-3).  -dump-tokens (handled well
-    // above) and -dump-parse-tree (just above) still work on one; an actual
-    // compile stops here with a clear diagnostic instead of running Sema
-    // against a ProgramNode whose real content Sema was never given.
+    // Turbo Tier 4, Cluster A item 1: a standalone unit file now runs
+    // through Sema for real (Sema::checkUnit) -- see
+    // err_unit_compilation_not_yet_supported's own comment for exactly what
+    // is and is not supported yet.  -dump-tokens (handled well above) and
+    // -dump-parse-tree (just above) are unaffected; -dump-ast below now also
+    // works for a unit, once Sema has run over it.
     if (Program->BareUnit) {
+        Sema UnitSem(Diags, Opts);
+        bool UnitOk = UnitSem.checkUnit(*Program->BareUnit);
+        emitAll();
+        if (!UnitOk) return 1;
+        if (DumpAst)
+            return withOutput([&](std::ostream& Os) { printAst(*Program, Os); });
         report(diag::err_unit_compilation_not_yet_supported, {Program->BareUnit->Name});
         return 1;
     }
@@ -1309,6 +1315,20 @@ int frontendPC1Main(int Argc, char *Argv[]) {
     Codegen Cg(Opts);
     Cg.setImportOwners(Sem.importOwners());
     Cg.setLoadedInterfaces(Sem.loadedInterfaces());
+    // Turbo Tier 4, Cluster A item 1: the narrow codegen support this item's
+    // own runtime shadowing test needs -- see Codegen::setUsedUnits's own
+    // comment for exactly what it does and does not cover.  Sem already
+    // parsed and checked every unit this program's own 'uses' clause named
+    // (Sema::loadUnitInterfaceExports); this just hands CodeGen the same
+    // already-loaded ASTs back, in the same 'uses' order, rather than having
+    // CodeGen re-find and re-parse the files itself.
+    if (Opts.turbo() && !Program->Uses.empty()) {
+        std::vector<const UnitNode*> UsedUnits;
+        for (const auto& U : Program->Uses)
+            if (const UnitNode* UN = Sem.loadedUnit(toLower(U.Name)))
+                UsedUnits.push_back(UN);
+        Cg.setUsedUnits(std::move(UsedUnits));
+    }
     if (Opts.Debug) Cg.setSourceManager(SrcMgr, MainFileID);
     if (OutputFile.empty()) {
         const bool EmitOk = Cg.emit(*Program, std::cout);

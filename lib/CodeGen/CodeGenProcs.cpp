@@ -310,6 +310,48 @@ void Codegen::Impl::registerInterfaceTypes(const BlockNode& iface,
     }
 }
 
+// Turbo Tier 4, Cluster A item 1: see Codegen::setUsedUnits's own comment
+// (CodeGen.h) for what this deliberately does and does not do.  Unlike
+// registerInterfaceTypes just above (EP's own real separate-compilation
+// mechanism -- a variable an interface declares becomes an external
+// reference into that module's OWN compiled object file), a Turbo unit
+// compiled through this item's temporary loader (Sema.cpp's
+// loadUnitInterfaceExports) never becomes a real object file of its own, so
+// there is nothing for an external reference to resolve against.  Only
+// SCALAR, FOLDABLE constants -- the one case that needs no storage at all,
+// an immediate value baked directly into whoever reads it -- are registered
+// here.  A unit-exported variable, procedure/function, or a structured/typed
+// constant (which needs real storage this loader cannot provide) is left
+// alone: Sema still accepts a program that references one (its declaration
+// type-checks fine), but nothing here makes that reference codegen to
+// working code, which is unchanged from before this item and is explicitly
+// item 2/3's job once real separate compilation exists.
+void Codegen::Impl::registerUsedUnitConsts() {
+    for (const UnitNode* Unit : usedUnits_) {
+        if (!Unit->InterfaceBlock) continue;
+        for (const auto& cd : Unit->InterfaceBlock->Consts) {
+            // TP typed constant: real static storage, not a foldable value.
+            if (cd.Type) continue;
+            // A whole array/record/set value needs storage of its own too.
+            if (llvm::isa<StructuredValueExpr>(cd.Value.get())) continue;
+            llvm::Value* cv = constantValueOf(cd);
+            if (!cv) continue; // does not fold at compile time; out of scope here
+            // 'uses' order: a later-processed unit's same-named constant
+            // simply overwrites an earlier one's, matching Sema's own
+            // last-uses-wins scope-stack precedence exactly.
+            defineConst(cd.Name, cv);
+            // Explicit qualification: 'UnitName.Identifier' -- the parser
+            // has already folded this into one dotted IdentExpr wherever
+            // 'UnitName' is a name QualifiedModules_ knows about (every
+            // 'uses'd unit; see ParseUnit.cpp's own comment), so a second,
+            // never-overwritten entry under the dotted name is all CodeGen
+            // needs: emitExpr's ordinary `Consts.find(toLower(n->Name))`
+            // already handles it with no new lookup logic at all.
+            defineConst(Unit->Name + "." + cd.Name, cv);
+        }
+    }
+}
+
 void Codegen::Impl::emitGlobals(const BlockNode& block) {
     // Register user-defined type aliases so llvmTypeOfName can resolve them.
     // These come first because a structured constant names one of them.

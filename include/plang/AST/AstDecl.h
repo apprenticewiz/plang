@@ -152,6 +152,20 @@ struct ImportClause {
 struct ModuleNode;  // forward decl
 struct UnitNode;    // forward decl (Turbo Tier 4, defined below)
 
+/// One unit named in a Turbo `uses` clause: just a name and where it was
+/// written.  Turbo's `uses` has none of EP's ImportClause syntax at all --
+/// no `qualified`, no selective/only import list, no renaming -- so a plain
+/// name+location pair is the whole of it; no existing AST type already
+/// paired the two so this is new, not reused.  Moved up here (out of the
+/// "Turbo Tier 4: unit support" section below, where UnitNode's own
+/// InterfaceUses/ImplementationUses first needed it) so that ProgramNode's
+/// own Uses field, just below, can name a complete type rather than an
+/// incomplete one.
+struct UsedUnit {
+    SourceLocation Loc;   ///< where the unit name was written in the uses clause
+    std::string    Name;  ///< unit name as written
+};
+
 struct ProgramNode : Node {
     static bool classof(const Node* n) { return n->Kind == NodeKind::ProgramNodeKind; }
     // Defined below, once ModuleNode/UnitNode are complete: destroying
@@ -162,6 +176,12 @@ struct ProgramNode : Node {
     std::string                Name;
     std::vector<std::string>   FileParams;  ///< program heading file-parameter list (e.g. input, output)
     std::vector<ImportClause>  Imports;     ///< import clauses in the program heading (EP §6.11.3)
+    /// Turbo Tier 4: this program's own top-level `uses` clause, empty if
+    /// none was written.  Turbo-only -- ISO 7185/Extended Pascal programs use
+    /// Imports above instead.  See UnitNode's own InterfaceUses/
+    /// ImplementationUses for why a unit keeps two separate lists of these;
+    /// a program has only ever the one.
+    std::vector<UsedUnit>      Uses;
     std::vector<std::unique_ptr<ModuleNode>> OwnedModules; ///< module definitions before this program
     std::vector<ModuleNode*>   Modules;     ///< borrowed ptrs into OwnedModules
     std::unique_ptr<BlockNode> Block;
@@ -208,16 +228,6 @@ struct ModuleNode : Node {
 // ---------------------------------------------------------------------------
 // Turbo Tier 4: unit support (interface/implementation, no ISO 10206 analog)
 // ---------------------------------------------------------------------------
-
-/// One unit named in a Turbo `uses` clause: just a name and where it was
-/// written.  Turbo's `uses` has none of EP's ImportClause syntax at all --
-/// no `qualified`, no selective/only import list, no renaming -- so a plain
-/// name+location pair is the whole of it; no existing AST type already
-/// paired the two so this is new, not reused.
-struct UsedUnit {
-    SourceLocation Loc;   ///< where the unit name was written in the uses clause
-    std::string    Name;  ///< unit name as written
-};
 
 /// Turbo `unit`: a separately-compiled unit (Tier 4, Cluster A).
 ///

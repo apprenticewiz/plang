@@ -35,6 +35,29 @@ public:
     /// They must outlive emit.
     void setLoadedInterfaces(std::vector<const ModuleNode*> Ifaces);
 
+    /// Turbo Tier 4, Cluster A item 1: the units this program's own top-level
+    /// 'uses' clause named, in the order it named them, as Sema already
+    /// parsed and checked them (Sema::loadUnitInterfaceExports /
+    /// Sema::loadedUnit) -- NOT a general "codegen for a unit" mechanism
+    /// (that is item 2/3's own job, once real separate compilation exists).
+    /// This is deliberately narrow: only what is needed to make Cluster A
+    /// item 1's own runtime shadowing/qualification test executable.  Each
+    /// unit's INTERFACE-declared, SCALAR, foldable constants (an Integer,
+    /// Char, Boolean, ... literal or constant expression -- not a typed
+    /// constant, not an array/record/set value, not anything requiring real
+    /// storage) are registered as compile-time immediates, both under their
+    /// own name and under "UnitName.name" for explicit qualification, in
+    /// 'uses' order so a later unit's same-named constant simply overwrites
+    /// an earlier one's -- the same last-uses-wins order Sema's own
+    /// SymbolTable scoping already resolved the identifiers with. A unit
+    /// export this narrow mechanism does not cover (a variable, a
+    /// procedure/function, a structured or typed constant) still type-checks
+    /// under Sema, but referencing it from a program compiled this way is
+    /// not yet expected to produce working code -- see this method's own
+    /// definition (CodeGenProcs.cpp) for exactly what it skips and why.
+    /// They must outlive emit.
+    void setUsedUnits(std::vector<const UnitNode*> Units);
+
     /// -g: the SourceManager that resolves every node's SourceLocation to a
     /// filename/line/column, and the FileID of the main input file, from
     /// which DIFile/DICompileUnit take their name and directory.  Only
