@@ -122,11 +122,17 @@ begin
   close(blkFile);
 
   { code 101: real short BlockWrite, no Result argument, against a
-    genuinely read-only-reopened file }
+    genuinely read-only-reopened file. FileMode must be forced to 0
+    (read-only) here -- Tier 3's own gap fix (reset-opens-read-write.pas)
+    now has Reset honor FileMode's documented read-write default of 2, so
+    without this, the BlockWrite below would genuinely succeed instead of
+    failing the way this case means to exercise. }
+  FileMode := 0;
   reset(blkFile, 1);
   blockwrite(blkFile, buf, 5);
   writeln('code101=', IOResult);
   close(blkFile);
+  FileMode := 2;
 
   { code 102: Erase against a file variable Assign never touched }
   erase(eraseFile);

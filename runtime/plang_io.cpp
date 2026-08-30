@@ -245,16 +245,38 @@ void plang_write_f64_f(double V, int64_t W, int64_t D, int8_t Upper);
 [[noreturn]] void plang_err_field_width(int64_t W);
 [[noreturn]] void plang_err_read_format(const char *Op);
 [[noreturn]] void plang_err_read_int_range(const char *Op, const char *Tok);
-/// Turbo's own numbered run-time error reporter (plang_sys.cpp) -- see
-/// RangeCheckGuards.cpp's own comment on why the div/mod/range checks route
-/// through this instead of the ISO/EP plang_err_* family: the runtime cannot
-/// hold a "which dialect" global (an ISO object and a Turbo one can be
-/// linked into one program), so CodeGen decides which reporter a call site
-/// reaches, never a flag this checks itself.  plang_read_i64_turbo/
-/// plang_read_f64_turbo below use it directly rather than through CodeGen,
-/// since the "12abc"/malformed-token check happens inside the scan itself,
-/// not at a point CodeGen ever emits a guard around.
+/// Turbo's own numbered run-time error reporter (plang_sys.cpp) -- kept for
+/// every OTHER numbered Turbo run-time error this file can still raise
+/// (range/overflow-shaped conditions with no InOutRes/{$I-} character at
+/// all).  It is deliberately NOT used any more for the "12abc"-shaped
+/// malformed-numeric-token case below -- see plang_read_i64_turbo's own
+/// comment for why that one specific case was moved onto the InOutRes path
+/// instead (a real bug, not a design choice: Borland/`fpc -Mtp` treats a
+/// malformed numeric read as an ordinary I/O failure, gated by {$I-} like
+/// any other).
 [[noreturn]] void plang_tp_runerror(int64_t Code);
+
+/// -std=turbo only: the single InOutRes global -- DEFINED once in
+/// runtime/plang_sys.cpp; see that file's own definition and
+/// runtime/plang_file.cpp's identical `extern` for the full rationale
+/// (int64_t, not Borland's 16-bit Word; one definition, every object file
+/// that touches it only declares).
+extern int64_t plang_tp_inoutres;
+
+/// -std=turbo only: sets InOutRes to \p Code, but ONLY when InOutRes does
+/// not already hold a pending, unread error -- the IDENTICAL "first pending
+/// error survives" contract runtime/plang_file.cpp's own
+/// setInOutResIfClear implements (see that function's own comment for the
+/// full rationale and the `fpc -Mtp` field practice it was found against,
+/// PR #481). That helper is `static` (file-local) to plang_file.cpp, so
+/// this is a separate, byte-for-byte identical twin rather than a shared
+/// declaration -- there is no header both .cpp files already include that
+/// would be a more natural home for one without disturbing either file's
+/// existing "helpers stay static, next to their callers" convention, and a
+/// single-line body has no drift risk to guard against by sharing it.
+static void setInOutResIfClear(int64_t Code) {
+    if (plang_tp_inoutres == 0) plang_tp_inoutres = Code;
+}
 
 // ISO §6.10.3.1 calls a negative TotalWidth or FracDigits "an error" (§3.2's
 // weaker class, which a processor may leave undetected) rather than saying
@@ -410,6 +432,33 @@ void plang_read_u64 (uint64_t *P) {
 // ---- Turbo read: whole-token, entire-token-must-parse, with $/0x/&/% radix
 // prefixes (confirmed against `fpc -Mtp`; see scanTokenTurbo's own comment) --
 
+// Tier 3 gap fix: a malformed token (e.g. "12abc") is an ORDINARY I/O
+// failure in real Turbo Pascal/`fpc -Mtp`, subject to {$I-}/{$I+} exactly
+// like every other InOutRes code -- confirmed empirically: under {$I-},
+// `fpc -Mtp` sets IOResult to 106, assigns the destination variable 0, and
+// lets the program keep running; under the default {$I+} it aborts with
+// "Runtime error 106". This function used to call plang_tp_runerror(106)
+// directly on a malformed token -- a `[[noreturn]]` reporter that aborts
+// unconditionally, INSIDE the read call, before control ever returns to
+// the caller -- so the existing emitIoCheckIfNeeded machinery
+// (lib/CodeGen/CGProcCall.cpp), already wired in after every read/readln
+// statement and already correctly honoring {$I-}/{$I+} for every OTHER
+// Turbo I/O failure, never got a chance to run: the process had already
+// exited. Fixed the same way runtime/plang_file.cpp's own read/write
+// entry points already handle a non-abort failure: set the destination to
+// 0, record InOutRes via setInOutResIfClear (the same "a pending, unread
+// error is not overwritten" contract, PR #481), and return normally,
+// leaving emitIoCheckIfNeeded to decide whether to abort.
+//
+// A magnitude beyond int64_t (ERANGE) gets the SAME numbered error as a
+// malformed token: `fpc -Mtp` reports 106 for "99999999999999999999" too,
+// not a distinct overflow code, since its own integer parser has nowhere
+// else to put a value that big either. A magnitude that fits int64_t but
+// not Turbo's own 16-bit Integer (e.g. "40000") is NOT an error here --
+// checked against `fpc -Mtp`, that wraps to -25536 rather than trapping --
+// so no range check happens in this function at all; CoerceToType's
+// ordinary truncation on the way into a narrower destination
+// (BuiltinIO.cpp's emitReadArg) reproduces the wraparound on its own.
 void plang_read_i64_turbo(int64_t *P) {
     bool SawAny = false;
     scanTokenTurbo(SawAny);
@@ -421,35 +470,40 @@ void plang_read_i64_turbo(int64_t *P) {
     const long long V = *Tok ? std::strtoll(Tok, &End, Radix) : 0;
     // The ENTIRE token must parse -- not just a prefix of it (scanNumber's
     // own ISO/EP rule, reversed here) -- so *End must land on the token's own
-    // terminating NUL, not partway through it.  A magnitude beyond int64_t
-    // (ERANGE) gets the same numbered error as a malformed token: `fpc -Mtp`
-    // reports 106 for "99999999999999999999" too, not a distinct overflow
-    // code, since its own integer parser has nowhere else to put a value
-    // that big either.  A magnitude that fits int64_t but not Turbo's own
-    // 16-bit Integer (e.g. "40000") is NOT an error here -- checked against
-    // `fpc -Mtp`, that wraps to -25536 rather than trapping -- so no range
-    // check happens in this function at all; CoerceToType's ordinary
-    // truncation on the way into a narrower destination (BuiltinIO.cpp's
-    // emitReadArg) reproduces the wraparound on its own.
-    if (!*Tok || *End != '\0' || errno == ERANGE) plang_tp_runerror(106);
+    // terminating NUL, not partway through it.
+    if (!*Tok || *End != '\0' || errno == ERANGE) {
+        *P = 0;
+        setInOutResIfClear(106);
+        return;
+    }
     *P = static_cast<int64_t>(V);
 }
 
 // The Turbo twin of plang_read_u64 above, for the identical QWord-only
 // reason.  A leading '-' is rejected up front, before turboRadixPrefix ever
 // gets a chance to strip a following '$' -- checked against `fpc -Mtp`,
-// "-$FF" read into a QWord is runtime error 106, exactly as a plain "-5" is.
+// "-$FF" read into a QWord is runtime error 106, exactly as a plain "-5" is
+// -- and, per plang_read_i64_turbo's own comment just above, a real I/O
+// failure gated by {$I-}/{$I+}, not an unconditional abort.
 void plang_read_u64_turbo(uint64_t *P) {
     bool SawAny = false;
     scanTokenTurbo(SawAny);
     if (!SawAny) { *P = 0; return; }               // issue #284: past EOF is a defined, consistent zero
     const char *Tok = TokBuf ? TokBuf : "";
-    if (*Tok == '-') plang_tp_runerror(106);
+    if (*Tok == '-') {
+        *P = 0;
+        setInOutResIfClear(106);
+        return;
+    }
     const int Radix = turboRadixPrefix(Tok);
     char *End = const_cast<char *>(Tok);
     errno = 0;
     const unsigned long long V = *Tok ? std::strtoull(Tok, &End, Radix) : 0;
-    if (!*Tok || *End != '\0' || errno == ERANGE) plang_tp_runerror(106);
+    if (!*Tok || *End != '\0' || errno == ERANGE) {
+        *P = 0;
+        setInOutResIfClear(106);
+        return;
+    }
     *P = static_cast<uint64_t>(V);
 }
 
@@ -464,7 +518,13 @@ void plang_read_f64_turbo(double *P) {
     // here the way plang_read_i64_turbo strips one.
     char *End = const_cast<char *>(Tok);
     const double V = *Tok ? std::strtod(Tok, &End) : 0.0;
-    if (!*Tok || *End != '\0') plang_tp_runerror(106);
+    // See plang_read_i64_turbo's own comment: a malformed token is an
+    // ordinary {$I-}/{$I+}-gated I/O failure, not an unconditional abort.
+    if (!*Tok || *End != '\0') {
+        *P = 0.0;
+        setInOutResIfClear(106);
+        return;
+    }
     // A real that overflows to +/-HUGE_VAL is left alone, matching the ISO/EP
     // reader's own policy just above (and the runtime's policy for real
     // arithmetic generally): an IEEE infinity or NaN, not a trap.

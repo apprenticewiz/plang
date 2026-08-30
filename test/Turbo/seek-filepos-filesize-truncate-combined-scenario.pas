@@ -10,15 +10,17 @@ written, not corrupted by the truncation next to them.
 
 Seek/Truncate/FileSize all run in the SAME Rewrite-opened session, not
 after a Reset -- confirmed while writing this test, not assumed:
-plang_tp_reset (runtime/plang_file.cpp) always fopen()s "r" (read-only),
-never honoring FileMode's own documented read-write default of 2
-(filemode-defaults-to-2-and-is-assignable.pas), so Seek+Truncate against a
-Reset-reopened file fails with a genuine EINVAL/218 in plang today even
-though the identical program succeeds against a real `fpc -Mtp` (which
-does open Reset read-write) -- see
-reset-does-not-yet-open-read-write-known-gap.pas, right next to this
-file, for that gap pinned and explained on its own. This test instead
-matches the ALREADY-PASSING shape
+plang_tp_reset (runtime/plang_file.cpp) used to always fopen() "r"
+(read-only), never honoring FileMode's own documented read-write default of
+2 (filemode-defaults-to-2-and-is-assignable.pas), so Seek+Truncate against
+a Reset-reopened file used to fail with a genuine EINVAL/218 even though
+the identical program succeeds against a real `fpc -Mtp` (which does open
+Reset read-write) -- see reset-opens-read-write.pas (test/Turbo/) for that
+gap, now fixed, pinned and explained on its own; and
+seek-truncate-after-fresh-reset.pas, right next to this file, for the
+Reset-session Seek+Truncate path this test's own Rewrite-session shape
+could not cover before the fix. This test's own shape predates the fix and
+is left as it was -- matching the ALREADY-PASSING shape
 truncate-shortens-a-file-at-the-current-position.pas already uses:
 Seek/Truncate happen before the file is ever closed, and only the FINAL
 read-back goes through a fresh Reset (read-only is all a pure read needs).
