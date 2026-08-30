@@ -150,11 +150,13 @@ struct ImportClause {
 };
 
 struct ModuleNode;  // forward decl
+struct UnitNode;    // forward decl (Turbo Tier 4, defined below)
 
 struct ProgramNode : Node {
     static bool classof(const Node* n) { return n->Kind == NodeKind::ProgramNodeKind; }
-    // Defined below, once ModuleNode is complete: destroying OwnedModules
-    // needs its size, which an implicit destructor here would not have.
+    // Defined below, once ModuleNode/UnitNode are complete: destroying
+    // OwnedModules/BareUnit needs their size, which an implicit destructor
+    // here would not have.
     ProgramNode();
     ~ProgramNode();
     std::string                Name;
@@ -163,6 +165,27 @@ struct ProgramNode : Node {
     std::vector<std::unique_ptr<ModuleNode>> OwnedModules; ///< module definitions before this program
     std::vector<ModuleNode*>   Modules;     ///< borrowed ptrs into OwnedModules
     std::unique_ptr<BlockNode> Block;
+
+    /// Turbo Tier 4: set when this whole file was a standalone
+    /// `unit Name; interface ... implementation ... end.` -- no `program`
+    /// heading anywhere in it, nothing here executable on its own.  Null for
+    /// every ordinary program, including EP's own module-only files (those
+    /// still synthesize a real, if empty, executable ProgramNode --
+    /// parseMultiUnitFile's own comment).
+    ///
+    /// Parser::parse() keeps returning unique_ptr<ProgramNode> rather than
+    /// growing a second top-level return type (a tagged union/variant is not
+    /// an idiom this codebase uses anywhere else) because every caller of
+    /// parse() -- today just Frontend.cpp's one call site -- already has to
+    /// branch on "was this actually a program" the same way it would have to
+    /// branch on a variant's active alternative, and ProgramNode already had
+    /// the "one node embeds a different kind of node" idiom in OwnedModules/
+    /// Modules above.  Name/Block above are harmless placeholders in this
+    /// case (an empty block, the unit's own name) so that nothing downstream
+    /// has to null-check them just because a unit file also went through
+    /// this constructor; Frontend.cpp checks BareUnit before ever handing
+    /// the ProgramNode to Sema, so those placeholders are never observed.
+    std::unique_ptr<UnitNode>  BareUnit;
 };
 
 /// EP §6.11: module definition (heading or body).
@@ -180,6 +203,76 @@ struct ModuleNode : Node {
     std::unique_ptr<BlockNode> Body;           ///< declarations and procedures
     std::unique_ptr<StmtNode>  InitStmt;       ///< to begin do stmt (body only)
     std::unique_ptr<StmtNode>  FinalStmt;      ///< to end do stmt (body only)
+};
+
+// ---------------------------------------------------------------------------
+// Turbo Tier 4: unit support (interface/implementation, no ISO 10206 analog)
+// ---------------------------------------------------------------------------
+
+/// One unit named in a Turbo `uses` clause: just a name and where it was
+/// written.  Turbo's `uses` has none of EP's ImportClause syntax at all --
+/// no `qualified`, no selective/only import list, no renaming -- so a plain
+/// name+location pair is the whole of it; no existing AST type already
+/// paired the two so this is new, not reused.
+struct UsedUnit {
+    SourceLocation Loc;   ///< where the unit name was written in the uses clause
+    std::string    Name;  ///< unit name as written
+};
+
+/// Turbo `unit`: a separately-compiled unit (Tier 4, Cluster A).
+///
+/// Structurally similar to EP's ModuleNode above -- both split into an
+/// interface (heading) section and an implementation (body) section -- but
+/// deliberately NOT the same node, because the two are genuinely different
+/// shapes, not just differently spelled:
+///   - no module parameters at all (contrast ModuleNode::Params, e.g. the
+///     `(input, output)` a module may declare -- Turbo units have nothing
+///     like it)
+///   - the interface section exports everything it declares, unconditionally
+///     -- Turbo's `interface` has no export-list syntax at all (contrast
+///     ExportItem's rename/protected/export-range forms), so there is
+///     nothing here shaped like ModuleNode::Exports
+///   - at most one initialization block and no separate finalization keyword
+///     -- a unit's optional `begin ... end` is InitBody below (contrast
+///     ModuleNode::InitStmt/FinalStmt's separate `to begin do`/`to end do`)
+///   - `uses` appears (each optional) in BOTH the interface and the
+///     implementation section, as two genuinely separate scopes -- Tier 4's
+///     own goal of closing mutual dependence through the implementation
+///     uses clause needs both kept apart, so there is one InterfaceUses and
+///     one ImplementationUses rather than a single shared list
+struct UnitNode : Node {
+    static bool classof(const Node* n) { return n->Kind == NodeKind::UnitNodeKind; }
+    UnitNode() : Node(NodeKind::UnitNodeKind) {}
+    std::string             Name;
+
+    /// `uses` clause inside `interface`, empty if none was written.
+    std::vector<UsedUnit>   InterfaceUses;
+    /// const/type/var declarations and procedure/function HEADINGS (no
+    /// bodies) declared in the interface section.  Each ProcDecl in here has
+    /// IsForward set the same way EP's own HeadingsOnly module interface
+    /// does (ParseDecl.cpp's parseProcDecl) -- a signature with the body
+    /// given elsewhere, which is exactly what a heading-only declaration is.
+    std::unique_ptr<BlockNode> InterfaceBlock;
+
+    /// `uses` clause inside `implementation`, empty if none was written.
+    /// Genuinely separate scope from InterfaceUses: a unit may name a unit
+    /// here that itself names this unit back in ITS OWN implementation uses
+    /// clause (mutual implementation-uses) -- Cluster A item 2's job to
+    /// make semantically work, not this item's, but the parser accepts the
+    /// syntax shape either way since parsing has no forward-reference
+    /// problem the way name resolution does.
+    std::vector<UsedUnit>   ImplementationUses;
+    /// const/type/var declarations, full bodies for every interface-declared
+    /// procedure/function, and any additional implementation-private
+    /// declarations.
+    std::unique_ptr<BlockNode> ImplementationBlock;
+
+    /// The unit's single optional `begin ... end` initialization section.
+    /// Null when the implementation section runs straight into `end.` with
+    /// no `begin` at all -- confirmed against real `fpc -Mtp` (see this
+    /// item's own report): a unit with no initialization code omits the
+    /// whole block, there is no empty `begin end` requirement.
+    std::unique_ptr<CompoundStmt> InitBody;
 };
 
 inline ProgramNode::ProgramNode()  : Node(NodeKind::ProgramNodeKind) {}

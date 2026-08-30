@@ -118,6 +118,13 @@ std::unique_ptr<ProgramNode> Parser::parse() {
         auto Prog = parseMultiUnitFile();
         return (ErrorCount > 0) ? nullptr : std::move(Prog);
     }
+    // Turbo Tier 4: a standalone unit file is nothing but 'unit Name; ...
+    // end.' -- never a 'program' at all, so it is checked for up front the
+    // same way EP's own module files are, before ever trying parseProgram().
+    if (Opts.turbo() && check(TokenKind::Unit)) {
+        auto Prog = parseUnitFile();
+        return (ErrorCount > 0) ? nullptr : std::move(Prog);
+    }
     auto Prog = parseProgram();
     return (ErrorCount > 0) ? nullptr : std::move(Prog);
 }

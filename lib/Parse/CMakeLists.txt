@@ -6,6 +6,7 @@ add_library(PlangParse OBJECT
     ParseModule.cpp
     ParseStmt.cpp
     ParseType.cpp
+    ParseUnit.cpp
 )
 target_link_libraries(PlangParse PRIVATE plang_warnings)
 # Parser owns a Scanner by value and drives it token by token (PlangLex);

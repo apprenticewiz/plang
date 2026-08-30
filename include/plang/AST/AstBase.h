@@ -106,6 +106,7 @@ enum class NodeKind {
     BlockNodeKind,
     ProgramNodeKind,
     ModuleNodeKind,   // EP §6.11: module definition (heading or body)
+    UnitNodeKind,     // Turbo Tier 4: unit (interface + implementation)
 };
 
 /// How many kinds each category holds.

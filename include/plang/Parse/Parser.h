@@ -282,6 +282,27 @@ private:
     // Collects all module nodes then delegates to parseProgram().
     std::unique_ptr<ProgramNode>  parseMultiUnitFile();
 
+    // Turbo Tier 4: a standalone `unit Name; interface ... implementation
+    // ... end.` file -- no 'program' anywhere in it.  Returns a ProgramNode
+    // whose BareUnit carries the real content; see BareUnit's own comment
+    // in AstDecl.h for why the return type stayed ProgramNode.
+    std::unique_ptr<ProgramNode>  parseUnitFile();
+
+    // The declaration sections of one unit section (interface or
+    // implementation), in Turbo's always-free order (LangFeatures.def's
+    // FreeDeclarationOrder, which -std=turbo already sets on every ordinary
+    // block via parseBlock -- this is the unit-section equivalent, modeled
+    // on parseModuleDeclarations just above but kept separate rather than
+    // shared, the same way UnitNode itself is kept separate from ModuleNode).
+    // HeadingsOnly is set for the interface section, where a procedure or
+    // function is written as its heading alone.
+    std::unique_ptr<BlockNode>    parseUnitDeclarations(bool HeadingsOnly);
+
+    // Turbo's own 'uses' clause: 'uses' identifier (',' identifier)* ';'.
+    // No qualified/only/rename syntax at all -- contrast EP's import above.
+    // Current must be on 'uses'; consumes through the trailing ';'.
+    std::vector<UsedUnit>         parseUsesClause();
+
     // EP §6.11: module-heading or module-body.
     // 'module' identifier [param-list] ['interface'] ';' ... 'end' '.'
     /// EP §6.11.1: reads one module-declaration, which is a heading, a block,

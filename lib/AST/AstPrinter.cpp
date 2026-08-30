@@ -743,7 +743,47 @@ static void printModule(const ModuleNode& mod, std::ostream& os, int depth) {
     os << ")\n";
 }
 
+// Turbo Tier 4: a standalone unit file.  See UnitNode's own comment in
+// AstDecl.h for the shape; printed the same '(kind ...)' way as printModule
+// just above, reusing printBlock for both sections (printStmt already
+// prints "()" for a null Body -- see its own null check -- so a HeadingsOnly
+// interface block with no compound-statement body still prints cleanly).
+static void printUnit(const UnitNode& unit, std::ostream& os) {
+    os << "(unit " << unit.Name << "\n";
+    os << ind(1) << "(interface";
+    if (!unit.InterfaceUses.empty()) {
+        os << " (uses";
+        for (const auto& u : unit.InterfaceUses) os << " " << u.Name;
+        os << ")";
+    }
+    os << "\n";
+    printBlock(*unit.InterfaceBlock, os, 2);
+    os << ")\n";
+    os << ind(1) << "(implementation";
+    if (!unit.ImplementationUses.empty()) {
+        os << " (uses";
+        for (const auto& u : unit.ImplementationUses) os << " " << u.Name;
+        os << ")";
+    }
+    os << "\n";
+    printBlock(*unit.ImplementationBlock, os, 2);
+    os << ")\n";
+    if (unit.InitBody) {
+        os << ind(1) << "(init ";
+        printStmt(unit.InitBody.get(), os, 1);
+        os << ")\n";
+    }
+    os << ")\n";
+}
+
 void plang::printAst(const ProgramNode& program, std::ostream& os) {
+    // Turbo Tier 4: a standalone unit file carries no real program at all --
+    // print the unit form and return, rather than the placeholder Name/Block
+    // parseUnitFile() filled in just so this ProgramNode still constructs.
+    if (program.BareUnit) {
+        printUnit(*program.BareUnit, os);
+        return;
+    }
     // Print any module definitions that precede the program.
     for (const auto* mod : program.Modules) {
         printModule(*mod, os, 0);

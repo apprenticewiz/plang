@@ -53,6 +53,17 @@ DIAG(err_unknown_dialect, Error,
      "unknown Pascal dialect '%0'; valid dialects: %1")
 DIAG(err_dialect_not_implemented, Error,
      "dialect '%0' is not yet implemented; implemented dialects: %1")
+// Turbo Tier 4, Cluster A item 0: a standalone `unit Name; interface ...
+// end.` file parses (Parser::parseUnitFile, ParseUnit.cpp), but nothing
+// downstream of parsing understands a unit yet -- no Sema, no CodeGen, no
+// separate-compilation artifact.  That wiring is Cluster A items 1-3's job.
+// -dump-tokens/-dump-parse-tree still work on a unit file (read-only
+// inspection, checked before this), but an actual compile stops here with a
+// clear diagnostic instead of running Sema/CodeGen against a unit they were
+// never taught about.
+DIAG(err_unit_compilation_not_yet_supported, Error,
+     "compiling a unit ('%0') is not yet supported; only -dump-tokens and "
+     "-dump-parse-tree can process a unit file so far")
 // -ferror-limit=<N>: N was not all-digits (including empty, or a leading
 // '-'), so there is no number to parse at all.
 DIAG(err_ferror_limit_not_a_number, Error, "-ferror-limit= requires a number")
