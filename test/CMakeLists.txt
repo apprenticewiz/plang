@@ -105,6 +105,7 @@ add_plang_lit_suite(Lex)
 add_plang_lit_suite(Parse)
 add_plang_lit_suite(Sema)
 add_plang_lit_suite(Basic)
+add_plang_lit_suite(Turbo)
 # Basic/Catalog exercises the real shipped locale catalogs (fr.po, es_MX.po,
 # qps_ploc.po, ...) via -fdiagnostics-language=, which live in the build
 # tree only once plang_catalogs (an `ALL`-target, so a full build already
