@@ -311,27 +311,38 @@ void Codegen::Impl::registerInterfaceTypes(const BlockNode& iface,
 }
 
 // Turbo Tier 4, Cluster A item 1: see Codegen::setUsedUnits's own comment
-// (CodeGen.h) for what this deliberately does and does not do.  Unlike
-// registerInterfaceTypes just above (EP's own real separate-compilation
-// mechanism -- a variable an interface declares becomes an external
-// reference into that module's OWN compiled object file), a Turbo unit
-// compiled through this item's temporary loader (Sema.cpp's
-// loadUnitInterfaceExports) never becomes a real object file of its own, so
-// there is nothing for an external reference to resolve against.  Only
-// SCALAR, FOLDABLE constants -- the one case that needs no storage at all,
-// an immediate value baked directly into whoever reads it -- are registered
-// here.  A unit-exported variable, procedure/function, or a structured/typed
-// constant (which needs real storage this loader cannot provide) is left
-// alone: Sema still accepts a program that references one (its declaration
-// type-checks fine), but nothing here makes that reference codegen to
-// working code, which is unchanged from before this item and is explicitly
-// item 2/3's job once real separate compilation exists.
+// (CodeGen.h) for the original design.  Since item 2, a Turbo unit compiled
+// through -c gets a real object file of its own (the same one item 1's
+// temporary loader used to stand in for), so this is no longer the only
+// path an imported declaration can codegen through.  Only SCALAR, FOLDABLE
+// constants -- the one case that needs no storage at all, an immediate
+// value baked directly into whoever reads it -- are registered explicitly
+// here. A unit-exported variable, procedure/function, or a typed constant
+// is left alone by THIS function on purpose, but is not left unhandled: TP
+// typed constant: real static storage, not a foldable value, so Sema
+// registers it as a SymbolKind::Var (Symbol::IsTypedConst) rather than a
+// SymbolKind::Const -- the exact same kind an ordinary interface variable
+// gets -- and CodeGenTypes.cpp's resolveImportedVar already declares an
+// external global for any Var symbol with no same-compile-unit
+// moduleGlobals_ entry, using the Sema-resolved type and the SAME mangled
+// name (CGLinkage::mangledGlobal) the defining unit's own compile emitted
+// storage under (CGTypedConst.cpp). That generic fallback is what makes an
+// imported typed OR structured constant read back correctly with no
+// separate registration loop needed here -- confirmed by round-tripping
+// sized-int, string[N], record, and array typed constants end-to-end
+// through a real -c/link/run cycle (Tier 4 Cluster A item 3).  A plain
+// EP-only structured constant (no ConstDef::Type, StructuredValueExpr
+// value) has never been reachable from a Turbo unit's own const section --
+// checkStructuredValue's TypeName-driven resolution is EP-only grammar
+// (see StructuredValueExpr's own comment) -- so it stays out of scope here.
 void Codegen::Impl::registerUsedUnitConsts() {
     for (const UnitNode* Unit : usedUnits_) {
         if (!Unit->InterfaceBlock) continue;
         const std::string UnitLower = toLower(Unit->Name);
         for (const auto& cd : Unit->InterfaceBlock->Consts) {
-            // TP typed constant: real static storage, not a foldable value.
+            // TP typed constant: real static storage, handled generically
+            // through resolveImportedVar instead -- see this function's own
+            // comment above.
             if (cd.Type) continue;
             // A whole array/record/set value needs storage of its own too.
             if (llvm::isa<StructuredValueExpr>(cd.Value.get())) continue;
