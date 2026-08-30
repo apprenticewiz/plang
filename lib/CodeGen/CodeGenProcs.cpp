@@ -329,6 +329,7 @@ void Codegen::Impl::registerInterfaceTypes(const BlockNode& iface,
 void Codegen::Impl::registerUsedUnitConsts() {
     for (const UnitNode* Unit : usedUnits_) {
         if (!Unit->InterfaceBlock) continue;
+        const std::string UnitLower = toLower(Unit->Name);
         for (const auto& cd : Unit->InterfaceBlock->Consts) {
             // TP typed constant: real static storage, not a foldable value.
             if (cd.Type) continue;
@@ -348,6 +349,58 @@ void Codegen::Impl::registerUsedUnitConsts() {
             // needs: emitExpr's ordinary `Consts.find(toLower(n->Name))`
             // already handles it with no new lookup logic at all.
             defineConst(Unit->Name + "." + cd.Name, cv);
+        }
+
+        // Turbo Tier 4, Cluster A item 2: interface variables become
+        // external globals, mangled pasg_<unit>$<name> -- CGLinkage's own
+        // scheme (moduleScope/PlangGlobalPrefix), the SAME mangling
+        // Codegen::emitUnit gives this unit's own real storage when IT is
+        // compiled.  Declared (never defined) here, exactly like
+        // registerInterfaceTypes does for an EP module read back from a
+        // .pmi -- the actual storage exists in whichever object really
+        // compiled this unit; this is only ever a reference to it.  A
+        // program's own bare `V` resolving to this happens through
+        // resolveImportedVar's existing, dialect-agnostic fallback
+        // (CodeGenTypes.cpp): it already declares an external global by
+        // mangledGlobal(name) whenever moduleGlobals_ has no same-compile-
+        // unit entry, using CGLinkage::importOwner/importLinkName -- which
+        // now resolve correctly for a Turbo 'uses' too, because
+        // Sema::pushUnitUsesScopes populates ImportOwners_ for one exactly
+        // as EP's own processImports already does.  Registering the global
+        // explicitly here (rather than relying solely on that lazy fallback)
+        // also makes 'UnitName.Identifier' qualification resolve without
+        // any change to moduleGlobals_'s own "owner.bare" lookup shape.
+        for (const auto& vg : Unit->InterfaceBlock->Vars) {
+            if (!vg.Type) continue;
+            llvm::Type* ty = llvmTypeOf(vg.Type.get(), nullptr);
+            for (const auto& nm : vg.Names) {
+                const std::string gname =
+                    PlangGlobalPrefix + UnitLower + PlangScopeSep + nm;
+                auto* gv = mod->getGlobalVariable(gname);
+                if (!gv)
+                    gv = new llvm::GlobalVariable(
+                        *mod, ty, /*isConst=*/false,
+                        llvm::GlobalValue::ExternalLinkage, nullptr, gname);
+                moduleGlobals_[UnitLower + "." + toLower(nm)] =
+                    VarEntry{ gv, ty, vg.Type.get() };
+            }
+        }
+
+        // Interface procedure/function headings: declared (never defined)
+        // under this unit's own mangling prefix, exactly like
+        // Codegen::emit's own loadedInterfaces_ loop already does for an EP
+        // module's .pmi-loaded interface (CodeGen.cpp) -- so that a CALL to
+        // one (CGLinkage::findMangledProc, which computes this SAME mangled
+        // name) finds a real llvm::Function to call rather than an internal
+        // error.  namePrefix is restored immediately after, so nothing else
+        // this function does (or anything the caller does afterward) is
+        // affected by the swap.
+        if (!Unit->InterfaceBlock->Procs.empty()) {
+            const std::string SavedPrefix = namePrefix;
+            namePrefix = PlangProcPrefix + UnitLower + PlangScopeSep;
+            for (const auto& proc : Unit->InterfaceBlock->Procs)
+                emitFunctionDef(*proc, /*declareOnly=*/true);
+            namePrefix = SavedPrefix;
         }
     }
 }
@@ -2259,6 +2312,76 @@ std::string Codegen::Impl::emitModuleInitFn(const ModuleNode& modNode) {
 
     // curFunc/curRetAlloca/curRetType/curFuncName are restored
     // unconditionally by curFn's destructor, at the end of this scope.
+    builder.restoreIP(savedIP);
+    return fnName;
+}
+
+// Turbo Tier 4, Cluster A item 2: see this method's own declaration
+// (CodeGenImpl.h) for the whole design.  Deliberately does NOT call any
+// OTHER unit's own __plang_init_<name> the way emitModuleInitFn calls
+// moduleInitFn(clause.ModuleName) for each of an EP module's imports: a
+// Turbo unit 'uses'd only through Sema::loadUnitInterfaceExports' .pas
+// fallback (no .tui was published, so Sema read its INTERFACE straight from
+// source for type-checking only -- see that function's own comment on why
+// the fallback exists) has no real object file anywhere in this compile,
+// and calling its __plang_init_<name> here would leave an undefined
+// reference for the linker to fail on even though the compile itself looked
+// clean.  So this only ever brings up the unit's OWN runtime-computed
+// constants/variables and its own InitBody -- automatically running a
+// USED unit's own initializer is left for a later item once every 'uses' in
+// a build is known to have a real published .tui/.o rather than possibly
+// being the fallback path (see this item's own report for exactly what this
+// means in practice: a used unit's foldable interface constants, extern
+// variable storage, and extern procedure/function calls all work today; a
+// used unit's runtime-computed constant/variable value and its
+// `begin...end` initialization section do not yet run automatically).
+std::string Codegen::Impl::emitUnitInitFn(const UnitNode& unit) {
+    const std::string unitLower = toLower(unit.Name);
+    const std::string fnName    = "__plang_init_" + unitLower;
+
+    CGFunction curFn(*this);
+    auto  savedIP = builder.saveIP();
+
+    curFuncName  = fnName;
+    curRetType   = nullptr;
+    curRetAlloca = nullptr;
+
+    auto* func = moduleInitFn(unit.Name);
+    curFunc = func;
+
+    const SourceLocation startLoc = unit.InitBody ? unit.InitBody->Loc : unit.Loc;
+    CGDebugInfo::ScopeGuard dbgScope(
+        *dbgInfo_, dbgInfo_->emitFunctionStart(
+            func, dbgInfo_->getFile(), "initialization of " + unit.Name, startLoc));
+
+    auto* done = new llvm::GlobalVariable(
+        *mod, i8Ty, /*isConst=*/false, llvm::GlobalValue::ExternalLinkage,
+        llvm::ConstantInt::get(i8Ty, 0), "__plang_initdone_" + unitLower);
+
+    auto* entry = llvm::BasicBlock::Create(ctx, "entry", func);
+    auto* run   = llvm::BasicBlock::Create(ctx, "run", func);
+    auto* ret   = llvm::BasicBlock::Create(ctx, "done", func);
+
+    builder.SetInsertPoint(entry);
+    auto* seen = builder.CreateLoad(i8Ty, done, "initdone");
+    builder.CreateCondBr(
+        builder.CreateICmpNE(seen, llvm::ConstantInt::get(i8Ty, 0)), ret, run);
+
+    builder.SetInsertPoint(run);
+    builder.CreateStore(llvm::ConstantInt::get(i8Ty, 1), done);
+
+    if (unit.ImplementationBlock)
+        emitModuleGlobalInits(*unit.ImplementationBlock, unit.InterfaceBlock.get());
+
+    pushScope();
+    if (unit.InitBody) emitCompound(*unit.InitBody);
+    popScope();
+
+    if (!isTerminated()) builder.CreateBr(ret);
+
+    builder.SetInsertPoint(ret);
+    builder.CreateRetVoid();
+
     builder.restoreIP(savedIP);
     return fnName;
 }

@@ -646,16 +646,20 @@ DIAG(err_protected_import_assigned, Error,
 // where it was made.
 DIAG(err_module_interface_without_implementation, Error,
      "module '%0' has an interface part but no matching implementation part")
-// Turbo Tier 4, Cluster A item 1: 'uses' names a unit this deliberately
-// temporary loader (Sema.cpp's loadUnitInterfaceExports -- see its own
-// comment) could not find as '<name-lowercased>.pas' anywhere on the module
+// Turbo Tier 4, Cluster A item 2: 'uses' names a unit that
+// Sema::loadUnitInterfaceExports could not find as EITHER a published
+// interface file ('<name-lowercased>.tui', written by a prior `plang -c`
+// compile of that unit -- see buildTUIContent/writeTUIFiles in
+// Frontend.cpp) OR a source file ('<name-lowercased>.pas', parsed on the
+// spot for Sema-only checking, no object code) anywhere on the module
 // search path or in the current directory.  Distinct diagnostic from EP's
-// own err_unknown_module: a Turbo 'uses' clause names a whole SOURCE FILE
-// to be parsed on the spot, not a .pmi interface, so the search failure
-// means something different to a reader.
+// own err_unknown_module: a Turbo 'uses' clause names a whole unit, not a
+// module import, so the search failure means something different to a
+// reader.
 DIAG(err_unknown_unit, Error,
-     "no unit named '%0' was found; it must exist as '%1.pas' on the unit "
-     "search path or in the current directory")
+     "no unit named '%0' was found; it must exist as '%1.tui' (a published "
+     "unit interface) or '%1.pas' (source) on the unit search path or in "
+     "the current directory")
 // A candidate '<name>.pas' file exists but does not parse as a unit file at
 // all (a plain program, a syntax error, ...).
 DIAG(err_malformed_unit, Error,

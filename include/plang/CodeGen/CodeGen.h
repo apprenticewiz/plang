@@ -26,6 +26,21 @@ public:
     /// are written to stderr and \p os is left empty).
     bool emit(const ProgramNode& prog, std::ostream& os);
 
+    /// Turbo Tier 4, Cluster A item 2: emits a complete LLVM module for one
+    /// standalone Turbo unit (`unit Name; interface ... implementation ...
+    /// end.`) to \p os as textual IR -- real separate-compilation codegen,
+    /// not item 1's "type-checks but stops there" placeholder.  No `main` is
+    /// emitted (mirrors Codegen::emit's own IsModuleOnly path for an EP
+    /// module compiled standalone): the object this produces is meant to be
+    /// linked into a later program's own object, the same two-step
+    /// `plang -c unit.pas -o unit.o` then `plang prog.pas unit.o -o prog`
+    /// shape EP's own module separate compilation already uses.
+    /// setUsedUnits below should be called first with whatever units \p Unit
+    /// itself 'uses' (interface and/or implementation), exactly as a
+    /// program's own compile does for its top-level 'uses'.
+    /// Precondition: Sema::checkUnit has verified \p Unit without errors.
+    bool emitUnit(const UnitNode& Unit, std::ostream& os);
+
     /// EP §6.11: tell codegen what each unit imports, as computed by
     /// Sema::importOwners.  See ImportedName.  It must outlive emit.
     void setImportOwners(const ImportOwnerTable& Owners);

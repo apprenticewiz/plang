@@ -1,9 +1,9 @@
 (*
-Turbo Tier 4, Cluster A item 1: the deliberately temporary unit loader
-(Sema::loadUnitInterfaceExports) looks for "<name-lowercased>.pas" on
-Opts.ModuleSearchPaths and then in the current directory; naming a unit that
-exists nowhere on either is a diagnosed error, not a silent "exports
-nothing".
+Turbo Tier 4, Cluster A item 2: Sema::loadUnitInterfaceExports looks for a
+published interface file, "<name-lowercased>.tui", then a source file,
+"<name-lowercased>.pas", on Opts.ModuleSearchPaths and then in the current
+directory; naming a unit that exists as neither anywhere on either is a
+diagnosed error, not a silent "exports nothing".
 
 RUN: not %plang -std=turbo %s 2> %t.err
 RUN: FileCheck %s < %t.err
@@ -15,5 +15,5 @@ begin
 end.
 
 (*
-CHECK: error: no unit named 'ThisUnitDoesNotExistAnywhere' was found; it must exist as 'thisunitdoesnotexistanywhere.pas' on the unit search path or in the current directory
+CHECK: error: no unit named 'ThisUnitDoesNotExistAnywhere' was found; it must exist as 'thisunitdoesnotexistanywhere.tui' (a published unit interface) or 'thisunitdoesnotexistanywhere.pas' (source) on the unit search path or in the current directory
 *)
