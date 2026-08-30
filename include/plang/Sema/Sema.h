@@ -222,6 +222,108 @@ private:
     // hook on checkBlock is for.
     void harvestModuleExports  (const ModuleNode& Mod);
 
+    // --- Turbo Tier 4, Cluster A item 1: unit uses/scoping/shadowing ---
+    //
+    // See Sema.cpp's own "Turbo unit uses" section banner for the whole
+    // design; this is just the state and entry points.
+
+    /// Lowercased unit name -> what its interface section exports (every
+    /// const/type/var it declares, and every proc/func heading -- Turbo's
+    /// `interface` has no export-list syntax at all, unlike EP's module
+    /// ExportItem, so everything declared there is exported, unconditionally).
+    /// Populated by checkUnitInterfaceOnly; consulted (and filled on first
+    /// use) by loadUnitInterfaceExports.
+    std::map<std::string, std::vector<Symbol>> UnitExports_;
+
+    /// Lowercased unit name -> the UnitNode this Sema loaded it from, kept
+    /// only so that CodeGen (which does not share this Sema's SymbolTable,
+    /// and does its own separate AST walk -- see CodeGen.cpp's own comment
+    /// at its call site) can find the SAME already-parsed, already-checked
+    /// interface a used unit's own const declarations came from, for the
+    /// narrow value-level codegen this item's own shadowing test needs. Not
+    /// exposed as a generic "give me a unit's AST" API: CodeGen's own use of
+    /// this is deliberately narrow (interface consts only -- see its call
+    /// site's comment), not a stand-in for real separate-compilation codegen,
+    /// which is item 2/3's job.
+    std::map<std::string, const UnitNode*> LoadedUnitNodes_;
+
+    /// Owns the ProgramNode (and, inside it, the UnitNode) that
+    /// loadUnitInterfaceExports parsed each used unit's own source file
+    /// into.  A Type resolved from one of these keeps a pointer back into
+    /// its own declaration (the same reason LoadedInterfaces_ exists for
+    /// .pmi-loaded EP module interfaces), so these have to live exactly as
+    /// long as this Sema does.
+    std::vector<std::unique_ptr<ProgramNode>> LoadedUnitFiles_;
+
+    /// Lowercased unit names currently being loaded, so that a 'uses' cycle
+    /// (this item's temporary loader has no real transitive-loading story of
+    /// its own -- see err_unit_circular_uses's own comment) is reported once
+    /// instead of recursing without end.
+    std::set<std::string> UnitLoading_;
+
+    /// Pushes the implicit `System` scope, then one further scope per unit
+    /// named in \p Uses IN ORDER, each holding that unit's own interface
+    /// exports (every export defined twice: once under its own name, once
+    /// under "UnitName.name" for explicit qualification -- see
+    /// Sema.cpp's own comment on why this needs no change to
+    /// SymbolTable::define's clash policy at all).  Later-pushed scopes are
+    /// more innermost, so SymbolTable::lookup's existing innermost-first
+    /// search means a name two 'uses'd units both export resolves to
+    /// whichever was named LAST -- last-uses-wins shadowing, falling out of
+    /// scope-stack order alone.  Returns how many scopes this pushed (always
+    /// >= 1, for System), so the caller knows how many to pop -- see
+    /// popUnitUsesScopes.  Turbo-only; never called under ISO 7185/Extended
+    /// Pascal (which use EP's own processImports instead, untouched).
+    size_t pushUnitUsesScopes(const std::vector<UsedUnit>& Uses);
+    /// Pops exactly \p Count scopes pushed by a matching pushUnitUsesScopes.
+    void popUnitUsesScopes(size_t Count);
+
+    /// What `uses UnitName;` brings into scope: \p UnitName's own interface
+    /// exports, loading and checking the unit's interface section on first
+    /// request (cached in UnitExports_ from then on).  Reports a diagnostic
+    /// and returns an empty (but present) UnitExports_ entry when the unit
+    /// cannot be found, does not parse as a unit, declares a different name
+    /// than asked for, or is already being loaded (a 'uses' cycle).
+    const std::vector<Symbol>& loadUnitInterfaceExports(const std::string& UnitName,
+                                                         SourceLocation Loc);
+    /// Checks \p Unit's own InterfaceBlock (headings only, exactly as EP's
+    /// own module-interface checking already treats a heading -- see
+    /// checkBlock's IsInterfaceBlock parameter) against \p Unit's own
+    /// InterfaceUses (plus the implicit System underneath), and harvests the
+    /// resulting scope into UnitExports_[lower(Unit.Name)].  Deliberately
+    /// does NOT check Unit.ImplementationBlock or Unit.InitBody -- nothing
+    /// that merely USES this unit can observe either, and re-checking a
+    /// dependency's own implementation every time something uses it would
+    /// make error counts (and diagnostic order) depend on how many times a
+    /// unit happens to be reached, which real separate compilation never
+    /// does either.  A full interface+implementation check of a unit is
+    /// checkUnit, below, used only when the unit itself -- not a user of it
+    /// -- is the thing being compiled.
+    void checkUnitInterfaceOnly(const UnitNode& Unit);
+
+public:
+    /// Checks a whole standalone unit file: interface, then implementation
+    /// (with the interface's own declarations given to it, exactly the way
+    /// EP's own processModuleBody gives an implementation module its
+    /// interface's declarations), then the optional initialization body --
+    /// see this method's own definition (Sema.cpp) for the exact scope
+    /// nesting this builds and why.  Called from Frontend.cpp when the
+    /// file being compiled is itself a unit (ProgramNode::BareUnit), in
+    /// place of the placeholder diagnostic that used to fire the moment one
+    /// was seen.  Returns true iff no errors were collected -- same contract
+    /// as check().
+    [[nodiscard]] bool checkUnit(const UnitNode& Unit);
+
+    /// The UnitNode this Sema loaded for \p LowerUnitName (already
+    /// lowercased), or null if no 'uses' clause this Sema processed ever
+    /// named it.  See LoadedUnitNodes_'s own comment for why CodeGen wants
+    /// this and how narrowly it is meant to be used.
+    [[nodiscard]] const UnitNode* loadedUnit(const std::string& LowerUnitName) const {
+        auto It = LoadedUnitNodes_.find(LowerUnitName);
+        return It == LoadedUnitNodes_.end() ? nullptr : It->second;
+    }
+
+private:
     // --- EP §6.11: separate compilation (.pmi file loading) ---
 
     /// What happened trying to load one candidate .pmi path.  Unreadable

@@ -53,17 +53,20 @@ DIAG(err_unknown_dialect, Error,
      "unknown Pascal dialect '%0'; valid dialects: %1")
 DIAG(err_dialect_not_implemented, Error,
      "dialect '%0' is not yet implemented; implemented dialects: %1")
-// Turbo Tier 4, Cluster A item 0: a standalone `unit Name; interface ...
-// end.` file parses (Parser::parseUnitFile, ParseUnit.cpp), but nothing
-// downstream of parsing understands a unit yet -- no Sema, no CodeGen, no
-// separate-compilation artifact.  That wiring is Cluster A items 1-3's job.
-// -dump-tokens/-dump-parse-tree still work on a unit file (read-only
-// inspection, checked before this), but an actual compile stops here with a
-// clear diagnostic instead of running Sema/CodeGen against a unit they were
-// never taught about.
+// Turbo Tier 4, Cluster A item 1: a standalone `unit Name; interface ...
+// end.` file now runs all the way through Sema (Sema::checkUnit -- interface,
+// then implementation, then the optional init body, each in the right
+// 'uses'-scope nesting; see Sema.cpp's own comment), so a real mistake in a
+// unit's own source is reported here, at its own location, instead of this
+// diagnostic firing unconditionally the moment a BareUnit was seen (Cluster A
+// item 0's placeholder).  What is still missing is CodeGen for a unit
+// compiled as its OWN separate translation unit -- object-file emission with
+// real cross-unit linkage is item 2/3's job, not this one's -- so a unit
+// that Sema accepts still stops here rather than producing an object file.
 DIAG(err_unit_compilation_not_yet_supported, Error,
-     "compiling a unit ('%0') is not yet supported; only -dump-tokens and "
-     "-dump-parse-tree can process a unit file so far")
+     "'%0' type-checks, but compiling a unit to an object file is not yet "
+     "supported; only -dump-tokens, -dump-parse-tree and -dump-ast can "
+     "process a unit file all the way through so far")
 // -ferror-limit=<N>: N was not all-digits (including empty, or a leading
 // '-'), so there is no number to parse at all.
 DIAG(err_ferror_limit_not_a_number, Error, "-ferror-limit= requires a number")

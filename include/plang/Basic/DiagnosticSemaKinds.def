@@ -646,6 +646,31 @@ DIAG(err_protected_import_assigned, Error,
 // where it was made.
 DIAG(err_module_interface_without_implementation, Error,
      "module '%0' has an interface part but no matching implementation part")
+// Turbo Tier 4, Cluster A item 1: 'uses' names a unit this deliberately
+// temporary loader (Sema.cpp's loadUnitInterfaceExports -- see its own
+// comment) could not find as '<name-lowercased>.pas' anywhere on the module
+// search path or in the current directory.  Distinct diagnostic from EP's
+// own err_unknown_module: a Turbo 'uses' clause names a whole SOURCE FILE
+// to be parsed on the spot, not a .pmi interface, so the search failure
+// means something different to a reader.
+DIAG(err_unknown_unit, Error,
+     "no unit named '%0' was found; it must exist as '%1.pas' on the unit "
+     "search path or in the current directory")
+// A candidate '<name>.pas' file exists but does not parse as a unit file at
+// all (a plain program, a syntax error, ...).
+DIAG(err_malformed_unit, Error,
+     "unit '%0' at '%1' could not be parsed as a unit: %2")
+// A candidate '<name>.pas' file parses as a unit, but declares a different
+// unit name than the 'uses' clause asked for (a stale copy, a rename, ...).
+DIAG(err_unit_name_mismatch, Error,
+     "'%1' at '%0' declares unit '%2', not '%1'")
+// This item's own temporary loader has no transitive/circularity story of
+// its own (that is item 2's job, building the real interface-file
+// mechanism) -- it only refuses to recurse into a unit that is already
+// being loaded, so a genuine cycle is reported once instead of overflowing
+// the stack.
+DIAG(err_unit_circular_uses, Error,
+     "circular 'uses': unit '%0' is used while it is still being loaded")
 // Turbo's Integer/Byte/ShortInt/Word/LongInt are genuinely narrower than the
 // one 64-bit Integer ISO 7185/EP always have (Type::Width, see its comment),
 // so an arithmetic constant-expression that is a perfectly ordinary fold

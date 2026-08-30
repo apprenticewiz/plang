@@ -56,6 +56,10 @@ void Codegen::setLoadedInterfaces(std::vector<const ModuleNode*> Ifaces) {
     PImpl->loadedInterfaces_ = std::move(Ifaces);
 }
 
+void Codegen::setUsedUnits(std::vector<const UnitNode*> Units) {
+    PImpl->usedUnits_ = std::move(Units);
+}
+
 void Codegen::setSourceManager(const SourceManager& SM, FileID MainFile) {
     PImpl->srcMgr_     = &SM;
     PImpl->mainFileID_ = MainFile;
@@ -161,6 +165,17 @@ bool Codegen::emit(const ProgramNode& prog, std::ostream& os) {
             [&](const std::string& N) { return eqCI(N, Clause.ModuleName); });
         if (!Local) InitModules.push_back(Clause.ModuleName);
     }
+
+    // Turbo Tier 4, Cluster A item 1: register the narrow subset of a used
+    // unit's interface this item supports (see Codegen::setUsedUnits's own
+    // comment) before the program's own globals -- so a same-named constant
+    // the program declares for itself still wins (emitGlobals's own loop
+    // overwrites `consts` unconditionally, the same "later write wins" rule
+    // that already gives a later 'uses'd unit precedence over an earlier
+    // one, here extended one more scope level with the program's own
+    // top-level consts innermost of all -- exactly mirroring Sema's own
+    // scope-stack order for the identical reason).
+    PImpl->registerUsedUnitConsts();
 
     PImpl->emitFileParams(prog.FileParams);
     PImpl->emitGlobals(*prog.Block);

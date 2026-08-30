@@ -274,6 +274,11 @@ struct Codegen::Impl {
     const ImportOwnerTable* importOwners_{nullptr};
     /// EP §6.11: interfaces read from .pmi files; see Codegen::setLoadedInterfaces.
     std::vector<const ModuleNode*> loadedInterfaces_;
+    /// Turbo Tier 4, Cluster A item 1: units this program's own 'uses' named,
+    /// in 'uses' order; see Codegen::setUsedUnits's own comment for exactly
+    /// what registerUsedUnitConsts (CodeGenProcs.cpp) does with these.
+    std::vector<const UnitNode*> usedUnits_;
+    void registerUsedUnitConsts();
     /// -g: set by Codegen::setSourceManager, which always runs before
     /// emit()/init() -- these stay plain Impl members, rather than moving
     /// into dbgInfo_ outright, purely so setSourceManager has somewhere to

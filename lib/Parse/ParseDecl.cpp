@@ -70,6 +70,15 @@ std::unique_ptr<ProgramNode> Parser::parseProgram() {
     if (Opts.extendedPascal() && check(TokenKind::Import)) {
         Node->Imports = parseImportClauses();
     }
+    // Turbo Tier 4, Cluster A item 1: a program's own top-level 'uses'
+    // clause, the same grammar production as a unit's own (parseUsesClause,
+    // ParseUnit.cpp) -- 'uses' identifier (',' identifier)* ';', with no
+    // 'qualified'/selective/renaming syntax of EP's ImportClause at all.
+    // Turbo-only: gated on Opts.turbo() the same way the no-heading form
+    // above is, since ISO 7185/Extended Pascal programs use Imports instead.
+    if (Opts.turbo() && check(TokenKind::Uses)) {
+        Node->Uses = parseUsesClause();
+    }
     Node->Block = parseBlock();
     expect(TokenKind::Dot);
     expect(TokenKind::Eof);

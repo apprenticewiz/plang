@@ -14,6 +14,7 @@
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/FileSystem.h"
+#include "llvm/Support/Path.h"
 
 #include <algorithm>
 #include <cfloat>
@@ -692,6 +693,18 @@ bool Sema::check(const ProgramNode& Prog) {
     if (!Prog.Imports.empty())
         processImports(Prog.Imports);
 
+    // Turbo Tier 4, Cluster A item 1: a program's own top-level 'uses'
+    // clause.  Pushed here, in the same outer (global) scope processImports
+    // above populates, so the program's own block -- checked by checkBlock
+    // just below -- sees the units' exports as ONE level out from its own
+    // declarations, exactly the way it already sees the required
+    // identifiers registerBuiltins() defined into this same scope.  Popped
+    // after checkBlock returns, before this function's own final
+    // Symtab.popScope() -- see pushUnitUsesScopes's own comment for why the
+    // scope-stack ORDER alone is what gives later-'uses'd units precedence.
+    const size_t UnitScopesPushed =
+        Opts.turbo() ? pushUnitUsesScopes(Prog.Uses) : 0;
+
     // ISO §6.10: every program-parameter but 'input' and 'output' must be
     // given a defining declaration in the program block itself -- the heading
     // only says which of the block's own declarations are external files (or,
@@ -715,6 +728,7 @@ bool Sema::check(const ProgramNode& Prog) {
                 error(Prog.Loc, diag::err_program_param_not_declared, {Name});
         }
     }, /*IsGlobalScope=*/true);
+    popUnitUsesScopes(UnitScopesPushed);
     Symtab.popScope();
     return !hasErrors();
 }
@@ -1034,6 +1048,261 @@ void Sema::processImports(const std::vector<ImportClause>& Imports) {
             (void)Symtab.define(DefSym);
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Turbo Tier 4, Cluster A item 1: unit uses / scoping / shadowing
+// ---------------------------------------------------------------------------
+//
+// The whole mechanism is: push one SymbolTable scope per 'uses'd unit, in
+// the order they were written, UNDER an always-present implicit `System`
+// scope, and let SymbolTable::lookup's existing innermost-first search do
+// the rest.  Two units that both export a name never share a scope to clash
+// in (SymbolTable::define's clash check is per-scope, and each unit gets its
+// own), so the later-pushed (later-named) one's export is simply what lookup
+// finds first -- last-uses-wins shadowing, entirely for free, with zero
+// change to define's clash policy anywhere.  This is deliberately NOT how
+// EP's own processImports works (that merges every import into ONE shared
+// scope and hard-errors on a same-name clash, err_import_name_clash) --
+// EP's own behavior is correct for EP and untouched by any of this.
+//
+// Qualification (UnitName.Identifier) reuses the very same per-scope
+// SymbolTable entries: each export is defined TWICE in its unit's own
+// scope, once under its bare name and once under "unitname.name" (the
+// parser has already folded 'A.X' into one dotted IdentExpr wherever 'A' is
+// a name QualifiedModules_ knows about -- see ParseUnit.cpp's own comment on
+// why every 'uses'd unit goes in there, Turbo having no 'qualified'
+// keyword).  A shadowed export is still reachable through its OWN unit's
+// dotted name even though the bare name now resolves to whatever shadowed
+// it, because the dotted entry lives in the shadowed unit's own scope,
+// undisturbed by anything pushed on top of it.
+
+size_t Sema::pushUnitUsesScopes(const std::vector<UsedUnit>& Uses) {
+    // The implicit `System`: every Turbo program and unit gets one, always
+    // pushed FIRST (so it ends up the least-recently-pushed, most-easily-
+    // shadowed of the group) -- confirmed against real `fpc -Mtp` that a
+    // real unit's own export can indeed shadow a System-provided identifier
+    // of the same name (see this item's own report).  System exports
+    // nothing of its own here: Tier 1-3 already registered Random, the
+    // file-model builtins, and everything else Turbo needs as ordinary
+    // dialect-gated Symbol::Builtin entries in registerBuiltins()'s global
+    // scope (Sema::check's very first scope, opened before this ever runs),
+    // wholly independent of any unit system.  This scope's only job is to be
+    // the fixed floor of the shadow stack that is always there, so a REAL
+    // unit built later (item 2/3's own scope, not this one's) can define an
+    // actual identifier here without disturbing this function's contract.
+    Symtab.pushScope(/*IsBlock=*/false);
+    size_t Count = 1;
+
+    for (const auto& U : Uses) {
+        Symtab.pushScope(/*IsBlock=*/false);
+        ++Count;
+        const std::string Lower = toLower(U.Name);
+        for (const Symbol& Sym : loadUnitInterfaceExports(U.Name, U.Loc)) {
+            // Fresh scope, one unit's exports only: two exports of the same
+            // unit cannot collide here (they didn't collide when the unit's
+            // own interface was checked, either), and nothing else has been
+            // defined into this scope yet, so `define` can never decline
+            // either of these two calls.
+            (void)Symtab.define(Sym);
+            Symbol Qualified   = Sym;
+            Qualified.Name     = U.Name + "." + Sym.Name;
+            (void)Symtab.define(std::move(Qualified));
+        }
+    }
+    return Count;
+}
+
+void Sema::popUnitUsesScopes(size_t Count) {
+    for (size_t I = 0; I < Count; ++I) Symtab.popScope();
+}
+
+const std::vector<Symbol>&
+Sema::loadUnitInterfaceExports(const std::string& UnitName, SourceLocation Loc) {
+    const std::string Key = toLower(UnitName);
+    if (auto It = UnitExports_.find(Key); It != UnitExports_.end())
+        return It->second;
+
+    if (!UnitLoading_.insert(Key).second) {
+        error(Loc, diag::err_unit_circular_uses, {UnitName});
+        return UnitExports_[Key]; // left empty; caller sees "exports nothing"
+    }
+
+    // This item's own deliberately temporary loader: find "<name>.pas" on
+    // the module search path, then in the current directory.  No
+    // .pmi-analog cache, no object file, no real separate compilation --
+    // every use of a given unit within one compile re-parses and
+    // re-checks its interface exactly once (UnitExports_ above is this
+    // Sema's own cache, not a persistent one), and nothing here writes
+    // anything back out for another compilation to read.  Item 2's own job
+    // is the real mechanism this is standing in for.
+    //
+    // Unlike EP's own .pmi search (loadPMI/processImports just below, which
+    // checks Dir + "/" + Key + ".pmi" with no further case juggling), a
+    // .pmi is always MACHINE-written by this same compiler's own
+    // writePMIFiles, always lowercase by construction -- an exact lowercase
+    // match is the whole of what case-insensitivity needs there.  A unit's
+    // "<name>.pas" is hand-written by whoever wrote the unit, and real
+    // Turbo/fpc convention capitalizes it however the unit's own identifier
+    // is spelled (CycleB.pas, System.pas, Crt.pas, ...) -- so this tries
+    // the exact lowercase spelling first (the fast, common case on a
+    // case-insensitive filesystem, and exactly right whenever the file
+    // happens to already be lowercase), then falls back to a real
+    // case-insensitive directory scan.
+    auto findCaseInsensitive = [&](const std::string& Dir) -> std::string {
+        const std::string Fast = Dir + "/" + Key + ".pas";
+        if (llvm::sys::fs::exists(Fast)) return Fast;
+        std::error_code EC;
+        for (llvm::sys::fs::directory_iterator It(Dir, EC), End;
+                It != End && !EC; It.increment(EC)) {
+            llvm::SmallString<64> Stem = llvm::sys::path::filename(It->path());
+            if (eqCI(std::string(Stem), Key + ".pas")) return std::string(It->path());
+        }
+        return "";
+    };
+    std::string Path;
+    bool        Found = false;
+    for (const auto& Dir : Opts.ModuleSearchPaths) {
+        Path = findCaseInsensitive(Dir);
+        if (!Path.empty()) { Found = true; break; }
+    }
+    if (!Found) {
+        Path = findCaseInsensitive(".");
+        Found = !Path.empty();
+    }
+    if (!Found) {
+        error(Loc, diag::err_unknown_unit, {UnitName, Key});
+        UnitLoading_.erase(Key);
+        return UnitExports_[Key];
+    }
+
+    std::ifstream UnitFile(Path);
+    if (!UnitFile) {
+        error(Loc, diag::err_unknown_unit, {UnitName, Key});
+        UnitLoading_.erase(Key);
+        return UnitExports_[Key];
+    }
+    std::ostringstream SS;
+    SS << UnitFile.rdbuf();
+
+    // Parsed with its own throwaway Diagnostics/SourceManager, exactly the
+    // way loadPMI parses a .pmi's content just below -- a used unit's own
+    // syntax errors are this unit's problem to report (via err_malformed_
+    // unit, giving the FIRST one as detail), not something the USING
+    // program's own diagnostic stream should carry located Diagnostic
+    // objects for (which would dangle once this throwaway SourceManager
+    // goes out of scope).
+    DiagnosticsEngine UnitDiags;
+    LangOptions       UnitOpts = Opts;
+    UnitOpts.Std = LangOptions::Standard::Turbo; // a unit file is always Turbo syntax
+    SourceManager UnitSrcMgr;
+    Scanner USc(UnitSrcMgr, "<" + Path + ">", SS.str(), UnitDiags, UnitOpts);
+    Parser  UP(std::move(USc), UnitDiags, UnitOpts);
+    auto    UnitProg = UP.parse();
+    if (!UnitProg || UnitDiags.hasErrors() || !UnitProg->BareUnit) {
+        std::string Detail;
+        for (const auto& D : UnitDiags.diagnostics())
+            if (D.Severity == DiagSeverity::Error) { Detail = D.Message; break; }
+        error(Loc, diag::err_malformed_unit, {UnitName, Path, Detail});
+        UnitLoading_.erase(Key);
+        return UnitExports_[Key];
+    }
+    if (!eqCI(UnitProg->BareUnit->Name, UnitName)) {
+        error(Loc, diag::err_unit_name_mismatch,
+              {Path, UnitName, UnitProg->BareUnit->Name});
+        UnitLoading_.erase(Key);
+        return UnitExports_[Key];
+    }
+
+    const UnitNode* UN = UnitProg->BareUnit.get();
+    LoadedUnitNodes_[Key] = UN;
+    checkUnitInterfaceOnly(*UN); // fills UnitExports_[Key]
+
+    // The Symbols just harvested, and any Type resolved while checking this
+    // interface, may point back into UN's own AST nodes (a record Type
+    // remembers the TypeDef it was laid out from, the same way a .pmi's
+    // loaded interface does -- see loadPMI's own comment) -- kept alive as
+    // long as this Sema is.
+    LoadedUnitFiles_.push_back(std::move(UnitProg));
+
+    UnitLoading_.erase(Key);
+    return UnitExports_[Key];
+}
+
+void Sema::checkUnitInterfaceOnly(const UnitNode& Unit) {
+    const std::string Key = toLower(Unit.Name);
+    // Deliberately does NOT pre-populate UnitExports_[Key] before recursing
+    // into this unit's own 'uses' below: loadUnitInterfaceExports's cache
+    // check (UnitExports_.find) has to see "not yet loaded" for as long as
+    // this call is still in progress, or a genuine cycle would look like a
+    // (harmless, empty) cache hit instead of being caught by UnitLoading_ --
+    // which the CALLER of this function (loadUnitInterfaceExports) has
+    // already inserted Key into before ever calling this, so re-entrancy is
+    // already guarded without this function needing a marker of its own.
+    const size_t Pushed = pushUnitUsesScopes(Unit.InterfaceUses);
+    checkBlock(*Unit.InterfaceBlock, /*BeforePop=*/[&] {
+        auto& Exports = UnitExports_[Key];
+        Symtab.forEachInCurrentScope([&](Symbol& Sym) {
+            // A label denotes a place in this unit's own code; nothing that
+            // merely uses the unit can do anything with one.
+            if (Sym.Kind == SymbolKind::Label) return;
+            Sym.Module = Key;
+            Exports.push_back(Sym);
+        });
+    }, /*IsGlobalScope=*/false, /*IsModuleBlock=*/false, /*IsInterfaceBlock=*/true);
+    popUnitUsesScopes(Pushed);
+}
+
+bool Sema::checkUnit(const UnitNode& Unit) {
+    Symtab.pushScope(); // global scope, mirroring check()'s own opening scope
+    registerBuiltins();
+    const std::string Key = toLower(Unit.Name);
+    const std::string SavedUnit = CurrentUnit_;
+    CurrentUnit_ = Key;
+
+    // Interface section: sees System + this unit's own InterfaceUses, and
+    // nothing else -- in particular, NOT ImplementationUses (Cluster A item
+    // 1's own requirement 3: a name available only through the
+    // implementation's own 'uses' must be rejected from an interface-section
+    // declaration).  checkUnitInterfaceOnly pushes and pops its own uses
+    // scopes; harvests into UnitExports_[Key].
+    checkUnitInterfaceOnly(Unit);
+
+    // Implementation section: sees BOTH the interface's own declarations
+    // (given to it the same way EP's own processModuleBody gives an
+    // implementation module its interface's declarations -- defined into a
+    // scope of their own, outside the implementation block's) AND
+    // ImplementationUses, nested INSIDE (more innermost than) InterfaceUses
+    // -- Cluster A item 1's own requirement 3's positive half: the
+    // implementation can see what the interface saw, plus more.
+    const size_t IfacePushed = pushUnitUsesScopes(Unit.InterfaceUses);
+    Symtab.pushScope(/*IsBlock=*/false);
+    for (const auto& Sym : UnitExports_[Key]) (void)Symtab.define(Sym);
+    const size_t ImplPushed = pushUnitUsesScopes(Unit.ImplementationUses);
+    if (Unit.ImplementationBlock)
+        checkBlock(*Unit.ImplementationBlock, /*BeforePop=*/[&] {
+            // The unit's single optional initialization block runs in the
+            // scope of the implementation's own top-level declarations (as
+            // well as everything the implementation and interface 'uses'
+            // brought in) -- checked here, while that scope is still
+            // current, rather than after checkBlock returns and has already
+            // popped it.
+            if (Unit.InitBody) checkCompound(*Unit.InitBody);
+        });
+    else if (Unit.InitBody) {
+        // No implementation declarations at all, just 'implementation
+        // begin ... end.' -- InitBody still has interface decls/uses and
+        // implementation uses in scope, just no implementation-private
+        // locals of its own.
+        checkCompound(*Unit.InitBody);
+    }
+    popUnitUsesScopes(ImplPushed);
+    Symtab.popScope(); // the reinjected-interface-declarations scope
+    popUnitUsesScopes(IfacePushed);
+
+    CurrentUnit_ = SavedUnit;
+    Symtab.popScope(); // global scope
+    return !hasErrors();
 }
 
 // ---------------------------------------------------------------------------
