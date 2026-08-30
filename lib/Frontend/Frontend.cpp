@@ -848,6 +848,173 @@ static bool writePMIFiles(const ProgramNode& Program,
     return true;
 }
 
+// ---------------------------------------------------------------------------
+// Turbo Tier 4, Cluster A item 2: .tui writer -- serialize a unit's own
+// INTERFACE section to Pascal text, replacing item 1's own temporary loader
+// (Sema.cpp's loadUnitInterfaceExports re-parsing "<name>.pas" from scratch
+// every time) with a real one, modeled closely on the .pmi mechanism just
+// above but genuinely parallel to it, not a reuse of it: buildPMIContent/
+// writePMIFiles/loadPMI/processImports are never called or modified by any
+// of this.  A .tui is, on purpose, valid Turbo unit syntax -- literally
+// `unit Name; interface uses ...; <decls>; implementation end.` -- so the
+// reader (Sema::loadUnitInterfaceExports) needs no synthetic wrapper the way
+// loadPMI needs one to turn a bare module heading into a parseable file:
+// Parser::parseUnitFile already parses a standalone unit file, so a .tui is
+// read back through exactly that, unchanged.
+// ---------------------------------------------------------------------------
+
+/// \p Uses, written as a Turbo `uses` clause, or "" when \p Uses is empty.
+/// Turbo's `uses` has none of EP's ImportClause syntax (no qualified/only/
+/// renaming), so this is a plain comma-separated name list -- see
+/// UsedUnit's own comment for why the AST already carries nothing more.
+static std::string usesPartText(const std::vector<UsedUnit>& Uses) {
+    if (Uses.empty()) return "";
+    std::string Text = "uses ";
+    for (size_t I = 0; I < Uses.size(); ++I) {
+        if (I) Text += ", ";
+        Text += Uses[I].Name;
+    }
+    return Text + ";\n";
+}
+
+/// Build the Pascal text of a .tui file for one Turbo unit's INTERFACE
+/// section only -- never its implementation, which is exactly what real
+/// separate compilation means here: whoever reads this back gets the same
+/// names Sema::checkUnitInterfaceOnly already harvests from `interface ...`
+/// directly, with no access to `implementation ...` at all, matching real
+/// `fpc -Mtp`'s own "a unit's implementation is its own business" rule.
+///
+/// Reports err_pmi_cannot_serialize_export-shaped diagnostics is NOT done
+/// here on purpose: unlike EP's export-list (which promises a name the body
+/// must then supply), a Turbo unit's `interface` section IS its own export
+/// list -- everything declared there is exported unconditionally (see
+/// UnitNode's own comment) -- so a declaration this function cannot
+/// serialize is simply left out of the .tui, and Sema::loadUnitInterfaceExports
+/// harvests one fewer symbol than the unit itself has, exactly the same
+/// silent-drop behavior item 1's own .pas-reparsing loader already had for
+/// anything checkUnitInterfaceOnly could not resolve.  A future item (3) that
+/// teaches this writer every remaining Turbo denoter closes that gap; this
+/// item's own report says explicitly what is and is not covered yet.
+static std::string buildTUIContent(const UnitNode& Unit) {
+    if (!Unit.InterfaceBlock) return "";
+    const BlockNode& Decls = *Unit.InterfaceBlock;
+
+    std::string TUI;
+    TUI += "{ plang turbo unit interface: ";
+    TUI += Unit.Name;
+    TUI += " }\n";
+    TUI += "unit " + Unit.Name + ";\n\n";
+    TUI += "interface\n\n";
+    TUI += usesPartText(Unit.InterfaceUses);
+
+    auto isStructured = [](const ConstDef& Cd) {
+        return llvm::isa<StructuredValueExpr>(Cd.Value.get());
+    };
+    auto writeConst = [&](const ConstDef& Cd) -> bool {
+        if (!Cd.Value || !canSerializeExpr(*Cd.Value)) return false;
+        TUI += "const " + Cd.Name + " = " + exprToString(*Cd.Value) + ";\n";
+        return true;
+    };
+    for (const auto& Cd : Decls.Consts)
+        if (Cd.Value && !isStructured(Cd)) writeConst(Cd);
+
+    for (const auto& Td : Decls.Types) {
+        std::string T = Td.Type ? typeNodeToString(*Td.Type) : std::string();
+        if (T.empty()) continue; // dropped -- see this function's own comment
+        TUI += "type " + Td.Name + " = " + T + ";\n";
+    }
+
+    for (const auto& Cd : Decls.Consts)
+        if (Cd.Value && isStructured(Cd)) writeConst(Cd);
+
+    for (const auto& Vg : Decls.Vars) {
+        std::string T = Vg.Type ? typeNodeToString(*Vg.Type) : std::string();
+        if (T.empty()) continue;
+        TUI += "var ";
+        for (size_t I = 0; I < Vg.Names.size(); ++I) {
+            if (I) TUI += ", ";
+            TUI += Vg.Names[I];
+        }
+        TUI += ": " + T + ";\n";
+    }
+
+    // Procedure/function headings.  Every ProcDecl in a unit's own
+    // InterfaceBlock is already a heading with no body (IsForward, exactly
+    // like EP's own HeadingsOnly module interface -- see UnitNode's own
+    // comment), so there is no "already emitted this one as a forward decl"
+    // bookkeeping to do the way buildPMIContent needs for a module BODY,
+    // which mixes forward declarations and real definitions in one list.
+    for (const auto& Proc : Decls.Procs) {
+        bool Ok = true;
+        std::string Heading = Proc->IsFunction ? "function " : "procedure ";
+        Heading += Proc->Name;
+        Heading += paramListToString(Proc->Params, Ok);
+        if (Proc->IsFunction && Proc->ReturnType) {
+            std::string T = typeNodeToString(*Proc->ReturnType);
+            if (T.empty()) Ok = false;
+            Heading += ": " + T;
+        }
+        if (!Ok) continue; // dropped -- see this function's own comment
+        TUI += Heading + ";\n";
+    }
+
+    TUI += "\nimplementation\n\nend.\n";
+    return TUI;
+}
+
+/// Write \p Unit's own .tui file next to \p InputFile.  Mirrors
+/// writePMIFiles' atomic write-temp-then-rename publish dance (a crash or a
+/// write failure partway through must never leave a corrupt or truncated
+/// interface file for a later, unrelated compile to load and trust), but is
+/// its own, Turbo-specific function -- writePMIFiles itself is untouched,
+/// and this never calls it.  Returns false (after reporting to stderr) on
+/// any I/O failure.
+static bool writeTUIFile(const UnitNode& Unit, const std::string& InputFile) {
+    std::string TuiDir = ".";
+    if (auto Slash = InputFile.rfind('/'); Slash != std::string::npos)
+        TuiDir = InputFile.substr(0, Slash);
+
+    std::string Content = buildTUIContent(Unit);
+    if (Content.empty()) return true; // nothing to publish (no interface at all)
+
+    // Canonicalized (lowercased) for the same reason writePMIFiles' own
+    // PmiPath is: Sema::loadUnitInterfaceExports looks up a unit's file by
+    // its lowercased 'uses' spelling, regardless of how the unit's own
+    // `unit Name;` heading capitalized it.
+    std::string TuiPath = TuiDir + "/" + toLower(Unit.Name) + ".tui";
+
+    llvm::SmallString<128> TmpPath;
+    int TmpFd = -1;
+    if (auto EC = llvm::sys::fs::createUniqueFile(TuiPath + "-%%%%%%.tmp",
+                                                    TmpFd, TmpPath)) {
+        std::cerr << "plang -pc1: cannot create unit interface file '"
+                   << TuiPath << "': " << EC.message() << "\n";
+        return false;
+    }
+    {
+        llvm::raw_fd_ostream OS(TmpFd, /*shouldClose=*/true);
+        OS << Content;
+        OS.close();
+        if (OS.has_error()) {
+            std::error_code EC = OS.error();
+            OS.clear_error();
+            std::cerr << "plang -pc1: cannot write unit interface '"
+                       << Unit.Name << "' to '" << TuiPath << "': "
+                       << EC.message() << "\n";
+            llvm::sys::fs::remove(TmpPath);
+            return false;
+        }
+    }
+    if (auto EC = llvm::sys::fs::rename(TmpPath, TuiPath)) {
+        std::cerr << "plang -pc1: cannot publish unit interface '"
+                   << Unit.Name << "' to '" << TuiPath << "': "
+                   << EC.message() << "\n";
+        llvm::sys::fs::remove(TmpPath);
+        return false;
+    }
+    return true;
+}
+
 /// Diagnoses and reports whether Os is in a fail state after its writer has
 /// already been flushed (Name empty means Os is std::cout; otherwise it is
 /// the -o path that was opened into Os).
@@ -1265,21 +1432,76 @@ int frontendPC1Main(int Argc, char *Argv[]) {
     if (DumpParseTree)
         return withOutput([&](std::ostream& Os) { printAst(*Program, Os); });
 
-    // Turbo Tier 4, Cluster A item 1: a standalone unit file now runs
-    // through Sema for real (Sema::checkUnit) -- see
-    // err_unit_compilation_not_yet_supported's own comment for exactly what
-    // is and is not supported yet.  -dump-tokens (handled well above) and
-    // -dump-parse-tree (just above) are unaffected; -dump-ast below now also
-    // works for a unit, once Sema has run over it.
+    // Turbo Tier 4, Cluster A item 1 taught a standalone unit file to run
+    // through Sema for real (Sema::checkUnit).  Cluster A item 2 replaces
+    // item 1's own "type-checks, but stops there" placeholder
+    // (err_unit_compilation_not_yet_supported, now unused -- kept in the
+    // catalog as a historical diagnostic, the same way this codebase treats
+    // every other retired-but-still-formattable message) with real
+    // separate-compilation codegen: publish this unit's own .tui (its
+    // INTERFACE, written back out as Pascal text -- buildTUIContent/
+    // writeTUIFile just above) and emit its object code (Codegen::emitUnit)
+    // exactly the way a program does just below, minus the parts (a `main`,
+    // .pmi writing) that only apply to one.
     if (Program->BareUnit) {
+        const UnitNode& Unit = *Program->BareUnit;
         Sema UnitSem(Diags, Opts);
-        bool UnitOk = UnitSem.checkUnit(*Program->BareUnit);
+        bool UnitOk = UnitSem.checkUnit(Unit);
         emitAll();
         if (!UnitOk) return 1;
         if (DumpAst)
             return withOutput([&](std::ostream& Os) { printAst(*Program, Os); });
-        report(diag::err_unit_compilation_not_yet_supported, {Program->BareUnit->Name});
-        return 1;
+
+        // Publish this unit's own .tui before codegen, mirroring the
+        // program path's own "publish interfaces, then emit" order just
+        // below -- a compile that is about to fail (codegen verification,
+        // an I/O error opening -o) must not have left a stale-looking but
+        // untrustworthy interface file behind, but writeTUIFile's own
+        // atomic write-temp-then-rename already makes ITS OWN publish
+        // failure impossible to observe as a corrupt file, so there is
+        // nothing further to roll back here the way writePMIFiles' own
+        // multi-module cleanup has to.
+        if (!writeTUIFile(Unit, InputFile)) return 1;
+
+        Codegen Cg(Opts);
+        // What this unit's own 'uses' clauses import, for CGLinkage's own
+        // mangling (importOwner/importLinkName) to resolve a call/reference
+        // to a used unit's export to the right pas_<unit>$<name> symbol --
+        // Sema::pushUnitUsesScopes now fills this in for a Turbo 'uses'
+        // exactly as Sema::processImports already does for EP's own
+        // 'import', see that function's own comment.
+        Cg.setImportOwners(UnitSem.importOwners());
+        // A unit may itself 'uses' other units, in both its interface and
+        // implementation sections (UnitNode::InterfaceUses/
+        // ImplementationUses) -- registered the same way a program's own
+        // top-level 'uses' is, just below, so this unit's own declarations
+        // can read a used unit's constants/variables and call its
+        // procedures exactly as a program compiled against it can.
+        std::vector<const UnitNode*> UsedUnits;
+        for (const auto& U : Unit.InterfaceUses)
+            if (const UnitNode* UN = UnitSem.loadedUnit(toLower(U.Name)))
+                UsedUnits.push_back(UN);
+        for (const auto& U : Unit.ImplementationUses)
+            if (const UnitNode* UN = UnitSem.loadedUnit(toLower(U.Name)))
+                UsedUnits.push_back(UN);
+        if (!UsedUnits.empty()) Cg.setUsedUnits(std::move(UsedUnits));
+        if (Opts.Debug) Cg.setSourceManager(SrcMgr, MainFileID);
+
+        if (OutputFile.empty()) {
+            const bool EmitOk = Cg.emitUnit(Unit, std::cout);
+            std::cout.flush();
+            if (EmitOk && reportIfWriteFailed(std::cout, "")) return 1;
+            return EmitOk ? 0 : 1;
+        }
+        std::ofstream F(OutputFile);
+        if (!F) {
+            report(diag::err_cannot_open_output_file, {OutputFile});
+            return 1;
+        }
+        const bool EmitOk = Cg.emitUnit(Unit, F);
+        F.close();
+        if (EmitOk && reportIfWriteFailed(F, OutputFile)) return 1;
+        return EmitOk ? 0 : 1;
     }
 
     Sema Sem(Diags, Opts);

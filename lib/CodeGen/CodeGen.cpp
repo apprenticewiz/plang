@@ -222,3 +222,79 @@ bool Codegen::emit(const ProgramNode& prog, std::ostream& os) {
     PImpl->mod->print(llvmOs, nullptr);
     return true;
 }
+
+// ---------------------------------------------------------------------------
+// Turbo Tier 4, Cluster A item 2: standalone unit codegen
+// ---------------------------------------------------------------------------
+
+bool Codegen::emitUnit(const UnitNode& Unit, std::ostream& os) {
+    PImpl->init(Unit.Name);
+    PImpl->pushScope();
+    PImpl->emitPredefinedGlobals();
+
+    const std::string UnitLower = toLower(Unit.Name);
+    PImpl->currentUnit_ = UnitLower;
+    PImpl->namePrefix   = PlangProcPrefix   + UnitLower + PlangScopeSep;
+    PImpl->globalPrefix = PlangGlobalPrefix + UnitLower + PlangScopeSep;
+
+    // What this unit's OWN 'uses' (interface and implementation alike --
+    // setUsedUnits must have been called with both lists' worth of UnitNodes
+    // before this) declares: its constants (folded), variables (extern
+    // globals) and procedure/function headings (extern declarations) --
+    // see registerUsedUnitConsts' own comment for exactly what this does.
+    // Registered before this unit's own globals, so a same-named
+    // declaration of its own still overwrites it (emitGlobals' own loop
+    // overwrites `consts` unconditionally) -- the same last-uses-wins /
+    // own-declaration-wins precedence Sema's own scope stack already gives
+    // these identifiers.
+    PImpl->registerUsedUnitConsts();
+
+    // Interface declarations first (so the implementation, which may
+    // reference them, resolves them the same way Sema's own checkUnit gave
+    // the implementation the interface's declarations already in scope),
+    // then the implementation's own.  No emitInheritedGlobals-style merge is
+    // needed the way an EP module's Body/heading pair needs one: a Turbo
+    // unit's InterfaceBlock and ImplementationBlock are two genuinely
+    // disjoint declaration lists (Sema rejects redeclaring an interface name
+    // in the implementation), so simply emitting both in turn cannot
+    // collide.
+    if (Unit.InterfaceBlock)      PImpl->emitGlobals(*Unit.InterfaceBlock);
+    if (Unit.ImplementationBlock) PImpl->emitGlobals(*Unit.ImplementationBlock);
+
+    // Interface procedure/function HEADINGS are forward declarations for
+    // the real definitions the implementation supplies under the same
+    // names (UnitNode::InterfaceBlock's own comment) -- declared first,
+    // exactly like emitAllProcedures' own forward-declare pass, so that
+    // emitAllProcedures(ImplementationBlock) below finds and completes the
+    // SAME llvm::Function (found by its mangled name) rather than defining
+    // a second, colliding one.
+    if (Unit.InterfaceBlock)
+        for (const auto& Proc : Unit.InterfaceBlock->Procs)
+            PImpl->emitFunctionDef(*Proc, /*declareOnly=*/true);
+    if (Unit.ImplementationBlock)
+        PImpl->emitAllProcedures(*Unit.ImplementationBlock);
+
+    PImpl->emitUnitInitFn(Unit);
+
+    PImpl->currentUnit_.clear();
+    PImpl->namePrefix   = PlangProcPrefix;
+    PImpl->globalPrefix = PlangGlobalPrefix;
+    PImpl->popScope();
+
+    if (!PImpl->dbgInfo_->finalize())
+        return false;
+
+    std::string errs;
+    llvm::raw_string_ostream errStream(errs);
+    if (llvm::verifyModule(*PImpl->mod, &errStream)) {
+        std::cerr << "plang: internal error: LLVM IR verification failed\n"
+                  << errs << "\n";
+        return false;
+    }
+
+    PImpl->optimize();
+
+    llvm::raw_os_ostream llvmOs(os);
+    PImpl->mod->print(llvmOs, nullptr);
+    return true;
+}

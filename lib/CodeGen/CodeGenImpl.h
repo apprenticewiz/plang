@@ -274,10 +274,37 @@ struct Codegen::Impl {
     const ImportOwnerTable* importOwners_{nullptr};
     /// EP §6.11: interfaces read from .pmi files; see Codegen::setLoadedInterfaces.
     std::vector<const ModuleNode*> loadedInterfaces_;
-    /// Turbo Tier 4, Cluster A item 1: units this program's own 'uses' named,
-    /// in 'uses' order; see Codegen::setUsedUnits's own comment for exactly
-    /// what registerUsedUnitConsts (CodeGenProcs.cpp) does with these.
+    /// Turbo Tier 4: units the thing being emitted (a program, OR -- Cluster
+    /// A item 2 -- another unit's own 'uses') named, in 'uses' order; see
+    /// Codegen::setUsedUnits's own comment for exactly what
+    /// registerUsedUnitConsts (CodeGenProcs.cpp) does with these.  Item 1
+    /// only ever set this from a program's own top-level 'uses'; item 2
+    /// additionally sets it from Codegen::emitUnit for the unit being
+    /// compiled's own InterfaceUses + ImplementationUses, so a unit that
+    /// itself 'uses' another unit gets the same const/var/proc registration
+    /// a program does.
     std::vector<const UnitNode*> usedUnits_;
+    /// Turbo Tier 4: registers what a 'uses'd unit's INTERFACE declares, so
+    /// that code being emitted here can read its constants, read/write its
+    /// variables, and call its procedures/functions.  Item 1's own
+    /// registerUsedUnitConsts only ever folded a SCALAR constant into a
+    /// compile-time immediate (see this function's own history in
+    /// CodeGenProcs.cpp); item 2 extends the SAME function (not a rename --
+    /// the const-folding behavior it already had is unchanged) to also:
+    ///   - declare (never define) each interface variable as an external
+    ///     global, mangled pasg_<unit>$<name>, exactly the way
+    ///     registerInterfaceTypes already does for an EP module read back
+    ///     from a .pmi -- the real storage lives in whichever object
+    ///     actually compiled that unit (Codegen::emitUnit), reached here
+    ///     only through the symbol name;
+    ///   - declare (never define) each interface procedure/function heading,
+    ///     mangled pas_<unit>$<name> via CGLinkage's existing, dialect-
+    ///     agnostic mangling scheme, the same "declareOnly" mechanism
+    ///     Codegen::emit already uses for a loaded EP module interface's own
+    ///     procs (CodeGen.cpp's loadedInterfaces_ loop).
+    /// A unit-exported STRUCTURED or TYPED constant is still left alone (real
+    /// storage this function does not yet give it) -- item 3's own job, per
+    /// this item's report.
     void registerUsedUnitConsts();
     /// -g: set by Codegen::setSourceManager, which always runs before
     /// emit()/init() -- these stay plain Impl members, rather than moving
@@ -1597,6 +1624,23 @@ struct Codegen::Impl {
     /// The name of the initialiser for the module called \p moduleName,
     /// declaring it if this unit did not emit it.
     llvm::Function* moduleInitFn(const std::string& moduleName);
+
+    /// Turbo Tier 4, Cluster A item 2: emit __plang_init_<unit> for \p unit
+    /// and return its name -- the exact parallel of emitModuleInitFn just
+    /// above, for a Turbo UnitNode instead of an EP ModuleNode.  Brings up
+    /// every unit this one 'uses' first (interface and implementation uses
+    /// alike, since either may declare a runtime-computed constant or a
+    /// `value`-initialized variable this unit's own code could observe),
+    /// then this unit's own runtime constant/variable initializers, then its
+    /// optional `begin ... end` InitBody.  Guarded exactly like
+    /// emitModuleInitFn's own __plang_initdone_<unit> so a diamond of 'uses'
+    /// runs this at most once, and a genuine cycle (which Sema now allows
+    /// for two units' IMPLEMENTATION 'uses' -- see this item's own report)
+    /// still terminates rather than recursing forever at runtime.
+    /// One is emitted for every unit compiled through Codegen::emitUnit,
+    /// whether or not it has an InitBody, so a later importer can call it
+    /// without knowing.
+    std::string emitUnitInitFn(const UnitNode& unit);
 
     // ====================================================================
     // Statement emission

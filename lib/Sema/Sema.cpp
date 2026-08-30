@@ -1108,6 +1108,26 @@ size_t Sema::pushUnitUsesScopes(const std::vector<UsedUnit>& Uses) {
             Symbol Qualified   = Sym;
             Qualified.Name     = U.Name + "." + Sym.Name;
             (void)Symtab.define(std::move(Qualified));
+
+            // Turbo Tier 4, Cluster A item 2: record what CodeGen needs to
+            // mangle a reference to this export correctly once it is
+            // genuinely a separate object file (CGLinkage::importOwner/
+            // importLinkName, ModuleImports.h's own comment on why codegen
+            // cannot work this out from the AST alone) -- exactly the same
+            // table EP's own processImports already fills for `import`,
+            // reused here unmodified, keyed by CurrentUnit_ (the unit or
+            // program whose 'uses' this is; "" for a program, same
+            // convention EP's own program-level import already uses).  Only
+            // a Var/VarParam/Proc actually needs this (a Const is inlined by
+            // registerUsedUnitConsts and never referenced by mangled symbol
+            // at all; a TypeAlias has no runtime symbol; skipping those two
+            // avoids polluting the table with entries nothing ever reads).
+            if ((Sym.Kind == SymbolKind::Var || Sym.Kind == SymbolKind::Proc)
+                    && !Sym.Module.empty())
+                ImportOwners_[CurrentUnit_].emplace(
+                    toLower(Sym.Name),
+                    ImportedName{Sym.Module, Sym.Kind == SymbolKind::Proc,
+                                 Sym.LinkName});
         }
     }
     return Count;
@@ -1128,27 +1148,45 @@ Sema::loadUnitInterfaceExports(const std::string& UnitName, SourceLocation Loc) 
         return UnitExports_[Key]; // left empty; caller sees "exports nothing"
     }
 
-    // This item's own deliberately temporary loader: find "<name>.pas" on
-    // the module search path, then in the current directory.  No
-    // .pmi-analog cache, no object file, no real separate compilation --
-    // every use of a given unit within one compile re-parses and
-    // re-checks its interface exactly once (UnitExports_ above is this
-    // Sema's own cache, not a persistent one), and nothing here writes
-    // anything back out for another compilation to read.  Item 2's own job
-    // is the real mechanism this is standing in for.
+    // Turbo Tier 4, Cluster A item 2: find this unit's own real, published
+    // interface file first -- "<name-lowercased>.tui", written by a prior
+    // `plang -c <name>.pas` compile (Frontend.cpp's buildTUIContent /
+    // writeTUIFile) -- and only fall back to re-parsing "<name>.pas" itself
+    // when no .tui exists.  This is genuine separate compilation: a program
+    // that 'uses' a unit whose .tui was published finds and reads THAT, not
+    // the unit's own source, which this item's own report proves by deleting
+    // the .pas after publishing and recompiling the importer unchanged.
     //
-    // Unlike EP's own .pmi search (loadPMI/processImports just below, which
-    // checks Dir + "/" + Key + ".pmi" with no further case juggling), a
-    // .pmi is always MACHINE-written by this same compiler's own
-    // writePMIFiles, always lowercase by construction -- an exact lowercase
-    // match is the whole of what case-insensitivity needs there.  A unit's
-    // "<name>.pas" is hand-written by whoever wrote the unit, and real
-    // Turbo/fpc convention capitalizes it however the unit's own identifier
-    // is spelled (CycleB.pas, System.pas, Crt.pas, ...) -- so this tries
-    // the exact lowercase spelling first (the fast, common case on a
-    // case-insensitive filesystem, and exactly right whenever the file
-    // happens to already be lowercase), then falls back to a real
-    // case-insensitive directory scan.
+    // The .pas fallback is kept, deliberately, for two reasons rather than
+    // just backward compatibility with Cluster A item 1's own tests: (1) it
+    // lets Sema type-check against a unit that has not been compiled yet
+    // (no object file, so anything it calls or reads storage from will fail
+    // to LINK, but a program can still be checked against its declarations),
+    // and (2) it is what makes two units' mutual IMPLEMENTATION 'uses'
+    // (this item's own circularity rule -- see err_unit_circular_uses' own
+    // comment and this item's report) actually bootstrap for real separate
+    // compilation: compiling unit B on its own (`plang -c b.pas`) when B's
+    // implementation 'uses A' and neither has been compiled yet has nothing
+    // to find as "a.tui" (A has not been compiled -- that would be the truly
+    // circular order), so it falls back to A's own source, reads A's
+    // INTERFACE only (never A's implementation, which is unaffected by
+    // whether A also happens to 'uses' B back), and succeeds -- exactly
+    // mirroring how real `fpc -Mtp` auto-compiles a not-yet-compiled unit's
+    // source on demand.
+    //
+    // A .tui is always MACHINE-written by this same compiler's own
+    // writeTUIFile, always lowercase by construction, so an exact lowercase
+    // match is the whole of what its own case-insensitivity needs (same
+    // reasoning as EP's own .pmi search just below).  A unit's "<name>.pas"
+    // is hand-written by whoever wrote the unit, and real Turbo/fpc
+    // convention capitalizes it however the unit's own identifier is spelled
+    // (CycleB.pas, System.pas, Crt.pas, ...), so that candidate still needs
+    // the real case-insensitive directory scan this item's own predecessor
+    // already had.
+    auto findExact = [](const std::string& Dir, const std::string& Name) -> std::string {
+        const std::string Candidate = Dir + "/" + Name;
+        return llvm::sys::fs::exists(Candidate) ? Candidate : std::string();
+    };
     auto findCaseInsensitive = [&](const std::string& Dir) -> std::string {
         const std::string Fast = Dir + "/" + Key + ".pas";
         if (llvm::sys::fs::exists(Fast)) return Fast;
@@ -1162,19 +1200,25 @@ Sema::loadUnitInterfaceExports(const std::string& UnitName, SourceLocation Loc) 
     };
     std::string Path;
     bool        Found = false;
-    for (const auto& Dir : Opts.ModuleSearchPaths) {
-        Path = findCaseInsensitive(Dir);
-        if (!Path.empty()) { Found = true; break; }
+    bool        IsTUI = false;
+    std::vector<std::string> SearchDirs = Opts.ModuleSearchPaths;
+    SearchDirs.push_back(".");
+    for (const auto& Dir : SearchDirs) {
+        if (Path = findExact(Dir, Key + ".tui"); !Path.empty()) {
+            Found = true; IsTUI = true; break;
+        }
     }
-    if (!Found) {
-        Path = findCaseInsensitive(".");
-        Found = !Path.empty();
-    }
+    if (!Found)
+        for (const auto& Dir : SearchDirs) {
+            Path = findCaseInsensitive(Dir);
+            if (!Path.empty()) { Found = true; break; }
+        }
     if (!Found) {
         error(Loc, diag::err_unknown_unit, {UnitName, Key});
         UnitLoading_.erase(Key);
         return UnitExports_[Key];
     }
+    (void)IsTUI; // both formats parse identically below -- a .tui IS a unit file
 
     std::ifstream UnitFile(Path);
     if (!UnitFile) {
