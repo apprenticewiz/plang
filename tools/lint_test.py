@@ -176,6 +176,18 @@ BRACE_CHECK_EXEMPT = {
     "test/CodeGen/Turbo/reset-on-a-nonexistent-file-sets-ioresult-instead-of-crashing.pas",
     "test/CodeGen/Turbo/reset-on-a-permission-denied-file-sets-ioresult-instead-of-crashing.pas",
     "test/CodeGen/Turbo/write-to-a-never-opened-file-is-a-silent-no-op-and-sets-ioresult-103.pas",
+    # Same reasoning again (only ever compiles under -std=turbo -- see each
+    # file's own RUN: line -- so the matched-delimiter rule this check
+    # doesn't model is the one that actually applies), for this tier's own
+    # capstone integration tests (test/Turbo/): their header prose discusses
+    # '{$I+}'/'{$I-}' (and, in the two known-gap files, a quoted `{$mode tp}`
+    # from a real `fpc -Mtp` repro session) syntax in English the same way
+    # dollar-i-plus-and-minus-are-not-mistaken-for-an-include.pas and the
+    # pending-InOutRes entries just above already do.  Not a hazard to fix.
+    "test/Turbo/ioresult-matrix-real-filesystem-driven-error-codes.pas",
+    "test/Turbo/pending-ioresult-survives-a-reopen-and-a-later-operation.pas",
+    "test/Turbo/read-of-malformed-numeric-input-does-not-yet-honor-i-minus-known-gap.pas",
+    "test/Turbo/reset-does-not-yet-open-read-write-known-gap.pas",
 }
 
 

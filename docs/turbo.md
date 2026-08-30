@@ -207,7 +207,7 @@ Twelve of Turbo's switches are recognized, `include/plang/Basic/CompilerSwitches
 | Switch | Letter | Long name | TP7 default | Acted on? |
 |---|---|---|---|---|
 | RangeChecks | `R` | `RANGECHECKS` | **off** | Yes |
-| IOChecks | `I` | `IOCHECKS` | on | Recorded only (see below) |
+| IOChecks | `I` | `IOCHECKS` | on | **Yes** (see below) |
 | BoolEval | `B` | `BOOLEVAL` | off | Yes |
 | ExtendedSyntax | `X` | `EXTENDEDSYNTAX` | on | Yes |
 | OverflowChecks | `Q` | `OVERFLOWCHECKS` | off | Recorded only |
@@ -241,8 +241,7 @@ falls through to `warning: unknown compiler directive`.
 **Acted on** means plang's codegen changes behavior at that switch's state;
 **recorded only** means the position-keyed table still remembers the value
 precisely so a query can answer truthfully, but nothing currently reads it
-to change what gets emitted. Two entries are worth calling out because the
-table's own grouping undersells or oversells them:
+to change what gets emitted. Two entries are worth a closer look:
 
 - **Assertions** (`{$C+}`/`{$C-}`) is grouped with the recorded-only
   switches in the `.def` file's own comments, but is in fact acted on:
@@ -251,14 +250,15 @@ table's own grouping undersells or oversells them:
   call compiles to nothing — `cond` is never even evaluated. Verified by
   compiling `{$C-}  Assert(false, 'x')` and confirming it exits 0 rather
   than reporting runtime error 227.
-- **IOChecks** (`{$I+}`/`{$I-}`) is grouped with the acted-on switches, but
-  nothing in codegen queries `Switch::IOChecks` today. It is recorded so
-  that a position-aware `{$IFOPT}` (once implemented) and a round-tripped
-  `{$I-}` have somewhere to land; the runtime behavior it exists to gate —
-  `IOResult` reporting a failed I/O operation instead of the program
-  aborting — arrives with a later piece of the file runtime. `{$I-}` compiles
-  and is remembered correctly; it does not yet change what a failed
-  `read`/`write` does.
+- **IOChecks** (`{$I+}`/`{$I-}`) genuinely is acted on:
+  `RangeCheckGuards::ioChecksAt`/`CGProcCall::emitIoCheckIfNeeded` read it
+  directly at every checked I/O statement's own source position, emitting
+  the automatic `plang_iocheck()` abort under `{$I+}` and suppressing it
+  under `{$I-}` — Tier 3's own `InOutRes`/`IOResult` contract ("Tier 3"
+  below) is exactly this switch's runtime behavior landing. (Earlier in
+  this milestone, before Tier 3 shipped, `{$I+}`/`{$I-}` compiled and was
+  remembered correctly but changed nothing at runtime; that interim state
+  is gone as of Tier 3.)
 
 Every other "recorded only" switch (`OverflowChecks`, `VarStringChecks`,
 `TypedAddress`, `OpenStrings`, `StackChecks`, `WritableConst`,
@@ -942,6 +942,316 @@ may be written bare, with no parentheses at all.
 
 ---
 
+# Tier 3: the System-unit file runtime, and `Random`
+
+Tier 1 is syntax and directives; Tier 2 is the type system and its string
+routines. Tier 3 is the part of the System unit a real Turbo program
+actually does file I/O with: a genuine binary/text file model distinct
+from ISO 7185/Extended Pascal's (`Assign`/`Reset`/`Rewrite`/`Append`/
+`Close`), the `InOutRes`/`IOResult`/`{$I+}`/`{$I-}` graceful-degradation
+contract that lets a program recover from a real I/O failure instead of
+aborting, and the untyped-file record-oriented routines
+(`BlockRead`/`BlockWrite`/`Seek`/...) real TP programs use for random
+access. Every feature below is gated to `-std=turbo` and rejected under
+`-std=iso7185`/`-std=iso10206`, exactly like Tier 1/2's own extensions —
+see each feature's own `*-is-turbo-only-not-available-under-iso7185-or-
+extended-pascal.pas` sibling under `test/Driver/Turbo/` for the rejection
+itself. `GetMem`/`FreeMem`/`HeapError`/`ExitProc`/`ErrorAddr`/
+`ParamCount`/`ParamStr` — chronologically also part of this tier's own
+program-control work — are already documented above, in Tier 2's "New
+builtins" section, rather than repeated here; `RunError` and Turbo's other
+numbered run-time errors are documented in Tier 1's "Run-time error codes"
+section.
+
+## The file model: `Assign`/`Reset`/`Rewrite`/`Append`/`Close`, `FileMode`
+
+Real Turbo Pascal's own file-opening idiom is a two-step **bind, then
+open**, unlike ISO 7185/Extended Pascal's one-step `reset(f, 'name')`/
+`rewrite(f, 'name')` (`docs/conformance.md`): `Assign(f, name)` records a
+name against a file variable without touching the filesystem at all, and a
+later `Reset(f)`/`Rewrite(f)`/`Append(f)` — no filename argument — opens
+whatever name the most recent `Assign` (or, for `Rewrite`/`Append` after a
+`Rename`, the file's own possibly-updated bound name) left behind. This
+retires the plain two-argument `Reset(f, 'name')`/`Rewrite(f, 'name')`
+implicit-assign form plang used to accept as a convenience: real Turbo
+Pascal's own second argument there is an **integer** `RecSize` for an
+untyped file (see below), not a filename, and `fpc -Mtp` rejects a string
+there with an incompatible-type error — plang now matches, with a real
+Sema diagnostic rather than silently accepting the old shape (see
+`reset-rewrite-two-argument-implicit-assign-was-retired-explicit-assign-
+still-binds-the-name.pas`, `test/CodeGen/Turbo/`).
+
+`Assign(f, '')` — an **empty name** — is a real, documented TP idiom for
+binding a file to the console instead of a real path: a following
+`Reset(f)` attaches `f` to `stdin`, a following `Rewrite(f)`/`Append(f)`
+attaches it to `stdout`, both literally the same C `stdin`/`stdout`
+streams a bare `read`/`readln`/`write`/`writeln` (no file argument) already
+reaches — so a program can freely mix `readln(f, s)` against a
+console-bound `f` with a bare `readln(s)` and see the identical input
+stream. `Assign(Output, name)` followed by `Rewrite(Output)` — the
+**predefined** `Output` variable itself, not a program-declared file —
+redirects every subsequent bare `write`/`writeln` to that file;
+`Assign(Output, '')` + `Rewrite(Output)` un-redirects it back to the
+console. See "Input/Output as real variables" below for why `Output` can
+be `Assign`ed at all.
+
+`Close(f)` closes the underlying stream but, unlike ISO/EP's `close`,
+performs none of the ISO/EP path's extra bookkeeping (no
+unterminated-line finishing beyond what the file's own dialect-appropriate
+write path already does — see "`file of char`" below — and no lingering
+component-buffer free) and **does not un-bind the name**: a following
+`Reset`/`Rewrite`/`Append` with no intervening `Assign` reopens exactly
+the name that was already bound, confirmed against `fpc -Mtp`.
+
+`FileMode: Integer` (Sema's second predefined mutable `Var`, after
+`ExitCode`, registered the identical way) defaults to `2` ("read-write"),
+matching real Borland/FPC — see `filemode-defaults-to-2-and-is-
+assignable.pas`. **plang does not yet act on it**: `Reset` always opens
+its underlying stream read-only regardless of `FileMode`'s value — see
+"Documented deviations" below for this known gap and its real, concrete
+consequence for `Write`/`Truncate` after `Reset`.
+
+## `InOutRes` and `IOResult`
+
+`InOutRes: Integer`, a hidden global (not itself a predefined identifier a
+program can name — real Turbo Pascal does not expose it directly either),
+latches the numbered result of the most recent I/O operation. `IOResult`
+(callable as `IOResult()` or bare `IOResult`, both syntactic forms reaching
+the identical runtime accessor) **reads InOutRes and clears it to 0 in the
+same call** — a second, immediately following `IOResult` read always
+answers `0`, even with nothing else run in between (`ioresult-reads-and-
+clears-inoutres.pas`).
+
+**A pending, unread `InOutRes` is not overwritten by a later failing
+operation** — confirmed against `fpc -Mtp`, and the least obvious part of
+this contract: once one operation under `{$I-}` leaves `InOutRes` pending,
+a SECOND, independently-failing operation does not replace that code with
+its own; only an explicit `IOResult` read clears the latch, ready to
+capture the next failure fresh (`a-pending-inoutres-is-not-overwritten-by-
+a-later-failing-operation.pas`, and, driven by a full realistic
+reopen-across-two-different-failures scenario rather than one call,
+`test/Turbo/pending-ioresult-survives-a-reopen-and-a-later-operation.pas`).
+
+Every failure this tier's file-model routines can raise reaches `InOutRes`
+through one shared helper (`setInOutResIfClear`, `runtime/plang_file.cpp`)
+and one shared errno-to-code table (`plang_tp_posix_to_run_error`) for
+every failure that comes from a real, mapped POSIX `errno`:
+
+| Code | Meaning | `errno` |
+|---|---|---|
+| 2 | File not found | `ENOENT` |
+| 3 | Path/name too long | `ENAMETOOLONG` |
+| 4 | Too many open files | `ENFILE`, `EMFILE` |
+| 5 | File access denied | `EACCES`, `EROFS`, `EEXIST`, `ENOTEMPTY`, `EBUSY`, `ENOTDIR`, `EISDIR` |
+| 100 | Disk read error | `EPIPE`, `EINTR`, `EIO`, `EAGAIN`, `ENOSPC` (via a real open failure), or a short `BlockRead` with no `Result` argument |
+| 101 | Disk write error | Same `errno` set as 100, or a short `BlockWrite` with no `Result` argument |
+| 102 | File not assigned | `Erase`/`Rename` against a file that is still open, or was never `Assign`ed at all |
+| 103 | File not open | Any operation against a file variable that was never successfully `Reset`/`Rewrite`/`Append`ed |
+| 218 | Invalid numeric format passed to the OS (`EINVAL`) | `Seek` with a negative record number |
+
+Every table entry above is reachable from a genuine filesystem condition —
+not simulated — and is exercised end to end, both individually
+(`test/CodeGen/Turbo/`) and as one combined program driving all of them
+back-to-back
+(`test/Turbo/ioresult-matrix-real-filesystem-driven-error-codes.pas`).
+Two gaps are worth calling out explicitly: code 3 (`ENAMETOOLONG`) is not
+practically reachable from a plang Turbo program at all, since `Assign`'s
+name parameter is a capacity-255 `ShortString` and every filesystem this
+project targets has a 255-byte `NAME_MAX` — no string a Turbo program can
+even construct exceeds it. Code 4 (`EMFILE`/`ENFILE`) needs a real
+per-process file-descriptor limit lower than the test process's own
+default, which this project's test suite has no portable, CI-safe way to
+arrange (no `ulimit` in lit's own restricted RUN-line shell — see
+`test/lit.cfg.py`'s comment on `%checkexit`/`%hold_stdin_open` for the
+general shape of what that shell cannot do) — both codes are real and
+reachable in principle, just not exercised by this project's own test
+suite.
+
+**106** ("Invalid numeric format") is deliberately absent from the table
+above: real Turbo Pascal treats a malformed `read`/`readln` numeric token
+as gated by `{$I-}` too (confirmed against `fpc -Mtp`), but plang's own
+`read`/`readln` does not yet honor that — see "Documented deviations"
+below.
+
+## `{$I+}`/`{$I-}`: automatic checks
+
+Turbo's `IOChecks` switch (`{$I+}`/`{$I-}`, `include/plang/Basic/
+CompilerSwitches.def`) is **textual and positional**, like every other
+switch this project models: a checked statement's own automatic abort is
+decided by that STATEMENT's source position, never by which call in a
+sequence actually produced the pending failure. Under the real Turbo
+default (`{$I+}`, unless a program says otherwise), a checked I/O
+statement — `Reset`/`Rewrite`/`Append`/`Close`/`Read`/`Readln`/`Write`/
+`Writeln`/`BlockRead`/`BlockWrite`/`Seek`/`Truncate`/`Erase`/`Rename`/
+`Flush`, and a bare bodyless `Read`/`Write` (no file argument) reading
+`Input`/writing `Output` too — emits a `plang_iocheck()` call right after
+itself (`RangeCheckGuards::ioChecksAt`, `CGProcCall::emitIoCheckIfNeeded`),
+which reports and aborts with the pending `InOutRes` code as the exit
+status (`Runtime error <n> at $<addr>`, never the shared ISO/EP
+`plang_err_*` wording or exit status 70) if one is still latched. Under
+`{$I-}`, that call is not emitted for a checked statement at that
+position, so a failure there leaves `InOutRes` pending and lets the
+program keep running.
+
+Which position's checkpoint actually reports a given failure is the
+subtle half of this contract: a `Reset` failing under `{$I-}`, followed by
+a `Read` that then runs under `{$I+}`, aborts at the `Read`'s own
+checkpoint — but with `Reset`'s ORIGINAL code, not whatever the `Read`
+would independently have produced (`io-plus-aborts-at-the-next-checked-
+operation-not-the-failing-one.pas`) — the same "first pending code
+survives" rule `InOutRes`'s own read-and-clear contract follows above.
+Both the `{$I-}` (`test/Turbo/ioresult-matrix-real-filesystem-driven-
+error-codes.pas`) and default `{$I+}` (`test/Turbo/default-i-plus-exit-
+status-matches-the-ioresult-code.pas`) sides of this contract are
+exercised end to end for the same underlying failures, confirming the
+exit status and `InOutRes` code agree.
+
+## `RecSize`
+
+An untyped file's record size for `BlockRead`/`BlockWrite`/`Seek`/
+`FilePos`/`FileSize` purposes is either an explicit integer second
+argument to `Reset`/`Rewrite` (`Reset(f, 4)`), or, when none is given,
+Turbo's own documented default of **128**. A typed file's `RecSize` is
+always `SizeOf` its element type, computed by codegen, never explicit. A
+`RecSize` of exactly `0` is real Borland/FPC field practice's own special
+case: it sets `InOutRes` to `2` ("file not found") without attempting to
+open anything at all, rather than a division-by-zero or a silently-wrong
+`FileSize`.
+
+`FileSize` **floors** when a file's real byte length is not an exact
+multiple of its own `RecSize` — confirmed against `fpc -Mtp`: a 5-byte
+file reopened with `RecSize` 2 reports `FileSize` 2, not 3 (rounded up).
+The two pieces compose concretely: the SAME 16-byte file reports
+`FileSize` 4 reopened with an explicit `RecSize` of 4 (`16 div 4`, exact),
+but `FileSize` 0 reopened with no explicit `RecSize` at all — the
+untyped-file default of 128 — since the file is shorter than even one
+128-byte record (`16 div 128`, floored to 0, not rounded up to 1); see
+`test/Turbo/reset-recsize-interacts-with-filesizes-floor-division.pas`.
+
+## `BlockRead`/`BlockWrite`/`Seek`/`FilePos`/`FileSize`/`Truncate`/`Erase`/`Rename`/`Flush`/`SetTextBuf`/`SeekEof`/`SeekEoln`
+
+`BlockRead(f, buf, count[, result])`/`BlockWrite(f, buf, count[, result])`
+transfer `count` whole `RecSize`-sized records between `buf` (an untyped,
+raw pointer — any variable, its own declared type not otherwise examined)
+and `f`. Their optional trailing `result` argument changes what a SHORT
+transfer means: WITH it, `result` silently receives however many whole
+records were actually transferred and `InOutRes` stays `0` — not an
+error; WITHOUT it, a short transfer sets `InOutRes` (100 for `BlockRead`,
+101 for `BlockWrite`) as a real failure. Both arities, and the realistic
+reason a program picks one over the other (recover with the true count vs.
+treat a short transfer as fatal), are exercised together against one
+shared fixture in `test/Turbo/blockread-blockwrite-combined-with-and-
+without-result.pas`.
+
+`Seek(f, n)` positions `f` at record `n` (0-relative, `RecSize` bytes from
+the start); seeking PAST the current end of file is legal and not an
+error — real Turbo Pascal programs rely on this to extend a file (seek
+past the end, then `Write`/`BlockWrite`) — but a NEGATIVE `n` is (`InOutRes`
+218, `EINVAL`). `FilePos(f)` reads back the current record position;
+`FileSize(f)` reads the file's own total record count (floored — see
+"`RecSize`" above). `Truncate(f)` discards everything from the CURRENT
+position to the file's previous end, leaving everything before it
+untouched. All four compose in one realistic scenario — write, seek
+partway in, truncate, confirm `FileSize` reflects it, seek back and
+confirm the surviving records are intact — in
+`test/Turbo/seek-filepos-filesize-truncate-combined-scenario.pas`.
+
+`Erase(f)`/`Rename(f, newname)` act on `f`'s own bound name and require
+`f` be closed first — calling either against a still-open `f` (or one
+never `Assign`ed at all) sets `InOutRes` 102 and performs nothing. A
+successful `Rename` updates `f`'s own bound name, so a following
+`Reset`/`Rewrite`/`Append` with no intervening `Assign` reaches the
+RENAMED file, matching `fpc -Mtp`.
+
+`Flush(f)` flushes `f`'s buffered output without closing it; always
+`InOutRes` 0 on a valid, open file.
+
+`SetTextBuf(f, buf, size)` overrides `f`'s own I/O buffering with
+caller-supplied storage. This is a **deliberate, documented deviation**
+from real Turbo Pascal's exact contract: plang's file model is a thin
+wrapper over C stdio, with no "pending buffer, not yet attached to a
+stream" slot the way Borland's own `TextRec` has, so `SetTextBuf` called
+BEFORE `f` is opened is a silent no-op (real Turbo Pascal's own idiom, but
+inert here), while called AFTER `Reset`/`Rewrite`/`Append` it takes effect
+immediately via `setvbuf(3)` — the reverse of real Turbo Pascal's own
+ordering.
+
+`SeekEof(f)`/`SeekEoln(f)` are the CONSUMING counterparts of `Eof`/`Eoln`:
+`SeekEof` skips past any blanks, tabs, and line markers ahead of the
+current position before testing; `SeekEoln` skips only blanks and tabs (a
+line marker is itself what `Eoln` tests for, so `SeekEoln` does not cross
+one).
+
+## `text` vs. `file of char`
+
+Real Turbo Pascal gives `text` its own distinct predefined type — "the
+standard type Text ... is not the same as File Of Char," Borland's own
+manual — and treats `file of char` as an ordinary **binary** file: each
+`Char` component is one raw byte, with no line-ending/formatting
+convention applied on `Close`. This is a genuine dialect REVERSAL from ISO
+7185 §6.4.3.5 and Extended Pascal, where `file of char` has no separate
+identity from `text` at all ("a file of the type char is termed a
+textfile") — writing two characters and closing produces exactly 2 raw
+bytes under `-std=turbo`, but 3 (`"AB\n"`, the trailing newline the text
+path appends to finish an unterminated line) under `-std=iso7185`/
+`-std=iso10206`, confirmed side by side against the identical two
+`write(f, ch)` calls in
+`test/Turbo/file-of-char-binary-under-turbo-text-under-iso7185.pas` — the
+two dialects' own real file-opening idioms differ too (`Assign`+`Rewrite`
+under Turbo vs. `Rewrite(f, 'name')` under ISO 7185, since the two-argument
+`Rewrite` name-binding form was retired under Turbo — see "The file model"
+above), so that file is two small `split-file` variants rather than one
+byte-identical source.
+
+## Input/Output as real variables
+
+`Input`/`Output` are ordinary, `Assign`-able `Text` variables under
+`-std=turbo` — not fixed, unredirectable handles the way a bare
+`read`/`write` might suggest. `Assign(f, '')` binds a file to the console
+(see "The file model" above); applying that same idiom to the PREDEFINED
+`Output` (`Assign(Output, name)`, `Rewrite(Output)`) redirects every
+following bare `Writeln` to a named file, and `Assign(Output, '')` +
+`Rewrite(Output)` sends it back to the console — a full redirect/
+un-redirect lifecycle, bare console output before, a real file during, and
+back to the console after, all exercised in one program in
+`test/Turbo/assign-output-redirect-and-unredirect-full-lifecycle.pas`.
+`Input`'s own analogous redirection makes a bare `read`/`readln`/`eof`/
+`eoln` (no file argument) follow whatever `Input` is currently bound to
+(`bare-readln-with-no-file-argument-reads-from-a-redirected-input.pas`,
+`bare-eof-and-eoln-follow-a-redirected-input.pas`, `test/CodeGen/Turbo/`).
+
+## `Random`, `Randomize`, `RandSeed`, `Int`, `Frac`
+
+`Random` shares one name across two call shapes: `Random` (no argument)
+answers a `Real` in `[0, 1)`; `Random(Range)` advances the SAME generator
+state and answers an ordinal value in `[0, Range)`, **in `Range`'s own
+type** — the same "stays in the argument's own type" rule `Abs`/`Sqr`/
+`Succ`/`Pred`/`High`/`Low` already follow. `RandSeed: Integer` (a
+predefined mutable `Var`, registered the same way `ExitCode`/`FileMode`
+are) is the generator's own visible state: setting it to the same value
+before two separate runs makes `Random`'s sequence deterministic and
+reproducible across those runs
+(`randseed-set-to-the-same-value-makes-random-deterministic.pas`).
+`Randomize` reseeds `RandSeed` from a real source of entropy (wall-clock
+time), so successive RUNS of the same program get a different sequence
+(`randomize-reseeds-randseed-differently-across-separate-runs.pas`).
+
+This is plang's OWN hand-rolled generator (`runtime/plang_math.cpp`) —
+**no claim is made that its sequence matches** real Borland Turbo Pascal
+7's own 32-bit LCG or Free Pascal's Mersenne Twister; the two do not match
+each other either, and bit-for-bit compatibility with either was never a
+goal. A program that only needs `Random`'s documented RANGE and
+`RandSeed`'s documented determinism-when-seeded behavior — not a specific
+sequence of values — is unaffected.
+
+`Int(x)`/`Frac(x)` split `x` into its integer part (toward zero, like
+`Trunc`, but answering a `Real` rather than an ordinal — `Int(1e30)` is
+simply `1e30`, not the runtime error `Trunc(1e30)` correctly raises) and
+its fractional part (`x - Int(x)`, keeping `x`'s own sign: `Frac(-3.7)` is
+`-0.7`, not `0.3` — there is no `floor` here).
+
+---
+
 ## Documented deviations from real Turbo Pascal / FPC field practice
 
 Everywhere above describes what plang's Turbo mode does; this section is
@@ -1086,6 +1396,61 @@ literal TP7's 16-bit-only ones (see "New builtins"), and `Val`'s two
 confirmed, unreproduced `fpc -Mtp` inconsistencies around a trailing
 `e`/`e+`/`e-` with no exponent digits (see "`Val`'s error contract").
 
+### Known gap: `read`/`readln` of a malformed numeric token does not honor `{$I-}`
+
+Real Turbo Pascal/`fpc -Mtp` treats a malformed numeric token read via
+`read`/`readln` (Runtime error 106, "Invalid numeric format") as an
+ORDINARY I/O failure subject to `{$I-}`/`{$I+}` — confirmed directly: under
+`{$I-}`, `fpc -Mtp` sets `IOResult` to 106, assigns the destination
+variable 0, and keeps running. plang's own `plang_read_i64_turbo`/
+`plang_read_f64_turbo` (`runtime/plang_io.cpp`) call the unconditional,
+`[[noreturn]]` `plang_tp_runerror(106)` directly on a malformed token
+instead — the same reporter that correctly aborts unconditionally for
+`RunError`/the numbered range/overflow/nil-pointer checks (none of which
+IS gated by `{$I-}` in real Turbo Pascal either — `IOChecks` only ever
+governs I/O operations, and a malformed `read` is Borland's own one case
+where a "numeric parse" is ALSO an I/O operation). So under plang
+`-std=turbo` today, a malformed numeric `read`/`readln` aborts with
+"Runtime error 106" regardless of `{$I-}`. Fixing this for real means
+threading `plang_read_i64_turbo`/`_f64_turbo` through the same
+`RangeCheckGuards::ioChecksAt`-gated `plang_iocheck()` checkpoint the file
+model's own operations above already use, rather than the call site
+deciding to abort by itself — out of scope for the test-corpus-only PR
+that found and pinned this gap; see
+`test/Turbo/read-of-malformed-numeric-input-does-not-yet-honor-i-minus-
+known-gap.pas`.
+
+### Known gap: `Reset` does not open read-write, despite `FileMode`'s own documented default
+
+`FileMode` defaults to 2 ("read-write" — see "The file model" above), and
+real Turbo Pascal/`fpc -Mtp` honors that concretely: `Reset` opens the
+underlying file read-write, so a `Write` (or a `Seek`+`Truncate`) against a
+file the program only ever `Reset` — never `Rewrite`/`Append` — works,
+the "load a record, seek back, patch it in place" idiom real TP field
+practice depends on. plang's own `plang_tp_reset` (`runtime/
+plang_file.cpp`) always `fopen()`s its underlying stream read-only,
+unconditionally, regardless of `FileMode`'s value. The resulting failure
+does not even reach Turbo's own `InOutRes`/`{$I-}` contract: a `Write`
+against a Reset-reopened file reaches the SHARED ISO/EP `plang_err_*`
+abort path instead ("file is not open in the required mode", exit 70) —
+the exact path Turbo's own file model exists to route every OTHER failure
+around. `Seek`+`Truncate` against a Reset-reopened file independently
+fails too, for a related but distinct reason: `ftruncate` on a genuinely
+read-only file descriptor is `EINVAL` at the OS level no matter what
+`InOutRes` plumbing sits above it. Not fixed here, for the same
+out-of-scope-for-a-test-corpus-PR reason as the `read`/`{$I-}` gap just
+above — fixing it means `plang_tp_reset` choosing its `fopen` mode from
+`FileMode` and `Write`'s own not-open-in-the-required-mode check routing
+through Turbo's `InOutRes` contract instead of the shared ISO/EP abort,
+both genuine runtime changes; see `test/Turbo/reset-does-not-yet-open-
+read-write-known-gap.pas`. Every other Tier 3 test that would otherwise
+Reset-then-mutate a file (`test/Turbo/seek-filepos-filesize-truncate-
+combined-scenario.pas` among them) works around this by keeping the whole
+write-then-mutate sequence inside its ORIGINAL `Rewrite`-opened session
+instead, the same shape the pre-existing, already-passing
+`truncate-shortens-a-file-at-the-current-position.pas`
+(`test/CodeGen/Turbo/`) already used.
+
 ### Not a Turbo deviation (checked and excluded)
 
 This project's own history has a `div`/`mod` sign-handling fix connected to
@@ -1111,4 +1476,6 @@ own comment.
 - `include/plang/Basic/CompilerSwitches.def`, `lib/Lex/Directives.cpp` — the source of truth Tier 1's directive-system sections above were written from.
 - `include/plang/AST/TypeContext.h`, `include/plang/Sema/Type.h`, `lib/Sema/SemaType.cpp` — the sized-integer ladder, narrowed subrange/enum storage, and `SizeOf`/`byteSizeOf`/`byteAlignOf`'s layout arithmetic Tier 2's type sections above were written from.
 - `include/plang/Basic/Builtins.def`, `runtime/plang_sstr.cpp`, `runtime/plang_val.cpp` — the System-unit string routines' and `Val`'s exact, empirically-derived semantics, including the `fpc -Mtp` field-practice citations this document summarizes.
-- `test/CodeGen/Turbo/`, `test/Driver/Turbo/` — per-feature and cross-feature regression coverage for everything in this document.
+- `runtime/plang_file.cpp`, `runtime/plang_math.cpp` — Tier 3's file model (`Assign`/`Reset`/`Rewrite`/`Append`/`Close`/`BlockRead`/`BlockWrite`/`Seek`/...), `InOutRes`/`IOResult`, and `Random`'s own empirically-derived semantics, including the `fpc -Mtp` field-practice citations this document's Tier 3 section summarizes.
+- `test/CodeGen/Turbo/`, `test/Driver/Turbo/` — per-feature regression coverage for everything in this document.
+- `test/Turbo/` — integration-level tests exercising realistic COMBINATIONS of Tier 3's file-model/`InOutRes`/`Random` features together (a program that opens a file, does I/O, checks `IOResult`, and exits cleanly — the kind of end-to-end scenario a real Turbo Pascal program actually runs), rather than one lit test per isolated behavior.
