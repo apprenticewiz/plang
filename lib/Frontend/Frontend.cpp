@@ -132,7 +132,20 @@ void addPredefinedConditionalSymbols(LangOptions &Opts) {
 
 /// Convert an ExprNode back to a Pascal constant expression string.
 /// Only handles the simple cases that appear in type bounds.
-static std::string exprToString(const ExprNode& E) {
+///
+/// \p TurboConstStyle says which of two grammars a TypeName-less
+/// StructuredValueExpr (see that node's own comment just below) is to be
+/// written back as -- true only while serializing a Turbo typed constant's
+/// OWN value (ConstDef::Type set; the writeConst lambdas in both
+/// buildPMIContent and buildTUIContent are the only two callers that ever
+/// pass true), propagated through every recursive call so a value nested
+/// inside a typed constant's own structured literal (an array of records, a
+/// record with a nested array field, ...) picks the same grammar all the
+/// way down. Every OTHER caller -- including EP's own `type ... value
+/// [...]` initial-state clause, which also leaves TypeName empty (see
+/// ParseInit.cpp's parseComponentValue) -- takes the default false and gets
+/// EP's own bracketed form exactly as before this parameter existed.
+static std::string exprToString(const ExprNode& E, bool TurboConstStyle = false) {
     if (auto* IL = llvm::dyn_cast<IntLitExpr>(&E))
         return std::to_string(IL->Value);
     if (auto* Id = llvm::dyn_cast<IdentExpr>(&E))
@@ -154,7 +167,7 @@ static std::string exprToString(const ExprNode& E) {
     if (auto* UN = llvm::dyn_cast<UnaryExpr>(&E)) {
         if (UN->Operand)
             return std::string(opSpelling(UN->Op)) + " "
-                 + exprToString(*UN->Operand);
+                 + exprToString(*UN->Operand, TurboConstStyle);
     }
     // EP §6.8.2: a constant may be written as an expression over other
     // constants, and the interface has to carry the expression, not a number
@@ -162,9 +175,9 @@ static std::string exprToString(const ExprNode& E) {
     // read back on its own, with none of the surrounding to hold it together.
     if (auto* BN = llvm::dyn_cast<BinaryExpr>(&E)) {
         if (BN->Left && BN->Right)
-            return "(" + exprToString(*BN->Left) + " "
+            return "(" + exprToString(*BN->Left, TurboConstStyle) + " "
                  + std::string(opSpelling(BN->Op)) + " "
-                 + exprToString(*BN->Right) + ")";
+                 + exprToString(*BN->Right, TurboConstStyle) + ")";
     }
     if (llvm::isa<NilExpr>(&E)) return "nil";
     // EP §6.8.2: `ord('a')` and its like are constant expressions too, and
@@ -173,7 +186,7 @@ static std::string exprToString(const ExprNode& E) {
         std::string R = CE->Name + "(";
         for (size_t I = 0; I < CE->Args.size(); ++I) {
             if (I) R += ", ";
-            R += exprToString(*CE->Args[I]);
+            R += exprToString(*CE->Args[I], TurboConstStyle);
         }
         return R + ")";
     }
@@ -194,38 +207,74 @@ static std::string exprToString(const ExprNode& E) {
         return R;
     }
     if (auto* RG = llvm::dyn_cast<SetRangeExpr>(&E))
-        return exprToString(*RG->Low) + ".." + exprToString(*RG->High);
+        return exprToString(*RG->Low, TurboConstStyle) + ".."
+             + exprToString(*RG->High, TurboConstStyle);
     // Turbo typecast: round-trips as the same TypeName(expr) syntax it was
     // written with.
     if (auto* TC = llvm::dyn_cast<TypeCastExpr>(&E))
-        return TC->TypeName + "(" + exprToString(*TC->Operand) + ")";
+        return TC->TypeName + "(" + exprToString(*TC->Operand, TurboConstStyle) + ")";
     // EP §6.6: an initial state may be a whole array, record or set, and the
     // interface has to keep saying what state that is.
     if (auto* SL = llvm::dyn_cast<SetLiteralExpr>(&E)) {
         std::string R = SL->TypeName + "[";
         for (size_t I = 0; I < SL->Elements.size(); ++I) {
             if (I) R += ", ";
-            R += exprToString(*SL->Elements[I]);
+            R += exprToString(*SL->Elements[I], TurboConstStyle);
         }
         return R + "]";
     }
     if (auto* SV = llvm::dyn_cast<StructuredValueExpr>(&E)) {
-        std::string R = SV->TypeName + "[";
+        // Two different grammars can both leave TypeName empty, so TypeName
+        // alone can NOT tell them apart -- TurboConstStyle (the caller's own
+        // context, threaded down from wherever this recursion started) is
+        // what does. EP's structured value constructor (§6.8.7) is
+        // `TypeName '[' arm... ']'`, and its OWN `type ... value [...]`
+        // initial-state clause (ParseInit.cpp's parseComponentValue) leaves
+        // TypeName empty too, the same as Turbo's typed-constant value does
+        // -- both read back through EP's own '[' / ']' grammar regardless.
+        // Turbo's typed-constant value (parseTurboConstValue, ParseDecl.cpp)
+        // is `'(' arm... ')'` with no type name at all -- the type is the
+        // one the const's own `identifier ':' type` already said, never
+        // repeated in the value -- and is the ONLY case TurboConstStyle is
+        // ever true for (both writeConst lambdas set it, and only for a
+        // ConstDef::Type'd constant's own value). Writing the wrong
+        // bracket/paren for either is not a cosmetic difference, it is
+        // invalid syntax that grammar's own reader does not accept, so the
+        // whole file it sits in fails to reparse -- not just the one
+        // declaration.
+        std::string R = SV->TypeName + (TurboConstStyle ? "(" : "[");
+        // parseTurboConstValue (ParseDecl.cpp) picks its arm separator from
+        // the FIRST arm alone and holds every later arm to it: a 'name:
+        // value' first arm means every arm is a record field and the
+        // separator is ';', anything else means every arm is a positional
+        // array element and the separator is ','. Writing the wrong one back
+        // -- ';' for a positional list, say -- is not read as the same
+        // value: parseArm's own separator check stops after the first arm
+        // and "expected ')'" fails the rest of the file with it. EP's own
+        // arm separator is always ';' regardless of arm shape (unchanged).
+        const std::string TurboSep =
+            (!SV->Arms.empty() && !SV->Arms[0].Labels.empty()
+             && !SV->Arms[0].IsOtherwise) ? "; " : ", ";
         for (size_t I = 0; I < SV->Arms.size(); ++I) {
             const auto& Arm = SV->Arms[I];
-            if (I) R += "; ";
+            if (I) R += TurboConstStyle ? TurboSep : "; ";
             if (Arm.IsOtherwise) {
                 R += "otherwise ";
-            } else {
+            } else if (!Arm.Labels.empty()) {
+                // A positional arm (no label at all -- e.g. a plain array
+                // element or Turbo's own untagged array-constant entries)
+                // has an empty Labels list; writing ": " for it anyway
+                // produced `(: 10, : 20, : 30)`, which is not the same
+                // expression read back -- it is not a valid one at all.
                 for (size_t J = 0; J < Arm.Labels.size(); ++J) {
                     if (J) R += ", ";
-                    R += exprToString(*Arm.Labels[J]);
+                    R += exprToString(*Arm.Labels[J], TurboConstStyle);
                 }
                 R += ": ";
             }
-            if (Arm.Value) R += exprToString(*Arm.Value);
+            if (Arm.Value) R += exprToString(*Arm.Value, TurboConstStyle);
         }
-        return R + "]";
+        return R + (TurboConstStyle ? ")" : "]");
     }
     return "0"; // safe fallback
 }
@@ -608,8 +657,16 @@ static std::string buildPMIContent(const ModuleNode& Mod,
     // names a constant the file never declares leaves the type unreadable.
     // A structured constant is the other way round, naming the type it is a
     // value of, so those follow the types instead.
+    // A Turbo typed constant (Cd.Type set) names its own type the same way a
+    // structured constant names the type of its value -- see ConstDef::Type's
+    // own comment -- so it has to wait for the types loop below for the same
+    // reason: `const CB: Byte = 200;` written before `type` has resolved
+    // nothing yet reads back fine only because Byte happens to be predefined,
+    // but `const CRec: TRec = (...);` written before `type TRec = ...` names
+    // a type the reader has never heard of yet.  EP itself never sets
+    // Cd.Type (see that comment), so this never changes EP's own ordering.
     auto isStructured = [](const ConstDef& Cd) {
-        return llvm::isa<StructuredValueExpr>(Cd.Value.get());
+        return Cd.Type || llvm::isa<StructuredValueExpr>(Cd.Value.get());
     };
     // A declaration this function is about to leave out of the .pmi: says so
     // through Diags rather than doing it quietly (issue #397).  Every site
@@ -635,7 +692,29 @@ static std::string buildPMIContent(const ModuleNode& Mod,
             reportDropped("constant", Cd.Name);
             return;
         }
-        PMI += "const " + Cd.Name + " = " + exprToString(*Cd.Value) + ";\n";
+        // Turbo's typed-constant form (ConstDef::Type's own comment): dropping
+        // the ': Type' here would round-trip a value that reads back with
+        // whatever type Sema infers for the bare expression instead of the
+        // one actually declared -- e.g. `CB: Byte = 200` losing its Byte and
+        // coming back as plang's default Integer, sized and signed
+        // differently, so code compiled against the reloaded interface reads
+        // a different value than the unit that published it (issue: this
+        // writer used to drop it silently).
+        std::string TypeAnnotation;
+        if (Cd.Type) {
+            TypeAnnotation = typeNodeToString(*Cd.Type);
+            if (TypeAnnotation.empty()) {
+                reportDropped("constant", Cd.Name);
+                return;
+            }
+        }
+        PMI += "const " + Cd.Name;
+        if (Cd.Type) PMI += ": " + TypeAnnotation;
+        // TurboConstStyle=Cd.Type!=null: a typed constant's own value reads
+        // back through parseTurboConstValue's '(...)' grammar, not EP's
+        // 'TypeName[...]' -- see exprToString's own comment on
+        // TurboConstStyle for why TypeName alone can't make this call.
+        PMI += " = " + exprToString(*Cd.Value, /*TurboConstStyle=*/Cd.Type != nullptr) + ";\n";
     };
     for (const auto& Cd : Decls.Consts)
         if (Cd.Value && !isStructured(Cd)) writeConst(Cd);
@@ -907,12 +986,33 @@ static std::string buildTUIContent(const UnitNode& Unit) {
     TUI += "interface\n\n";
     TUI += usesPartText(Unit.InterfaceUses);
 
+    // A typed constant (ConstDef::Type set -- the common case for a Turbo
+    // unit's own const section) names its own type, the same way an EP
+    // structured constant names the type of its value, so it has to wait for
+    // the types loop below for the same reason buildPMIContent's own
+    // isStructured does (see that function's matching comment): a type named
+    // in the const section itself may not exist yet.
     auto isStructured = [](const ConstDef& Cd) {
-        return llvm::isa<StructuredValueExpr>(Cd.Value.get());
+        return Cd.Type || llvm::isa<StructuredValueExpr>(Cd.Value.get());
     };
     auto writeConst = [&](const ConstDef& Cd) -> bool {
         if (!Cd.Value || !canSerializeExpr(*Cd.Value)) return false;
-        TUI += "const " + Cd.Name + " = " + exprToString(*Cd.Value) + ";\n";
+        // Dropping ': Type' here would round-trip `CB: Byte = 200` as a
+        // plain untyped const, which Sema then gives plang's default
+        // Integer type instead of Byte -- a different width and signedness,
+        // so an importer reads a wrong value back (see buildPMIContent's
+        // matching writeConst for the full story; this is the same bug for
+        // the same reason, just in the sibling writer).
+        std::string TypeAnnotation;
+        if (Cd.Type) {
+            TypeAnnotation = typeNodeToString(*Cd.Type);
+            if (TypeAnnotation.empty()) return false;
+        }
+        TUI += "const " + Cd.Name;
+        if (Cd.Type) TUI += ": " + TypeAnnotation;
+        // TurboConstStyle=Cd.Type!=null: see buildPMIContent's matching
+        // writeConst / exprToString's own TurboConstStyle comment.
+        TUI += " = " + exprToString(*Cd.Value, /*TurboConstStyle=*/Cd.Type != nullptr) + ";\n";
         return true;
     };
     for (const auto& Cd : Decls.Consts)
