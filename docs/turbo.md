@@ -1006,10 +1006,15 @@ the name that was already bound, confirmed against `fpc -Mtp`.
 `FileMode: Integer` (Sema's second predefined mutable `Var`, after
 `ExitCode`, registered the identical way) defaults to `2` ("read-write"),
 matching real Borland/FPC — see `filemode-defaults-to-2-and-is-
-assignable.pas`. **plang does not yet act on it**: `Reset` always opens
-its underlying stream read-only regardless of `FileMode`'s value — see
-"Documented deviations" below for this known gap and its real, concrete
-consequence for `Write`/`Truncate` after `Reset`.
+assignable.pas`. `Reset` now honors it: `0` opens read-only, `1`
+write-only (a raw `open(O_WRONLY)`, since `Reset` must never truncate and
+no `fopen(3)` mode string opens write-only without also creating or
+truncating), and `2` (the default) read-write — confirmed against
+`fpc -Mtp`. A direction violation against a named file (e.g. `Write`
+after a `FileMode`-`0` `Reset`) sets `InOutRes` (`105`/`104`, matching
+Borland's own "file not open for output/input" codes) under `{$I-}`
+rather than aborting, the same graceful-degradation contract every other
+Turbo I/O failure gets.
 
 ## `InOutRes` and `IOResult`
 
@@ -1069,9 +1074,13 @@ suite.
 
 **106** ("Invalid numeric format") is deliberately absent from the table
 above: real Turbo Pascal treats a malformed `read`/`readln` numeric token
-as gated by `{$I-}` too (confirmed against `fpc -Mtp`), but plang's own
-`read`/`readln` does not yet honor that — see "Documented deviations"
-below.
+as gated by `{$I-}` too (confirmed against `fpc -Mtp`), and plang's own
+`read`/`readln` now honors that as well — under `{$I-}`, `InOutRes` reads
+`106` and the destination variable is set to `0`; under the default
+`{$I+}` it aborts with `Runtime error 106`, matching every other
+`InOutRes` code's own default-abort behavior — see
+`read-of-malformed-numeric-input-honors-i-minus.pas`
+(`test/Turbo/`).
 
 ## `{$I+}`/`{$I-}`: automatic checks
 
@@ -1396,31 +1405,35 @@ literal TP7's 16-bit-only ones (see "New builtins"), and `Val`'s two
 confirmed, unreproduced `fpc -Mtp` inconsistencies around a trailing
 `e`/`e+`/`e-` with no exponent digits (see "`Val`'s error contract").
 
-### Known gap: `read`/`readln` of a malformed numeric token does not honor `{$I-}`
+### Fixed gap (was a known gap): `read`/`readln` of a malformed numeric token now honors `{$I-}`
 
 Real Turbo Pascal/`fpc -Mtp` treats a malformed numeric token read via
 `read`/`readln` (Runtime error 106, "Invalid numeric format") as an
 ORDINARY I/O failure subject to `{$I-}`/`{$I+}` — confirmed directly: under
 `{$I-}`, `fpc -Mtp` sets `IOResult` to 106, assigns the destination
-variable 0, and keeps running. plang's own `plang_read_i64_turbo`/
-`plang_read_f64_turbo` (`runtime/plang_io.cpp`) call the unconditional,
-`[[noreturn]]` `plang_tp_runerror(106)` directly on a malformed token
-instead — the same reporter that correctly aborts unconditionally for
-`RunError`/the numbered range/overflow/nil-pointer checks (none of which
-IS gated by `{$I-}` in real Turbo Pascal either — `IOChecks` only ever
-governs I/O operations, and a malformed `read` is Borland's own one case
-where a "numeric parse" is ALSO an I/O operation). So under plang
-`-std=turbo` today, a malformed numeric `read`/`readln` aborts with
-"Runtime error 106" regardless of `{$I-}`. Fixing this for real means
-threading `plang_read_i64_turbo`/`_f64_turbo` through the same
-`RangeCheckGuards::ioChecksAt`-gated `plang_iocheck()` checkpoint the file
-model's own operations above already use, rather than the call site
-deciding to abort by itself — out of scope for the test-corpus-only PR
-that found and pinned this gap; see
-`test/Turbo/read-of-malformed-numeric-input-does-not-yet-honor-i-minus-
-known-gap.pas`.
+variable 0, and keeps running. plang's own `plang_read_file_i64_turbo`/
+`plang_read_file_u64_turbo`/`plang_read_file_f64_turbo`
+(`runtime/plang_file.cpp` — the entry points a `-std=turbo`
+`read`/`readln` actually reaches, including a bare `read` with no
+explicit file variable, since Turbo's own `input` is modeled as a real
+`PascalFile` binding) used to call the unconditional, `[[noreturn]]`
+`plang_tp_runerror(106)` directly on a malformed token, aborting the
+process INSIDE the read call before `CGProcCall.cpp`'s
+`emitIoCheckIfNeeded` machinery — already wired in after every
+`read`/`readln` and already correctly honoring `{$I-}`/`{$I+}` for every
+OTHER Turbo I/O failure — ever got a chance to run. Fixed by setting the
+destination variable to 0 and `InOutRes` to 106 (the same
+`setInOutResIfClear` "a pending, unread error is not overwritten"
+contract every other Turbo I/O failure in `plang_file.cpp` already uses)
+and returning normally, letting the existing checked-statement machinery
+decide whether to abort — exactly like every other Turbo I/O failure.
+`plang_io.cpp`'s `plang_read_i64_turbo`/`_u64_turbo`/`_f64_turbo` (the
+stdin-only siblings, never actually reached under `-std=turbo` since a
+bare `read` always has a `PascalFile`) got the identical fix for
+consistency even though they are currently dead code on that path. See
+`test/Turbo/read-of-malformed-numeric-input-honors-i-minus.pas`.
 
-### Known gap: `Reset` does not open read-write, despite `FileMode`'s own documented default
+### Fixed gap (was a known gap): `Reset` now opens read-write, honoring `FileMode`'s own documented default
 
 `FileMode` defaults to 2 ("read-write" — see "The file model" above), and
 real Turbo Pascal/`fpc -Mtp` honors that concretely: `Reset` opens the
@@ -1428,28 +1441,28 @@ underlying file read-write, so a `Write` (or a `Seek`+`Truncate`) against a
 file the program only ever `Reset` — never `Rewrite`/`Append` — works,
 the "load a record, seek back, patch it in place" idiom real TP field
 practice depends on. plang's own `plang_tp_reset` (`runtime/
-plang_file.cpp`) always `fopen()`s its underlying stream read-only,
-unconditionally, regardless of `FileMode`'s value. The resulting failure
-does not even reach Turbo's own `InOutRes`/`{$I-}` contract: a `Write`
-against a Reset-reopened file reaches the SHARED ISO/EP `plang_err_*`
-abort path instead ("file is not open in the required mode", exit 70) —
-the exact path Turbo's own file model exists to route every OTHER failure
-around. `Seek`+`Truncate` against a Reset-reopened file independently
-fails too, for a related but distinct reason: `ftruncate` on a genuinely
-read-only file descriptor is `EINVAL` at the OS level no matter what
-`InOutRes` plumbing sits above it. Not fixed here, for the same
-out-of-scope-for-a-test-corpus-PR reason as the `read`/`{$I-}` gap just
-above — fixing it means `plang_tp_reset` choosing its `fopen` mode from
-`FileMode` and `Write`'s own not-open-in-the-required-mode check routing
-through Turbo's `InOutRes` contract instead of the shared ISO/EP abort,
-both genuine runtime changes; see `test/Turbo/reset-does-not-yet-open-
-read-write-known-gap.pas`. Every other Tier 3 test that would otherwise
-Reset-then-mutate a file (`test/Turbo/seek-filepos-filesize-truncate-
-combined-scenario.pas` among them) works around this by keeping the whole
-write-then-mutate sequence inside its ORIGINAL `Rewrite`-opened session
-instead, the same shape the pre-existing, already-passing
-`truncate-shortens-a-file-at-the-current-position.pas`
-(`test/CodeGen/Turbo/`) already used.
+plang_file.cpp`) now chooses its open mode from the CURRENT value of
+`FileMode`, confirmed against `fpc -Mtp`: `0` opens read-only (`fopen`
+`"r"`, unchanged from before), `2` (the default) opens read-write
+(`"r+"`), and `1` (write-only) opens via a raw `open(O_WRONLY)` — no
+`fopen(3)` mode string opens write-only without also creating or
+truncating, and `Reset` must never truncate, unlike `Rewrite`. A genuine
+direction violation against a named file (e.g. `Write` after a
+`FileMode`-`0` `Reset`) now routes through a Turbo-only, non-aborting
+twin of the wrong-mode/wrong-direction checks
+(`tpTrapOnStreamError`/`tpTrapOnWrongDirection`, following the
+`tpFileReady` naming convention this tier already established) that sets
+`InOutRes` to `105`/`104` ("file not open for output"/"input", Borland's
+own documented codes, confirmed against `fpc -Mtp`) under `{$I-}` instead
+of aborting through the SHARED, ISO/EP-reachable
+`plang_err_file_wrong_mode` — which is completely unchanged and still
+aborts unconditionally on a mode violation, correct behavior for those
+dialects. See `test/Turbo/reset-opens-read-write.pas` and
+`test/Turbo/seek-truncate-after-fresh-reset.pas` (the Reset-session
+Seek+Truncate path this fix newly enables — see
+`test/Turbo/seek-filepos-filesize-truncate-combined-scenario.pas`'s own
+comment for the Rewrite-session workaround this test's sibling no longer
+needs).
 
 ### Not a Turbo deviation (checked and excluded)
 

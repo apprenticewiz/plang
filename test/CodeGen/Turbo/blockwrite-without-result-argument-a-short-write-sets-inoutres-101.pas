@@ -28,6 +28,11 @@ begin
   blockwrite(f, buf, 5);
   close(f);
 
+  { FileMode forced to 0 (read-only): Tier 3's own gap fix
+    (test/Turbo/reset-opens-read-write.pas) now has Reset honor FileMode's
+    documented read-write default of 2, so without this, the BlockWrite
+    below would genuinely succeed instead of being refused. }
+  FileMode := 0;
   reset(f, 1); (* read-only: every byte of a following write is refused *)
   {$I-}
   blockwrite(f, buf, 5);
