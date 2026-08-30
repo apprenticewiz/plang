@@ -190,6 +190,117 @@ void CGProcCall::emitCallStmt(const CallStmt& s) {
         emitIoCheckIfNeeded(s.Loc);
         return;
     }
+    // -std=turbo only: Seek(f, n) / Truncate(f).  n is in units of f's own
+    // RecSize -- plang_tp_seek reads F->RecSize itself, so codegen passes n
+    // through untouched (unlike EP's seekread/seekwrite/seekupdate above,
+    // which pass ElemSize/IndexLow because those runtime calls have no
+    // RecSize field to read yet).
+    if (lo == "seek" && s.Args.size() == 2 && RangeGuards.isTurbo()) {
+        auto* fp = FileVars.fileVarPtr(*s.Args[0]);
+        auto* n  = ToI64(EmitExpr(*s.Args[1]));
+        auto* fn = RtFns.getExternFnN("plang_tp_seek",
+            llvm::Type::getVoidTy(Ctx), {PtrTy, I64Ty});
+        B.CreateCall(fn, {fp, n});
+        emitIoCheckIfNeeded(s.Loc);
+        return;
+    }
+    if (lo == "truncate" && !s.Args.empty() && RangeGuards.isTurbo()) {
+        auto* fp = FileVars.fileVarPtr(*s.Args[0]);
+        auto* fn = RtFns.getExternFnN("plang_tp_truncate",
+            llvm::Type::getVoidTy(Ctx), {PtrTy});
+        B.CreateCall(fn, {fp});
+        emitIoCheckIfNeeded(s.Loc);
+        return;
+    }
+    // -std=turbo only: BlockRead(f, var buf; count[; var result]) /
+    // BlockWrite(f, var buf; count[; var result]).  buf is untyped -- an
+    // EmitLValue straight to its storage, same as FillChar/Move's own X/
+    // Source/Dest (below).  plang_tp_blockread/plang_tp_blockwrite always
+    // return the actual record count transferred and take an int8 "has a
+    // result argument" flag: WITH one (HasResult != 0) a short transfer is
+    // not an error at all, and this only stores the actual count into
+    // result; WITHOUT one, the runtime call itself sets InOutRes (100/101)
+    // on a short transfer -- see runtime/plang_file.cpp's own comment for
+    // why that decision lives there and not here (this is exactly the kind
+    // of "which error, if any" decision the RecSize field comment and this
+    // item's own plan put in the runtime, not codegen).
+    if ((lo == "blockread" || lo == "blockwrite") && s.Args.size() >= 3
+            && RangeGuards.isTurbo()) {
+        auto* fp     = FileVars.fileVarPtr(*s.Args[0]);
+        auto* buf    = EmitLValue(*s.Args[1]);
+        auto* count  = ToI64(EmitExpr(*s.Args[2]));
+        const bool hasResult = s.Args.size() > 3;
+        auto* fn = RtFns.getExternFnN(
+            lo == "blockread" ? "plang_tp_blockread" : "plang_tp_blockwrite",
+            I64Ty, {PtrTy, PtrTy, I64Ty, I8Ty});
+        auto* actual = B.CreateCall(fn, {fp, buf, count,
+            llvm::ConstantInt::get(I8Ty, hasResult ? 1 : 0)}, lo + ".actual");
+        if (hasResult) {
+            auto* resAddr = EmitLValue(*s.Args[3]);
+            const auto& resTy = s.Args[3]->ResolvedType;
+            auto* resLLTy = resTy ? Types.llvmTypeOfSemaType(*resTy) : I64Ty;
+            auto* narrowed = resLLTy != I64Ty
+                ? B.CreateZExtOrTrunc(actual, resLLTy, lo + ".result") : actual;
+            B.CreateStore(narrowed, resAddr);
+        }
+        // WITHOUT a result argument, emitIoCheckIfNeeded is what decides
+        // whether the InOutRes 100/101 the runtime call may just have set
+        // aborts under {$I+} -- exactly the same choke point Reset/Rewrite/
+        // Append/Close above already go through.  WITH one, the runtime
+        // call above never set InOutRes to begin with (HasResult
+        // suppresses it), so this is harmless there too.
+        emitIoCheckIfNeeded(s.Loc);
+        return;
+    }
+    // -std=turbo only: Erase(f) / Rename(f, newname).  Both act on F->Name
+    // (the name Assign bound f to), requiring F be fmClosed first -- a
+    // RUNTIME check (F->Mode), not a Sema one; see Builtins.def's own
+    // comment for the confirmed InOutRes 102 ("file not assigned", FPC's
+    // own field practice) either sets on a still-open f.
+    if (lo == "erase" && !s.Args.empty() && RangeGuards.isTurbo()) {
+        auto* fp = FileVars.fileVarPtr(*s.Args[0]);
+        auto* fn = RtFns.getExternFnN("plang_tp_erase",
+            llvm::Type::getVoidTy(Ctx), {PtrTy});
+        B.CreateCall(fn, {fp});
+        emitIoCheckIfNeeded(s.Loc);
+        return;
+    }
+    if (lo == "rename" && s.Args.size() == 2 && RangeGuards.isTurbo()) {
+        auto* fp = FileVars.fileVarPtr(*s.Args[0]);
+        // Same string(n)-has-no-NUL-terminator marshalling Assign's own
+        // filename argument needs, just above.
+        auto* nm = StrCall.emitCStrArg(*s.Args[1]);
+        auto* fn = RtFns.getExternFnN("plang_tp_rename",
+            llvm::Type::getVoidTy(Ctx), {PtrTy, PtrTy});
+        B.CreateCall(fn, {fp, nm});
+        emitIoCheckIfNeeded(s.Loc);
+        return;
+    }
+    // -std=turbo only: Flush(f) -- flush f's buffered output without
+    // closing it.
+    if (lo == "flush" && !s.Args.empty() && RangeGuards.isTurbo()) {
+        auto* fp = FileVars.fileVarPtr(*s.Args[0]);
+        auto* fn = RtFns.getExternFnN("plang_tp_flush",
+            llvm::Type::getVoidTy(Ctx), {PtrTy});
+        B.CreateCall(fn, {fp});
+        emitIoCheckIfNeeded(s.Loc);
+        return;
+    }
+    // -std=turbo only: SetTextBuf(var f: Text; var buf[; size]).  buf is
+    // untyped, same as BlockRead/BlockWrite's own above; size defaults to
+    // 1024 when omitted (Builtins.def's own comment on why that specific
+    // fallback, rather than SizeOf(buf), is used).
+    if (lo == "settextbuf" && s.Args.size() >= 2 && RangeGuards.isTurbo()) {
+        auto* fp  = FileVars.fileVarPtr(*s.Args[0]);
+        auto* buf = EmitLValue(*s.Args[1]);
+        auto* size = s.Args.size() > 2
+            ? ToI64(EmitExpr(*s.Args[2]))
+            : llvm::ConstantInt::get(I64Ty, 1024);
+        auto* fn = RtFns.getExternFnN("plang_tp_settextbuf",
+            llvm::Type::getVoidTy(Ctx), {PtrTy, PtrTy, I64Ty});
+        B.CreateCall(fn, {fp, buf, size});
+        return;
+    }
     if ((lo == "reset" || lo == "rewrite") && !s.Args.empty()) {
         auto* fp = FileVars.fileVarPtr(*s.Args[0]);
         // A string(n) filename has no NUL terminator of its own -- only the

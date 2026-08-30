@@ -911,3 +911,15 @@ DIAG(err_const_param_assigned, Error, "assignment to const parameter '%0'")
 DIAG(err_untyped_param_bare_use, Error,
      "untyped parameter '%0' can only be used through a type cast, or "
      "passed on to another untyped parameter")
+
+// TP-only: FilePos/FileSize/Seek/Truncate/BlockRead/BlockWrite/Flush all
+// operate on a typed or untyped BINARY file's raw record stream -- 'text'
+// is a genuinely distinct predefined type under -std=turbo (isTextFile's
+// own comment, Type.h), and real Turbo Pascal rejects a Text argument to
+// any of these outright: confirmed against `fpc -Mtp`, whose own error for
+// `FilePos(SomeTextVar)` is "Call by var for arg no. 1 has to match
+// exactly: Got Text expected File", not some ad-hoc byte-level meaning the
+// way SeekEof/SeekEoln (Text-only, the reverse restriction --
+// err_line_proc_not_text) get.
+DIAG(err_binary_file_required, Error,
+     "'%0' requires a typed or untyped file, not '%1'")

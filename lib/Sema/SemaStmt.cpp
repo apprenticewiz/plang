@@ -1476,6 +1476,123 @@ void Sema::checkCallStmt(const CallStmt& S) {
             return;
         }
 
+        // TP-only: Seek(f, n) / Truncate(f) -- position f at record n
+        // (Seek) or truncate f at the current position (Truncate); both
+        // take a typed or untyped BINARY file the same way FilePos/
+        // FileSize (checkCallExpr, SemaExpr.cpp) do, and refuse a Text
+        // argument (err_binary_file_required) for the identical reason.
+        if ((Lo == "seek" || Lo == "truncate") && !S.Args.empty()) {
+            auto FTy = checkExpr(*S.Args[0]);
+            if (!FTy->isError()) {
+                if (FTy->Kind != TypeKind::File)
+                    error(S.Args[0]->Loc, diag::err_file_argument, {Lo, FTy->Name});
+                else if (isTextFile(*FTy, Opts))
+                    error(S.Args[0]->Loc, diag::err_binary_file_required,
+                          {Lo, FTy->Name});
+            }
+            if (Lo == "seek" && S.Args.size() > 1) {
+                auto NTy = checkExpr(*S.Args[1]);
+                if (!NTy->isError() && !NTy->isIntegral())
+                    error(S.Args[1]->Loc, diag::err_numeric_argument, {Lo, NTy->Name});
+            }
+            return;
+        }
+        // TP-only: BlockRead(f, var buf; count[; var result]) /
+        // BlockWrite(f, var buf; count[; var result]) -- see Builtins.def's
+        // own comment for the arity-dependent short-transfer behavior. buf
+        // is "untyped" the same way FillChar/Move's own X/Source/Dest are,
+        // above: any variable at all, its own declared type not otherwise
+        // examined.
+        if ((Lo == "blockread" || Lo == "blockwrite") && S.Args.size() >= 3) {
+            auto FTy = checkExpr(*S.Args[0]);
+            if (!FTy->isError()) {
+                if (FTy->Kind != TypeKind::File)
+                    error(S.Args[0]->Loc, diag::err_file_argument, {Lo, FTy->Name});
+                else if (isTextFile(*FTy, Opts))
+                    error(S.Args[0]->Loc, diag::err_binary_file_required,
+                          {Lo, FTy->Name});
+            }
+            auto BufTy = checkExpr(*S.Args[1]);
+            if (!BufTy->isError() && !isLValue(*S.Args[1]))
+                error(S.Args[1]->Loc, diag::err_var_param_needs_lvalue,
+                      {std::string_view("2"), std::string_view(Lo)});
+            auto CountTy = checkExpr(*S.Args[2]);
+            if (!CountTy->isError() && !CountTy->isIntegral())
+                error(S.Args[2]->Loc, diag::err_numeric_argument, {Lo, CountTy->Name});
+            if (S.Args.size() > 3) {
+                auto ResTy = checkExpr(*S.Args[3]);
+                if (!ResTy->isError()) {
+                    if (!ResTy->isIntegral())
+                        error(S.Args[3]->Loc, diag::err_numeric_argument,
+                              {Lo, ResTy->Name});
+                    else if (!isLValue(*S.Args[3]))
+                        error(S.Args[3]->Loc, diag::err_var_param_needs_lvalue,
+                              {std::string_view("4"), std::string_view(Lo)});
+                }
+            }
+            return;
+        }
+        // TP-only: Erase(f) / Rename(f, newname) -- delete/rename the file
+        // f is bound to.  Both take any file kind (Text included -- real
+        // Turbo Pascal's Erase/Rename work on Text files too, unlike Seek/
+        // Truncate/BlockRead/BlockWrite/FilePos/FileSize above); the
+        // fmClosed requirement (Builtins.def's own comment) is a RUNTIME
+        // check (runtime/plang_file.cpp), not a Sema one -- f's Mode is not
+        // known statically.
+        if (Lo == "erase" && !S.Args.empty()) {
+            auto FTy = checkExpr(*S.Args[0]);
+            if (!FTy->isError() && FTy->Kind != TypeKind::File)
+                error(S.Args[0]->Loc, diag::err_file_argument, {Lo, FTy->Name});
+            return;
+        }
+        if (Lo == "rename" && S.Args.size() > 1) {
+            auto FTy = checkExpr(*S.Args[0]);
+            if (!FTy->isError() && FTy->Kind != TypeKind::File)
+                error(S.Args[0]->Loc, diag::err_file_argument, {Lo, FTy->Name});
+            // The new name -- same "string-like" set Assign's own filename
+            // argument accepts just above.
+            auto NTy = checkExpr(*S.Args[1]);
+            const bool StringLike = isVarStringLike(NTy.get())
+                || isCharStringType(*NTy) || isShortStringLike(NTy.get())
+                || NTy->Kind == TypeKind::Char || NTy->Kind == TypeKind::String;
+            if (!NTy->isError() && !StringLike)
+                error(S.Args[1]->Loc, diag::err_string_fn_arg_type, {Lo, NTy->Name});
+            return;
+        }
+        // TP-only: Flush(f) -- flush f's buffered output.  No Text/binary
+        // restriction (confirmed against `fpc -Mtp`: both accept it).
+        if (Lo == "flush" && !S.Args.empty()) {
+            auto FTy = checkExpr(*S.Args[0]);
+            if (!FTy->isError() && FTy->Kind != TypeKind::File)
+                error(S.Args[0]->Loc, diag::err_file_argument, {Lo, FTy->Name});
+            return;
+        }
+        // TP-only: SetTextBuf(var f: Text; var buf[; size]).  f must be
+        // Text (err_line_proc_not_text, the same restriction Eoln/SeekEoln
+        // already have); buf is untyped like BlockRead/BlockWrite's own
+        // above.
+        if (Lo == "settextbuf" && S.Args.size() >= 2) {
+            auto FTy = checkExpr(*S.Args[0]);
+            if (!FTy->isError()) {
+                if (FTy->Kind != TypeKind::File)
+                    error(S.Args[0]->Loc, diag::err_file_argument, {Lo, FTy->Name});
+                else if (!isTextFile(*FTy, Opts))
+                    error(S.Args[0]->Loc, diag::err_line_proc_not_text,
+                          {Lo, FTy->Name});
+            }
+            auto BufTy = checkExpr(*S.Args[1]);
+            if (!BufTy->isError() && !isLValue(*S.Args[1]))
+                error(S.Args[1]->Loc, diag::err_var_param_needs_lvalue,
+                      {std::string_view("2"), std::string_view(Lo)});
+            if (S.Args.size() > 2) {
+                auto SizeTy = checkExpr(*S.Args[2]);
+                if (!SizeTy->isError() && !SizeTy->isIntegral())
+                    error(S.Args[2]->Loc, diag::err_numeric_argument,
+                          {Lo, SizeTy->Name});
+            }
+            return;
+        }
+
         // TP-only: Assert(cond: Boolean [; msg: string]).  Type-checked
         // exactly the same whether or not {$C-} is in effect at S.Loc --
         // CGProcCall::emitCallStmt is where the switch is actually read, and

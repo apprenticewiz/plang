@@ -221,6 +221,25 @@ llvm::Value* CGFuncCall::emitBuiltinCall(const std::string& Name,
             RtFns.getRuntimeBoolFn("plang_eoln_stdin"), {}, "eoln.raw");
         return EnsureI1(raw);
     }
+    // -std=turbo only: FilePos(f) / FileSize(f) -- Builtins.def's own
+    // comment has the full rationale.  Functions, not statements, so
+    // neither calls emitIoCheckIfNeeded -- the same reasoning IOResult
+    // itself (SemaExpr.cpp's own comment on its Builtins.def entry) is
+    // exempt for: reading a function's result is not "an I/O statement" in
+    // the {$I+}/{$I-} sense.
+    if ((lo == "filepos" || lo == "filesize") && !Args.empty()) {
+        auto* fp = FileVars.fileVarPtr(*Args[0]);
+        auto* fn = RtFns.getExternFnN("plang_tp_" + lo, I64Ty, {PtrTy});
+        return B.CreateCall(fn, {fp}, lo);
+    }
+    // -std=turbo only: SeekEof(f) / SeekEoln(f) -- the CONSUMING
+    // counterparts of Eof/Eoln, Builtins.def's own comment.
+    if ((lo == "seekeof" || lo == "seekeoln") && !Args.empty()) {
+        auto* fp  = FileVars.fileVarPtr(*Args[0]);
+        auto* fn  = RtFns.getExternFnN("plang_tp_" + lo, I8Ty, {PtrTy});
+        auto* raw = B.CreateCall(fn, {fp}, lo + ".raw");
+        return EnsureI1(raw);
+    }
     // EP §6.7.6.8: binding(f) → BindingType record
     if (lo == "binding" && !Args.empty()) {
         auto* fp  = FileVars.fileVarPtr(*Args[0]);

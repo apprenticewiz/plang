@@ -1371,6 +1371,47 @@ std::shared_ptr<Type> Sema::checkCallExpr(const CallExpr& E) {
             }
             return Sym->ReturnType ? Sym->ReturnType : TyErr;
         }
+        // TP-only: FilePos(f) / FileSize(f) -- see Builtins.def's own
+        // comment for what these report and why.  Both take a typed or
+        // untyped BINARY file (err_binary_file_required rejects Text, the
+        // same way eoln's err_line_proc_not_text rejects a non-text file
+        // just below) and answer with a genuine 64-bit Int64, overriding
+        // Builtins.def's R_Int placeholder the same way abs/sqr's own
+        // ArgTy override does just below.
+        if ((Lo == "filepos" || Lo == "filesize") && !E.Args.empty()) {
+            auto ArgTy = checkExpr(*E.Args[0]);
+            for (size_t I = 1; I < E.Args.size(); ++I) (void)checkExpr(*E.Args[I]);
+            if (!ArgTy->isError()) {
+                if (ArgTy->Kind != TypeKind::File) {
+                    error(E.Args[0]->Loc, diag::err_file_argument, {Lo, ArgTy->Name});
+                    return TyErr;
+                }
+                if (isTextFile(*ArgTy, Opts)) {
+                    error(E.Args[0]->Loc, diag::err_binary_file_required,
+                          {Lo, ArgTy->Name});
+                    return TyErr;
+                }
+            }
+            return Ctx_.getInt(64, /*Signed=*/true);
+        }
+        // TP-only: SeekEof(f) / SeekEoln(f) -- the CONSUMING counterparts
+        // of Eof/Eoln (Builtins.def's own comment); Text-only, exactly the
+        // restriction eoln already enforces just above.
+        if ((Lo == "seekeof" || Lo == "seekeoln") && !E.Args.empty()) {
+            auto ArgTy = checkExpr(*E.Args[0]);
+            if (!ArgTy->isError()) {
+                if (ArgTy->Kind != TypeKind::File) {
+                    error(E.Args[0]->Loc, diag::err_file_argument, {Lo, ArgTy->Name});
+                    return TyErr;
+                }
+                if (!isTextFile(*ArgTy, Opts)) {
+                    error(E.Args[0]->Loc, diag::err_line_proc_not_text,
+                          {Lo, ArgTy->Name});
+                    return TyErr;
+                }
+            }
+            return TyBool;
+        }
         // abs/sqr are polymorphic: return the argument's type.
         if ((Lo == "abs" || Lo == "sqr") && !E.Args.empty()) {
             auto ArgTy = checkExpr(*E.Args[0]);
