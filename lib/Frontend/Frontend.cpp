@@ -1265,6 +1265,17 @@ int frontendPC1Main(int Argc, char *Argv[]) {
     if (DumpParseTree)
         return withOutput([&](std::ostream& Os) { printAst(*Program, Os); });
 
+    // Turbo Tier 4, Cluster A item 0: parsing a standalone unit file is all
+    // that is wired up so far -- Sema/CodeGen have never been taught what a
+    // UnitNode is (that's Cluster A items 1-3).  -dump-tokens (handled well
+    // above) and -dump-parse-tree (just above) still work on one; an actual
+    // compile stops here with a clear diagnostic instead of running Sema
+    // against a ProgramNode whose real content Sema was never given.
+    if (Program->BareUnit) {
+        report(diag::err_unit_compilation_not_yet_supported, {Program->BareUnit->Name});
+        return 1;
+    }
+
     Sema Sem(Diags, Opts);
     bool Ok = Sem.check(*Program);
     emitAll();

@@ -99,7 +99,7 @@ KEYWORD       (In,            "in")
 DIALECT_KEYWORD(Inherited,    "inherited",     TP)  // Turbo objects
 DIALECT_KEYWORD(Inline,       "inline",        TP)  // Turbo inline directive
 KEYWORD       (Integer,       "integer")
-DIALECT_KEYWORD(Interface,    "interface",     EP)  // EP §6.11
+DIALECT_KEYWORD(Interface,    "interface",     EP | TP)  // EP §6.11; also Turbo units
 KEYWORD       (Label,         "label")
 DIALECT_KEYWORD(Library,      "library",       TP)  // Turbo DLLs
 KEYWORD       (Mod,           "mod")
