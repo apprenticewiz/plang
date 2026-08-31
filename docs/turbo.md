@@ -20,16 +20,17 @@ runtime (`Assign`/`Reset`/`Rewrite`/`Append`/`Close`, `InOutRes`/
 compilation, and the shipped `Crt`/`Dos`/`Printer`/`Strings` standard
 library. Tier 5 (this document's own "Object types" section, near the end)
 is TP7's own `object` model — inheritance, virtual methods and the VMT,
-constructors/destructors, `with`, and visibility (Cluster A), plus an
-object type declared in one separately-compiled unit, inherited from and
-overridden in a second, and used from a third (Cluster B item 8) — a real
+constructors/destructors, `with`, and visibility (Cluster A); an object
+type declared in one separately-compiled unit, inherited from and
+overridden in a second, and used from a third (Cluster B) — a real
 cross-unit ancestor chain, `.tui`-serialized private fields included, with
 virtual dispatch through an ancestor-typed pointer still reaching the
-correct override across the unit boundary. A capstone integration test
-corpus at the scale of Tier 4's own (Cluster C) is still ahead. Still not
-(yet) covered, at any tier: the real-mode DOS
-surface (`Seg`/`Ofs`/`Mem`/`Intr`/...), which plang rejects by name as
-targeting a machine this compiler does not build for.
+correct override across the unit boundary; and a capstone integration test
+corpus at the scale of Tier 4's own, plus a handful of known gaps this
+capstone's own testing found and pinned rather than fixed (Cluster C) —
+the whole tier is now complete. Still not (yet) covered, at any tier: the
+real-mode DOS surface (`Seg`/`Ofs`/`Mem`/`Intr`/...), which plang rejects
+by name as targeting a machine this compiler does not build for.
 
 This document covers what `plang(1)` doesn't have room for: every accepted
 `{$...}` directive, the predefined `{$IFDEF}` symbols, how `{$I file}`
@@ -1794,10 +1795,24 @@ tier.
 ## Object types
 
 TP7's `object` model (not Delphi's `class` — no reference semantics, no
-`try`/`except`, no automatic construction) is Tier 5, Cluster A. Everything
-below is implemented; only cross-**module** object-type consumption (a
-program using an object type declared in a `uses`d unit) and a capstone
-integration test corpus remain, as separate Cluster B/C work.
+`try`/`except`, no automatic construction) is Tier 5. Single-module
+declaration, inheritance, virtual dispatch, construction, and visibility
+are Cluster A; cross-**module** object-type consumption (a program using
+an object type declared in a `uses`d unit, inherited from and overridden
+in a second) is Cluster B; a capstone integration test corpus and this
+section's own "Known gaps" below are Cluster C. All three are complete —
+everything below is implemented, cross-checked against a local `fpc -Mtp`
+build throughout, and proven at integration scale by
+`test/Turbo/Objects/` (single-module scenarios) and `test/Turbo/Units/`
+(scenarios crossing a unit boundary). The per-item unit-level coverage
+each paragraph below draws on lives under
+`test/Parse/ParserTurboObjects/`, `test/Sema/SemaTurboObjects/`,
+`SemaTurboConstructors/`, `SemaTurboObjectCompat/`, and
+`test/CodeGen/CodeGenTurboObjects/`, `CodeGenTurboVirtualDispatch/`,
+`CodeGenTurboConstructors/`, `CodeGenTurboObjectCompat/` — one directory
+per Cluster A/B item, the same granularity Tier 4's own
+`test/Parse/ParserTurboUnits/`/`test/Sema/SemaTurboUnitScoping/` split
+already established.
 
 **Declaration and inheritance.** `object [(Ancestor)] ... end`, with
 `private`/`public` visibility sections (any number, in any order — TP7 has
@@ -1883,7 +1898,91 @@ ancestor instance against a descendant one, and `TypeOf(anInstance) =
 TypeOf(ATypeName)` both name the one global. Requires an object type with
 at least one virtual method somewhere in its own hierarchy — `typeof can
 only be used on object types with VMT` otherwise, FPC's own wording,
-confirmed against a local `fpc -Mtp` build and reused verbatim.
+confirmed against a local `fpc -Mtp` build and reused verbatim. **Answers a
+static, not a dynamic, question** — see "Known gaps" immediately below,
+the most significant entry there.
+
+### Known gaps
+
+Four restrictions a user of this tier's `object` model can actually run
+into, confirmed against a local `fpc -Mtp` build rather than assumed. The
+first two below (`TypeOf`, `inherited`) are real bugs this capstone item's
+own integration testing found while building the tests above — genuinely
+new, not previously known or documented; the last two (bare no-parens
+method calls, the by-value self-reference restriction) were already known
+and are repeated here only so this section is a complete list, not scattered
+across the document.
+
+**`TypeOf` resolves its argument's STATIC type, never its dynamic one.**
+The paragraph above is accurate as far as it goes, but leaves out a real
+gap: `TypeOf`'s own CodeGen lowering (`CGFuncCall.cpp`, search "TypeOf(x)")
+picks the VMT from `Args[0]`'s Sema-resolved static type — by explicit
+design, the same unevaluated-operand treatment `SizeOf`/`High`/`Low` get —
+never from the object's own `_vptr` field at run time the way virtual
+dispatch itself (`P^.SomeMethod`, unaffected by this) does. This is
+invisible, and correct, whenever a variable's static and dynamic types
+coincide — every case above, and
+`test/Turbo/Objects/typeof-distinguishes-directly-typed-instances-across-a-three-level-hierarchy.pas`,
+only ever exercise that case. It gives a wrong answer the moment they
+diverge: `TypeOf(P^)` for `P` an ancestor-typed pointer actually holding a
+descendant instance — the textbook use for a "what does this really point
+to" facility, and the one no test written before this capstone item tried.
+Real `fpc -Mtp` reads the dynamic type correctly there; plang does not.
+Pinned, not fixed (a real fix is CodeGen work, out of scope for a test/docs
+item), at
+`test/Turbo/Objects/typeof-through-an-ancestor-typed-pointer-answers-statically-not-dynamically-known-gap.pas`.
+
+**`inherited` is a statement, never an expression.** Real Turbo Pascal
+routinely calls an inherited *function* and uses its result directly —
+`Result := inherited GetValue + 1;` is ordinary TP7 object code, confirmed
+here against a local `fpc -Mtp` build. plang's parser only ever reaches
+`TokenKind::Inherited` from its statement dispatch (`ParseStmt.cpp`,
+building an `InheritedCallStmt`) — there is no expression-level production
+for it at all, so `S := inherited Describe;` and even the fully-parenthesized
+`S := inherited Describe();` both fail to parse (`expected expression, got
+'inherited'`). Calling an inherited method and merely discarding its
+result — `inherited Describe;` as its own statement, even when `Describe`
+is a function — works fine and is exactly how every multi-level chain in
+this tier's own tests (including this capstone's own
+`test/Turbo/Objects/` scenario) is written. Not pinned as its own test
+here — a parser rejection does not fit this suite's own "real compiled and
+run, with observed output" convention the way a wrong-but-running answer
+does — but written down here so it is not a surprise.
+
+**A bare (no-parens) method call does not resolve in expression
+position.** `Obj.Method(args)`/`P^.Method(args)` and a bare, argument-free
+call *in statement position* (`D.Bark;`, no parens, item 5's own idiom)
+both resolve correctly. A bare, argument-free method call used **as a
+value** — `writeln(GetLegs)`, `x := Self.GetLegs`, `x := GetLegs` inside
+the method's own body relying on the implicit `Self` — does not: Sema
+reports `object type 'TFoo' has no field 'GetLegs'` (qualified) or
+`undefined identifier 'GetLegs'` (bare), even for a directly-declared,
+non-inherited, single-file method with no units or inheritance involved at
+all. Every test in this tier routes around it with explicit parens
+(`GetLegs()`) — the workaround real Turbo Pascal never actually needs, but
+plang currently does.
+
+**A record/object type cannot be its own by-value parameter type before
+its own declaration finishes.** `procedure Copy(Other: TFoo)` inside
+`TFoo`'s own declaration is refused — a pre-existing forward-reference
+limitation general to `record`/`object` alike, not specific to this tier,
+unaffected by this capstone item. Route around it with a pointer or `var`
+parameter instead.
+
+One more, genuinely cosmetic, not counted above: a `method ... hides the
+inherited method of the same name` warning false-positives for same-named,
+differently-signed, non-virtual constructors declared at different levels
+of one hierarchy (the standard `Init`-at-every-level TP7 idiom) —
+confirmed a local `fpc -Mtp` build stays silent on the identical
+construct, but the warning is otherwise harmless, does not affect codegen,
+and every constructor test in this tier (including this capstone's own)
+compiles with it uncommented-on. This capstone item also observed the
+identical false positive surface at a cross-unit **call site** rather than
+only at a declaration
+(`test/Turbo/Units/three-units-cross-unit-new-fail-dispose-lifecycle-and-virtual-destructor-dispatch.pas`)
+— still the same same-named-constructor false positive, just reached
+through the cross-unit "declare if missing" path instead of a direct
+declaration, not a second issue.
 
 ---
 
@@ -1900,4 +1999,6 @@ confirmed against a local `fpc -Mtp` build and reused verbatim.
 - `test/Turbo/` — integration-level tests exercising realistic COMBINATIONS of Tier 3's file-model/`InOutRes`/`Random` features together (a program that opens a file, does I/O, checks `IOResult`, and exits cleanly — the kind of end-to-end scenario a real Turbo Pascal program actually runs), rather than one lit test per isolated behavior.
 - `lib/Sema/Sema.cpp` (`pushUnitUsesScopes`, `loadUnitInterfaceExports`), `lib/Driver/Driver.cpp` (`scanUsesClauseUnitNames`, `findShippedUnitObject`), `lib/Basic/UnitSearchPath.cpp` — Tier 4's scoping, separate-compilation, and shipped-RTL search-path mechanisms this document's Tier 4 section was written from.
 - `share/plang/units/` — the shipped `Crt`/`Dos`/`Printer`/`Strings` unit sources, each with its own detailed header comment on exactly what it does and does not reproduce from real Turbo Pascal 7 / `fpc -Mtp`.
-- `test/Turbo/Units/` — Tier 4's own integration-level test corpus: realistic multi-unit, multi-file COMBINATIONS (last-unit-wins shadowing across three real units, mutual implementation-`uses` doing real bidirectional work, three-unit separate compilation with sources deleted, the shipped RTL used all together) rather than one lit test per isolated behavior — the same split `test/Turbo/`'s own Tier 3 capstone already established for Tier 3.
+- `test/Turbo/Units/` — Tier 4's own integration-level test corpus: realistic multi-unit, multi-file COMBINATIONS (last-unit-wins shadowing across three real units, mutual implementation-`uses` doing real bidirectional work, three-unit separate compilation with sources deleted, the shipped RTL used all together) rather than one lit test per isolated behavior — the same split `test/Turbo/`'s own Tier 3 capstone already established for Tier 3; also now home to Tier 5's own cross-unit object-model integration tests (Cluster B item 8's inheritance/virtual-dispatch capstone, and Cluster C's own New/Fail/Dispose-lifecycle companion), reusing the same directory rather than inventing a Tier-5-specific one.
+- `lib/CodeGen/CodeGenProcs.cpp` (`getOrCreateVmt`, VMT slot assignment, `emitAbstractMethodStub`, and the per-constructor `curCtorOkAlloca` success-flag setup), `lib/CodeGen/CGProcCall.cpp` (`emitBoundMethodCall` — `New`/`Init`, `Dispose`/`Done` — and `Fail`'s own codegen), `lib/CodeGen/CGFuncCall.cpp` (`TypeOf` lowering), `lib/Sema/Sema.cpp`/`SemaExpr.cpp`/`SemaStmt.cpp`/`SemaType.cpp` (`resolveObjectType`, `VmtSlotEntry`, object-type resolution, the VMT slot table, visibility, covariance), `lib/Parse/ParseStmt.cpp` (`InheritedCallStmt`) — the source of truth Tier 5's "Object types" section above, including its own "Known gaps", was written from.
+- `test/Turbo/Objects/` — Tier 5's own single-module integration-level test corpus (Cluster C): a 3-level "employee roster" hierarchy combining virtual dispatch through an ancestor-typed pointer, multi-level `inherited` chains, the full `New`/`Fail`/`Dispose` construction lifecycle, and virtual-destructor dispatch in one realistic program, plus dedicated `TypeOf` coverage (both its correct, narrow usage and the ancestor-typed-pointer case it gets wrong, pinned rather than fixed) — the same split `test/Turbo/Units/`'s own Tier 4 capstone already established for cross-unit scenarios, applied here to Tier 5's single-module ones.
