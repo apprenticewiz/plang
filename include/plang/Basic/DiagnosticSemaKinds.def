@@ -132,6 +132,15 @@ DIAG(err_ordinal_argument, Error, "'%0' requires an ordinal argument, got '%1'")
 // folding the two into one "ordinal or numeric" message: a translator
 // reading either in isolation can tell what the call actually needed.
 DIAG(err_numeric_argument, Error, "'%0' requires a numeric argument, got '%1'")
+// issue #306: re/im/arg (EP §6.7.6.2) are the one arithmetic-function family
+// that is NOT also polymorphic over integer-type and real-type the way
+// sqrt/sin/cos/exp/ln/arctan just above are (ISO 10206 Table 2's own
+// operand-type column: footnote (1), "integer-type, real-type, or
+// complex-type", for those; footnote (4), "Complex-type" alone, for these
+// three) -- so a plain numeric argument needs its own, distinct rejection
+// from err_numeric_argument's, which would otherwise wrongly call an
+// already-numeric argument "not numeric."
+DIAG(err_complex_argument, Error, "'%0' requires a complex argument, got '%1'")
 // issue #261: eof/eoln read a file's status, so their (optional) argument
 // names the file to test.
 DIAG(err_file_argument, Error, "'%0' requires a file argument, got '%1'")
