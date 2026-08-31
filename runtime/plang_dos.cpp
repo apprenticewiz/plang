@@ -28,6 +28,20 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+// An asm-label needs an explicit leading underscore on Mach-O (macOS): the
+// compiler adds that prefix automatically for an ordinary, non-asm-labelled
+// C symbol, but NOT on top of an explicit asm(...) label -- confirmed the
+// hard way (this project's sibling Strings/Printer units linked fine on
+// Linux/ELF and failed with "Undefined symbols ... _pas_..." on macOS/
+// Mach-O before this fix, since CGLinkage's own LLVM-emitted call site
+// already expects the Mach-O convention but a literal, unprefixed asm-label
+// does not supply it).
+#if defined(__APPLE__)
+#define PLANG_ASM_NAME(name) asm("_" name)
+#else
+#define PLANG_ASM_NAME(name) asm(name)
+#endif
+
 namespace plang {
 
 namespace {
@@ -163,7 +177,7 @@ char g_LastFindDir[1024] = "";
 /// existing convention, unchanged, is what computes the exact name below on
 /// the Pascal side).  Turbo's Integer is 16 bits (this project's own
 /// Turbo-milestone decision), so this is int16_t, not int.
-extern "C" int16_t plang_dos_doserror asm("pasg_dos$DosError");
+extern "C" int16_t plang_dos_doserror PLANG_ASM_NAME("pasg_dos$DosError");
 int16_t plang_dos_doserror = 0;
 
 extern "C" {
@@ -175,7 +189,7 @@ extern "C" {
 // compiled by plang or by a real C++ compiler.
 
 void plang_dos_getdate(uint16_t* year, uint16_t* month, uint16_t* day,
-                        uint16_t* dayOfWeek) asm("pas_dos$GetDate");
+                        uint16_t* dayOfWeek) PLANG_ASM_NAME("pas_dos$GetDate");
 void plang_dos_getdate(uint16_t* year, uint16_t* month, uint16_t* day,
                         uint16_t* dayOfWeek) {
     std::time_t now = std::time(nullptr);
@@ -188,7 +202,7 @@ void plang_dos_getdate(uint16_t* year, uint16_t* month, uint16_t* day,
 }
 
 void plang_dos_gettime(uint16_t* hour, uint16_t* minute, uint16_t* second,
-                        uint16_t* sec100) asm("pas_dos$GetTime");
+                        uint16_t* sec100) PLANG_ASM_NAME("pas_dos$GetTime");
 void plang_dos_gettime(uint16_t* hour, uint16_t* minute, uint16_t* second,
                         uint16_t* sec100) {
     // Sec100 (hundredths of a second): std::time's own second granularity
@@ -208,7 +222,7 @@ void plang_dos_gettime(uint16_t* hour, uint16_t* minute, uint16_t* second,
 }
 
 void plang_dos_setdate(uint16_t year, uint16_t month, uint16_t day)
-    asm("pas_dos$SetDate");
+    PLANG_ASM_NAME("pas_dos$SetDate");
 void plang_dos_setdate(uint16_t year, uint16_t month, uint16_t day) {
     // Real `fpc -Mtp` field practice (rtl/unix/dos.pp's own SetDate):
     // rebuild a full local time from the CURRENT time-of-day plus the new
@@ -231,7 +245,7 @@ void plang_dos_setdate(uint16_t year, uint16_t month, uint16_t day) {
 }
 
 void plang_dos_settime(uint16_t hour, uint16_t minute, uint16_t second,
-                        uint16_t sec100) asm("pas_dos$SetTime");
+                        uint16_t sec100) PLANG_ASM_NAME("pas_dos$SetTime");
 void plang_dos_settime(uint16_t hour, uint16_t minute, uint16_t second,
                         uint16_t sec100) {
     std::time_t now = std::time(nullptr);
@@ -246,13 +260,13 @@ void plang_dos_settime(uint16_t hour, uint16_t minute, uint16_t second,
 }
 
 void plang_dos_packtime(const PlangDosDateTime* t, int32_t* p)
-    asm("pas_dos$PackTime");
+    PLANG_ASM_NAME("pas_dos$PackTime");
 void plang_dos_packtime(const PlangDosDateTime* t, int32_t* p) {
     *p = packDosTime(t->Year, t->Month, t->Day, t->Hour, t->Min, t->Sec);
 }
 
 void plang_dos_unpacktime(int32_t p, PlangDosDateTime* t)
-    asm("pas_dos$UnpackTime");
+    PLANG_ASM_NAME("pas_dos$UnpackTime");
 void plang_dos_unpacktime(int32_t p, PlangDosDateTime* t) {
     int y, mo, d, h, mi, s;
     unpackDosTime(p, &y, &mo, &d, &h, &mi, &s);
@@ -264,7 +278,7 @@ void plang_dos_unpacktime(int32_t p, PlangDosDateTime* t) {
     t->Sec = static_cast<uint16_t>(s);
 }
 
-uint16_t plang_dos_dosexitcode(void) asm("pas_dos$DosExitCode");
+uint16_t plang_dos_dosexitcode(void) PLANG_ASM_NAME("pas_dos$DosExitCode");
 uint16_t plang_dos_dosexitcode(void) {
     return static_cast<uint16_t>(g_LastDosExitCode);
 }
@@ -277,14 +291,14 @@ uint16_t plang_dos_dosexitcode(void) {
 // comment explains why AddDisk's per-drive registry is out of scope: it is
 // unreachable, since this project never implements AddDisk itself).
 
-int64_t plang_dos_diskfree(uint8_t) asm("pas_dos$DiskFree");
+int64_t plang_dos_diskfree(uint8_t) PLANG_ASM_NAME("pas_dos$DiskFree");
 int64_t plang_dos_diskfree(uint8_t) {
     struct statvfs sv {};
     if (statvfs(".", &sv) != 0) return -1;
     return static_cast<int64_t>(sv.f_bavail) * static_cast<int64_t>(sv.f_frsize);
 }
 
-int64_t plang_dos_disksize(uint8_t) asm("pas_dos$DiskSize");
+int64_t plang_dos_disksize(uint8_t) PLANG_ASM_NAME("pas_dos$DiskSize");
 int64_t plang_dos_disksize(uint8_t) {
     struct statvfs sv {};
     if (statvfs(".", &sv) != 0) return -1;
@@ -295,7 +309,7 @@ int64_t plang_dos_disksize(uint8_t) {
 // DiskFree/DiskSize (Dos.pas's own header comment): every value reports
 // the real current working directory.
 
-void plang_dos_getdir(uint8_t, PlangSStr255* dir) asm("pas_dos$GetDir");
+void plang_dos_getdir(uint8_t, PlangSStr255* dir) PLANG_ASM_NAME("pas_dos$GetDir");
 void plang_dos_getdir(uint8_t, PlangSStr255* dir) {
     char buf[256];
     if (getcwd(buf, sizeof(buf)))
@@ -349,7 +363,7 @@ static bool statInto(const char* fullPath, const char* nameOnly, PlangDosSearchR
     return true;
 }
 
-void plang_dos_findnext(PlangDosSearchRec* f) asm("pas_dos$FindNext");
+void plang_dos_findnext(PlangDosSearchRec* f) PLANG_ASM_NAME("pas_dos$FindNext");
 void plang_dos_findnext(PlangDosSearchRec* f) {
     DIR* d = static_cast<DIR*>(f->dirHandle);
     if (!d) { plang_dos_doserror = 18; return; }
@@ -372,7 +386,7 @@ void plang_dos_findnext(PlangDosSearchRec* f) {
     }
 }
 
-void plang_dos_findclose(PlangDosSearchRec* f) asm("pas_dos$FindClose");
+void plang_dos_findclose(PlangDosSearchRec* f) PLANG_ASM_NAME("pas_dos$FindClose");
 void plang_dos_findclose(PlangDosSearchRec* f) {
     if (f->dirHandle) closedir(static_cast<DIR*>(f->dirHandle));
     f->dirHandle = nullptr;
