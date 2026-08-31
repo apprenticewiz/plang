@@ -530,6 +530,23 @@ struct Type {
         return It != RecordFields.end() ? &*It : nullptr;
     }
 
+    /// Object only (Turbo Tier 5, Cluster A item 2): true when THIS type is
+    /// the one that first introduces `_vptr` into its own hierarchy -- its
+    /// own VmtSlots is non-empty (a virtual method somewhere in itself or
+    /// its ancestry) but its Parent's is not (or there is no Parent).  A
+    /// descendant of an already-virtual ancestor answers false: it still
+    /// HAS a `_vptr` (through VmtSlots, inherited), just not one it placed
+    /// itself -- see Sema::byteSizeOf's Object case and
+    /// CGTypes::layoutOfObject for the recursive/nested layout this
+    /// distinction drives (confirmed against a local `fpc -Mtp` build: the
+    /// naive "vptr always trails EVERY descendant's own fields" reading a
+    /// first draft of this item assumed put a real descendant's own field
+    /// at the wrong offset the moment a THIRD generation added fields on
+    /// top of a virtual-introducing SECOND).
+    [[nodiscard]] bool introducesVptr() const {
+        return (!Parent || Parent->VmtSlots.empty()) && !VmtSlots.empty();
+    }
+
     // ---------------------------------------------------------------------------
     // Factories for the eight built-in types (each call allocates a new object;
     // Sema stores the results as member shared_ptrs to avoid repeated allocation)

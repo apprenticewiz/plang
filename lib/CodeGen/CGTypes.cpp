@@ -296,6 +296,123 @@ llvm::StructType* CGTypes::structTypeFor(const RecordTypeNode& rt) {
     return layoutOf(rt).Ty;
 }
 
+// Turbo Tier 5, Cluster A item 2.  layoutOf's Object analog: there is no
+// RecordTypeNode to walk (Type::ObjectDecl is an ObjectTypeNode carrying
+// the ORIGINAL, un-flattened member list, kept for whatever a later item
+// needs original declaration order/visibility for -- see its own comment,
+// Type.h) -- but building this type's storage does NOT flatten the whole
+// ancestor chain into one struct the way llvmTypeOfSemaTypeImpl's Record
+// case flattens RecordFields for a schema-less built-in record.  It is
+// RECURSIVE/NESTED instead: when T has a Parent, that Parent's own
+// llvm::StructType (already fully laid out, by a recursive call to this
+// same function) is embedded as ONE single struct-typed element -- an
+// untouched, byte-for-byte sub-object, exactly the ancestor's own storage,
+// including whatever `_vptr`/padding IT needed -- and only THIS type's own
+// NEWLY declared fields (RecordFields from where Parent's own list left
+// off) are appended after it.
+//
+// This is not a stylistic choice: confirmed against a local `fpc -Mtp`
+// build, real Borland/FPC layout needs exactly this.  An earlier version
+// of this function instead flattened every field (own and inherited alike)
+// into ONE struct and inserted `_vptr` at a fixed prefix position, and it
+// empirically disagreed with fpc the moment a THIRD generation added its
+// own fields on top of a SECOND generation that had already introduced
+// virtual: TDog adding Breed, then TPuppy adding LitterSize -- fpc placed
+// LitterSize a full 8 bytes further out than "TDog's raw fields plus
+// natural alignment" alone predicts, because TDog's OWN storage (as a
+// self-contained unit, tail-padded to ITS OWN alignment) is what TPuppy's
+// own fields are placed after, not merely however many raw bytes TDog's
+// fields happened to occupy.  Nesting gets this right for free: LLVM's own
+// struct-layout algorithm advances by a nested struct ELEMENT's alloc size
+// (which already includes that struct's own trailing padding) when placing
+// whatever comes after it -- precisely the rounding real field practice
+// needs, without this function computing any padding by hand.
+//
+// The `_vptr` slot itself is placed only at the level that actually
+// introduces it (Type::introducesVptr(): this type's own VmtSlots is
+// non-empty but its Parent's is not, or it has no Parent) -- a hierarchy
+// with no virtual method anywhere costs nothing beyond its own fields
+// (confirmed against fpc: a root object with none carries no extra 8
+// bytes), and every descendant below the introducing level gets `_vptr`
+// for free as part of the embedded ancestor prefix, at the identical byte
+// offset the introducing level itself gave it -- see vptrOffsetOf.
+const CGTypes::RecordLayout* CGTypes::layoutOfObject(const Type& T) {
+    if (T.Kind != TypeKind::Object) return nullptr;
+    if (auto it = objectLayouts_.find(&T); it != objectLayouts_.end())
+        return &it->second;
+
+    RecordLayout L;
+    std::vector<llvm::Type*> elems;
+    size_t OwnStart = 0;
+    if (T.Parent) {
+        const auto* PL = layoutOfObject(*T.Parent);
+        if (!PL)
+            codegenICE("object type '" + T.Name + "' has an ancestor with "
+                       "no layout");
+        // The whole ancestor sub-object, nested as ONE element -- not
+        // flattened -- see this function's own top comment for why.  No
+        // entries are copied into L.Fields for an INHERITED field name: a
+        // later item's field-access codegen recurses into Parent's own
+        // layoutOfObject the same way this function does (an inherited
+        // field's real address needs a GEP into element 0 and then
+        // Parent's own FieldPlace within it -- exactly mirroring the
+        // nesting itself), rather than this map trying to flatten a
+        // multi-level GEP path a single top-level Index cannot represent.
+        elems.push_back(PL->Ty);
+        OwnStart = T.Parent->RecordFields.size();
+    }
+    for (size_t I = OwnStart; I < T.RecordFields.size(); ++I) {
+        const auto& F = T.RecordFields[I];
+        if (!F.Ty)
+            codegenICE("field '" + F.Name + "' of object type '" + T.Name
+                       + "' has no resolved type");
+        llvm::Type* ft = llvmTypeOfSemaType(*F.Ty);
+        L.Fields[toLower(F.Name)] =
+            FieldPlace{static_cast<unsigned>(elems.size()), ft, false, 0};
+        elems.push_back(ft);
+    }
+    if (T.introducesVptr()) {
+        L.VptrIndex = static_cast<unsigned>(elems.size());
+        elems.push_back(ptrTy);
+    }
+
+    // Same shape-interning convention layoutOf uses for a record (a
+    // separate "O:" prefix so an object's shape key can never collide with
+    // a record's of the same field-type sequence, even though sharing
+    // would in fact be harmless -- identical elems always give identical
+    // offsets regardless of which declaration asked for them).  A nested
+    // ancestor element (elems[0], when T.Parent) is itself already an
+    // interned llvm::StructType* from the recursive call above, so its
+    // pointer identity alone is enough to fold two descendants with
+    // identical own-field shapes of the SAME ancestor into one struct too.
+    std::string key = "O:";
+    for (auto* t : elems) key += std::to_string(std::bit_cast<uintptr_t>(t)) + ",";
+    auto it = structTypes_.find(key);
+    L.Ty = (it != structTypes_.end()) ? it->second
+                                      : llvm::StructType::get(Ctx, elems, /*packed=*/false);
+    structTypes_[key] = L.Ty;
+    return &objectLayouts_.emplace(&T, std::move(L)).first->second;
+}
+
+// Turbo Tier 5, Cluster A item 2.  Where a fully-laid-out object type's
+// `_vptr` slot lives, in bytes from the start of its own storage.  Under
+// layoutOfObject's nested design an INHERITED `_vptr` (T does not itself
+// introduce one -- Type::introducesVptr() is false, but T.VmtSlots is
+// still non-empty) is not a top-level element of T's own struct at all --
+// it is inside the embedded Parent sub-object, which sits at element 0,
+// offset 0, UNSHIFTED -- so Parent's own vptr offset (recursively, its own
+// answer to this exact question) is directly T's own answer too.
+std::optional<uint64_t> CGTypes::vptrOffsetOf(const Type& T) {
+    if (T.Kind != TypeKind::Object || T.VmtSlots.empty()) return std::nullopt;
+    const auto* L = layoutOfObject(T);
+    if (!L) return std::nullopt;
+    if (L->VptrIndex) {
+        if (!L->Ty->isSized()) return std::nullopt;
+        return Mod.getDataLayout().getStructLayout(L->Ty)->getElementOffset(*L->VptrIndex);
+    }
+    return T.Parent ? vptrOffsetOf(*T.Parent) : std::nullopt;
+}
+
 // See NumTypeKinds in AstBase.h.
 static_assert(NumTypeKinds == 15,
               "a new type denoter needs a case in llvmTypeOfNode");
@@ -535,15 +652,14 @@ bool CGTypes::canLowerSemaType(const Type& T) {
         return true;
     case TypeKind::SchemaInstance:
         return T.SchemaBody && canLowerSemaType(*T.SchemaBody);
-    // Turbo Tier 5, Cluster A item 1 (Sema) resolves an object type fully --
-    // ancestor chain, fields, VMT slot table -- but memory layout is item
-    // 2's own job, not yet done, so there is genuinely no lowering here
-    // yet.  Explicit rather than falling into default below so the next
-    // reader does not have to wonder whether Object was simply forgotten;
-    // see llvmTypeOfSemaTypeImpl's own Object case for what a program that
-    // actually reaches codegen for one does today.
+    // Turbo Tier 5, Cluster A item 2: memory layout now exists
+    // (CGTypes::layoutOfObject) -- a recursive, nested-ancestor layout with
+    // a conditional _vptr at whichever level introduces one -- so a plain
+    // object-typed variable lowers like any other structured type.
+    // Method-call codegen/Self/constructors/the VMT global itself are still
+    // later items' job; nothing here claims those.
     case TypeKind::Object:
-        return false;
+        return true;
     default:
         return false;
     }
@@ -724,11 +840,52 @@ void CGTypes::checkSchemaFieldOffsetAgreement(const Type& T, llvm::Type* Built) 
     }
 }
 
+// Turbo Tier 5, Cluster A item 2.  checkFieldOffsetAgreement's Object leg:
+// the same "Sema's walk and codegen's layout are two implementations of one
+// algorithm" cross-check as the Record leg just below, minus the THIRD
+// (SchemaLayoutEngine run-time-walk) leg -- there is no schema/run-time
+// walk over an ObjectTypeNode to compare against, EP schemas and Turbo
+// objects being unrelated features -- so this is a genuine two-way check,
+// not a gap: Sema::byteSizeOf's Object case (SemaType.cpp) and
+// CGTypes::layoutOfObject are independent implementations of the identical
+// recursive, nested-ancestor rule, and disagreeing on any field's offset is
+// exactly the class of bug (right total size, wrong field position) R4's
+// own comment below describes.  Only checks fields THIS level itself
+// declares (Want's inherited-name entries have no L->Fields entry to find
+// -- layoutOfObject does not re-list an inherited field, see its own
+// comment): every field still gets checked, just at the level that
+// actually declares it, the first time THAT type is lowered.
+void CGTypes::checkObjectFieldOffsetAgreement(const Type& T, llvm::Type* Built) {
+    auto* st = llvm::dyn_cast_or_null<llvm::StructType>(Built);
+    if (!st || T.Kind != TypeKind::Object || st->isOpaque() || !st->isSized())
+        return;
+
+    Sema::FieldOffsets Want;
+    if (!Sema::byteSizeOf(T, &Want)) return;
+
+    const auto* L = layoutOfObject(T);
+    if (!L) return;
+    const auto* SL = Mod.getDataLayout().getStructLayout(st);
+
+    for (const auto& [Name, Offset] : Want) {
+        auto It = L->Fields.find(toLower(Name));
+        if (It == L->Fields.end()) continue;
+        const auto& P = It->second;
+        if (P.Index >= st->getNumElements()) continue;
+        const uint64_t Got = SL->getElementOffset(P.Index);
+        if (Got != Offset)
+            codegenICE("field '" + Name + "' of object type '" + T.Name
+                       + "' is at " + llvm::Twine(Offset) + " to Sema and at "
+                       + llvm::Twine(Got) + " as it was laid out");
+    }
+}
+
 // R4.  A record can be exactly the right size with every field in the wrong
 // place, and until now only the total was ever compared -- Sema's walk and
 // codegen's layout are two implementations of one algorithm, and Sema's own
 // comment says it mirrors codegen's.  This asks the question that would notice.
 void CGTypes::checkFieldOffsetAgreement(const Type& T, llvm::Type* Built) {
+    if (T.Kind == TypeKind::Object) return checkObjectFieldOffsetAgreement(T, Built);
     auto* st = llvm::dyn_cast_or_null<llvm::StructType>(Built);
     if (!st || T.Kind != TypeKind::Record || !T.RecordDecl) return;
     if (st->isOpaque() || !st->isSized()) return;
@@ -923,22 +1080,19 @@ llvm::Type* CGTypes::llvmTypeOfSemaTypeImpl(const Type& T) {
         case TypeKind::Procedure:
         case TypeKind::Function:
             return ptrTy;
-        // Turbo Tier 5, Cluster A item 1 (Sema) resolves an object type in
-        // full -- ancestor chain, flattened fields, VMT slot table -- so a
-        // program declaring one, or even a variable of one, now gets past
-        // Sema cleanly.  Memory layout (a VMT pointer field, the field
-        // offsets that give the ancestor's own fields the same offsets in
-        // every descendant) is item 2's job and does not exist yet, so
-        // reaching here is a real, if temporary, gap -- worded as one
-        // (rather than falling into the generic "no LLVM type" default
-        // below, which would look like an ordinary Sema/CodeGen
-        // disagreement bug) so this stays easy to tell apart from an actual
-        // regression once item 2 lands and this case is replaced with a
-        // real lowering.
-        case TypeKind::Object:
-            codegenICE("object type '" + T.Name + "' was resolved by Sema "
-                       "(Turbo Tier 5 item 1) but CodeGen cannot lay one out "
-                       "yet (Turbo Tier 5 item 2, not implemented)");
+        // Turbo Tier 5, Cluster A item 2: real memory layout -- see
+        // layoutOfObject's own comment for the recursive, nested-ancestor
+        // shape (and why RecordFields alone, no ObjectDecl walk, is enough
+        // to drive it).  Method-call codegen, Self, constructors, and the
+        // VMT global itself are later items' job -- nothing here populates
+        // the _vptr slot this may have reserved, only lays out where it
+        // goes (CGTypes::vptrOffsetOf).
+        case TypeKind::Object: {
+            const auto* L = layoutOfObject(T);
+            if (!L)
+                codegenICE("object type '" + T.Name + "' has no layout");
+            return L->Ty;
+        }
         default:
             codegenICE("no LLVM type for semantic type '" + T.Name + "'");
     }
