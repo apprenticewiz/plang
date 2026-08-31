@@ -66,7 +66,13 @@ llvm::Value* CGFuncCall::emitBuiltinCall(const std::string& Name,
         // below, which called ToI64 on a float value.
         if (v->getType()->isFloatingPointTy())
             return B.CreateCall(RtFns.getRTMathRR("plang_abs_real"), {ToDouble(v)}, "abs");
-        return B.CreateCall(RtFns.getRTMathII("plang_abs_int"), {ToI64(v)}, "abs");
+        // Args[0]'s own signedness, not a guess from v's LLVM width: Abs on
+        // a negative signed narrow (ShortInt) or unsigned wide (Word/
+        // Cardinal) Turbo-ordinal argument otherwise widened with the wrong
+        // sign before plang_abs_int ever saw it (issue #177's sibling
+        // audit).
+        return B.CreateCall(RtFns.getRTMathII("plang_abs_int"),
+                             {ToI64(v, exprIsSigned(*Args[0]))}, "abs");
     }
     if (lo == "sqr") {
         auto* v = EmitExpr(*Args[0]);
@@ -76,7 +82,8 @@ llvm::Value* CGFuncCall::emitBuiltinCall(const std::string& Name,
         // See abs's identical comment just above.
         if (v->getType()->isFloatingPointTy())
             return B.CreateCall(RtFns.getRTMathRR("plang_sqr_real"), {ToDouble(v)}, "sqr");
-        return B.CreateCall(RtFns.getRTMathII("plang_sqr_int"), {ToI64(v)}, "sqr");
+        return B.CreateCall(RtFns.getRTMathII("plang_sqr_int"),
+                             {ToI64(v, exprIsSigned(*Args[0]))}, "sqr");
     }
     // EP §6.7.6.3: cmplx(x, y) constructor
     if (lo == "cmplx") {
@@ -151,7 +158,7 @@ llvm::Value* CGFuncCall::emitBuiltinCall(const std::string& Name,
             return B.CreateCall(fn, {}, "random");
         }
         auto* arg = EmitExpr(*Args[0]);
-        auto* v   = ToI64(arg);
+        auto* v   = ToI64(arg, exprIsSigned(*Args[0]));
         auto* fn  = RtFns.getExternFnN("plang_tp_random_range", I64Ty, {I64Ty});
         auto* r   = B.CreateCall(fn, {v}, "random");
         // Random(Range) stays in Range's own type (Sema's identical rule) --
@@ -309,20 +316,20 @@ llvm::Value* CGFuncCall::emitBuiltinCall(const std::string& Name,
         // value before it is narrowed.  Char's range is the fixed 0..255
         // ordinalRange gives it, not a lookup on the argument's type -- the
         // argument is whatever ordinal expression was passed, not a char.
-        auto* v = ToI64(EmitExpr(*Args[0]));
+        auto* v = ToI64(EmitExpr(*Args[0]), exprIsSigned(*Args[0]));
         RangeGuards.emitRangeCheck(v, 0, 255, /*isIndex=*/false, Loc);
         return B.CreateTrunc(v, I8Ty, "chr");
     }
     if (lo == "odd") {
-        auto* v   = ToI64(EmitExpr(*Args[0]));
+        auto* v   = ToI64(EmitExpr(*Args[0]), exprIsSigned(*Args[0]));
         auto* bit = B.CreateAnd(v, llvm::ConstantInt::get(I64Ty, 1), "odd.bit");
         return B.CreateICmpNE(bit, llvm::ConstantInt::get(I64Ty, 0), "odd");
     }
     if (lo == "succ" || lo == "pred") {
         auto* arg = EmitExpr(*Args[0]);
-        auto* v = ToI64(arg);
+        auto* v = ToI64(arg, exprIsSigned(*Args[0]));
         auto* k = Args.size() > 1
-            ? ToI64(EmitExpr(*Args[1]))
+            ? ToI64(EmitExpr(*Args[1]), exprIsSigned(*Args[1]))
             : llvm::ConstantInt::get(I64Ty, 1);
         auto* r = lo == "succ" ? B.CreateAdd(v, k, "succ")
                                : B.CreateSub(v, k, "pred");
@@ -603,9 +610,9 @@ llvm::Value* CGFuncCall::emitBuiltinCall(const std::string& Name,
         if (sp) {
             // EP §6.7.5.4: the third argument is how many characters to take,
             // not where to stop.  Omitting it means the rest of the string.
-            auto* i = ToI64(EmitExpr(*Args[1]));
+            auto* i = ToI64(EmitExpr(*Args[1]), exprIsSigned(*Args[1]));
             auto* n = Args.size() > 2
-                ? ToI64(EmitExpr(*Args[2]))
+                ? ToI64(EmitExpr(*Args[2]), exprIsSigned(*Args[2]))
                 : B.CreateAdd(
                       B.CreateSub(Strings.strLoadLen(sp), i, "substr.rest"),
                       llvm::ConstantInt::get(I64Ty, 1), "substr.len");
@@ -689,8 +696,8 @@ llvm::Value* CGFuncCall::emitBuiltinCall(const std::string& Name,
     // own comment on why, regardless of s's own declared capacity).
     if (lo == "copy" && Args.size() == 3) {
         auto [sp, sc] = sstrArgPtr(*Args[0]);
-        auto* idx  = ToI64(EmitExpr(*Args[1]));
-        auto* cnt  = ToI64(EmitExpr(*Args[2]));
+        auto* idx  = ToI64(EmitExpr(*Args[1]), exprIsSigned(*Args[1]));
+        auto* cnt  = ToI64(EmitExpr(*Args[2]), exprIsSigned(*Args[2]));
         auto* resPtr = CreateEntryAlloca(Types.sstrStructType(PlangMaxStringCapacity), "copy.res");
         auto* fn = Strings.getStrFn("plang_sstr_copy", llvm::Type::getVoidTy(Ctx),
             {PtrTy, I64Ty, PtrTy, I64Ty, I64Ty, I64Ty});
@@ -735,7 +742,7 @@ llvm::Value* CGFuncCall::emitBuiltinCall(const std::string& Name,
     // StringOfChar(ch, count) -- count copies of ch, capacity-255 result.
     if (lo == "stringofchar" && Args.size() == 2) {
         auto* ch    = EmitExpr(*Args[0]);
-        auto* count = ToI64(EmitExpr(*Args[1]));
+        auto* count = ToI64(EmitExpr(*Args[1]), exprIsSigned(*Args[1]));
         auto* resPtr = CreateEntryAlloca(Types.sstrStructType(PlangMaxStringCapacity), "sof.res");
         auto* fn = Strings.getStrFn("plang_sstr_of_char", llvm::Type::getVoidTy(Ctx),
             {PtrTy, I64Ty, I8Ty, I64Ty});
@@ -772,7 +779,7 @@ llvm::Value* CGFuncCall::emitBuiltinCall(const std::string& Name,
     // temporary, the same way every other ShortString-producing runtime
     // routine in this file does (see e.g. Copy/StringOfChar just above).
     if (lo == "paramstr" && !Args.empty()) {
-        auto* n = ToI64(EmitExpr(*Args[0]));
+        auto* n = ToI64(EmitExpr(*Args[0]), exprIsSigned(*Args[0]));
         auto* resPtr = CreateEntryAlloca(Types.sstrStructType(PlangMaxStringCapacity),
                                           "paramstr.res");
         auto* fn = RtFns.getExternFnN("plang_tp_paramstr", llvm::Type::getVoidTy(Ctx),

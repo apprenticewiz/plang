@@ -140,17 +140,26 @@ void RangeCheckGuards::emitNilCheck(llvm::Value* ptr) {
 }
 
 void RangeCheckGuards::emitRangeCheck(llvm::Value* val, int64_t lo, int64_t hi,
-                                       bool isIndex, plang::SourceLocation Loc) {
+                                       bool isIndex, plang::SourceLocation Loc,
+                                       std::optional<bool> valSigned) {
     if (!rangeChecksAt(Loc)) return;
     emitRangeCheckDyn(val, llvm::ConstantInt::get(i64Ty(), lo, true),
-                      llvm::ConstantInt::get(i64Ty(), hi, true), isIndex, Loc);
+                      llvm::ConstantInt::get(i64Ty(), hi, true), isIndex, Loc,
+                      valSigned);
 }
 
 void RangeCheckGuards::emitRangeCheckDyn(llvm::Value* val, llvm::Value* lo,
                                           llvm::Value* hi, bool isIndex,
-                                          plang::SourceLocation Loc) {
+                                          plang::SourceLocation Loc,
+                                          std::optional<bool> valSigned) {
     if (!rangeChecksAt(Loc)) return;
-    auto* v      = ToI64(val);
+    // valSigned given and val not already i64: consult it directly rather
+    // than ToI64's own no-context guess -- see this function's declaration
+    // (RangeCheckGuards.h) for which callers need to supply it and why.
+    auto* v = (valSigned.has_value() && val->getType() != i64Ty())
+        ? (*valSigned ? B.CreateSExt(val, i64Ty(), "to.i64")
+                       : B.CreateZExt(val, i64Ty(), "to.i64"))
+        : ToI64(val);
     auto* loV    = ToI64(lo);
     auto* hiV    = ToI64(hi);
     auto* tooLow = B.CreateICmpSLT(v, loV, "rng.lo");

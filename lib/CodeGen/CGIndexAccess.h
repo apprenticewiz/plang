@@ -14,6 +14,7 @@
 
 #include "CGSymbolTable.h"
 #include "CGTypes.h"
+#include "OrdinalSignedness.h"
 #include "RangeCheckGuards.h"
 #include "RuntimeFunctionCache.h"
 #include "SchemaAccess.h"
@@ -32,7 +33,7 @@ public:
                   llvm::IntegerType* I8Ty, llvm::IntegerType* I64Ty,
                   std::function<llvm::Value*(const plang::ExprNode&)> EmitExpr,
                   std::function<llvm::Value*(const plang::ExprNode&)> EmitLValue,
-                  std::function<llvm::Value*(llvm::Value*)> ToI64,
+                  std::function<llvm::Value*(llvm::Value*, bool)> ToI64,
                   std::function<const plang::TypeNode*(const plang::TypeNode*)> DenoterOf,
                   std::function<bool(const plang::ExprNode&)> ExprIsVarStr,
                   std::function<std::optional<llvm::Align>(const plang::ExprNode&)> PackedAccessAlign,
@@ -69,7 +70,14 @@ private:
     llvm::IntegerType* I64Ty;
     std::function<llvm::Value*(const plang::ExprNode&)> EmitExpr;
     std::function<llvm::Value*(const plang::ExprNode&)> EmitLValue;
-    std::function<llvm::Value*(llvm::Value*)> ToI64;
+    /// The bool is the index operand's actual Sema-resolved Type::IsSigned;
+    /// see CGBinaryOps.h's identical member for the fuller comment.  Every
+    /// index expression this file lowers passes exprIsSigned(x)
+    /// (OrdinalSignedness.h) for its own ExprNode x -- a negative or
+    /// out-of-declared-range index otherwise widened with the wrong sign
+    /// reached a GEP with a corrupted offset instead of failing its range
+    /// check (issue #177's sibling audit).
+    std::function<llvm::Value*(llvm::Value*, bool)> ToI64;
     std::function<const plang::TypeNode*(const plang::TypeNode*)> DenoterOf;
     std::function<bool(const plang::ExprNode&)> ExprIsVarStr;
     std::function<std::optional<llvm::Align>(const plang::ExprNode&)> PackedAccessAlign;

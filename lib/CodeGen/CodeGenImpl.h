@@ -67,6 +67,7 @@
 #include "ConstFold.h"
 #include "FileVarHelpers.h"
 #include "LabelGotoEngine.h"
+#include "OrdinalSignedness.h"
 #include "RangeCheckGuards.h"
 #include "RuntimeFunctionCache.h"
 #include "SchemaAccess.h"
@@ -1373,11 +1374,14 @@ struct Codegen::Impl {
     /// ISO §6.5.4: p^ where p is nil.  No-op unless range checking is enabled.
     void emitNilCheck(llvm::Value* ptr);
     /// No-op unless range checking is enabled; isIndex picks the wording.
+    /// valSigned: see RangeCheckGuards::emitRangeCheck's own comment.
     void emitRangeCheck(llvm::Value* val, int64_t lo, int64_t hi, bool isIndex,
-                        SourceLocation Loc);
+                        SourceLocation Loc,
+                        std::optional<bool> valSigned = std::nullopt);
     /// emitRangeCheck for bounds that are only known at run time.
     void emitRangeCheckDyn(llvm::Value* val, llvm::Value* lo, llvm::Value* hi,
-                           bool isIndex, SourceLocation Loc);
+                           bool isIndex, SourceLocation Loc,
+                           std::optional<bool> valSigned = std::nullopt);
 
     // ====================================================================
     // EP §6.4.7: undiscriminated schema types (CodeGenSchema.cpp)
@@ -1899,26 +1903,17 @@ struct Codegen::Impl {
         builtinIO_->emitBuiltinReadStr(args);
     }
     /// Whether an ordinal's values are unsigned in their LLVM representation.
-    /// ISO §6.4.2.2 orders every ordinal by its ordinal number, which is never
-    /// negative for Boolean/Char/Enum; a signed compare would read boolean
-    /// 'true' (i1 1) as -1 and the upper half of the char set as negative.
-    /// Turbo's unsigned sized-integer rungs (Byte, Word, Cardinal, LongWord,
-    /// QWord) need the identical treatment for the identical reason -- Word's
-    /// 60000 read as a signed i16 is a large negative number.
-    ///
-    /// Consults Type::IsSigned rather than re-deriving the answer from Kind:
-    /// IsSigned is now correctly false on every one of these (Type::
-    /// makeBoolean/makeChar and the Enum construction site in SemaType.cpp
-    /// all set it explicitly; TypeContext::getInt sets it from the ladder's
-    /// own Bits/Signed key), so one flag now answers for all of them,
-    /// including Kind::Integer rungs a Kind-only dispatch could never have
-    /// covered.  Kept as a Kind-agnostic IsSigned read rather than a hybrid
-    /// (Kind-dispatch OR IsSigned) so there is exactly one source of truth to
-    /// keep correct; a hybrid would silently paper over a future factory that
-    /// forgets to set IsSigned instead of surfacing it.
+    /// Hoisted to OrdinalSignedness.h/.cpp (issue #177's sibling audit) so
+    /// CGAssign/CGProcCall/CGFuncCall/... can call it directly without going
+    /// through an Impl instance; kept here, delegating, since this is still
+    /// how CodeGenTypes.cpp's own `[](const Type* t){ return
+    /// ordinalIsUnsigned(t); }` closures (OrdinalIsUnsigned bridged into
+    /// CGBinaryOps/CGControlFlow) and every unqualified in-Impl call site
+    /// spell it.  See the free function's own doc comment for what it
+    /// answers and why -- including the Subrange-peeling bug that used to
+    /// live in this copy of the body.
     static bool ordinalIsUnsigned(const plang::Type* t) {
-        while (t && t->Kind == TypeKind::Subrange && t->SubBase) t = t->SubBase.get();
-        return t && !t->IsSigned;
+        return ::ordinalIsUnsigned(t);
     }
     void emitBuiltinRead(const std::vector<std::unique_ptr<ExprNode>>& args) {
         builtinIO_->emitBuiltinRead(args);

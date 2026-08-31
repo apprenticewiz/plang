@@ -1,4 +1,5 @@
 add_library(PlangCodeGen OBJECT
+    OrdinalSignedness.cpp
     ConstFold.cpp
     RuntimeFunctionCache.cpp
     StringRuntime.cpp

@@ -9,6 +9,7 @@
 #include "plang/Sema/Type.h"
 
 #include "CodegenICE.h"
+#include "OrdinalSignedness.h"
 
 using namespace plang;
 
@@ -128,8 +129,16 @@ void CGAssign::emitAssignValue(const ExprNode& Target, const ExprNode& Value,
         // Sizing a temporary needs a constant; what the runtime is told about
         // the destination is the capacity it really has.
         const int64_t cap = ExprStrCapStatic(*sub->Str);
-        auto* low  = ToI64(EmitExpr(*sub->Low));
-        auto* high = ToI64(EmitExpr(*sub->High));
+        // Sema places no type restriction on a substring bound beyond being
+        // an expression (SemaExpr.cpp's SubstringExpr arm just checkExpr's
+        // Low/High), so either can be a signed narrow or unsigned wide
+        // Turbo ordinal -- ToI64's own bridge here has no operand-type
+        // context to consult, so it is bypassed in favor of
+        // widenOrdinalToI64, which does.
+        auto* low  = widenOrdinalToI64(B, EmitExpr(*sub->Low),  I64Ty,
+                                        exprIsSigned(*sub->Low));
+        auto* high = widenOrdinalToI64(B, EmitExpr(*sub->High), I64Ty,
+                                        exprIsSigned(*sub->High));
         auto* n    = B.CreateAdd(
             B.CreateSub(high, low, "substr.span"),
             llvm::ConstantInt::get(I64Ty, 1), "substr.len");
@@ -315,8 +324,18 @@ void CGAssign::emitAssignValue(const ExprNode& Target, const ExprNode& Value,
         // == Subrange above already guarantees these bounds are real, so a
         // `SubLo != SubHi` guard here would just exempt `5..5` from the very
         // check this block exists to perform.
+        // rhs is still the RAW EmitExpr(Value) result here, ahead of the
+        // dstTy coercion below -- e.g. a ShortInt source reaches this as a
+        // genuine i8, not yet widened -- so the check needs Value's own
+        // signedness explicitly (issue #177's sibling audit): without it, a
+        // legal negative ShortInt (or other Turbo-narrow-signed) value
+        // assigned into a subrange target zero-extended to a large positive
+        // i64 here and FAILED this check spuriously (Runtime error 201) for
+        // an in-range value, the assignment sibling of Inc/Dec's own
+        // spurious-trap shape.
         if (!checked)
-            RangeGuards.emitRangeCheck(rhs, tt->SubLo, tt->SubHi, /*isIndex=*/false, Loc);
+            RangeGuards.emitRangeCheck(rhs, tt->SubLo, tt->SubHi, /*isIndex=*/false, Loc,
+                                        exprIsSigned(Value));
     }
 
     // What the destination holds, not what the source produced: an array
@@ -361,13 +380,23 @@ void CGAssign::emitAssignValue(const ExprNode& Target, const ExprNode& Value,
     // whatever was already in the slot's upper bytes untouched -- silently
     // for a freshly zero-initialized variable, wrong for a variant-record
     // field whose shared storage was last written through a wider
-    // alternative (issue #229). Zero-extension is the correct widening: the
-    // narrow ordinals plang has (char, boolean) are all non-negative, the
-    // same reasoning coerceToType's identical int/int branch uses for every
-    // other value-consuming path (call arguments, constructors, ...).
+    // alternative (issue #229).
+    //
+    // A narrowing truncation is exact regardless of signedness (coerceToType's
+    // identical int/int branch has the same observation), but an actual
+    // WIDENING has to get sign- vs. zero-extension right, and unconditional
+    // zero-extension is wrong once Turbo's signed ShortInt (i8) and unsigned
+    // Word/Cardinal (i16/i32) exist alongside Char/Boolean (i8/i1, genuinely
+    // always non-negative) -- `s: ShortInt; i: Integer; s := -5; i := s`
+    // zero-extended s's i8 bit pattern and printed i=251 instead of -5
+    // (issue #177).  exprIsSigned reads Value's own Sema-resolved
+    // signedness rather than guessing from rhs's LLVM width, the same
+    // question CGBinaryOps' operandIsSigned answers for every arithmetic
+    // operand.
     if (dstTy->isIntegerTy() && rhs->getType()->isIntegerTy()
             && rhs->getType() != dstTy)
-        rhs = B.CreateZExtOrTrunc(rhs, dstTy, "conv");
+        rhs = exprIsSigned(Value) ? B.CreateSExtOrTrunc(rhs, dstTy, "conv")
+                                   : B.CreateZExtOrTrunc(rhs, dstTy, "conv");
 
     auto* st = B.CreateStore(rhs, addr);
     // A field of a packed record is at a byte offset that need not satisfy its

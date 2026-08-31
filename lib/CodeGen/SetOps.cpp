@@ -90,8 +90,12 @@ llvm::Value* SetOps::alignSetArg(llvm::Value* v, const ExprNode& arg,
     return alignSet(v, setBaseOf(arg), *destSetBase);
 }
 
-llvm::Value* SetOps::setBitIndex(llvm::Value* ordinal, int64_t base) {
-    auto* ord = ToI64(ordinal);
+llvm::Value* SetOps::setBitIndex(llvm::Value* ordinal, int64_t base,
+                                  std::optional<bool> ordinalSigned) {
+    auto* ord = (ordinalSigned.has_value() && ordinal->getType() != i64Ty())
+        ? (*ordinalSigned ? B.CreateSExt(ordinal, i64Ty(), "to.i64")
+                           : B.CreateZExt(ordinal, i64Ty(), "to.i64"))
+        : ToI64(ordinal);
     if (base == 0) return ord;
     return B.CreateSub(ord, llvm::ConstantInt::get(i64Ty(), base, true),
                        "set.rebase");
@@ -99,7 +103,7 @@ llvm::Value* SetOps::setBitIndex(llvm::Value* ordinal, int64_t base) {
 
 llvm::Value* SetOps::emitSetSingleton(llvm::Value* ordinal, int64_t base,
         std::optional<std::pair<int64_t, int64_t>> declaredRange,
-        plang::SourceLocation Loc) {
+        plang::SourceLocation Loc, std::optional<bool> ordinalSigned) {
     // Checked against the set's own declared base type, not merely clamped
     // into [0, PlangMaxSetElements) below: that window is the bitmask's
     // physical width, wider than most base types actually declare, so an
@@ -107,11 +111,12 @@ llvm::Value* SetOps::emitSetSingleton(llvm::Value* ordinal, int64_t base,
     // and was folded into the bitmask as an unrelated, undeclared member.
     if (declaredRange)
         RangeGuards.emitRangeCheck(ordinal, declaredRange->first,
-                                    declaredRange->second, /*isIndex=*/false, Loc);
+                                    declaredRange->second, /*isIndex=*/false, Loc,
+                                    ordinalSigned);
     auto* st    = setTy();
     auto* zero  = llvm::ConstantInt::get(st, 0);
     llvm::Value* inRange = nullptr;
-    auto* ord   = clampOrdinal(B, i64Ty(), setBitIndex(ordinal, base), inRange);
+    auto* ord   = clampOrdinal(B, i64Ty(), setBitIndex(ordinal, base, ordinalSigned), inRange);
     auto* bit   = B.CreateShl(llvm::ConstantInt::get(st, 1),
                               B.CreateZExt(ord, st), "set.bit");
     return B.CreateSelect(inRange, bit, zero, "set.single");
@@ -119,16 +124,17 @@ llvm::Value* SetOps::emitSetSingleton(llvm::Value* ordinal, int64_t base,
 
 llvm::Value* SetOps::emitSetRange(llvm::Value* lo, llvm::Value* hi, int64_t base,
         std::optional<std::pair<int64_t, int64_t>> declaredRange,
-        plang::SourceLocation Loc) {
+        plang::SourceLocation Loc, std::optional<bool> loSigned,
+        std::optional<bool> hiSigned) {
     // As emitSetSingleton: each endpoint is checked against the declared base
     // type before it is ever turned into a bit position, regardless of
     // whether lo > hi leaves the range empty -- an endpoint outside the base
     // type is still not a value of that type.
     if (declaredRange) {
         RangeGuards.emitRangeCheck(lo, declaredRange->first, declaredRange->second,
-                                    /*isIndex=*/false, Loc);
+                                    /*isIndex=*/false, Loc, loSigned);
         RangeGuards.emitRangeCheck(hi, declaredRange->first, declaredRange->second,
-                                    /*isIndex=*/false, Loc);
+                                    /*isIndex=*/false, Loc, hiSigned);
     }
     auto* st       = setTy();
     auto* zero     = llvm::ConstantInt::get(st, 0);
@@ -139,8 +145,8 @@ llvm::Value* SetOps::emitSetRange(llvm::Value* lo, llvm::Value* hi, int64_t base
     // Emptiness is decided from the original bounds; the clamped copies below
     // only keep the shift amounts inside the type width, since a shift past it
     // is poison in LLVM even on a path whose result is discarded.
-    auto* l = setBitIndex(lo, base);
-    auto* h = setBitIndex(hi, base);
+    auto* l = setBitIndex(lo, base, loSigned);
+    auto* h = setBitIndex(hi, base, hiSigned);
     auto* empty = B.CreateOr(
         B.CreateICmpSGT(l, h, "set.lo.gt.hi"),
         B.CreateOr(B.CreateICmpSGT(l, i64Max, "set.lo.big"),
@@ -165,10 +171,11 @@ llvm::Value* SetOps::emitSetRange(llvm::Value* lo, llvm::Value* hi, int64_t base
     return B.CreateSelect(empty, zero, mask, "set.range.chk");
 }
 
-llvm::Value* SetOps::emitSetMember(llvm::Value* ordinal, llvm::Value* set, int64_t base) {
+llvm::Value* SetOps::emitSetMember(llvm::Value* ordinal, llvm::Value* set, int64_t base,
+                                    std::optional<bool> ordinalSigned) {
     auto* st = setTy();
     llvm::Value* inRange = nullptr;
-    auto* ord   = clampOrdinal(B, i64Ty(), setBitIndex(ordinal, base), inRange);
+    auto* ord   = clampOrdinal(B, i64Ty(), setBitIndex(ordinal, base, ordinalSigned), inRange);
     auto* shifted = B.CreateLShr(toSetWidth(set),
                                  B.CreateZExt(ord, st), "set.shr");
     auto* bit = B.CreateTrunc(shifted, llvm::Type::getInt1Ty(Ctx), "set.bit");

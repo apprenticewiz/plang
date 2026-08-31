@@ -67,21 +67,38 @@ public:
     /// value alone, a var parameter's address included.
     llvm::Value* alignSetArg(llvm::Value* v, const plang::ExprNode& arg,
                               std::optional<int64_t> destSetBase);
-    /// Bit index for an ordinal in a set based at `base`.
-    llvm::Value* setBitIndex(llvm::Value* ordinal, int64_t base);
+    /// Bit index for an ordinal in a set based at `base`.  \p ordinalSigned,
+    /// when given, is the ordinal's own Sema-resolved signedness (an
+    /// exprIsSigned answer, OrdinalSignedness.h) -- consulted instead of the
+    /// shared ToI64 bridge's own guess-from-LLVM-width fallback whenever
+    /// \p ordinal is not already i64.  Defaults to nullopt, preserving every
+    /// pre-existing caller's exact behavior; a set whose base type reaches
+    /// below zero (setBaseOf's own reason to exist) can carry a genuinely
+    /// negative member ordinal, which -- like every other ToI64 call site
+    /// issue #177's sibling audit covers -- needs this explicitly rather
+    /// than guessed (e.g. a `set of ShortInt` member, or the set-typed `in`
+    /// operator's left operand).
+    llvm::Value* setBitIndex(llvm::Value* ordinal, int64_t base,
+                              std::optional<bool> ordinalSigned = std::nullopt);
     /// \p declaredRange, when given, is checked against \p ordinal (or, for
     /// emitSetRange, against both \p lo and \p hi) with a RangeCheckGuards
     /// trap at \p Loc before the value is folded into the bitmask -- ISO
     /// §6.4.6/§6.7.2.4: a set member has to lie in the set's base type, and
     /// PlangMaxSetElements alone (what clampOrdinal/emitSetRange's own
     /// emptiness test enforce) is the representation's width, not that.
+    /// \p ordinalSigned (\p loSigned/\p hiSigned for emitSetRange): as
+    /// setBitIndex's own parameter above.
     llvm::Value* emitSetSingleton(llvm::Value* ordinal, int64_t base,
         std::optional<std::pair<int64_t, int64_t>> declaredRange = std::nullopt,
-        plang::SourceLocation Loc = {});
+        plang::SourceLocation Loc = {},
+        std::optional<bool> ordinalSigned = std::nullopt);
     llvm::Value* emitSetRange(llvm::Value* lo, llvm::Value* hi, int64_t base,
         std::optional<std::pair<int64_t, int64_t>> declaredRange = std::nullopt,
-        plang::SourceLocation Loc = {});
-    llvm::Value* emitSetMember(llvm::Value* ordinal, llvm::Value* set, int64_t base);
+        plang::SourceLocation Loc = {},
+        std::optional<bool> loSigned = std::nullopt,
+        std::optional<bool> hiSigned = std::nullopt);
+    llvm::Value* emitSetMember(llvm::Value* ordinal, llvm::Value* set, int64_t base,
+                                std::optional<bool> ordinalSigned = std::nullopt);
     /// Lowers a set-valued or set-comparing binary operator; returns null if
     /// op is not one of them.
     llvm::Value* emitSetBinary(plang::TokenKind op, llvm::Value* a, llvm::Value* b);

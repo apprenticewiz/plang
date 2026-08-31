@@ -166,7 +166,7 @@ void CGProcCall::emitCallStmt(const CallStmt& s) {
             B.CreateCall(fn, {fp, recSize});
         } else if (FileVars.isUntypedFileVar(*s.Args[0])) {
             auto* recSize = s.Args.size() > 1
-                ? ToI64(EmitExpr(*s.Args[1]))
+                ? ToI64(EmitExpr(*s.Args[1]), exprIsSigned(*s.Args[1]))
                 : llvm::ConstantInt::get(I64Ty, 128); // TP's own default
             auto* fn = RtFns.getExternFnN("plang_tp_" + lo + "_sized",
                 llvm::Type::getVoidTy(Ctx), {PtrTy, I64Ty});
@@ -197,7 +197,7 @@ void CGProcCall::emitCallStmt(const CallStmt& s) {
     // RecSize field to read yet).
     if (lo == "seek" && s.Args.size() == 2 && RangeGuards.isTurbo()) {
         auto* fp = FileVars.fileVarPtr(*s.Args[0]);
-        auto* n  = ToI64(EmitExpr(*s.Args[1]));
+        auto* n  = ToI64(EmitExpr(*s.Args[1]), exprIsSigned(*s.Args[1]));
         auto* fn = RtFns.getExternFnN("plang_tp_seek",
             llvm::Type::getVoidTy(Ctx), {PtrTy, I64Ty});
         B.CreateCall(fn, {fp, n});
@@ -228,7 +228,7 @@ void CGProcCall::emitCallStmt(const CallStmt& s) {
             && RangeGuards.isTurbo()) {
         auto* fp     = FileVars.fileVarPtr(*s.Args[0]);
         auto* buf    = EmitLValue(*s.Args[1]);
-        auto* count  = ToI64(EmitExpr(*s.Args[2]));
+        auto* count  = ToI64(EmitExpr(*s.Args[2]), exprIsSigned(*s.Args[2]));
         const bool hasResult = s.Args.size() > 3;
         auto* fn = RtFns.getExternFnN(
             lo == "blockread" ? "plang_tp_blockread" : "plang_tp_blockwrite",
@@ -294,7 +294,7 @@ void CGProcCall::emitCallStmt(const CallStmt& s) {
         auto* fp  = FileVars.fileVarPtr(*s.Args[0]);
         auto* buf = EmitLValue(*s.Args[1]);
         auto* size = s.Args.size() > 2
-            ? ToI64(EmitExpr(*s.Args[2]))
+            ? ToI64(EmitExpr(*s.Args[2]), exprIsSigned(*s.Args[2]))
             : llvm::ConstantInt::get(I64Ty, 1024);
         auto* fn = RtFns.getExternFnN("plang_tp_settextbuf",
             llvm::Type::getVoidTy(Ctx), {PtrTy, PtrTy, I64Ty});
@@ -383,7 +383,7 @@ void CGProcCall::emitCallStmt(const CallStmt& s) {
     if ((lo == "seekread" || lo == "seekwrite" || lo == "seekupdate")
         && s.Args.size() >= 2) {
         auto* fp      = FileVars.fileVarPtr(*s.Args[0]);
-        auto* idx     = ToI64(EmitExpr(*s.Args[1]));
+        auto* idx     = ToI64(EmitExpr(*s.Args[1]), exprIsSigned(*s.Args[1]));
         int64_t esz   = FileVars.getFileElemSize(*s.Args[0]);
         int64_t ilo   = FileVars.getFileIndexLow(*s.Args[0]);
         auto* fn = RtFns.getExternFnN("plang_" + lo,
@@ -436,7 +436,7 @@ void CGProcCall::emitCallStmt(const CallStmt& s) {
     // every other small-integer runtime argument is (e.g. Randomize's
     // sibling Halt(n) just below).
     if (lo == "delay" && !s.Args.empty()) {
-        auto* ms = ToI64(EmitExpr(*s.Args[0]));
+        auto* ms = ToI64(EmitExpr(*s.Args[0]), exprIsSigned(*s.Args[0]));
         B.CreateCall(RtFns.getExternFnN("plang_crt_delay",
             llvm::Type::getVoidTy(Ctx), {I64Ty}), {ms});
         return;
@@ -452,7 +452,7 @@ void CGProcCall::emitCallStmt(const CallStmt& s) {
         // EP §6.7.5.7 halt takes no argument; halt(n) is the widespread extension
         // that sets the exit status.
         auto* status = s.Args.empty() ? llvm::ConstantInt::get(I64Ty, 0)
-                                      : ToI64(EmitExpr(*s.Args[0]));
+                                      : ToI64(EmitExpr(*s.Args[0]), exprIsSigned(*s.Args[0]));
         B.CreateCall(RtFns.getRuntimeHaltFn(), {status});
         B.CreateUnreachable();
         return;
@@ -526,7 +526,7 @@ void CGProcCall::emitCallStmt(const CallStmt& s) {
     // Turbo/FPC.  fpc -Mtp confirms the no-argument form's default: 0.
     if (lo == "runerror") {
         auto* code = s.Args.empty() ? llvm::ConstantInt::get(I64Ty, 0)
-                                    : ToI64(EmitExpr(*s.Args[0]));
+                                    : ToI64(EmitExpr(*s.Args[0]), exprIsSigned(*s.Args[0]));
         B.CreateCall(
             RtFns.getExternFnN("plang_tp_runerror", llvm::Type::getVoidTy(Ctx), {I64Ty}),
             {code});
@@ -544,7 +544,8 @@ void CGProcCall::emitCallStmt(const CallStmt& s) {
         auto* addr = EmitLValue(*s.Args[0]);
         auto* cur  = B.CreateLoad(Sets.setTy(), addr, "set.cur");
         auto* bit  = Sets.emitSetSingleton(EmitExpr(*s.Args[1]),
-                         Sets.setBaseOf(*s.Args[0]), Sets.declaredRangeOf(*s.Args[0]), s.Loc);
+                         Sets.setBaseOf(*s.Args[0]), Sets.declaredRangeOf(*s.Args[0]), s.Loc,
+                         exprIsSigned(*s.Args[1]));
         auto* next = Sets.emitSetBinary(
             lo == "include" ? TokenKind::Plus : TokenKind::Minus, cur, bit);
         B.CreateStore(next, addr);
@@ -571,7 +572,7 @@ void CGProcCall::emitCallStmt(const CallStmt& s) {
         auto* addr = EmitLValue(*s.Args[0]);
         if (ty && ty->Kind == TypeKind::Pointer) {
             auto* cur  = B.CreateLoad(PtrTy, addr, "incdec.cur");
-            auto* step = s.Args.size() > 1 ? ToI64(EmitExpr(*s.Args[1]))
+            auto* step = s.Args.size() > 1 ? ToI64(EmitExpr(*s.Args[1]), exprIsSigned(*s.Args[1]))
                                             : llvm::ConstantInt::get(I64Ty, 1);
             if (lo == "dec") step = B.CreateNeg(step, "dec.step");
             llvm::Type* elemLLVMTy = Types.llvmTypeOfSemaType(*ty->PointeeType);
@@ -581,8 +582,12 @@ void CGProcCall::emitCallStmt(const CallStmt& s) {
         }
         auto* llTy = ty ? Types.llvmTypeOfSemaType(*ty) : I64Ty;
         auto* cur  = B.CreateLoad(llTy, addr, "incdec.cur");
-        auto* v = ToI64(cur);
-        auto* k = s.Args.size() > 1 ? ToI64(EmitExpr(*s.Args[1]))
+        // s.Args[0]'s own ResolvedType is x's -- consulted explicitly rather
+        // than left to ToI64's LLVM-width guess, which zero-extended a
+        // negative ShortInt (i8, signed) x and then failed the in-range
+        // increment's own range check below spuriously (issue #177).
+        auto* v = ToI64(cur, exprIsSigned(*s.Args[0]));
+        auto* k = s.Args.size() > 1 ? ToI64(EmitExpr(*s.Args[1]), exprIsSigned(*s.Args[1]))
                                      : llvm::ConstantInt::get(I64Ty, 1);
         auto* r = (lo == "inc") ? B.CreateAdd(v, k, "inc") : B.CreateSub(v, k, "dec");
         if (ty && !ty->isError())
@@ -600,8 +605,8 @@ void CGProcCall::emitCallStmt(const CallStmt& s) {
     // Value's own low byte, regardless of X's declared type.
     if (lo == "fillchar" && s.Args.size() == 3) {
         auto* dst   = EmitLValue(*s.Args[0]);
-        auto* count = ToI64(EmitExpr(*s.Args[1]));
-        auto* val   = B.CreateTrunc(ToI64(EmitExpr(*s.Args[2])), I8Ty, "fillchar.val");
+        auto* count = ToI64(EmitExpr(*s.Args[1]), exprIsSigned(*s.Args[1]));
+        auto* val   = B.CreateTrunc(ToI64(EmitExpr(*s.Args[2]), exprIsSigned(*s.Args[2])), I8Ty, "fillchar.val");
         B.CreateMemSet(dst, val, count, llvm::MaybeAlign());
         return;
     }
@@ -617,7 +622,7 @@ void CGProcCall::emitCallStmt(const CallStmt& s) {
     if (lo == "move" && s.Args.size() == 3) {
         auto* src   = EmitLValue(*s.Args[0]);
         auto* dst   = EmitLValue(*s.Args[1]);
-        auto* count = ToI64(EmitExpr(*s.Args[2]));
+        auto* count = ToI64(EmitExpr(*s.Args[2]), exprIsSigned(*s.Args[2]));
         B.CreateMemMove(dst, llvm::MaybeAlign(), src, llvm::MaybeAlign(), count);
         return;
     }
@@ -661,8 +666,8 @@ void CGProcCall::emitCallStmt(const CallStmt& s) {
     // comment on the out-of-range-index NO-OP rule (not a clamp).
     if (lo == "delete" && s.Args.size() == 3) {
         auto* sp  = StrCall.emitStrAddr(*s.Args[0]);
-        auto* idx = ToI64(EmitExpr(*s.Args[1]));
-        auto* cnt = ToI64(EmitExpr(*s.Args[2]));
+        auto* idx = ToI64(EmitExpr(*s.Args[1]), exprIsSigned(*s.Args[1]));
+        auto* cnt = ToI64(EmitExpr(*s.Args[2]), exprIsSigned(*s.Args[2]));
         auto* fn  = RtFns.getExternFnN("plang_sstr_delete", llvm::Type::getVoidTy(Ctx),
             {PtrTy, I64Ty, I64Ty, I64Ty});
         B.CreateCall(fn, {sp, llvm::ConstantInt::get(I64Ty, ExprShortStrCap(*s.Args[0])), idx, cnt});
@@ -674,7 +679,7 @@ void CGProcCall::emitCallStmt(const CallStmt& s) {
     if (lo == "insert" && s.Args.size() == 3) {
         auto [srcp, srcc] = sstrArgPtr(*s.Args[0]);
         auto* sp  = StrCall.emitStrAddr(*s.Args[1]);
-        auto* idx = ToI64(EmitExpr(*s.Args[2]));
+        auto* idx = ToI64(EmitExpr(*s.Args[2]), exprIsSigned(*s.Args[2]));
         auto* fn  = RtFns.getExternFnN("plang_sstr_insert", llvm::Type::getVoidTy(Ctx),
             {PtrTy, I64Ty, PtrTy, I64Ty, I64Ty});
         B.CreateCall(fn, {sp, llvm::ConstantInt::get(I64Ty, ExprShortStrCap(*s.Args[1])),
@@ -686,7 +691,7 @@ void CGProcCall::emitCallStmt(const CallStmt& s) {
     // divergence from fpc's own unclamped (buffer-overrunning) behavior.
     if (lo == "setlength" && s.Args.size() == 2) {
         auto* sp     = StrCall.emitStrAddr(*s.Args[0]);
-        auto* newLen = ToI64(EmitExpr(*s.Args[1]));
+        auto* newLen = ToI64(EmitExpr(*s.Args[1]), exprIsSigned(*s.Args[1]));
         auto* fn = RtFns.getExternFnN("plang_sstr_setlength", llvm::Type::getVoidTy(Ctx),
             {PtrTy, I64Ty, I64Ty});
         B.CreateCall(fn, {sp, llvm::ConstantInt::get(I64Ty, ExprShortStrCap(*s.Args[0])), newLen});
@@ -955,7 +960,7 @@ void CGProcCall::emitCallStmt(const CallStmt& s) {
     // the whole design, including how HeapError is consulted on failure).
     if (lo == "getmem" && s.Args.size() == 2) {
         auto* addr = EmitLValue(*s.Args[0]);
-        auto* size = ToI64(EmitExpr(*s.Args[1]));
+        auto* size = ToI64(EmitExpr(*s.Args[1]), exprIsSigned(*s.Args[1]));
         auto* fn = RtFns.getExternFnN("plang_tp_getmem", PtrTy, {I64Ty});
         auto* p = B.CreateCall(fn, {size}, "getmem");
         B.CreateStore(p, addr);
@@ -965,7 +970,7 @@ void CGProcCall::emitCallStmt(const CallStmt& s) {
     // omitted; plang_tp_freemem ignores it either way (its own comment).
     if (lo == "freemem" && !s.Args.empty()) {
         auto* p    = EmitExpr(*s.Args[0]);
-        auto* size = s.Args.size() > 1 ? ToI64(EmitExpr(*s.Args[1]))
+        auto* size = s.Args.size() > 1 ? ToI64(EmitExpr(*s.Args[1]), exprIsSigned(*s.Args[1]))
                                         : llvm::ConstantInt::get(I64Ty, 0);
         auto* fn = RtFns.getExternFnN("plang_tp_freemem",
                                        llvm::Type::getVoidTy(Ctx), {PtrTy, I64Ty});

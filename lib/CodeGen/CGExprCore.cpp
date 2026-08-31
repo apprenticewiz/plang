@@ -328,9 +328,11 @@ llvm::Value* CGExprCore::emitExpr(const ExprNode& e) {
             llvm::Value* bits = nullptr;
             if (auto* rng = llvm::dyn_cast<SetRangeExpr>(elem.get()))
                 bits = Sets.emitSetRange(emitExpr(*rng->Low), emitExpr(*rng->High), base,
-                                          declaredRange, rng->Loc);
+                                          declaredRange, rng->Loc,
+                                          exprIsSigned(*rng->Low), exprIsSigned(*rng->High));
             else
-                bits = Sets.emitSetSingleton(emitExpr(*elem), base, declaredRange, elem->Loc);
+                bits = Sets.emitSetSingleton(emitExpr(*elem), base, declaredRange, elem->Loc,
+                                              exprIsSigned(*elem));
             result = B.CreateOr(result, bits, "set");
         }
         return result;
@@ -384,8 +386,12 @@ llvm::Value* CGExprCore::emitExpr(const ExprNode& e) {
         }
         if (!strAddr) codegenICE("substring applied to a non-addressable operand");
         auto* resPtr = CreateEntryAlloca(Types.strStructType(cap), "substr.res");
-        auto* low    = ToI64(emitExpr(*n->Low));
-        auto* high   = ToI64(emitExpr(*n->High));
+        // Sema places no type restriction on a substring bound beyond being
+        // an expression (SubstringExpr's own SemaExpr.cpp arm just
+        // checkExpr's Low/High), so either can be a signed narrow or
+        // unsigned wide Turbo ordinal (issue #177's sibling audit).
+        auto* low    = ToI64(emitExpr(*n->Low),  exprIsSigned(*n->Low));
+        auto* high   = ToI64(emitExpr(*n->High), exprIsSigned(*n->High));
         // s[i..j] names its bounds, the runtime helper takes a count.
         auto* len    = B.CreateAdd(
             B.CreateSub(high, low, "substr.span"),
@@ -433,7 +439,12 @@ llvm::Value* CGExprCore::emitTypeCastValue(const TypeCastExpr& n) {
         // no-op once the LLVM types agree, which is bit-for-bit identical to
         // reinterpreting; for a genuinely different representation (Real's
         // bits are not its integer value's bits) only this path is correct.
-        return CoerceToType(emitExpr(*n.Operand), dstLlvmTy);
+        // n.Operand's own signedness: a Turbo VALUE typecast widening a
+        // signed narrow (ShortInt) or unsigned wide (Word/Cardinal)
+        // operand into a wider destination otherwise guessed sign- vs.
+        // zero-extension from the operand's own LLVM width (issue #177's
+        // sibling audit).
+        return CoerceToType(emitExpr(*n.Operand), dstLlvmTy, exprIsSigned(*n.Operand));
     }
     // Not both ordinal-or-real: Sema only accepts this when the two types
     // are exactly the same size, so it is a VARIABLE-style reinterpretation

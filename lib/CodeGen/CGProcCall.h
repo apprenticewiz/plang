@@ -21,6 +21,7 @@
 #include "CGTypes.h"
 #include "ClosureAndCallABI.h"
 #include "FileVarHelpers.h"
+#include "OrdinalSignedness.h"
 #include "RangeCheckGuards.h"
 #include "RuntimeFunctionCache.h"
 #include "SchemaAccess.h"
@@ -47,7 +48,7 @@ public:
                llvm::Type* DblTy,
                std::function<llvm::Value*(const plang::ExprNode&)> EmitExpr,
                std::function<llvm::Value*(const plang::ExprNode&)> EmitLValue,
-               std::function<llvm::Value*(llvm::Value*)> ToI64,
+               std::function<llvm::Value*(llvm::Value*, bool)> ToI64,
                std::function<llvm::Value*(llvm::Value*)> EnsureI1,
                std::function<llvm::Value*(llvm::Value*, llvm::Type*)> CoerceToType,
                std::function<llvm::AllocaInst*(llvm::Type*, const std::string&)> CreateEntryAlloca,
@@ -209,7 +210,13 @@ private:
     llvm::Type* DblTy;
     std::function<llvm::Value*(const plang::ExprNode&)> EmitExpr;
     std::function<llvm::Value*(const plang::ExprNode&)> EmitLValue;
-    std::function<llvm::Value*(llvm::Value*)> ToI64;
+    /// The bool is the operand's actual Sema-resolved Type::IsSigned --
+    /// CGBinaryOps.h's identical ToI64 member has the fuller version of this
+    /// comment.  Upgraded from a 1-arg (no operand-type context) bridge to
+    /// this 2-arg one in issue #177's sibling audit: every call site in this
+    /// file now passes exprIsSigned(x) (OrdinalSignedness.h) for whatever
+    /// ExprNode x the value being widened came from.
+    std::function<llvm::Value*(llvm::Value*, bool)> ToI64;
     /// Normalizes a Boolean expression's raw LLVM value to i1, the type
     /// CreateCondBr (and so RangeGuards.emitGuard) requires -- the same
     /// widening every OTHER boolean-condition call site (emitIf, emitWhile,

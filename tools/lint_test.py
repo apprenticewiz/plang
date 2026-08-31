@@ -190,6 +190,14 @@ BRACE_CHECK_EXEMPT = {
     "test/Turbo/pending-ioresult-survives-a-reopen-and-a-later-operation.pas",
     "test/Turbo/read-of-malformed-numeric-input-honors-i-minus.pas",
     "test/Turbo/reset-opens-read-write.pas",
+    # Same reasoning again (only ever compiles under -std=turbo -- see its own
+    # RUN: line -- so the matched-delimiter rule this check doesn't model is
+    # the one that actually applies), for a signedness-aware-widening
+    # regression test (issue #177): its header prose quotes the exact `{$R+}
+    # s: ShortInt; ...` repro that used to trap spuriously, the same '{$R+}'-
+    # in-English-prose shape the switch-directive files above already cover.
+    # Not a hazard to fix.
+    "test/CodeGen/Turbo/inc-and-dec-on-a-negative-shortint-do-not-spuriously-range-trap-issue-177.pas",
 }
 
 

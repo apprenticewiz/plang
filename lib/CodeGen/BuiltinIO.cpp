@@ -84,8 +84,14 @@ void BuiltinIO::emitWriteArgs(
         llvm::Value*    decimals = nullptr;
         if (auto* wp = llvm::dyn_cast<WriteParam>(argExpr)) {
             argExpr  = wp->Value.get();
-            width    = wp->Width    ? ToI64(EmitExpr(*wp->Width))    : nullptr;
-            decimals = wp->Decimals ? ToI64(EmitExpr(*wp->Decimals)) : nullptr;
+            // Sema only requires Width/Decimals to be isIntegral()
+            // (SemaExpr.cpp's WriteParam arm), so either can be a signed
+            // narrow or unsigned wide Turbo ordinal (issue #177's sibling
+            // audit).
+            width    = wp->Width    ? ToI64(EmitExpr(*wp->Width), exprIsSigned(*wp->Width))
+                                     : nullptr;
+            decimals = wp->Decimals ? ToI64(EmitExpr(*wp->Decimals), exprIsSigned(*wp->Decimals))
+                                     : nullptr;
         }
 
         // Binary typed file: write raw bytes.
@@ -730,7 +736,13 @@ void BuiltinIO::emitReadArg(const ExprNode& arg, llvm::Value* fp) {
     if (const auto& rt = arg.ResolvedType;
             rt && rt->Kind == TypeKind::Subrange) {
         auto* got = B.CreateLoad(ty, addr, "rd.chk");
-        RangeGuards.emitRangeCheck(ToI64(got), rt->SubLo, rt->SubHi,
+        // arg's own signedness (== rt's, arg.ResolvedType): a read() target
+        // whose declared subrange picked a signed narrow or unsigned wide
+        // Turbo storage width (TP7 ch.19's own rule -- see
+        // TypeContext::getSubrange) otherwise widened wrong here, ahead of
+        // the very range check meant to catch an out-of-bounds value (issue
+        // #177's sibling audit).
+        RangeGuards.emitRangeCheck(ToI64(got, exprIsSigned(arg)), rt->SubLo, rt->SubHi,
                        /*isIndex=*/false, arg.Loc);
     }
 }
