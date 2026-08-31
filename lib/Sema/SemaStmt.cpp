@@ -14,7 +14,7 @@ using namespace plang;
 
 // See NumStmtKinds in AstBase.h.  checkStmt returns quietly for a statement it
 // does not know, which for a checker means the statement was approved.
-static_assert(NumStmtKinds == 12, "a new statement needs a case in checkStmt");
+static_assert(NumStmtKinds == 13, "a new statement needs a case in checkStmt");
 
 // ---------------------------------------------------------------------------
 // Statement checking
@@ -28,6 +28,7 @@ void Sema::checkStmt(const StmtNode* Stmt) {
     if (auto* S = llvm::dyn_cast<GotoStmt>(Stmt))      { checkGoto(*S);     return; }
     if (auto* S = llvm::dyn_cast<LabeledStmt>(Stmt))   { checkLabeled(*S);  return; }
     if (auto* S = llvm::dyn_cast<CallStmt>(Stmt))      { checkCallStmt(*S); return; }
+    if (auto* S = llvm::dyn_cast<MethodCallStmt>(Stmt)) { checkMethodCallStmt(*S); return; }
     // Structured statements: push onto StructStack so checkGoto can determine
     // whether a goto would jump INTO this statement from outside it (ISO §6.8.1).
     if (auto* S = llvm::dyn_cast<IfStmt>(Stmt)) {
@@ -1979,6 +1980,18 @@ void Sema::checkCallStmt(const CallStmt& S) {
     // TyErr (an ordinary procedure call, or any error) collapses back to
     // null: see CallStmt::ResolvedType's own comment.
     auto RetTy = checkUserDefinedCall(*Sym, S.Loc, S.Args, /*expectFunction=*/false);
+    S.ResolvedType = (RetTy && !RetTy->isError()) ? RetTy : nullptr;
+}
+
+// Turbo Tier 5, Cluster A item 3: 'Obj.Method(args);' / 'P^.Method(args);' /
+// the bare-call form 'Obj.Method;' used as a statement -- see
+// Sema::checkMethodCall's own comment (SemaExpr.cpp) for the shared logic
+// with checkMethodCallExpr, and MethodCallStmt::ResolvedType's own comment
+// (AstStmt.h) for the Turbo `{$X+}` result-discard mirror of CallStmt's
+// identical field just above.
+void Sema::checkMethodCallStmt(const MethodCallStmt& S) {
+    auto RetTy = checkMethodCall(*S.Receiver, S.Method, S.Loc, S.Args,
+                                  /*ExpectFunction=*/false);
     S.ResolvedType = (RetTy && !RetTy->isError()) ? RetTy : nullptr;
 }
 

@@ -251,4 +251,38 @@ struct WriteParam : ExprNode {
     std::unique_ptr<ExprNode> Decimals;  /// decimal places; null if not specified (reals only)
 };
 
+/// Turbo Tier 5, Cluster A item 3: a receiver-carrying method call --
+/// `Obj.Method(args)` or `P^.Method(args)` -- used as a VALUE (a function
+/// method called where an expression is expected).  See MethodCallStmt
+/// (AstStmt.h) for the statement-context sibling (a procedure method, or a
+/// function method called with its result discarded under Turbo's default
+/// `{$X+}`).
+///
+/// Parsed by Parser::parsePostfix exactly where FieldExpr is: `.identifier`
+/// immediately followed by `(` builds this node instead of a FieldExpr,
+/// with Receiver holding whatever postfix chain came before the dot (a
+/// plain IdentExpr for `Obj.Method(...)`, or a DerefExpr for `P^.Method(...)`
+/// -- confirmed against a local fpc -Mtp build that the `^` may not be
+/// omitted: `P.Method` for P: ^TAnimal is "Illegal qualifier", so a bare
+/// pointer receiver never reaches Sema with Object type at all and the
+/// ordinary err_method_call_receiver_not_object diagnostic covers it).
+///
+/// The parser cannot tell a genuine method call from a field access
+/// followed by a parenthesized sub-expression that just happens to sit next
+/// to it (there is no such thing in this codebase -- no procedural-typed
+/// record field exists to call -- but the parser does not know that; it
+/// only knows the two token shapes are otherwise identical), so this is
+/// built unconditionally whenever `.identifier(` is seen and Sema
+/// (Sema::checkMethodCall) is what actually confirms Receiver's type is
+/// TypeKind::Object and Method names something in its VMT-slot ancestor
+/// chain, reporting err_method_call_receiver_not_object /
+/// err_object_method_not_found otherwise.
+struct MethodCallExpr : ExprNode {
+    static bool classof(const Node* n) { return n->Kind == NodeKind::MethodCallExpr; }
+    MethodCallExpr() : ExprNode(NodeKind::MethodCallExpr) {}
+    std::unique_ptr<ExprNode>              Receiver;  /// object-typed expression (or P^ deref of one)
+    std::string                            Method;    /// method name, as written
+    std::vector<std::unique_ptr<ExprNode>> Args;       /// actual arguments, in order
+};
+
 } // namespace plang

@@ -178,9 +178,10 @@ std::unique_ptr<ExprNode> Parser::parseTerm() {
 }
 
 // Applies zero or more postfix operators to Expr:
-//   '[' expression ']' → IndexExpr
-//   '.' identifier      → FieldExpr
-//   '^'                 → DerefExpr
+//   '[' expression ']'        → IndexExpr
+//   '.' identifier            → FieldExpr
+//   '.' identifier '(' ... ')' → MethodCallExpr (Turbo Tier 5, Cluster A item 3)
+//   '^'                        → DerefExpr
 std::unique_ptr<ExprNode> Parser::parsePostfix(std::unique_ptr<ExprNode> Expr) {
     for (;;) {
         if (check(TokenKind::LeftBracket)) {
@@ -210,11 +211,37 @@ std::unique_ptr<ExprNode> Parser::parsePostfix(std::unique_ptr<ExprNode> Expr) {
         } else if (check(TokenKind::Dot)) {
             Token Loc = Current;
             advance();
-            auto Node    = std::make_unique<FieldExpr>();
-            Node->Loc    = Loc;
-            Node->Record = std::move(Expr);
-            Node->Field  = expect(TokenKind::Identifier).Lexeme;
-            Expr = std::move(Node);
+            std::string FieldName = expect(TokenKind::Identifier).Lexeme;
+            // Turbo Tier 5, Cluster A item 3: '.identifier' immediately
+            // followed by '(' is built as a MethodCallExpr rather than a
+            // FieldExpr -- see MethodCallExpr's own comment (AstExpr.h) for
+            // why the parser cannot (and does not need to) tell a genuine
+            // method call apart from anything else here; Sema decides.
+            // Reuses the plain parseExpression-list argument-parsing shape
+            // (not parseSizeHighLowArg's SizeOf/High/Low special case,
+            // which applies only to those three builtins' bare identifier
+            // call form just below in parseFactor).
+            if (check(TokenKind::LeftParen)) {
+                advance(); // consume '('
+                auto Node      = std::make_unique<MethodCallExpr>();
+                Node->Loc      = Loc;
+                Node->Receiver = std::move(Expr);
+                Node->Method   = FieldName;
+                if (!check(TokenKind::RightParen)) {
+                    Node->Args.push_back(parseExpression());
+                    while (match(TokenKind::Comma)) {
+                        Node->Args.push_back(parseExpression());
+                    }
+                }
+                expect(TokenKind::RightParen);
+                Expr = std::move(Node);
+            } else {
+                auto Node    = std::make_unique<FieldExpr>();
+                Node->Loc    = Loc;
+                Node->Record = std::move(Expr);
+                Node->Field  = FieldName;
+                Expr = std::move(Node);
+            }
         } else if (check(TokenKind::Caret)) {
             Token Loc = Current;
             advance();

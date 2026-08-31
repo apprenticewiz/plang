@@ -14,7 +14,7 @@
 using namespace plang;
 
 // See NumExprKinds in AstBase.h.
-static_assert(NumExprKinds == 17, "a new expression needs a case in checkExpr");
+static_assert(NumExprKinds == 18, "a new expression needs a case in checkExpr");
 
 // ---------------------------------------------------------------------------
 // Comparisons that one operand's type has already settled
@@ -173,6 +173,7 @@ std::shared_ptr<Type> Sema::checkExpr(const ExprNode& E) {
     else if (auto* N = llvm::dyn_cast<BinaryExpr>(&E))     T = checkBinary(*N);
     else if (auto* N = llvm::dyn_cast<UnaryExpr>(&E))      T = checkUnary(*N);
     else if (auto* N = llvm::dyn_cast<CallExpr>(&E))       T = checkCallExpr(*N);
+    else if (auto* N = llvm::dyn_cast<MethodCallExpr>(&E)) T = checkMethodCallExpr(*N);
     else if (auto* N = llvm::dyn_cast<SetLiteralExpr>(&E)) T = checkSetLit(*N);
     else if (auto* N = llvm::dyn_cast<StructuredValueExpr>(&E)) T = checkStructuredValue(*N);
     else if (auto* N = llvm::dyn_cast<TypeCastExpr>(&E))   T = checkTypeCast(*N);
@@ -2433,6 +2434,75 @@ Sema::checkUserDefinedCall(const Symbol& Sym, SourceLocation CallLoc,
     }
     checkCallArgs(Sym, CallLoc, Args);
     return Sym.ReturnType ? Sym.ReturnType : TyErr;
+}
+
+// Turbo Tier 5, Cluster A item 3: see this function's own declaration
+// (Sema.h) for the design.  Shared by checkMethodCallExpr (ExpectFunction =
+// true) and checkMethodCallStmt (ExpectFunction = false, defined in
+// SemaStmt.cpp) -- both just check the receiver/method, then hand off.
+std::shared_ptr<Type> Sema::checkMethodCall(
+        const ExprNode& Receiver, const std::string& Method, SourceLocation Loc,
+        std::span<const std::unique_ptr<ExprNode>> Args, bool ExpectFunction) {
+    auto RecvTy = checkExpr(Receiver);
+    if (RecvTy->isError()) {
+        for (const auto& A : Args) (void)checkExpr(*A);
+        return TyErr;
+    }
+    // Confirmed against a local fpc -Mtp build: a pointer receiver must be
+    // explicitly dereferenced ('P^.Method', never 'P.Method' -- "Illegal
+    // qualifier") -- so by the time a genuine method call reaches here, the
+    // '^' has already been parsed as a DerefExpr and checkExpr(Receiver) has
+    // already unwrapped it to the pointee's own Object type.  RecvTy is
+    // therefore checked directly against TypeKind::Object, with no separate
+    // TypeKind::Pointer branch: a bare pointer receiver correctly falls into
+    // the "not an object" diagnostic below, matching fpc's own rejection.
+    if (RecvTy->Kind != TypeKind::Object) {
+        error(Loc, diag::err_method_call_receiver_not_object, {RecvTy->Name});
+        for (const auto& A : Args) (void)checkExpr(*A);
+        return TyErr;
+    }
+
+    // Ancestor-chain walk for a method named Method: the same MRO order
+    // resolveObjectType's own VmtSlots inheritance uses (SemaType.cpp), just
+    // expressed through the public composite-key symbol lookup
+    // (Sema::objectMethodKey) that resolveObjectType itself registered each
+    // TYPE-LEVEL method under, rather than SemaType.cpp's file-local
+    // findMethodInChain helper (which walks Type::ObjectMethods directly and
+    // is not visible outside that translation unit) -- both walk Parent the
+    // same way and would find the same declaration.
+    const Symbol* MethodSym = nullptr;
+    for (const Type* Cur = RecvTy.get(); Cur; Cur = Cur->Parent.get()) {
+        Symbol* S = Symtab.lookup(objectMethodKey(Cur->Name, Method));
+        if (S && S->Kind == SymbolKind::Method) { MethodSym = S; break; }
+    }
+    if (!MethodSym) {
+        error(Loc, diag::err_object_method_not_found, {RecvTy->Name, Method});
+        for (const auto& A : Args) (void)checkExpr(*A);
+        return TyErr;
+    }
+
+    // Turbo Tier 5, Cluster A item 3 is explicitly scoped to parsing + Sema
+    // RESOLUTION only -- no visibility enforcement (item 7's job): a private
+    // method called from outside its own type's implementation is accepted
+    // here exactly like a public one.  Tracked, not silently forgotten.
+
+    // Hand off to the SAME arity/argument-type checking an ordinary
+    // procedure/function call gets, via a synthetic SymbolKind::Proc
+    // stand-in -- the identical trick checkUserDefinedCall's own Var/
+    // procedural-value arm already uses just above, so this is not a second
+    // implementation of argument checking.
+    Symbol Indirect;
+    Indirect.Kind       = SymbolKind::Proc;
+    Indirect.Name       = MethodSym->MethodOwnerType + "." +
+                           (MethodSym->Decl ? MethodSym->Decl->Name : Method);
+    Indirect.IsFunction = MethodSym->IsFunction;
+    Indirect.Params     = MethodSym->Params;
+    Indirect.ReturnType = MethodSym->ReturnType;
+    return checkUserDefinedCall(Indirect, Loc, Args, ExpectFunction);
+}
+
+std::shared_ptr<Type> Sema::checkMethodCallExpr(const MethodCallExpr& E) {
+    return checkMethodCall(*E.Receiver, E.Method, E.Loc, E.Args, /*ExpectFunction=*/true);
 }
 
 /// EP §6.7.3.7: are two conformant array schemas the same one?

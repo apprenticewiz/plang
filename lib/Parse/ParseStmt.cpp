@@ -253,6 +253,37 @@ std::unique_ptr<StmtNode> Parser::parseStatement() {
                 return Node;
             }
 
+            // Turbo Tier 5, Cluster A item 3: 'Obj.Method(args);' -- Lval is
+            // already a MethodCallExpr (parsePostfix built one the moment it
+            // saw '.identifier(' -- see that function's own comment,
+            // ParseExpr.cpp) -- becomes a MethodCallStmt the same way an
+            // ordinary CallExpr-shaped bare identifier becomes a CallStmt
+            // just above, just with a Receiver instead of a bare Name.
+            if (auto* Mc = llvm::dyn_cast<MethodCallExpr>(Lval.get())) {
+                auto Node      = std::make_unique<MethodCallStmt>();
+                Node->Loc      = Mc->Loc;
+                Node->Receiver = std::move(Mc->Receiver);
+                Node->Method   = std::move(Mc->Method);
+                Node->Args     = std::move(Mc->Args);
+                return Node;
+            }
+            // Turbo Tier 5, Cluster A item 3: the BARE form, 'Obj.Method;'
+            // with no parens at all -- confirmed legal against a local
+            // fpc -Mtp build, the identical relaxation a bare 'Foo;' already
+            // gets for a zero-argument ordinary procedure.  Lval is a plain
+            // FieldExpr here (parsePostfix has no way to know '.identifier'
+            // with nothing after it is a method rather than a field read
+            // used, illegally, as a statement -- there is no such thing as
+            // an expression-statement in this grammar otherwise, so this was
+            // always an error before and Sema now decides which one).
+            if (auto* Fe = llvm::dyn_cast<FieldExpr>(Lval.get())) {
+                auto Node      = std::make_unique<MethodCallStmt>();
+                Node->Loc      = Fe->Loc;
+                Node->Receiver = std::move(Fe->Record);
+                Node->Method   = Fe->Field;
+                return Node;
+            }
+
             emitError(Lval->Loc, diag::err_expected_assign_after_var);
             return nullptr;
         }
