@@ -1609,10 +1609,10 @@ int frontendPC1Main(int Argc, char *Argv[]) {
     // Turbo Tier 4, Cluster A item 1 taught a standalone unit file to run
     // through Sema for real (Sema::checkUnit).  Cluster A item 2 replaces
     // item 1's own "type-checks, but stops there" placeholder
-    // (err_unit_compilation_not_yet_supported, now unused -- kept in the
-    // catalog as a historical diagnostic, the same way this codebase treats
-    // every other retired-but-still-formattable message) with real
-    // separate-compilation codegen: publish this unit's own .tui (its
+    // (err_unit_compilation_not_yet_supported, since removed -- issue #308
+    // part (b): a diagnostic with no emit site is dead weight, not a useful
+    // historical record) with real separate-compilation codegen: publish
+    // this unit's own .tui (its
     // INTERFACE, written back out as Pascal text -- buildTUIContent/
     // writeTUIFile just above) and emit its object code (Codegen::emitUnit)
     // exactly the way a program does just below, minus the parts (a `main`,

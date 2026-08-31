@@ -1,8 +1,8 @@
 (*
 Turbo Tier 5, Cluster A item 1 supersedes item 0's own placeholder
-(err_object_type_not_yet_supported, now unused -- kept in the catalog,
-DiagnosticSemaKinds.def's own comment) with real resolution: an object type
-whose only method is virtual-and-abstract needs no out-of-line body at all
+(err_object_type_not_yet_supported, since removed -- issue #308 part (b))
+with real resolution: an object type whose only method is
+virtual-and-abstract needs no out-of-line body at all
 (err_object_method_never_defined does not apply -- see that diagnostic's
 own comment) and now resolves cleanly, VMT slot included.  This is the
 positive twin of abstract-method-may-not-have-a-body.pas (which checks the
