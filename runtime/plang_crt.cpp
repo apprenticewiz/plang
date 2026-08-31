@@ -94,7 +94,15 @@ bool stdinHasByteWithin(long TimeoutUsec) {
     fd_set Fds;
     FD_ZERO(&Fds);
     FD_SET(STDIN_FILENO, &Fds);
-    timeval Tv{TimeoutUsec / 1000000, TimeoutUsec % 1000000};
+    // Brace-init would narrow the microseconds field, which macOS's own
+    // tv_usec (a 32-bit __darwin_suseconds_t) rejects at compile time --
+    // Linux's own (64-bit) accepts the identical literal by chance, which is
+    // exactly the kind of platform difference this file's own header
+    // comment warns every OS-specific code path to isolate rather than
+    // assume away.
+    timeval Tv{};
+    Tv.tv_sec  = static_cast<decltype(Tv.tv_sec)>(TimeoutUsec / 1000000);
+    Tv.tv_usec = static_cast<decltype(Tv.tv_usec)>(TimeoutUsec % 1000000);
     int Rc;
     do {
         Rc = ::select(STDIN_FILENO + 1, &Fds, nullptr, nullptr, &Tv);
