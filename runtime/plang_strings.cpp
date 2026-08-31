@@ -42,6 +42,22 @@
 
 #include <strings.h> // strcasecmp(3) -- StrIComp's case-insensitive compare
 
+// GCC/Clang's `asm("name")` label extension binds a function to an EXACT
+// link name, bypassing C++ name mangling -- but on Mach-O (macOS) every C
+// symbol the compiler itself emits also gets an implicit leading underscore
+// that `asm(...)` does NOT apply automatically (unlike an ordinary,
+// non-asm-labelled C++/extern "C" declaration, where the compiler adds it
+// for you).  Confirmed the hard way: this file's own symbols linked fine on
+// Linux/ELF (no such prefixing convention) and failed with "Undefined
+// symbols ... _pas_strings$StrLower" on macOS/Mach-O, since CGLinkage's own
+// LLVM-emitted call site already expects the Mach-O convention (LLVM knows
+// its own target triple) but this file's literal asm-label did not.
+#if defined(__APPLE__)
+#define PLANG_ASM_NAME(name) asm("_" name)
+#else
+#define PLANG_ASM_NAME(name) asm(name)
+#endif
+
 namespace plang {
 
 extern "C" {
@@ -51,13 +67,13 @@ void *plang_tp_getmem(int64_t Size);
 void  plang_tp_freemem(void *P, int64_t Size);
 
 // ---- StrLen ----------------------------------------------------------------
-uint32_t plang_strings_StrLen(const char *Str) asm("pas_strings$StrLen");
+uint32_t plang_strings_StrLen(const char *Str) PLANG_ASM_NAME("pas_strings$StrLen");
 uint32_t plang_strings_StrLen(const char *Str) {
     return static_cast<uint32_t>(std::strlen(Str));
 }
 
 // ---- StrCopy ----------------------------------------------------------------
-char *plang_strings_StrCopy(char *Dest, const char *Source) asm("pas_strings$StrCopy");
+char *plang_strings_StrCopy(char *Dest, const char *Source) PLANG_ASM_NAME("pas_strings$StrCopy");
 char *plang_strings_StrCopy(char *Dest, const char *Source) {
     std::strcpy(Dest, Source);
     return Dest;
@@ -69,7 +85,7 @@ char *plang_strings_StrCopy(char *Dest, const char *Source) {
 // NULs when Source is shorter; neither behavior is what StrLCopy documents,
 // so this is hand-rolled rather than a strncpy wrapper). ----------------------
 char *plang_strings_StrLCopy(char *Dest, const char *Source, uint32_t MaxLen)
-    asm("pas_strings$StrLCopy");
+    PLANG_ASM_NAME("pas_strings$StrLCopy");
 char *plang_strings_StrLCopy(char *Dest, const char *Source, uint32_t MaxLen) {
     uint32_t I = 0;
     while (I < MaxLen && Source[I] != '\0') { Dest[I] = Source[I]; ++I; }
@@ -78,7 +94,7 @@ char *plang_strings_StrLCopy(char *Dest, const char *Source, uint32_t MaxLen) {
 }
 
 // ---- StrCat ----------------------------------------------------------------
-char *plang_strings_StrCat(char *Dest, const char *Source) asm("pas_strings$StrCat");
+char *plang_strings_StrCat(char *Dest, const char *Source) PLANG_ASM_NAME("pas_strings$StrCat");
 char *plang_strings_StrCat(char *Dest, const char *Source) {
     std::strcat(Dest, Source);
     return Dest;
@@ -89,7 +105,7 @@ char *plang_strings_StrCat(char *Dest, const char *Source) {
 // suffix, unlike strncat(3), whose third argument bounds only the number of
 // source bytes appended regardless of Dest's existing length). --------------
 char *plang_strings_StrLCat(char *Dest, const char *Source, uint32_t MaxLen)
-    asm("pas_strings$StrLCat");
+    PLANG_ASM_NAME("pas_strings$StrLCat");
 char *plang_strings_StrLCat(char *Dest, const char *Source, uint32_t MaxLen) {
     const uint32_t DestLen = static_cast<uint32_t>(std::strlen(Dest));
     if (DestLen >= MaxLen) return Dest; // already at or past the limit: no-op
@@ -103,18 +119,18 @@ char *plang_strings_StrLCat(char *Dest, const char *Source, uint32_t MaxLen) {
 // ---- StrComp/StrLComp/StrIComp: strcmp(3)'s own convention (negative/zero/
 // positive), confirmed as real Borland/FPC field practice too -- Str1 < Str2,
 // Str1 = Str2, Str1 > Str2 respectively, not just a -1/0/1 tri-state. -------
-int16_t plang_strings_StrComp(const char *Str1, const char *Str2) asm("pas_strings$StrComp");
+int16_t plang_strings_StrComp(const char *Str1, const char *Str2) PLANG_ASM_NAME("pas_strings$StrComp");
 int16_t plang_strings_StrComp(const char *Str1, const char *Str2) {
     return static_cast<int16_t>(std::strcmp(Str1, Str2));
 }
 
 int16_t plang_strings_StrLComp(const char *Str1, const char *Str2, uint32_t MaxLen)
-    asm("pas_strings$StrLComp");
+    PLANG_ASM_NAME("pas_strings$StrLComp");
 int16_t plang_strings_StrLComp(const char *Str1, const char *Str2, uint32_t MaxLen) {
     return static_cast<int16_t>(std::strncmp(Str1, Str2, MaxLen));
 }
 
-int16_t plang_strings_StrIComp(const char *Str1, const char *Str2) asm("pas_strings$StrIComp");
+int16_t plang_strings_StrIComp(const char *Str1, const char *Str2) PLANG_ASM_NAME("pas_strings$StrIComp");
 int16_t plang_strings_StrIComp(const char *Str1, const char *Str2) {
     return static_cast<int16_t>(::strcasecmp(Str1, Str2));
 }
@@ -122,7 +138,7 @@ int16_t plang_strings_StrIComp(const char *Str1, const char *Str2) {
 // ---- StrPos: substring search; nil (not found) when Str2 is not a
 // substring of Str1 -- an empty Str2 always matches at Str1 (real Borland/
 // FPC field practice, and also strstr(3)'s own). -----------------------------
-char *plang_strings_StrPos(const char *Str1, const char *Str2) asm("pas_strings$StrPos");
+char *plang_strings_StrPos(const char *Str1, const char *Str2) PLANG_ASM_NAME("pas_strings$StrPos");
 char *plang_strings_StrPos(const char *Str1, const char *Str2) {
     return const_cast<char *>(std::strstr(Str1, Str2));
 }
@@ -131,25 +147,25 @@ char *plang_strings_StrPos(const char *Str1, const char *Str2) {
 // search for the NUL terminator itself (Chr = #0) is real Borland/FPC field
 // practice too (strchr(3)/strrchr(3) already both honor it: the terminator
 // counts as part of the string being searched). -----------------------------
-char *plang_strings_StrScan(const char *Str, char Chr) asm("pas_strings$StrScan");
+char *plang_strings_StrScan(const char *Str, char Chr) PLANG_ASM_NAME("pas_strings$StrScan");
 char *plang_strings_StrScan(const char *Str, char Chr) {
     return const_cast<char *>(std::strchr(Str, static_cast<unsigned char>(Chr)));
 }
 
-char *plang_strings_StrRScan(const char *Str, char Chr) asm("pas_strings$StrRScan");
+char *plang_strings_StrRScan(const char *Str, char Chr) PLANG_ASM_NAME("pas_strings$StrRScan");
 char *plang_strings_StrRScan(const char *Str, char Chr) {
     return const_cast<char *>(std::strrchr(Str, static_cast<unsigned char>(Chr)));
 }
 
 // ---- StrUpper/StrLower: in-place, returns the same pointer it was given. --
-char *plang_strings_StrUpper(char *Str) asm("pas_strings$StrUpper");
+char *plang_strings_StrUpper(char *Str) PLANG_ASM_NAME("pas_strings$StrUpper");
 char *plang_strings_StrUpper(char *Str) {
     for (char *P = Str; *P; ++P)
         *P = static_cast<char>(std::toupper(static_cast<unsigned char>(*P)));
     return Str;
 }
 
-char *plang_strings_StrLower(char *Str) asm("pas_strings$StrLower");
+char *plang_strings_StrLower(char *Str) PLANG_ASM_NAME("pas_strings$StrLower");
 char *plang_strings_StrLower(char *Str) {
     for (char *P = Str; *P; ++P)
         *P = static_cast<char>(std::tolower(static_cast<unsigned char>(*P)));
@@ -161,7 +177,7 @@ char *plang_strings_StrLower(char *Str) {
 // nil in, nil out (real Borland/FPC field practice: StrNew(nil) = nil,
 // StrDispose(nil) is a no-op), matching plang_tp_freemem's own nil-safety
 // (std::free(nullptr) is always defined). ------------------------------------
-char *plang_strings_StrNew(const char *Str) asm("pas_strings$StrNew");
+char *plang_strings_StrNew(const char *Str) PLANG_ASM_NAME("pas_strings$StrNew");
 char *plang_strings_StrNew(const char *Str) {
     if (!Str) return nullptr;
     const auto Len = static_cast<int64_t>(std::strlen(Str));
@@ -171,7 +187,7 @@ char *plang_strings_StrNew(const char *Str) {
     return P;
 }
 
-void plang_strings_StrDispose(char *Str) asm("pas_strings$StrDispose");
+void plang_strings_StrDispose(char *Str) PLANG_ASM_NAME("pas_strings$StrDispose");
 void plang_strings_StrDispose(char *Str) {
     if (!Str) return;
     const auto Len = static_cast<int64_t>(std::strlen(Str));
@@ -184,7 +200,7 @@ void plang_strings_StrDispose(char *Str) {
 // length, bytes 1.. are the character data (plang_sstr.cpp's own header
 // comment). StrPCopy copies the whole thing; StrPLCopy truncates to MaxLen
 // the same way StrLCopy does above -- both always null-terminate. ----------
-char *plang_strings_StrPCopy(char *Dest, const void *Source) asm("pas_strings$StrPCopy");
+char *plang_strings_StrPCopy(char *Dest, const void *Source) PLANG_ASM_NAME("pas_strings$StrPCopy");
 char *plang_strings_StrPCopy(char *Dest, const void *Source) {
     const auto *S   = static_cast<const uint8_t *>(Source);
     const uint8_t Len = S[0];
@@ -194,7 +210,7 @@ char *plang_strings_StrPCopy(char *Dest, const void *Source) {
 }
 
 char *plang_strings_StrPLCopy(char *Dest, const void *Source, uint32_t MaxLen)
-    asm("pas_strings$StrPLCopy");
+    PLANG_ASM_NAME("pas_strings$StrPLCopy");
 char *plang_strings_StrPLCopy(char *Dest, const void *Source, uint32_t MaxLen) {
     const auto *S   = static_cast<const uint8_t *>(Source);
     uint32_t Len = S[0];

@@ -43,6 +43,16 @@
 
 #include <unistd.h> // getpid()
 
+// See plang_strings.cpp's own identical macro for the full rationale: an
+// asm-label needs an explicit leading underscore on Mach-O (macOS), which
+// the compiler would otherwise add automatically for a non-asm-labelled
+// symbol but does NOT add on top of an explicit asm(...) label.
+#if defined(__APPLE__)
+#define PLANG_ASM_NAME(name) asm("_" name)
+#else
+#define PLANG_ASM_NAME(name) asm(name)
+#endif
+
 namespace plang {
 
 extern "C" {
@@ -65,7 +75,7 @@ void plang_tp_rewrite(PascalFile *F);
 // state any other file variable starts in, which plang_tp_assign/
 // plang_tp_rewrite below then open for real before anything else can touch
 // it.
-PascalFile PlangPrinterLst asm("pasg_printer$Lst");
+PascalFile PlangPrinterLst PLANG_ASM_NAME("pasg_printer$Lst");
 
 namespace {
 
