@@ -27,7 +27,14 @@ target_link_libraries(PlangLocale PRIVATE plang_warnings)
 target_compile_definitions(PlangLocale PRIVATE
     PLANG_CATALOG_DIR="${CMAKE_BINARY_DIR}/share/plang/locale")
 
-# Language-independent support: source buffers and positions.
-add_library(PlangBasic OBJECT SourceManager.cpp)
+# Language-independent support: source buffers and positions, and (Tier 4,
+# Cluster B item 4) where an installed plang finds its shipped RTL units.
+add_library(PlangBasic OBJECT SourceManager.cpp UnitSearchPath.cpp)
 target_compile_options(PlangBasic PRIVATE -fno-rtti -fno-exceptions -fPIC)
 target_link_libraries(PlangBasic PRIVATE plang_warnings)
+# Where the shipped RTL units are in the build tree.  Same two-step
+# reasoning as PlangLocale's own PLANG_CATALOG_DIR just above: an installed
+# plang finds them relative to its own binary, an uninstalled one (and every
+# test binary, which is its own main executable) finds them here instead.
+target_compile_definitions(PlangBasic PRIVATE
+    PLANG_UNIT_DIR="${CMAKE_BINARY_DIR}/lib/plang/units")

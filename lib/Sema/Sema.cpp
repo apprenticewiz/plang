@@ -1203,6 +1203,12 @@ Sema::loadUnitInterfaceExports(const std::string& UnitName, SourceLocation Loc) 
     bool        IsTUI = false;
     std::vector<std::string> SearchDirs = Opts.ModuleSearchPaths;
     SearchDirs.push_back(".");
+    // Tier 4, Cluster B item 4: the shipped-RTL default, tried only after a
+    // user's own -I directories and the current directory -- see
+    // LangOptions::UnitSearchPaths's own comment for why this is a third,
+    // separate list rather than folded into ModuleSearchPaths above.
+    SearchDirs.insert(SearchDirs.end(), Opts.UnitSearchPaths.begin(),
+                       Opts.UnitSearchPaths.end());
     for (const auto& Dir : SearchDirs) {
         if (Path = findExact(Dir, Key + ".tui"); !Path.empty()) {
             Found = true; IsTUI = true; break;

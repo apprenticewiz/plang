@@ -23,6 +23,7 @@
 #include "plang/Basic/SourceManager.h"
 #include "plang/Basic/LangOptions.h"
 #include "plang/Basic/StringUtil.h"
+#include "plang/Basic/UnitSearchPath.h"
 #include "plang/Parse/Parser.h"
 #include "plang/Lex/Scanner.h"
 #include "plang/Sema/Sema.h"
@@ -1438,6 +1439,11 @@ int frontendPC1Main(int Argc, char *Argv[]) {
     }
     Opts.ModuleSearchPaths = std::move(ModuleSearchPaths);
     Opts.IncludeSearchPaths = std::move(IncludeSearchPaths);
+    // Tier 4, Cluster B item 4: the default installed-RTL search path a
+    // `uses` clause falls back to with no -I and no PLANG_UNIT_DIR override
+    // -- see UnitSearchPaths's own comment for why this is a third list
+    // rather than folded into ModuleSearchPaths above.
+    Opts.UnitSearchPaths = unitSearchPaths(findInstallDir(Argc > 0 ? Argv[0] : nullptr));
 
     // Opts.Defines: the predefined platform symbols first (the baseline),
     // then -d/-u in the order given on the command line, so a later -u can

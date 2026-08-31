@@ -242,6 +242,28 @@ struct LangOptions {
     /// things depending on which dialect is active.
     std::vector<std::string> IncludeSearchPaths;
 
+    /// Directories to search for a Turbo unit's own "<name>.tui"/"<name>.pas"
+    /// (see Sema::loadUnitInterfaceExports's own comment for the full
+    /// resolution order), tried LAST -- after ModuleSearchPaths and ".".
+    /// Populated by the front end from unitSearchPaths()
+    /// (plang/Basic/UnitSearchPath.h): an env-var override, then the
+    /// directory a shipped RTL installs into relative to the running
+    /// binary, then a compiled-in build-tree fallback -- the same
+    /// three-tier resolution catalogSearchPaths() uses for message
+    /// catalogs (Tier 4, Cluster B item 4).
+    ///
+    /// Deliberately a THIRD, separate list from ModuleSearchPaths/-I (EP's
+    /// own .pmi search path) and IncludeSearchPaths/-Fi ({$I}'s own search
+    /// path) above: -I already means the EP module search path, and
+    /// reusing it for where the shipped Turbo RTL lives would make one flag
+    /// mean two different things depending on which dialect is active --
+    /// exactly the reasoning IncludeSearchPaths's own comment gives for not
+    /// reusing ModuleSearchPaths for {$I}.  There is no user-facing flag for
+    /// this list; it is always exactly what unitSearchPaths() computes, since
+    /// this item is about the DEFAULT installed-RTL location resolving with
+    /// no flags at all, not a new command-line option.
+    std::vector<std::string> UnitSearchPaths;
+
     /// Symbols defined for -std=turbo's `{$IFDEF}`/`{$IFNDEF}`/`{$ELSEIF}`
     /// conditional compilation: the command line's `-d<symbol>`/`-u<symbol>`
     /// (applied in the order given, so a later -u undoes an earlier -d for

@@ -173,6 +173,18 @@ jobs:
           # ... and that the sentinel is absent without the locale, so the
           # grep above cannot pass for some reason unrelated to the catalog.
           ! plang bad.pas -o bad 2>&1 | grep -q '\[!'
+          # Turbo Tier 4, Cluster B item 4: the shipped RTL's own install
+          # path. No real standard-library unit exists yet (Crt/Dos/Printer/
+          # Strings are a later cluster) -- share/plang/units/InstallProbeUnit.pas
+          # is a deliberately tiny placeholder whose only job is to prove
+          # unitSearchPaths()'s default tier (<exeDir>/../lib/plang/units)
+          # resolves a real `uses` clause from a real installed prefix, with
+          # NO -I and NO PLANG_UNIT_DIR -- the one tier lit's own suite
+          # cannot reach, since it always runs the in-tree build-dir binary.
+          test -f /usr/local/lib/plang/units/InstallProbeUnit.pas
+          printf 'program usesprobe(output);\nuses InstallProbeUnit;\nbegin writeln(InstallProbeAnswer) end.\n' > usesprobe.pas
+          plang -std=turbo usesprobe.pas -o usesprobe
+          test "$(./usesprobe)" = "42"
 
   macos:
     name: macOS / ${{ matrix.build_type }}
@@ -325,6 +337,18 @@ jobs:
           # ... and that the sentinel is absent without the locale, so the
           # grep above cannot pass for some reason unrelated to the catalog.
           ! plang bad.pas -o bad 2>&1 | grep -q '\[!'
+          # Turbo Tier 4, Cluster B item 4: the shipped RTL's own install
+          # path. No real standard-library unit exists yet (Crt/Dos/Printer/
+          # Strings are a later cluster) -- share/plang/units/InstallProbeUnit.pas
+          # is a deliberately tiny placeholder whose only job is to prove
+          # unitSearchPaths()'s default tier (<exeDir>/../lib/plang/units)
+          # resolves a real `uses` clause from a real installed prefix, with
+          # NO -I and NO PLANG_UNIT_DIR -- the one tier lit's own suite
+          # cannot reach, since it always runs the in-tree build-dir binary.
+          test -f /usr/local/lib/plang/units/InstallProbeUnit.pas
+          printf 'program usesprobe(output);\nuses InstallProbeUnit;\nbegin writeln(InstallProbeAnswer) end.\n' > usesprobe.pas
+          plang -std=turbo usesprobe.pas -o usesprobe
+          test "$(./usesprobe)" = "42"
 
   optimized:
     name: emitted programs at -O1/-O2/-O3

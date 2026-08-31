@@ -387,6 +387,20 @@ install(DIRECTORY share/plang/gdb/
     DESTINATION ${CMAKE_INSTALL_DATADIR}/plang/gdb
     FILES_MATCHING PATTERN "*.py"
 )
+# Turbo Tier 4, Cluster B item 4: where an installed plang's own `uses`
+# clause finds the shipped RTL by default, with no -I and no PLANG_UNIT_DIR
+# -- see lib/Basic/UnitSearchPath.cpp's own unitSearchPaths() for the three
+# tiers this is the middle one of (<exeDir>/../lib/plang/units, matching
+# CMAKE_INSTALL_LIBDIR/plang/units below exactly).  No real standard-library
+# unit exists yet (Crt/Dos/Printer/Strings are a later cluster); the one file
+# this installs, share/plang/units/InstallProbeUnit.pas, is a deliberately
+# tiny placeholder whose only job is to prove this install layout and the
+# default search path actually resolve a `uses` clause end-to-end from a
+# real installed prefix -- see its own header comment.
+install(DIRECTORY share/plang/units/
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/plang/units
+    FILES_MATCHING PATTERN "*.pas"
+)
 
 # ---- Tests ----
 # Off by default: the suite needs GoogleTest, which someone building the
