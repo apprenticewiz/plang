@@ -535,7 +535,7 @@ llvm::Value* CGBinaryOps::emitBinary(const BinaryExpr& e) {
     // only true of the right operand.
     if (e.Op == TokenKind::In)
         return Sets.emitSetMember(EmitExpr(*e.Left), EmitExpr(*e.Right),
-                             Sets.setBaseOf(*e.Right));
+                             Sets.setBaseOf(*e.Right), operandIsSigned(*e.Left));
 
     auto* lv = EmitExpr(*e.Left);
     auto* rv = EmitExpr(*e.Right);
