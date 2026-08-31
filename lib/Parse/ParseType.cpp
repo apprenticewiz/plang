@@ -208,6 +208,9 @@ std::unique_ptr<TypeNode> Parser::parseTypeExpr() {
         case TokenKind::Record:
             return parseRecordType(false);
 
+        case TokenKind::Object:
+            return parseObjectType();
+
         case TokenKind::Set: {
             advance();
             expect(TokenKind::Of);
@@ -752,6 +755,128 @@ std::unique_ptr<RecordTypeNode> Parser::parseRecordType(bool Packed) {
     // enclosing 'record' between here and the ceiling is missing its 'end'
     // for the same reason, and expect()'s diagnostic once per level would
     // bury the one diagnostic that actually explains the failure.
+    if (TypeDepthLimitHit)
+        match(TokenKind::End);
+    else
+        expect(TokenKind::End);
+    return Node;
+}
+
+// One in-class method heading -- see parseObjectMethodHeading's own
+// declaration comment in Parser.h for the grammar.  Called with Current
+// pointing at 'constructor'/'destructor'/'procedure'/'function'.
+std::unique_ptr<ProcDecl> Parser::parseObjectMethodHeading() {
+    auto Node = std::make_unique<ProcDecl>();
+    Node->Loc = Current;
+    // A heading with no body of its own here -- the same "signature now,
+    // body elsewhere" meaning IsForward already carries for a unit
+    // interface's own HeadingsOnly declarations (parseProcDecl's own
+    // comment).  The body, when one exists, is the out-of-line
+    // 'TypeName.MethodName' ProcDecl that parseProcDecl produces elsewhere
+    // (see its own Turbo-object dotted-heading handling).
+    Node->IsForward = true;
+
+    if (match(TokenKind::Constructor)) {
+        Node->IsConstructor = true;
+    } else if (match(TokenKind::Destructor)) {
+        Node->IsDestructor = true;
+    } else if (match(TokenKind::Function)) {
+        Node->IsFunction = true;
+    } else {
+        expect(TokenKind::Procedure);
+    }
+
+    Node->Name   = expect(TokenKind::Identifier).Lexeme;
+    Node->Params = parseParamList();
+
+    if (Node->IsFunction && match(TokenKind::Colon)) {
+        Node->ReturnType = parseTypeExpr();
+    }
+
+    expect(TokenKind::Semicolon);
+
+    // Trailing directives -- confirmed against a local fpc -Mtp build that
+    // both are written AFTER the heading's own ';', each terminated by its
+    // own ';' in turn ('procedure Draw; virtual; abstract;'), exactly like
+    // this codebase's existing 'forward' directive (parseProcDecl).  Real
+    // Turbo Pascal always writes 'virtual' before a following 'abstract'
+    // (an abstract method is necessarily virtual), but both are accepted in
+    // either order here since ordering them is a semantic rule -- "abstract
+    // without virtual" -- not a syntactic one, and Sema is where that rule
+    // belongs.
+    for (;;) {
+        if (match(TokenKind::Virtual)) {
+            Node->IsVirtual = true;
+            expect(TokenKind::Semicolon);
+            continue;
+        }
+        if (match(TokenKind::Abstract)) {
+            Node->IsAbstract = true;
+            expect(TokenKind::Semicolon);
+            continue;
+        }
+        break;
+    }
+    return Node;
+}
+
+// Turbo object-type denoter.  See ObjectTypeNode's own comment in AstDecl.h
+// for the full grammar and every field-practice decision this was checked
+// against.  Called with Current pointing at 'object'.
+std::unique_ptr<ObjectTypeNode> Parser::parseObjectType() {
+    auto Node = std::make_unique<ObjectTypeNode>();
+    Node->Loc = Current;
+    expect(TokenKind::Object);
+
+    // Optional ancestor clause.  Absent entirely for a root object type --
+    // confirmed legal against a local fpc -Mtp build (obj1.pas's own
+    // TAnimal = object ... end, no parens at all).
+    if (match(TokenKind::LeftParen)) {
+        Node->Ancestor = expect(TokenKind::Identifier).Lexeme;
+        expect(TokenKind::RightParen);
+    }
+
+    // Confirmed against a local fpc -Mtp build (obj2.pas): any number of
+    // 'private'/'public' sections, in any order, each simply setting the
+    // visibility for the members that follow until the next such keyword or
+    // 'end' -- so this is one flat loop with a running CurVis rather than a
+    // fixed "public part then one optional private part" shape.
+    MemberVisibility CurVis = MemberVisibility::Public;
+    while (!check(TokenKind::End) && !check(TokenKind::Eof)) {
+        if (match(TokenKind::Private)) { CurVis = MemberVisibility::Private; continue; }
+        if (match(TokenKind::Public))  { CurVis = MemberVisibility::Public;  continue; }
+
+        if (check(TokenKind::Procedure) || check(TokenKind::Function) ||
+            check(TokenKind::Constructor) || check(TokenKind::Destructor)) {
+            ObjectMember M;
+            M.Vis      = CurVis;
+            M.IsMethod = true;
+            M.Method   = parseObjectMethodHeading();
+            Node->Members.push_back(std::move(M));
+            continue;
+        }
+
+        // Otherwise, a field-declaration -- identifier-list ':' type-expr ';',
+        // the same shape as a RecordTypeNode field (parseRecordType above).
+        ObjectMember M;
+        M.Vis = CurVis;
+        M.Field.Names.push_back(expect(TokenKind::Identifier).Lexeme);
+        while (match(TokenKind::Comma)) {
+            M.Field.Names.push_back(expect(TokenKind::Identifier).Lexeme);
+        }
+        // See parseRecordType's identical registration above: a field is
+        // exposed by `with` exactly as a var-declaration introduces one.
+        for (const auto& N : M.Field.Names) VarNames_.insert(toLower(N));
+        expect(TokenKind::Colon);
+        M.Field.Type = parseTypeExpr();
+        Node->Members.push_back(std::move(M));
+
+        if (!match(TokenKind::Semicolon)) break;
+        // Allow trailing semicolons before 'end'.
+    }
+
+    // Suppressed while unwinding from the depth ceiling above: see
+    // parseRecordType's identical comment on its own 'end'.
     if (TypeDepthLimitHit)
         match(TokenKind::End);
     else

@@ -478,6 +478,14 @@ DIAG(err_proc_param_not_congruous, Error,
 DIAG(err_proc_param_not_assignable, Error,
      "'%0' is a procedural parameter and cannot be assigned to")
 DIAG(err_unrecognized_type, Error, "unrecognized type expression")
+// Turbo Tier 5, Cluster A item 0: object types parse (Parser::parseObjectType)
+// but Sema has no inheritance/VMT/layout logic yet -- that is items 1-7's
+// job, not this one's.  A parsed ObjectTypeNode reaching type resolution is
+// therefore a real, if temporary, terminal case rather than a fall-through
+// to err_unrecognized_type, the same way a parsed-but-unprocessed UnitNode
+// once got its own now-unused err_unit_compilation_not_yet_supported.
+DIAG(err_object_type_not_yet_supported, Error,
+     "object types are not yet supported")
 DIAG(err_undefined_type, Error, "undefined type '%0'")
 DIAG(err_not_a_type, Error, "'%0' is not a type")
 // EP §6.2.1(k): the relaxation that lets declaration parts appear in any

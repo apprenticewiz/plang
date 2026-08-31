@@ -16,7 +16,7 @@
 using namespace plang;
 
 // See NumTypeKinds in AstBase.h.
-static_assert(NumTypeKinds == 14,
+static_assert(NumTypeKinds == 15,
               "a new type denoter needs a case in resolveTypeImpl");
 
 // ---------------------------------------------------------------------------
@@ -911,6 +911,17 @@ std::shared_ptr<Type> Sema::resolveTypeImpl(const TypeNode& Node) {
         // Cache for codegen (mutable annotation, same pattern as ExprNode::ResolvedType).
         N->ResolvedBody = T;
         return T;
+    }
+    if (llvm::isa<ObjectTypeNode>(&Node)) {
+        // Turbo Tier 5, Cluster A item 0: parsing only.  Inheritance
+        // resolution, VMT/layout, and method-body checking are items 1-7's
+        // job -- see ObjectTypeNode's own comment in AstDecl.h.  A parsed
+        // object type reaching type resolution today is a real, if
+        // temporary, terminal case, so it gets its own clear diagnostic
+        // rather than falling through to the generic
+        // err_unrecognized_type below.
+        error(Node.Loc, diag::err_object_type_not_yet_supported);
+        return TyErr;
     }
     error(Node.Loc, diag::err_unrecognized_type);
     return TyErr;

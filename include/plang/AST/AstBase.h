@@ -99,7 +99,8 @@ enum class NodeKind {
     ConformantArrayTypeNode, // EP §6.7.3.7: conformant array parameter type
     SchemaTypeNode,          // EP §6.4.8: discriminated schema instantiation
     ProcedureTypeNode,       // ISO §6.6.3.1: procedural/functional parameter
-    TypeLast      = ProcedureTypeNode,
+    ObjectTypeNode,          // Turbo Tier 5: object type (fields + method headings, optional ancestor)
+    TypeLast      = ObjectTypeNode,
 
     // -- Top-level declaration / program nodes --
     ProcDeclKind,

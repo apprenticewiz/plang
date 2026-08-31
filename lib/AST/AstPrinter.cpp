@@ -71,7 +71,7 @@ static void printParams(const std::vector<ParamGroup>& params, std::ostream& os)
 // file could do, and it is what happened to every EP node added after it.
 static_assert(NumExprKinds == 17, "a new expression needs a case in printExpr");
 static_assert(NumStmtKinds == 12, "a new statement needs a case in printStmt");
-static_assert(NumTypeKinds == 14, "a new type denoter needs a case in printType");
+static_assert(NumTypeKinds == 15, "a new type denoter needs a case in printType");
 
 // ---------------------------------------------------------------------------
 // Inline type printing
@@ -138,6 +138,39 @@ static void printType(const TypeNode& node, std::ostream& os) {
                     printType(*fd.Type, os);
                     os << ")";
                 }
+                os << ")";
+            }
+            os << ")";
+        }
+        os << ")";
+        break;
+    }
+    case NodeKind::ObjectTypeNode: {
+        const auto* n = llvm::cast<ObjectTypeNode>(&node);
+        os << "(object";
+        if (!n->Ancestor.empty()) os << " (ancestor " << n->Ancestor << ")";
+        for (const auto& m : n->Members) {
+            os << " ("
+               << (m.Vis == MemberVisibility::Private ? "private " : "public ");
+            if (m.IsMethod) {
+                const auto& pd = *m.Method;
+                os << (pd.IsConstructor ? "constructor" :
+                       pd.IsDestructor  ? "destructor"  :
+                       pd.IsFunction    ? "function"    : "procedure")
+                   << " " << pd.Name << " ";
+                printParams(pd.Params, os);
+                if (pd.IsFunction && pd.ReturnType) {
+                    os << " ";
+                    printType(*pd.ReturnType, os);
+                }
+                if (pd.IsVirtual) os << " virtual";
+                if (pd.IsAbstract) os << " abstract";
+            } else {
+                os << "(";
+                Sep sp;
+                for (const auto& name : m.Field.Names) os << sp << name;
+                os << " ";
+                printType(*m.Field.Type, os);
                 os << ")";
             }
             os << ")";
@@ -666,8 +699,15 @@ static void printBlock(const BlockNode& node, std::ostream& os, int depth) {
 
 static void printProc(const ProcDecl& node, std::ostream& os, int depth) {
     os << ind(depth)
-       << "(" << (node.IsFunction ? "function" : "procedure")
-       << " " << node.Name << " ";
+       << "(" << (node.IsConstructor ? "constructor" :
+                   node.IsDestructor  ? "destructor"  :
+                   node.IsFunction    ? "function"    : "procedure")
+       << " ";
+    // Turbo Tier 5: an object-type method's out-of-line body is qualified by
+    // its owning type -- 'TAnimal.Speak' -- see ProcDecl::OwnerType's own
+    // comment.  Empty for every other ProcDecl, ordinary and in-class alike.
+    if (!node.OwnerType.empty()) os << node.OwnerType << ".";
+    os << node.Name << " ";
     printParams(node.Params, os);
     // EP §6.7.2: the optional named-result-variable-specification is written
     // '= identifier' right after the parameter list and before the result

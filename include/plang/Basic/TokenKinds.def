@@ -67,6 +67,7 @@ TOK(Error,      "invalid character")
 #define EP (LangOptions::D_ISO10206)
 #define TP (LangOptions::D_Turbo)
 
+DIALECT_KEYWORD(Abstract,     "abstract",      TP)  // Turbo objects: abstract virtual method directive
 KEYWORD       (And,           "and")
 DIALECT_KEYWORD(AndThen,      "and_then",      EP)  // EP §6.8.3.3
 KEYWORD       (Array,         "array")
@@ -114,9 +115,11 @@ DIALECT_KEYWORD(OrElse,       "or_else",       EP)  // EP §6.8.3.3
 DIALECT_KEYWORD(Otherwise,    "otherwise",     EP)  // EP §6.9.3.5
 KEYWORD       (Packed,        "packed")
 DIALECT_KEYWORD(Pow,          "pow",           EP)  // EP §6.8.3.2
+DIALECT_KEYWORD(Private,      "private",       TP)  // Turbo objects: visibility section
 KEYWORD       (Procedure,     "procedure")
 KEYWORD       (Program,       "program")
 DIALECT_KEYWORD(Protected,    "protected",     EP)  // EP §6.6.3.7
+DIALECT_KEYWORD(Public,       "public",        TP)  // Turbo objects: visibility section
 DIALECT_KEYWORD(Qualified,    "qualified",     EP)  // EP §6.12
 KEYWORD       (Real,          "real")
 KEYWORD       (Record,        "record")
@@ -135,6 +138,7 @@ KEYWORD       (Until,         "until")
 DIALECT_KEYWORD(Uses,         "uses",          TP)  // Turbo units
 DIALECT_KEYWORD(Value,        "value",         EP)  // EP §6.6
 KEYWORD       (Var,           "var")
+DIALECT_KEYWORD(Virtual,      "virtual",       TP)  // Turbo objects: virtual method directive
 KEYWORD       (While,         "while")
 KEYWORD       (With,          "with")
 DIALECT_KEYWORD(Xor,          "xor",           TP)  // Turbo bitwise/logical xor
