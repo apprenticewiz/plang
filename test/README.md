@@ -65,6 +65,22 @@ to the same-terminator rule above.
 | `%run` | `PLANG_TEST_RUN_WRAPPER` if set (e.g. the guardheap allocator), empty otherwise — **always wrap a just-built program's execution as `%run %t`, never a bare `%t`**, or this hook silently stops applying to that one file with no failure signal |
 | `%FileCheck`, `not`, `split-file`, `%s`, `%t`, `%T` | lit/LLVM defaults, via `lit.llvm` |
 
+## Test timeouts
+
+`test/lit.cfg.py` sets `lit_config.maxIndividualTestTime = 120` (issue
+#189): any single test that runs past 120s is killed and reported as a
+failure rather than left to hang a CI job indefinitely. That is a global
+cap, not a per-test one — there is currently no override mechanism, and
+none of today's tests need one (the slowest observed is 6.62s).
+
+If a genuinely slow test is ever added and needs more than 120s, the
+pattern to follow is a `lit.local.cfg` in that test's subdirectory,
+setting `config.maxIndividualTestTime = <N>` there — lit applies the
+most specific `lit.local.cfg` along a test's directory path, so this
+overrides the suite-wide value for just that subdirectory without
+touching everything else. This escape hatch does not exist yet; add it
+only when a real test needs it.
+
 `REQUIRES: fpc-binary` (not bare `fpc` — `include/plang/Basic/Dialects.def`
 already reserves that name for a future, unrelated `-std=fpc` plang
 dialect) gates a test on a real, working `fpc` install. The feature

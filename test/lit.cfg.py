@@ -33,6 +33,16 @@ config.test_format = lit.formats.ShTest(execute_external=False)
 config.test_source_root = os.path.dirname(__file__)
 config.test_exec_root = os.path.join(config.plang_binary_dir, "test")
 
+# Per-test wall-clock cap (issue #189). The comment above on
+# execute_external=False already relies on lit being able to kill a hung
+# child cleanly; this is what actually arms that kill for every test rather
+# than only the one deliberately-hangable stdin-blocked test that brings its
+# own 5s watchdog. 120s is ~18x the slowest test observed in this suite
+# (6.62s), so it should never fire on a merely slow machine -- only on a
+# genuine hang. A future test that legitimately needs longer can override
+# this per-directory with its own lit.local.cfg (see test/README.md).
+lit_config.maxIndividualTestTime = 120
+
 lit.llvm.initialize(lit_config, config)
 llvm_config = lit.llvm.llvm_config  # a global set by initialize(), not a class to construct
 llvm_config.use_default_substitutions()
