@@ -2086,6 +2086,25 @@ uint64_t Sema::byteAlignOf(const Type& T) {
             if (F.Ty) A = std::max(A, byteAlignOf(*F.Ty));
         return A;
     }
+    // Turbo Tier 5, Cluster A item 2: same natural-alignment rule as Record
+    // just above (an object is never `packed` -- ObjectTypeNode has no such
+    // concept, confirmed against fpc: real Turbo has no `packed object`),
+    // widened by `_vptr`'s own 8-byte alignment when the hierarchy has one
+    // -- see byteSizeOf's Object case for the recursive/nested layout this
+    // is a piece of.  Unlike byteSizeOf's own Object case, this one does
+    // NOT need to recurse through Parent or single out "this type's own new
+    // fields": alignment is a plain max, order-independent and unaffected
+    // by which ancestor declared which field, so scanning the whole
+    // already-flat RecordFields list (own and inherited together, exactly
+    // like the Record case just above) gives the identical answer a
+    // Parent-recursing walk would.
+    case TypeKind::Object: {
+        uint64_t A = 1;
+        for (const auto& F : T.RecordFields)
+            if (F.Ty) A = std::max(A, byteAlignOf(*F.Ty));
+        if (!T.VmtSlots.empty()) A = std::max<uint64_t>(A, 8);
+        return A;
+    }
     default:
         return 1;
     }
@@ -2261,6 +2280,85 @@ std::optional<uint64_t> Sema::byteSizeOf(const Type& T, FieldOffsets* Offsets) {
             }
         }
         if (!Ok) return std::nullopt;
+        return roundUp(Off, Align);
+    }
+    // Turbo Tier 5, Cluster A item 2: NOT a single flat natural-alignment
+    // walk over the whole (already-flattened) RecordFields list -- an
+    // earlier version of this function did exactly that, appending `_vptr`
+    // once after either every field or a fixed field-count prefix, and it
+    // empirically DISAGREED with a local `fpc -Mtp` build the moment a
+    // THIRD generation added its own fields on top of a SECOND generation
+    // that had already introduced virtual: TDog adding Breed after
+    // TAnimal's own vptr, then TPuppy adding LitterSize, and fpc placed
+    // LitterSize a full 8 bytes further out than "TDog's raw fields plus
+    // natural alignment" alone would predict.
+    //
+    // Real Borland/FPC layout is RECURSIVE/NESTED: a descendant's storage
+    // is its immediate ancestor's own already-laid-out, already-tail-padded
+    // storage (byteSizeOf(*T.Parent), which already accounts for whatever
+    // vptr and padding THAT type's own ancestry needed) sitting as an
+    // untouched, unshifted prefix, with this type's own NEW fields placed
+    // strictly after that whole prefix -- not merely after however many raw
+    // bytes the ancestor's own fields happened to occupy before its own
+    // trailing alignment padding.  `_vptr` itself is placed, exactly once,
+    // at the level that first declares a virtual method (this type if its
+    // own VmtSlots is non-empty but its Parent's is empty or absent), right
+    // after THAT level's own new fields; every deeper descendant inherits
+    // it for free as part of the ancestor prefix, at the SAME byte offset,
+    // because nothing is ever inserted ahead of that prefix once it exists.
+    // Mirrors the SAME recursive layout CGTypes::layoutOfObject builds
+    // (there, by literally nesting the ancestor's own llvm::StructType as
+    // one struct-typed element, which is what makes LLVM's own struct
+    // layout reproduce this identical rounding automatically), which is
+    // what checkSizeAgreement/checkObjectFieldOffsetAgreement (CGTypes.cpp)
+    // cross-check this against for every object type codegen lowers.
+    case TypeKind::Object: {
+        uint64_t Off = 0, Align = 1;
+        if (T.Parent) {
+            // Recursing (rather than reading T.Parent's own already-cached
+            // answer) also fills Offsets with every INHERITED field's own
+            // offset, in the exact same recursive way T.Parent computed for
+            // itself -- unchanged, since the ancestor prefix is never
+            // shifted.
+            const auto ParentSize = byteSizeOf(*T.Parent, Offsets);
+            if (!ParentSize) return std::nullopt;
+            Off   = *ParentSize;
+            Align = byteAlignOf(*T.Parent);
+        }
+        // This type's own NEWLY declared fields only -- RecordFields is the
+        // ancestor-then-own flattening (item 1), so they are exactly the
+        // suffix starting where the ancestor's own RecordFields left off
+        // (0 for a root type with no ancestor at all).
+        const size_t OwnStart = T.Parent ? T.Parent->RecordFields.size() : 0;
+        bool Ok = true;
+        for (size_t I = OwnStart; I < T.RecordFields.size(); ++I) {
+            const auto& F = T.RecordFields[I];
+            if (!F.Ty) { Ok = false; break; }
+            const auto Sz = byteSizeOf(*F.Ty);
+            if (!Sz) { Ok = false; break; }
+            const uint64_t A = byteAlignOf(*F.Ty);
+            Align = std::max(Align, A);
+            Off   = roundUp(Off, A);
+            if (Offsets) Offsets->emplace_back(F.Name, Off);
+            Off += *Sz;
+        }
+        if (!Ok) return std::nullopt;
+        // Reserved only when the hierarchy has a virtual method ANYWHERE
+        // (T.VmtSlots is the final, already-inherited table -- see its own
+        // comment, Type.h) AND this is the level that first introduces it
+        // (no Parent, or Parent's own VmtSlots -- and so Parent's own
+        // byteSizeOf above -- did not already account for one): a hierarchy
+        // with none costs nothing beyond its own fields, and a descendant
+        // below the introducing level gets it for free as part of the
+        // ancestor prefix above, real Borland/FPC field practice either
+        // way.  The _vptr slot itself is not a named Pascal field -- nothing
+        // here adds it to Offsets -- see CGTypes::vptrOffsetOf for how a
+        // later item (virtual dispatch) finds its offset instead.
+        if (T.introducesVptr()) {
+            Align = std::max<uint64_t>(Align, 8);
+            Off   = roundUp(Off, 8);
+            Off  += 8;
+        }
         return roundUp(Off, Align);
     }
     // A conformant array's extent arrives with it, and an undiscriminated

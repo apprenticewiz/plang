@@ -76,6 +76,12 @@ public:
         llvm::StructType* Ty{nullptr};
         /// Field name, folded to lower case, to where it lives.
         std::map<std::string, FieldPlace> Fields;
+        /// Turbo Tier 5, Cluster A item 2: the element index of the trailing
+        /// `_vptr` slot layoutOfObject appends, or nullopt when this
+        /// layout's hierarchy has no virtual method anywhere (see
+        /// layoutOfObject's own comment).  Always empty for a Record's own
+        /// layout (layoutOf never sets it) -- see vptrOffsetOf.
+        std::optional<unsigned> VptrIndex;
     };
 
     /// Binds a schema instance's discriminants into Consts/schemaCtx_ for
@@ -115,6 +121,25 @@ public:
     const RecordLayout* layoutOfRecord(const plang::Type& T);
     const RecordLayout& layoutOf(const plang::RecordTypeNode& rt,
                                   const plang::Type* semaRec = nullptr);
+    /// Turbo Tier 5, Cluster A item 2: the Object analog of layoutOfRecord/
+    /// layoutOf.  An object type has no RecordTypeNode to walk (Type::
+    /// ObjectDecl is an ObjectTypeNode, and carries the ORIGINAL,
+    /// un-flattened member list -- see its own comment, Type.h) -- but item
+    /// 1 already left Type::RecordFields flat (ancestor-then-own,
+    /// transitively, see resolveObjectType) -- so this reads THAT directly,
+    /// the same way llvmTypeOfSemaTypeImpl's Record-with-no-RecordDecl arm
+    /// (TimeStamp/BindingType) already does, rather than re-deriving
+    /// anything from ObjectDecl or walking Parent itself.  Returns null
+    /// only for a non-Object T.
+    const RecordLayout* layoutOfObject(const plang::Type& T);
+    /// Where a fully-laid-out object type's `_vptr` slot lives, or nullopt
+    /// when its hierarchy has no virtual method anywhere (layoutOfObject's
+    /// RecordLayout::VptrIndex is unset).  Nothing populates the slot yet
+    /// (no VMT global, no constructor -- later items' job); this exists so
+    /// THIS item can prove the offset is stable across an inheritance
+    /// chain, and so a later item has a ready answer for where to store/
+    /// read the pointer once there is one.
+    std::optional<uint64_t> vptrOffsetOf(const plang::Type& T);
     llvm::StructType*   structTypeFor(const plang::RecordTypeNode& rt);
     llvm::Type*         llvmTypeOfNode(const plang::TypeNode& node);
     llvm::Type*         llvmTypeOfNodeViaSema(const plang::TypeNode& node, const std::string& what);
@@ -125,6 +150,7 @@ public:
     void                checkSizeAgreement(const plang::Type& T, llvm::Type* Built);
     void                checkSchemaFieldOffsetAgreement(const plang::Type& T, llvm::Type* Built);
     void                checkFieldOffsetAgreement(const plang::Type& T, llvm::Type* Built);
+    void                checkObjectFieldOffsetAgreement(const plang::Type& T, llvm::Type* Built);
     llvm::Type*         llvmTypeOfSemaType(const plang::Type& T);
     llvm::Type*         llvmTypeOfSemaTypeImpl(const plang::Type& T);
 
@@ -169,6 +195,13 @@ private:
     std::map<std::tuple<const plang::RecordTypeNode*, std::string, const plang::Type*>,
              RecordLayout>
         recordLayouts_;
+    /// layoutOfObject's own memo, keyed by the canonical Sema Type* (an
+    /// object type has exactly one -- see resolveObjectType, which resolves
+    /// it once per `type Name = object ... end` and every mention after
+    /// shares that same shared_ptr's address -- unlike a Record, which is
+    /// re-instantiated per schema binding and so needs recordLayouts_'s
+    /// richer {decl, schemaCtx, semaRec} key instead).
+    std::unordered_map<const plang::Type*, RecordLayout> objectLayouts_;
     /// The discriminants a layout is currently being worked out under,
     /// written as `name=value` pairs.  Empty everywhere outside a schema
     /// body.

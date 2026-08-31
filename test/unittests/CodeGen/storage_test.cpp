@@ -358,3 +358,142 @@ TEST(Storage, ASubrangeSaysWhetherItsValuesCanBeNegative) {
     EXPECT_TRUE(C.getSubrange(C.getInt(16, /*Signed=*/true), -5, 5)->IsSigned);
 }
 
+// ---------------------------------------------------------------------------
+// Turbo Tier 5, Cluster A item 2: object layout's per-FIELD offsets
+//
+// A field access ('.') on an object type is not yet supported by Sema (a
+// later cluster item's job -- checkField, SemaExpr.cpp, still refuses any
+// non-Record with err_field_on_non_record), so there is no compiled-program
+// proxy (no `Ofs`/`Addr`-equivalent, and SizeOf alone cannot show WHERE a
+// field sits, only how big the whole thing is) for the individual byte
+// offset a field lands at -- the same "no CLI-observable proxy" situation
+// TheScalarsAreTheSizeTheyAreLoweredAt and its neighbors above are the
+// permanent exception for.  These build the Type objects resolveObjectType
+// would (Sema::byteSizeOf's Object case reads only RecordFields/Parent/
+// VmtSlots -- see its own comment, SemaType.cpp -- with no ObjectDecl AST
+// needed) and call Sema::byteSizeOf directly with a FieldOffsets sink,
+// checking the exact numbers against a local `fpc -Mtp` build of the
+// identical hierarchy (see the comment on each TEST).  CodeGen's own
+// independent answer (CGTypes::layoutOfObject) is cross-checked against
+// these same Sema numbers for every object-typed variable a real program
+// declares -- test/CodeGen/CodeGenTurboObjects/ -- via the automatic
+// checkSizeAgreement/checkObjectFieldOffsetAgreement codegenICE gate
+// (CGTypes.cpp), not repeated here.
+// ---------------------------------------------------------------------------
+
+TEST(ObjectLayout, AThreeLevelChainWhoseRootIntroducesVptrMatchesFpc) {
+    // TAnimal(Name: array[1..10] of char; procedure Speak; virtual) ->
+    // TDog(Breed: LongInt) -> TPuppy(LitterSize: LongInt), confirmed
+    // against a local `fpc -Mtp` build of the identical hierarchy: sizes
+    // 24/32/40, with Breed at 24 in BOTH TDog and TPuppy (not 24 vs. some
+    // other offset) and LitterSize at 32 -- not 28, which is what "TDog's
+    // raw fields plus natural alignment alone" (no ancestor-boundary
+    // padding) would give.
+    TypeContext C;
+    auto Idx    = C.getSubrange(C.getInteger(), 1, 10);
+    auto NameTy = C.getArray(Idx, C.getChar(), /*packed=*/false);
+    auto LongIntTy = C.getInt(32, /*Signed=*/true);
+
+    auto TAnimal = std::make_shared<Type>();
+    TAnimal->Kind = TypeKind::Object;
+    TAnimal->Name = "TAnimal";
+    TAnimal->RecordFields.push_back({.Name = "Name", .Ty = NameTy});
+    TAnimal->VmtSlots.push_back({.MethodName = "Speak", .ImplementingType = "TAnimal"});
+
+    auto TDog = std::make_shared<Type>();
+    TDog->Kind = TypeKind::Object;
+    TDog->Name = "TDog";
+    TDog->Parent = TAnimal;
+    TDog->RecordFields = TAnimal->RecordFields;
+    TDog->VmtSlots     = TAnimal->VmtSlots;
+    TDog->RecordFields.push_back({.Name = "Breed", .Ty = LongIntTy});
+
+    auto TPuppy = std::make_shared<Type>();
+    TPuppy->Kind = TypeKind::Object;
+    TPuppy->Name = "TPuppy";
+    TPuppy->Parent = TDog;
+    TPuppy->RecordFields = TDog->RecordFields;
+    TPuppy->VmtSlots     = TDog->VmtSlots;
+    TPuppy->RecordFields.push_back({.Name = "LitterSize", .Ty = LongIntTy});
+
+    EXPECT_TRUE(TAnimal->introducesVptr());
+    EXPECT_FALSE(TDog->introducesVptr());
+    EXPECT_FALSE(TPuppy->introducesVptr());
+
+    EXPECT_EQ(Sema::byteSizeOf(*TAnimal), 24u);
+    EXPECT_EQ(Sema::byteSizeOf(*TDog),    32u);
+
+    Sema::FieldOffsets Offsets;
+    const auto Size = Sema::byteSizeOf(*TPuppy, &Offsets);
+    ASSERT_TRUE(Size.has_value());
+    EXPECT_EQ(*Size, 40u);
+    ASSERT_EQ(Offsets.size(), 3u);
+    EXPECT_EQ(Offsets[0], (std::pair<std::string, uint64_t>{"Name", 0}));
+    EXPECT_EQ(Offsets[1], (std::pair<std::string, uint64_t>{"Breed", 24}));
+    EXPECT_EQ(Offsets[2], (std::pair<std::string, uint64_t>{"LitterSize", 32}));
+}
+
+TEST(ObjectLayout, VptrIntroducedBelowTheRootStillLandsAtAStableOffset) {
+    // Same three-level shape, but TAnimal (the root) declares no virtual
+    // method at all and TDog is the first to.  Confirmed against a local
+    // `fpc -Mtp` build: TAnimal is 10 bytes (no vptr overhead at all, real
+    // Borland/FPC field practice for a hierarchy with no virtual method
+    // anywhere), TDog is 24 (Breed at 12, then the vptr IT introduces), and
+    // TPuppy is 32 (LitterSize at 24 -- TDog's own full size -- not 16,
+    // which "right after Breed's raw 4 bytes" would give).
+    TypeContext C;
+    auto Idx    = C.getSubrange(C.getInteger(), 1, 10);
+    auto NameTy = C.getArray(Idx, C.getChar(), /*packed=*/false);
+    auto LongIntTy = C.getInt(32, /*Signed=*/true);
+
+    auto TAnimal = std::make_shared<Type>();
+    TAnimal->Kind = TypeKind::Object;
+    TAnimal->Name = "TAnimal";
+    TAnimal->RecordFields.push_back({.Name = "Name", .Ty = NameTy});
+
+    auto TDog = std::make_shared<Type>();
+    TDog->Kind = TypeKind::Object;
+    TDog->Name = "TDog";
+    TDog->Parent = TAnimal;
+    TDog->RecordFields = TAnimal->RecordFields;
+    TDog->RecordFields.push_back({.Name = "Breed", .Ty = LongIntTy});
+    TDog->VmtSlots.push_back({.MethodName = "Speak", .ImplementingType = "TDog"});
+
+    auto TPuppy = std::make_shared<Type>();
+    TPuppy->Kind = TypeKind::Object;
+    TPuppy->Name = "TPuppy";
+    TPuppy->Parent = TDog;
+    TPuppy->RecordFields = TDog->RecordFields;
+    TPuppy->VmtSlots     = TDog->VmtSlots;
+    TPuppy->RecordFields.push_back({.Name = "LitterSize", .Ty = LongIntTy});
+
+    EXPECT_FALSE(TAnimal->introducesVptr());
+    EXPECT_TRUE(TDog->introducesVptr());
+    EXPECT_FALSE(TPuppy->introducesVptr());
+
+    EXPECT_EQ(Sema::byteSizeOf(*TAnimal), 10u);
+
+    Sema::FieldOffsets DogOffsets;
+    EXPECT_EQ(Sema::byteSizeOf(*TDog, &DogOffsets), 24u);
+    ASSERT_EQ(DogOffsets.size(), 2u);
+    EXPECT_EQ(DogOffsets[1], (std::pair<std::string, uint64_t>{"Breed", 12}));
+
+    Sema::FieldOffsets PuppyOffsets;
+    EXPECT_EQ(Sema::byteSizeOf(*TPuppy, &PuppyOffsets), 32u);
+    ASSERT_EQ(PuppyOffsets.size(), 3u);
+    EXPECT_EQ(PuppyOffsets[2], (std::pair<std::string, uint64_t>{"LitterSize", 24}));
+}
+
+TEST(ObjectLayout, ARootWithNoVirtualMethodAnywhereHasNoVptrOverhead) {
+    // Confirmed against a local `fpc -Mtp` build: a root object with no
+    // virtual method at all is exactly its own fields' natural-alignment
+    // size, with no hidden 8-byte pointer field.
+    TypeContext C;
+    auto TRoot = std::make_shared<Type>();
+    TRoot->Kind = TypeKind::Object;
+    TRoot->Name = "TRoot";
+    TRoot->RecordFields.push_back({.Name = "X", .Ty = C.getInt(16, /*Signed=*/true)});
+    EXPECT_FALSE(TRoot->introducesVptr());
+    EXPECT_EQ(Sema::byteSizeOf(*TRoot), 2u);
+}
+
