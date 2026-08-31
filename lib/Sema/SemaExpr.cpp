@@ -3271,11 +3271,35 @@ bool Sema::isAssignCompatible(const Type& Dst, const Type& Src,
                                               ExactBounds);
                 return true;
 
-            // Structural type compatibility (ISO §6.4.5).
-            // Two array types are compatible when their element types are compatible
-            // and their index types are compatible.
+            // Array: a NAMED array type is identified by its declaration (ISO
+            // §6.4.2.3, §6.4.3.2 -- issue #178), the identical rule Enum
+            // above and Record below already get.  An array written inline
+            // has no declared name; those are compared structurally (ISO
+            // §6.4.5), which is what lets an inline parameter type accept an
+            // inline variable of the same shape.
             case TypeKind::Array:
                 if (!Dst.ElemType || !Src.ElemType)  return false;
+                // Mirrors the Record arm just below, minus its RecordDecl
+                // fast path (an array has no equivalent node to compare --
+                // nothing needs it, since a value type-denoter cannot be
+                // reached from itself without a pointer indirection the way
+                // a record field can, so there is no unbounded-recursion
+                // hazard here for a decl-identity check to short-circuit).
+                //
+                // Where AT LEAST ONE side has a declared name, the names
+                // must agree or the two are different types whatever their
+                // shape -- a `TArr1` and a `TArr2` of identical bounds and
+                // element type are still not one another (fpc -Mtp agrees:
+                // "Incompatible types: got TArr1 expected TArr2").  Where
+                // they agree, fall through to the structural checks below as
+                // the answer for separate compilation, where the same
+                // declaration reaches Sema through a different node in each
+                // unit and so is not caught by the `&Dst == &Src` shortcut
+                // above.  Where BOTH sides are anonymous, skip straight past
+                // this and go structural unconditionally, same as always.
+                if ((!isAnonymousNominal(Dst) || !isAnonymousNominal(Src))
+                        && Dst.Name != Src.Name)
+                    return false;
                 if (!isAssignCompatible(*Dst.ElemType, *Src.ElemType,
                                         /*ExactBounds=*/true)) return false;
                 if (Dst.IndexType && Src.IndexType)

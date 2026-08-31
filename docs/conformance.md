@@ -13,6 +13,18 @@ parameters (§6.6.3.6 e), §6.6.3.7 and §6.6.3.8); level 1 includes them. plang
 accepts them, in both the `array` and the `packed array` form, under
 `-std=iso7185`.
 
+A `type` declaration's own body is a distinct type from any other, even one
+written identically: ISO §6.4.2.3 gives each declaration this identity, and
+plang applies it alike to an enumerated-type, to a record-type (§6.4.3.3), and
+to an array-type (§6.4.3.2). `type A = array[1..5] of integer; B = array[1..5]
+of integer;` therefore declares two types, not the same one reached two ways —
+neither is assignment-compatible with the other, and neither may stand in a
+`var` parameter (§6.6.3.3) declared with the other. Only a `type` declaration's
+own body carries this identity: the identical array-type-denoter written
+inline, with no declaration naming it (`var v: array[1..5] of integer`), has
+none to be identified by, and two such inline denoters remain compatible by
+their structure, the same as an anonymous record or enumerated-type.
+
 The statement above is the one clause 5.1 prescribes for a processor that
 complies in all respects. Where a departure is found it belongs in the list
 below and the statement becomes the "with the following exceptions" form; the

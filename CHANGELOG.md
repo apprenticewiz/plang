@@ -261,6 +261,24 @@ version numbers follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html
   exclusive today, so this had no live call path to reach, but is fixed on
   the same "do not leave a silently-wrong serialization in place" grounds as
   the rest of this project's AST/type-denoter printing.
+- A NAMED array type declaration (`type A = array[1..5] of Integer;`) was
+  interned exactly like an anonymous one (`TypeContext::getArray`, keyed on
+  index/element/packed alone), so two separately-declared array types of
+  identical shape shared one `Type*` and were silently interchangeable --
+  including through a `var` parameter, where ISO §6.6.3.3 requires strict
+  identity: `procedure P(var x: B); ... var a: A; P(a)` compiled and ran for
+  two unrelated types `A`/`B` of the same shape. `record` and
+  enumerated-type declarations already got the correct treatment (ISO
+  §6.4.2.3: each declaration is a distinct type, so neither is ever
+  interned); a named array now gets it too, minted through
+  `TypeContext::makeArrayUncached` and renamed/un-anonymized by the
+  identical `nameNominalType` call Enum/Record already go through -- one
+  unique `Type` per declaration, with `Sema::isAssignCompatible`'s `Array`
+  arm now requiring the same declared-name identity its `Record` arm
+  already does. An array type-denoter written inline, with no `type`
+  declaration of its own, is unaffected and remains exactly as structurally
+  compatible as it always was; only a NAMED array's own identity changes.
+  (#178)
 
 ## [0.3.5] - 2026-08-27
 

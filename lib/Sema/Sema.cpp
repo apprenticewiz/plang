@@ -72,10 +72,22 @@ namespace {
 ///
 /// An enumeration or record is identified by its declaration, so it needs the
 /// declared name to be told apart from the next one; until this runs they are
-/// all called "(enum)" or "(record)" and would compare equal.  A structural
-/// type keeps the descriptive name it already has, and an alias of an existing
-/// type must keep the name of the type it aliases — renaming there would
-/// rename the one canonical object out from under every other user of it.
+/// all called "(enum)" or "(record)" and would compare equal.  A NAMED array
+/// is the identical story (issue #178): it too needs the declared name to be
+/// told apart from a same-shaped array declared elsewhere, and until this
+/// runs it is called "array[1..N] of T" the same as any other array of that
+/// shape.  Read isAnonymousNominal's own comment (Type.h) for why an array
+/// needs one more thing Enum/Record do not -- Sema.cpp's Phase 3b routes a
+/// named array's OWN resolution through TypeContext::makeArrayUncached
+/// rather than the interning getArray, so that the rename below lands on an
+/// object nothing else shares, the same precondition Enum/Record get for
+/// free by never being interned in the first place.
+///
+/// A plain structural type (Set, Pointer, Subrange, ... — and an ANONYMOUS
+/// array) keeps the descriptive name it already has, and an alias of an
+/// existing type must keep the name of the type it aliases — renaming there
+/// would rename the one canonical object out from under every other user of
+/// it.
 void nameNominalType(Type& T, const std::string& DeclName) {
     // EP §6.4.2.5: a restricted type is a new type made for this definition
     // alone, so naming it renames nothing that anything else can see.
@@ -1813,6 +1825,18 @@ void Sema::checkBlock(const BlockNode& Block,
             // AFTER resolveType returns, the way nameNominalType below
             // names every other kind.
             PendingObjectTypeName_ = Td.Name;
+            // Issue #178: unlike the object case just above, an array
+            // type-denoter does not need its OWN declared name while it is
+            // being resolved -- nameNominalType below still supplies that,
+            // after the fact, the same as it does for Enum/Record.  What it
+            // needs to know eagerly is only THAT it is one, so the
+            // ArrayTypeNode arm (SemaType.cpp) can route it through
+            // TypeContext::makeArrayUncached instead of the interning
+            // getArray; see PendingArrayTypeIsNamed_'s own comment (Sema.h).
+            // Set unconditionally, exactly as PendingObjectTypeName_ is
+            // just above: harmless (read, then cleared, unused) for every
+            // Td.Type that is not directly an ArrayTypeNode.
+            PendingArrayTypeIsNamed_ = true;
             auto Resolved = resolveType(*Td.Type);
             nameNominalType(*Resolved, Td.Name);
 

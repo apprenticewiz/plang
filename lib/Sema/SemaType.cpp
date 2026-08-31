@@ -342,6 +342,12 @@ std::shared_ptr<Type> Sema::resolveTypeImpl(const TypeNode& Node) {
     // further down.
     const std::string PendingObjectName = std::move(PendingObjectTypeName_);
     PendingObjectTypeName_.clear();
+    // Issue #178: same reason, same point -- see PendingArrayTypeIsNamed_'s
+    // own comment (Sema.h) for why a NAMED array needs this read out before
+    // any nested resolveType call (this array's own element type, say) can
+    // run.
+    const bool ResolvingNamedArrayBody = PendingArrayTypeIsNamed_;
+    PendingArrayTypeIsNamed_ = false;
 
     // Gated on having the NAMES, not on the probe being active.  A form is
     // arithmetic over discriminant INDICES, so it is the same form for every
@@ -395,6 +401,14 @@ std::shared_ptr<Type> Sema::resolveTypeImpl(const TypeNode& Node) {
                 T->ExtentVaries = true;
                 return T;
             }
+            // Issue #178: a NAMED array type-denoter (`type X = array[idx]
+            // of ...;`) gets its own unique, uncached Type -- the same
+            // "declaration is the identity" treatment Enum/Record already
+            // get -- rather than sharing ArrayCache_'s slot for this shape
+            // with every anonymous `array[idx] of ...` elsewhere in the
+            // program.  See PendingArrayTypeIsNamed_'s own comment (Sema.h).
+            if (ResolvingNamedArrayBody)
+                return Ctx_.makeArrayUncached(Index, Elem, N->Packed);
             return Ctx_.getArray(Index, Elem, N->Packed);
         }
         // Determine the ordinal base type of the index from the declared bounds.
@@ -425,6 +439,10 @@ std::shared_ptr<Type> Sema::resolveTypeImpl(const TypeNode& Node) {
             T->ExtentVaries = true;
             return T;
         }
+        // Issue #178: see the identical check in the named-index-type arm
+        // just above for why this bypasses the interning cache.
+        if (ResolvingNamedArrayBody)
+            return Ctx_.makeArrayUncached(Index, Elem, N->Packed);
         return Ctx_.getArray(Index, Elem, N->Packed);
     }
     // R3: a denoter written inside a schema body records its extents as closed
