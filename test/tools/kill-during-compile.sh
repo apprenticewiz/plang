@@ -60,6 +60,20 @@ done
 
 if kill -0 "$pid" 2>/dev/null; then
     echo "CAUGHT-MID-FLIGHT"
+    # The driver only calls llvm::sys::RemoveFileOnSignal (registering the
+    # temp file for crash-safe cleanup) once the file already exists on
+    # disk -- createTemporaryFile has to create it before it can return the
+    # actual randomized path to register. That leaves an unavoidable, if
+    # normally sub-millisecond, gap between "file appears" (what the poll
+    # above just detected) and "cleanup is registered". Under heavy CPU
+    # contention (e.g. a CI job running many other compiles concurrently)
+    # the scheduler can stretch that gap enough for a signal landing right
+    # after detection to beat the registration, producing a real but
+    # spurious SCRATCH-DIR-HAS-LEFTOVERS unrelated to the fix being tested.
+    # A short settle delay here is far more than that in-memory list-append
+    # needs to complete even on a loaded runner, without weakening the
+    # test: it still kills the driver well before a real compile finishes.
+    sleep 0.02
     kill -TERM -- -"$pid" 2>/dev/null
 else
     echo "FINISHED-BEFORE-SIGNAL"
