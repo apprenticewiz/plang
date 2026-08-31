@@ -14,7 +14,7 @@
 using namespace plang;
 
 // See NumExprKinds in AstBase.h.
-static_assert(NumExprKinds == 18, "a new expression needs a case in checkExpr");
+static_assert(NumExprKinds == 19, "a new expression needs a case in checkExpr");
 
 // ---------------------------------------------------------------------------
 // Comparisons that one operand's type has already settled
@@ -174,6 +174,7 @@ std::shared_ptr<Type> Sema::checkExpr(const ExprNode& E) {
     else if (auto* N = llvm::dyn_cast<UnaryExpr>(&E))      T = checkUnary(*N);
     else if (auto* N = llvm::dyn_cast<CallExpr>(&E))       T = checkCallExpr(*N);
     else if (auto* N = llvm::dyn_cast<MethodCallExpr>(&E)) T = checkMethodCallExpr(*N);
+    else if (auto* N = llvm::dyn_cast<InheritedCallExpr>(&E)) T = checkInheritedCallExpr(*N);
     else if (auto* N = llvm::dyn_cast<SetLiteralExpr>(&E)) T = checkSetLit(*N);
     else if (auto* N = llvm::dyn_cast<StructuredValueExpr>(&E)) T = checkStructuredValue(*N);
     else if (auto* N = llvm::dyn_cast<TypeCastExpr>(&E))   T = checkTypeCast(*N);
@@ -2555,6 +2556,116 @@ std::shared_ptr<Type> Sema::checkMethodCall(
 
 std::shared_ptr<Type> Sema::checkMethodCallExpr(const MethodCallExpr& E) {
     return checkMethodCall(*E.Receiver, E.Method, E.Loc, E.Args, /*ExpectFunction=*/true);
+}
+
+// Turbo Tier 5, issue #509: the shared ancestor-resolution logic behind
+// checkInheritedCallStmt (SemaStmt.cpp, ExpectFunction = false) and
+// checkInheritedCallExpr (just below, ExpectFunction = true) -- the same
+// checkMethodCall/checkMethodCallExpr/checkMethodCallStmt split just above,
+// applied to 'inherited' instead of an ordinary receiver-carrying call.
+// See this function's own declaration (Sema.h) and InheritedCallStmt's own
+// comment (AstStmt.h) for the whole design; confirmed against a local
+// `fpc -Mtp` build throughout, unchanged from checkInheritedCallStmt's own
+// original behavior for every statement-context case (this is a pure
+// extraction, not a behavior change -- see this function's own bare-form
+// branch below for the one place the two contexts genuinely differ).
+std::shared_ptr<Type> Sema::checkInheritedCall(
+        const std::string& Method, SourceLocation Loc,
+        std::span<const std::unique_ptr<ExprNode>> Args, bool ExpectFunction,
+        std::string& ResolvedMethod, std::string& ImplementingType,
+        std::string& ImplementingModule) {
+    if (!CurrentProc || CurrentProc->OwnerType.empty()
+            || !CurrentProc->ResolvedOwnerType) {
+        error(Loc, diag::err_inherited_outside_method, {});
+        for (const auto& A : Args) (void)checkExpr(*A);
+        return TyErr;
+    }
+    const Type& OwnerTy = *CurrentProc->ResolvedOwnerType;
+    if (!OwnerTy.Parent) {
+        error(Loc, diag::err_inherited_no_ancestor, {OwnerTy.Name});
+        for (const auto& A : Args) (void)checkExpr(*A);
+        return TyErr;
+    }
+
+    // Bare 'inherited' means "the same method THIS activation itself is
+    // overriding" -- CurrentProc's own name -- "called with the same
+    // arguments this activation itself received" -- CodeGen forwards its
+    // own parameters directly (CGProcCall::emitInheritedCallStmt/
+    // CGFuncCall::emitInheritedCallExpr), so there is nothing here to
+    // type-check against \p Args (always empty for this form; the parser
+    // never fills it in without a following identifier).
+    const std::string MethodName = Method.empty() ? CurrentProc->Name : Method;
+
+    // Same ancestor-chain walk checkMethodCall itself uses (composite-key
+    // lookup, resolveObjectType's own registration), just starting one level
+    // up: Parent, never OwnerTy itself, so a method can never 'inherited'
+    // its own body.
+    const Symbol* MethodSym = nullptr;
+    for (const Type* Cur = OwnerTy.Parent.get(); Cur; Cur = Cur->Parent.get()) {
+        Symbol* Sy = Symtab.lookup(objectMethodKey(Cur->Name, MethodName));
+        if (Sy && Sy->Kind == SymbolKind::Method) { MethodSym = Sy; break; }
+    }
+    if (!MethodSym) {
+        error(Loc, diag::err_inherited_method_not_found, {OwnerTy.Name, MethodName});
+        for (const auto& A : Args) (void)checkExpr(*A);
+        return TyErr;
+    }
+
+    // Turbo Tier 5, Cluster A item 7: same private-visibility gate
+    // checkMethodCall applies -- see its own comment (SemaExpr.cpp).
+    if (MethodSym->IsMethodPrivate && MethodSym->Module != CurrentUnit_)
+        error(Loc, diag::err_object_private_method,
+              {MethodSym->MethodOwnerType, MethodName});
+
+    ResolvedMethod     = MethodName;
+    ImplementingType   = MethodSym->MethodOwnerType;
+    ImplementingModule = MethodSym->Module;
+
+    // Hand off to the SAME arity/argument-type checking an ordinary
+    // procedure/function call gets, via a synthetic SymbolKind::Proc
+    // stand-in -- the identical trick checkMethodCall's own tail already
+    // uses just above.
+    Symbol Indirect;
+    Indirect.Kind       = SymbolKind::Proc;
+    Indirect.Name       = MethodSym->MethodOwnerType + "." +
+                           (MethodSym->Decl ? MethodSym->Decl->Name : MethodName);
+    Indirect.IsFunction = MethodSym->IsFunction;
+    Indirect.Params     = MethodSym->Params;
+    Indirect.ReturnType = MethodSym->ReturnType;
+
+    if (Method.empty()) {
+        // Bare form: no argument list was ever written down to check arity
+        // against -- Args is always empty for this form (see this
+        // function's own comment above), regardless of how many parameters
+        // Indirect really takes, so checkUserDefinedCall's ordinary arity
+        // check does not apply here and is skipped entirely, exactly like
+        // checkInheritedCallStmt always has.
+        if (!ExpectFunction)
+            // Statement context: whatever this resolves to, its result (if
+            // it even has one) is unused -- checkInheritedCallStmt's own
+            // original behavior, preserved unchanged by this extraction:
+            // no {$X-}/err_func_as_statement-style check ever applied to
+            // the bare form, and still does not.
+            return TyErr;
+        // Expression context: a value is required, so the ancestor being
+        // reached must really be a function -- the same diagnostic an
+        // ordinary call gets from checkUserDefinedCall under
+        // ExpectFunction=true, reproduced directly here since the bare
+        // form has no Args of its own to hand that function for the
+        // identical (arity-free) check to fall out of naturally.
+        if (!Indirect.IsFunction) {
+            error(Loc, diag::err_proc_cannot_return_value, {Indirect.Name});
+            return TyErr;
+        }
+        return Indirect.ReturnType ? Indirect.ReturnType : TyErr;
+    }
+
+    return checkUserDefinedCall(Indirect, Loc, Args, ExpectFunction);
+}
+
+std::shared_ptr<Type> Sema::checkInheritedCallExpr(const InheritedCallExpr& E) {
+    return checkInheritedCall(E.Method, E.Loc, E.Args, /*ExpectFunction=*/true,
+                              E.ResolvedMethod, E.ImplementingType, E.ImplementingModule);
 }
 
 /// EP §6.7.3.7: are two conformant array schemas the same one?

@@ -449,6 +449,45 @@ std::unique_ptr<ExprNode> Parser::parseFactor() {
             return Node;
         }
 
+        // Turbo Tier 5, issue #509: 'inherited;' (bare) / 'inherited Method'
+        // / 'inherited Method(args)' used as a VALUE -- the
+        // expression-context sibling of Parser::parseStatement's identical
+        // TokenKind::Inherited case (ParseStmt.cpp), which builds an
+        // InheritedCallStmt the same way this builds an InheritedCallExpr;
+        // see InheritedCallExpr's own comment (AstExpr.h) for why these are
+        // two node kinds rather than one, the same MethodCallExpr/
+        // MethodCallStmt split already established just above.  'inherited'
+        // is a DIALECT_KEYWORD (TokenKinds.def) reserved only under Turbo,
+        // so this case is reached at all only there -- see ParseStmt.cpp's
+        // own identical comment for why no separate Opts.turbo() check is
+        // needed here either.  Sema (Sema::checkInheritedCallExpr) is what
+        // actually confirms this appears inside a method body and resolves
+        // Method against the enclosing method's own OwnerType's ancestor
+        // chain; the parser only knows the token shape.
+        case TokenKind::Inherited: {
+            advance();
+            auto Node = std::make_unique<InheritedCallExpr>();
+            Node->Loc = Loc;
+            if (check(TokenKind::Identifier)) {
+                Node->Method = Current.Lexeme;
+                advance();
+                if (match(TokenKind::LeftParen)) {
+                    if (!check(TokenKind::RightParen)) {
+                        Node->Args.push_back(parseExpression());
+                        while (match(TokenKind::Comma))
+                            Node->Args.push_back(parseExpression());
+                    }
+                    expect(TokenKind::RightParen);
+                }
+            }
+            // Postfix chaining ('.Field', '[i]', '^') applies to an
+            // 'inherited' call's own result exactly as it does to an
+            // ordinary CallExpr just below -- e.g. a function-valued
+            // 'inherited' result feeding straight into a further field or
+            // index access.
+            return parsePostfix(std::move(Node));
+        }
+
         case TokenKind::Identifier: {
             std::string Name = Current.Lexeme;
             advance();

@@ -149,7 +149,10 @@ struct MethodCallStmt : StmtNode {
 /// at the enclosing method's OwnerType's immediate Parent (never at OwnerType
 /// itself, so a method can never "inherited" its own body) and walks upward
 /// exactly like an ordinary method call's own ancestor-chain resolution
-/// (Sema::checkMethodCall) -- see Sema::checkInheritedCallStmt.
+/// (Sema::checkMethodCall) -- see Sema::checkInheritedCallStmt.  See
+/// InheritedCallExpr (AstExpr.h) for the expression-context sibling (issue
+/// #509: 'inherited' used as a value, e.g. `S := inherited Describe;`),
+/// exactly the way MethodCallExpr is MethodCallStmt's own sibling.
 ///
 /// Two surface forms, both real Borland/FPC syntax:
 ///   'inherited MethodName(args);' / 'inherited MethodName;' -- Method is

@@ -304,4 +304,39 @@ struct MethodCallExpr : ExprNode {
     std::vector<std::unique_ptr<ExprNode>> Args;       /// actual arguments, in order
 };
 
+/// Turbo Tier 5, issue #509: 'inherited [Method[(args)]]' used as a VALUE --
+/// the expression-context sibling of InheritedCallStmt (AstStmt.h), exactly
+/// the way MethodCallExpr is MethodCallStmt's own sibling just above.  Same
+/// design throughout: a STATIC call (never through the VMT) to the DIRECT
+/// PARENT's own implementation of a method with the given name, resolved by
+/// Sema::checkInheritedCall (shared with checkInheritedCallStmt) and emitted
+/// by CGFuncCall::emitInheritedCallExpr (shared design with CGProcCall::
+/// emitInheritedCallStmt, just returning the call's value instead of
+/// discarding it). See InheritedCallStmt's own comment for the whole
+/// design, including the two surface forms (explicit 'inherited Method(...)'
+/// vs. bare 'inherited' forwarding this activation's own arguments) -- both
+/// apply identically here.
+///
+/// Deliberately has no ResolvedType field of its own: unlike
+/// InheritedCallStmt (a StmtNode, which has no such field to begin with),
+/// this is an ExprNode, and ExprNode::ResolvedType already carries Sema's
+/// answer generically -- the same reason MethodCallExpr does not repeat
+/// MethodCallStmt::ResolvedType either.
+struct InheritedCallExpr : ExprNode {
+    static bool classof(const Node* n) { return n->Kind == NodeKind::InheritedCallExpr; }
+    InheritedCallExpr() : ExprNode(NodeKind::InheritedCallExpr) {}
+    /// The method name as written, or empty for the bare 'inherited' form.
+    std::string                            Method;
+    /// Actual arguments, in order; always empty for the bare form -- see
+    /// InheritedCallStmt::Args's own comment.
+    std::vector<std::unique_ptr<ExprNode>> Args;
+
+    /// Sema::checkInheritedCall's resolution, consumed by
+    /// CGFuncCall::emitInheritedCallExpr -- mirrors InheritedCallStmt's own
+    /// three fields of the same names exactly; see their comments there.
+    mutable std::string ResolvedMethod;
+    mutable std::string ImplementingType;
+    mutable std::string ImplementingModule;
+};
+
 } // namespace plang

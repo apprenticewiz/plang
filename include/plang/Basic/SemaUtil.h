@@ -20,14 +20,14 @@ namespace plang {
 // See NumExprKinds and NumStmtKinds in AstBase.h.
 // Complete as written: of the fourteen statement kinds, the nine that
 // contain a statement appear in walkStmts and the eleven that hang an
-// expression off themselves appear in forEachStmtExpr; of the eighteen
-// expression kinds, six are leaves and the other twelve appear in
+// expression off themselves appear in forEachStmtExpr; of the nineteen
+// expression kinds, six are leaves and the other thirteen appear in
 // walkExprs.
 static_assert(NumStmtKinds == 14,
               "a new statement kind that contains statements needs a branch in "
               "walkStmts, and one that hangs an expression off itself needs a "
               "branch in forEachStmtExpr");
-static_assert(NumExprKinds == 18,
+static_assert(NumExprKinds == 19,
               "a new expression kind that owns a child expression needs a "
               "branch in walkExprs");
 
@@ -86,6 +86,10 @@ void walkExprs(const ExprNode* E, Fn&& F) {
         for (const auto& A : N->Args) walkExprs(A.get(), F);
     } else if (auto* N = llvm::dyn_cast<MethodCallExpr>(E)) {
         walkExprs(N->Receiver.get(), F);
+        for (const auto& A : N->Args) walkExprs(A.get(), F);
+    } else if (auto* N = llvm::dyn_cast<InheritedCallExpr>(E)) {
+        // No Receiver to walk -- see InheritedCallExpr's own comment
+        // (AstExpr.h): the receiver is always the implicit Self.
         for (const auto& A : N->Args) walkExprs(A.get(), F);
     } else if (auto* N = llvm::dyn_cast<SetRangeExpr>(E)) {
         walkExprs(N->Low.get(), F);

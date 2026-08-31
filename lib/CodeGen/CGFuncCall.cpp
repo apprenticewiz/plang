@@ -1030,6 +1030,141 @@ llvm::Value* CGFuncCall::emitMethodCallExpr(const MethodCallExpr& e) {
     return ret;
 }
 
+// Turbo Tier 5, issue #509: see this method's own declaration (CGFuncCall.h)
+// for the whole design -- the CGFuncCall sibling of CGProcCall::
+// emitInheritedCallStmt (CGProcCall.cpp), which this otherwise duplicates
+// byte-for-byte (same mangled-symbol resolution, same not-yet-declared
+// fallback heuristics, same bare-vs-explicit argument handling, same
+// Self-forwarding, and -- deliberately, matching the statement form exactly
+// -- no virtual/VMT dispatch branch at all: 'inherited' is always a STATIC
+// call), just returning the call's own value instead of discarding it, with
+// the same string/ShortString return-value spill emitMethodCallExpr's own
+// tail just above applies.
+llvm::Value* CGFuncCall::emitInheritedCallExpr(const InheritedCallExpr& e) {
+    if (e.ImplementingType.empty() || e.ResolvedMethod.empty())
+        codegenICE("'inherited' reached CodeGen unresolved -- "
+                   "Sema::checkInheritedCall should have refused this "
+                   "already or filled in ImplementingType/ResolvedMethod");
+    std::string mangledName = Linkage.mangledMethod(e.ImplementingType, e.ResolvedMethod,
+                                                    e.ImplementingModule);
+
+    // Every method THIS TRANSLATION UNIT declares is pre-declared (at
+    // minimum) by emitAllProcedures's own method pre-pass before ANY body --
+    // including this one, whichever method contains this 'inherited' -- is
+    // emitted; the ancestor 'inherited' reaches may also now be declared in
+    // a DIFFERENT translation unit than this one, which the pre-pass cannot
+    // reach at all -- declared here instead, on first use.  See
+    // CGProcCall::emitInheritedCallStmt's own identical comment.
+    auto* callee = Mod.getFunction(mangledName);
+    if (!callee) {
+        if (e.Method.empty()) {
+            // Bare 'inherited' forwards this activation's own parameters
+            // positionally and unchanged (just below) -- Sema's own
+            // override-signature check (resolveObjectType) already
+            // guarantees the ancestor's own parameter list is identical to
+            // the CURRENTLY EXECUTING function's, so that function's own
+            // FunctionType is exactly the signature to declare.
+            llvm::Function* enclosing = B.GetInsertBlock()->getParent();
+            callee = llvm::Function::Create(enclosing->getFunctionType(),
+                                            llvm::GlobalValue::ExternalLinkage,
+                                            mangledName, &Mod);
+        } else {
+            // Explicit 'inherited Method(args)': same args-derived signature
+            // heuristic emitInheritedCallStmt's own identical fallback uses
+            // (this call's own written argument list, plus e.ResolvedType
+            // for the function's result).
+            llvm::Type* retTy = llvm::Type::getVoidTy(Ctx);
+            if (e.ResolvedType && !e.ResolvedType->isError())
+                retTy = Types.llvmTypeOfSemaType(*e.ResolvedType);
+            std::vector<llvm::Type*> paramTys;
+            paramTys.push_back(PtrTy); // Self
+            for (const auto& Arg : e.Args) {
+                if (Arg && Arg->ResolvedType && !Arg->ResolvedType->isError())
+                    paramTys.push_back(Types.llvmTypeOfSemaType(*Arg->ResolvedType));
+                else
+                    paramTys.push_back(I64Ty);
+            }
+            auto* fnTy = llvm::FunctionType::get(retTy, paramTys, false);
+            callee = llvm::Function::Create(fnTy, llvm::GlobalValue::ExternalLinkage,
+                                            mangledName, &Mod);
+        }
+    }
+
+    // The CURRENTLY EXECUTING function's own Self -- forwarded unchanged,
+    // never re-read through the 'Self' symbol table entry, so this works
+    // identically whether or not the enclosing method happens to still have
+    // 'Self' in scope under that name.
+    llvm::Function* curFn = B.GetInsertBlock()->getParent();
+    if (curFn->arg_size() == 0)
+        codegenICE("'inherited' used inside a function with no 'Self' "
+                   "parameter -- Sema::checkInheritedCall should have "
+                   "refused this outside a method body already");
+    llvm::Value* selfPtr = curFn->getArg(0);
+
+    std::vector<llvm::Value*> args;
+    args.push_back(selfPtr);
+
+    llvm::Value* ret;
+    if (e.Method.empty()) {
+        // Bare 'inherited': this activation's own remaining parameters,
+        // forwarded positionally with no re-marshalling -- see this
+        // function's own declaration comment for why that is sound.
+        for (unsigned i = 1; i < curFn->arg_size(); ++i)
+            args.push_back(curFn->getArg(i));
+        ret = B.CreateCall(callee, args, "inherited.call");
+    } else {
+        // Same per-argument marshalling loop emitMethodCallExpr uses above
+        // -- an explicit 'inherited Method(args)' takes its own written
+        // argument list exactly like an ordinary method call does.
+        size_t pi = args.size();
+        for (size_t astArgIdx = 0; astArgIdx < e.Args.size(); ++astArgIdx) {
+            const auto& arg = e.Args[astArgIdx];
+
+            if (const auto* pt = ProcParamArg(mangledName, astArgIdx)) {
+                ClosureAbi.pushProcParamArgs(args, *arg, *pt);
+                pi = args.size();
+                continue;
+            }
+            if (unsigned nd = Schema.schemaArgDiscs(mangledName, astArgIdx); nd > 0) {
+                Schema.pushSchemaArgs(args, *arg, nd);
+                pi = args.size();
+                continue;
+            }
+            const size_t dims = ConformantDimsOf(mangledName, astArgIdx);
+            if (dims > 0) {
+                ClosureAbi.pushConformantArgs(args, *arg, dims);
+                pi += 1 + 2 * dims;
+            } else {
+                std::optional<int64_t> destSetBase = ParamSetBaseOf(mangledName, astArgIdx);
+                args.push_back(Sets.alignSetArg(
+                    StrCall.emitCallArg(*arg,
+                        pi < callee->arg_size()
+                            ? callee->getFunctionType()->getParamType(pi) : nullptr,
+                        ParamIsByRef(mangledName, astArgIdx)),
+                    *arg, destSetBase));
+                ++pi;
+            }
+        }
+        ret = B.CreateCall(callee, args, "inherited.call");
+    }
+
+    // Same string/ShortString return-value spill emitMethodCallExpr's own
+    // tail (just above) and emitUserFuncCall's own perform, for the
+    // identical reason: a struct-shaped result comes back by value, and
+    // every consumer of a string expression expects an address instead.
+    if (ExprIsVarStr(e) && ret->getType()->isStructTy()) {
+        auto* tmp = CreateEntryAlloca(ret->getType(), "str.ret");
+        B.CreateStore(ret, tmp);
+        return tmp;
+    }
+    if (ExprIsShortStr(e) && ret->getType()->isStructTy()) {
+        auto* tmp = CreateEntryAlloca(ret->getType(), "sstr.ret");
+        B.CreateStore(ret, tmp);
+        return tmp;
+    }
+    return ret;
+}
+
 llvm::Value* CGFuncCall::emitUserFuncCall(const CallExpr& e) {
     if (auto* v = tryEmitDosFuncCall(e)) return v;
     // ISO §6.6.3.1: a functional parameter is called through the pair it
