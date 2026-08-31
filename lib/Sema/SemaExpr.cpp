@@ -1765,14 +1765,51 @@ std::shared_ptr<Type> Sema::checkCallExpr(const CallExpr& E) {
             }
             return Sym->ReturnType ? Sym->ReturnType : TyErr; // TyReal
         }
-        // EP §6.7.6.3: complex constructors.
+        // EP §6.7.6.3: complex constructors -- cmplx(x,y) and polar(r,t) each
+        // COMBINE two real-type components into a complex result, so both
+        // arguments are numeric and, unlike the sqrt/sin/... arm above,
+        // never complex (ISO 10206 §6.7.6.3's own prose: "the expressions
+        // x and y [/ r and t] that shall be of real-type" -- no complex
+        // alternative is offered the way Table 2's footnote (1) offers one
+        // for sqrt/sin/...).  A complex argument here has no lowering
+        // either: CodeGen's cmplx/polar (CGFuncCall.cpp) run each argument
+        // through ToDouble, which has no case for the {double,double}
+        // aggregate a complex value actually is.  Neither argument was
+        // checked at all before this, so `cmplx(true, 'x')` type-checked
+        // with nothing to reject it (issue #306) -- the same
+        // numeric-but-not-complex shape trunc/round/int/frac already
+        // require above, for the identical reason.
         if (Lo == "cmplx" || Lo == "polar") {
-            for (const auto& Arg : E.Args) (void)checkExpr(*Arg);
+            for (const auto& Arg : E.Args) {
+                auto ArgTy = checkExpr(*Arg);
+                if (ArgTy->isError()) continue;
+                if (!ArgTy->isNumeric() || ArgTy->Kind == TypeKind::Complex)
+                    error(Arg->Loc, diag::err_numeric_argument, {Lo, ArgTy->Name});
+            }
             return TyComplex;
         }
-        // EP §6.7.6.2: component extraction functions.
-        if (Lo == "re" || Lo == "im" || Lo == "arg") {
-            for (const auto& Arg : E.Args) (void)checkExpr(*Arg);
+        // EP §6.7.6.2: component extraction functions -- unlike sqrt/sin/
+        // cos/exp/ln/arctan just above, re/im/arg are NOT polymorphic over
+        // integer-type and real-type too: ISO 10206 Table 2's "Type of
+        // operand" column gives those six functions footnote (1),
+        // "Integer-type, real-type, or complex-type", but gives re/im/arg
+        // their own, narrower footnote (4), "Complex-type" alone -- the
+        // standard's own mechanism for saying a required function accepts
+        // more than one operand type, used deliberately for the six and
+        // deliberately not for these three. So a plain numeric argument is
+        // rejected here, not silently widened. This had no check at all, so
+        // `re(SomeInteger)` type-checked and CodeGen's non-complex fallback
+        // (a ToDouble passthrough for re, a constant 0 for im, an
+        // origin-embedding plang_arg call for arg) fabricated a
+        // plausible-looking but non-conforming result instead of a
+        // diagnostic (issue #306).
+        if ((Lo == "re" || Lo == "im" || Lo == "arg") && !E.Args.empty()) {
+            auto ArgTy = checkExpr(*E.Args[0]);
+            if (ArgTy->isError()) return TyErr;
+            if (ArgTy->Kind != TypeKind::Complex) {
+                error(E.Args[0]->Loc, diag::err_complex_argument, {Lo, ArgTy->Name});
+                return TyErr;
+            }
             return TyReal;
         }
         // EP §6.7.6.8: binding names the variable whose binding it reports,
