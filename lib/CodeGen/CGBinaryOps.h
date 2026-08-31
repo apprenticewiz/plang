@@ -14,6 +14,7 @@
 
 #include "CGTypes.h"
 #include "ComplexOps.h"
+#include "OrdinalSignedness.h"
 #include "RangeCheckGuards.h"
 #include "RuntimeFunctionCache.h"
 #include "SchemaAccess.h"
@@ -80,8 +81,14 @@ private:
     /// See CodeGenImpl.h's toI64/coerceToType \c srcSigned parameter for
     /// why an LLVM-width-alone guess is wrong for Turbo's sized-integer
     /// ladder's unsigned rungs wider than i8 and its signed 8-bit rung.
+    ///
+    /// A thin delegate to the free function (OrdinalSignedness.h) issue
+    /// #177's sibling audit hoisted this body to, once CGAssign/CGProcCall/
+    /// StringCallMarshalling/... needed the identical logic too -- kept as
+    /// a same-named member so every call site in CGBinaryOps.cpp keeps
+    /// reading `operandIsSigned(x)`, unchanged.
     bool operandIsSigned(const plang::ExprNode& e) const {
-        return !OrdinalIsUnsigned(e.ResolvedType.get());
+        return exprIsSigned(e);
     }
 
     /// The two-block-plus-PHI CFG shape shared by every short-circuiting

@@ -82,7 +82,7 @@ llvm::Value* CGIndexAccess::emitConformantElemPtr(const IndexExpr& e) {
     // the variable after the array.
     const size_t nflat = std::min(subs.size(), dims);
     for (size_t d = 0; d < nflat; ++d) {
-        auto* idx = ToI64(EmitExpr(*subs[d]));
+        auto* idx = ToI64(EmitExpr(*subs[d]), exprIsSigned(*subs[d]));
         if (d < ve->conformantDims.size()) {
             // EP §6.7.3.7: every other indexing path (plain arrays, schema
             // arrays, arrays through pointers) range-checks the subscript;
@@ -123,7 +123,7 @@ llvm::Value* CGIndexAccess::emitConformantElemPtr(const IndexExpr& e) {
         // GEP below with no lower-bound adjustment: wrong element type AND
         // wrong offset, landing the write one element past where it belongs.
         if (at) at = schemaUnderlying(at);
-        auto* idx = ToI64(EmitExpr(*subs[d]));
+        auto* idx = ToI64(EmitExpr(*subs[d]), exprIsSigned(*subs[d]));
         if (at && at->Kind == TypeKind::Array) {
             // This dimension's bounds are fixed by the element type's own
             // declaration rather than by anything the caller passed at run
@@ -163,7 +163,7 @@ llvm::Value* CGIndexAccess::emitIndexGEP(const IndexExpr& e) {
             && e.Array->ResolvedType->PointeeType
             && e.Array->ResolvedType->PointeeType->Kind == TypeKind::Char) {
         auto* base = EmitExpr(*e.Array); // the pointer VALUE, not its address
-        auto* idx  = ToI64(EmitExpr(*e.Index));
+        auto* idx  = ToI64(EmitExpr(*e.Index), exprIsSigned(*e.Index));
         return B.CreateGEP(I8Ty, base, {idx}, "pchar.elem.ptr");
     }
     // EP §6.4.7: an array FIELD of a run-time-laid-out body has bounds the
@@ -189,7 +189,7 @@ llvm::Value* CGIndexAccess::emitIndexGEP(const IndexExpr& e) {
             && ref->semaTy->SchemaBody->Kind == TypeKind::Array) {
         auto [lo, hi] = Schema.schemaArrayBounds(*ref);
         auto* elemTy  = Schema.schemaStorageType(*ref);
-        auto* idx     = ToI64(EmitExpr(*e.Index));
+        auto* idx     = ToI64(EmitExpr(*e.Index), exprIsSigned(*e.Index));
         RangeGuards.emitRangeCheckDyn(idx, lo, hi, /*isIndex=*/true, e.Loc);
         idx = B.CreateSub(idx, lo, "idx.adj.sch");
         return B.CreateGEP(elemTy, ref->data, {idx}, "elem.ptr");
@@ -216,7 +216,7 @@ llvm::Value* CGIndexAccess::emitIndexGEP(const IndexExpr& e) {
         // concretely -- and emitStrAddr already falls back to EmitExpr for
         // exactly that, the same dispatch EP's own s[i] arm just below uses.
         auto* strPtr = StrCall.emitStrAddr(*e.Array);
-        auto* idx    = ToI64(EmitExpr(*e.Index));
+        auto* idx    = ToI64(EmitExpr(*e.Index), exprIsSigned(*e.Index));
         const int64_t cap = ExprShortStrCap(*e.Array);
         if (RangeGuards.rangeChecksAt(e.Loc)) {
             auto* bad = B.CreateOr(
@@ -246,7 +246,7 @@ llvm::Value* CGIndexAccess::emitIndexGEP(const IndexExpr& e) {
     // to the string's current length rather than to its capacity.
     if (ExprIsVarStr(*e.Array)) {
         auto* strPtr = StrCall.emitStrAddr(*e.Array);
-        auto* idx    = ToI64(EmitExpr(*e.Index));
+        auto* idx    = ToI64(EmitExpr(*e.Index), exprIsSigned(*e.Index));
         if (RangeGuards.rangeChecksAt(e.Loc)) {
             auto* len   = Strings.strLoadLen(strPtr);
             auto* one   = llvm::ConstantInt::get(I64Ty, 1);
@@ -277,7 +277,7 @@ llvm::Value* CGIndexAccess::emitIndexGEP(const IndexExpr& e) {
         return nullptr;
     }();
 
-    auto* idx = ToI64(EmitExpr(*e.Index));
+    auto* idx = ToI64(EmitExpr(*e.Index), exprIsSigned(*e.Index));
     auto* arrPtr = ve ? ve->ptr : EmitLValue(*e.Array);
 
     llvm::Type* arrTy  = nullptr;

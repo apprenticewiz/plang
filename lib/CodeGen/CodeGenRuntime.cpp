@@ -91,14 +91,16 @@ void Codegen::Impl::emitNilCheck(llvm::Value* ptr) {
 }
 
 void Codegen::Impl::emitRangeCheck(llvm::Value* val, int64_t lo, int64_t hi,
-                                   bool isIndex, SourceLocation Loc) {
-    rangeGuards_->emitRangeCheck(val, lo, hi, isIndex, Loc);
+                                   bool isIndex, SourceLocation Loc,
+                                   std::optional<bool> valSigned) {
+    rangeGuards_->emitRangeCheck(val, lo, hi, isIndex, Loc, valSigned);
 }
 
 void Codegen::Impl::emitRangeCheckDyn(llvm::Value* val, llvm::Value* lo,
                                       llvm::Value* hi, bool isIndex,
-                                      SourceLocation Loc) {
-    rangeGuards_->emitRangeCheckDyn(val, lo, hi, isIndex, Loc);
+                                      SourceLocation Loc,
+                                      std::optional<bool> valSigned) {
+    rangeGuards_->emitRangeCheckDyn(val, lo, hi, isIndex, Loc, valSigned);
 }
 
 // ====================================================================

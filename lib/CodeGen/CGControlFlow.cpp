@@ -76,8 +76,13 @@ void CGControlFlow::emitFor(const ForStmt& s) {
     // Both are therefore evaluated once, and both before the store: in
     // `i := 10; for i := 1 to i`, the limit is the 10 that was there when the
     // statement began, and storing 1 first made the loop run a single time.
-    auto* fromVal  = CoerceToType(EmitExpr(*s.From),  ve->type);
-    auto* limitVal = CoerceToType(EmitExpr(*s.Limit), ve->type);
+    // From/Limit's own signedness, not a guess from their LLVM width: a
+    // bound narrower than the control variable's own storage (e.g. `for i
+    // := w to 100 do` with `i: LongInt; w: Word`) otherwise widened wrong
+    // here, ahead of the uns-flagged compare below ever running (issue
+    // #177's sibling audit).
+    auto* fromVal  = CoerceToType(EmitExpr(*s.From),  ve->type, exprIsSigned(*s.From));
+    auto* limitVal = CoerceToType(EmitExpr(*s.Limit), ve->type, exprIsSigned(*s.Limit));
     B.CreateStore(fromVal, ve->ptr);
 
     auto* condBB = llvm::BasicBlock::Create(Ctx, "for.cond", CurFn);
@@ -296,7 +301,17 @@ void CGControlFlow::emitRepeat(const RepeatStmt& s) {
 // Uses an if-else chain to support both point and lo..hi range labels (EP).
 void CGControlFlow::emitCase(const CaseStmt& s) {
     // Re-evaluated on every pass through an enclosing loop; see emitIf.
-    llvm::Value* sel = WithStackScope([&]{ return ToI64(EmitExpr(*s.Selector)); });
+    // s.Selector's own signedness: a signed narrow or unsigned wide Turbo
+    // ordinal selector (very often a subrange -- TP7 ch.19's own storage-
+    // width rule picks exactly these shapes for many ordinary bounded
+    // ranges) otherwise widened wrong here (issue #177's sibling audit).
+    // The i64 comparisons below stay plain SIGNED regardless: once sel/lo/
+    // hi/val are all correctly widened to the full i64 domain, every value
+    // any of them could have held (8/16/32-bit, signed or not) is already
+    // within plain i64's own signed range, so no unsigned compare variant
+    // is ever needed on top of getting the widening itself right.
+    llvm::Value* sel = WithStackScope([&]{
+        return ToI64(EmitExpr(*s.Selector), exprIsSigned(*s.Selector)); });
     auto* endBB = llvm::BasicBlock::Create(Ctx, "case.end", CurFn);
 
     // Chain: for each arm build a test block and a body block.
@@ -315,13 +330,13 @@ void CGControlFlow::emitCase(const CaseStmt& s) {
             llvm::Value* match;
             if (lbl.High) {
                 // Range lo..hi: sel >= lo && sel <= hi
-                auto* lo  = ToI64(EmitExpr(*lbl.Low));
-                auto* hi  = ToI64(EmitExpr(*lbl.High));
+                auto* lo  = ToI64(EmitExpr(*lbl.Low),  exprIsSigned(*lbl.Low));
+                auto* hi  = ToI64(EmitExpr(*lbl.High), exprIsSigned(*lbl.High));
                 auto* geq = B.CreateICmpSGE(sel, lo, "rlo");
                 auto* leq = B.CreateICmpSLE(sel, hi, "rhi");
                 match     = B.CreateAnd(geq, leq, "range");
             } else {
-                auto* val = ToI64(EmitExpr(*lbl.Low));
+                auto* val = ToI64(EmitExpr(*lbl.Low), exprIsSigned(*lbl.Low));
                 match     = B.CreateICmpEQ(sel, val, "eq");
             }
             cond = B.CreateOr(cond, match, "lbl");

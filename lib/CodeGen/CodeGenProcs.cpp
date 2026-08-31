@@ -1496,8 +1496,20 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
                     if (const auto& rt = tn ? tn->ResolvedType : nullptr;
                             rt && rt->Kind == TypeKind::Subrange
                             && argVal->getType()->isIntegerTy())
+                        // argVal is the raw incoming Argument, at the
+                        // formal's OWN (possibly narrower-than-i64) LLVM
+                        // width -- rt's own signedness (not a guess from
+                        // that width) has to widen it before the compare,
+                        // or a legal negative value formal'd as a signed
+                        // narrow Turbo ordinal (e.g. `x: -100..100`) got
+                        // zero-extended into a huge positive one and failed
+                        // this check spuriously (issue #177's sibling
+                        // audit; see CGAssign.cpp's own two identical
+                        // fixes for the assignment-statement shape of the
+                        // same bug).
                         emitRangeCheck(argVal, rt->SubLo, rt->SubHi,
-                                       /*isIndex=*/false, tn->Loc);
+                                       /*isIndex=*/false, tn->Loc,
+                                       !ordinalIsUnsigned(rt.get()));
                     auto* a = createEntryAlloca(vt, nm + ".addr");
                     builder.CreateStore(argVal, a);
                     defVar(nm, a, vt, tn); // pass typeNode so bounds are known

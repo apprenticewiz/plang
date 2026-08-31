@@ -15,6 +15,7 @@
 
 #include "CGSymbolTable.h"
 #include "CGTypes.h"
+#include "OrdinalSignedness.h"
 #include "RuntimeFunctionCache.h"
 #include "SetOps.h"
 
@@ -36,8 +37,8 @@ public:
                   std::function<llvm::Value*(const plang::ExprNode&)> EmitExpr,
                   std::function<void(const plang::StmtNode*)> EmitStmt,
                   std::function<llvm::Value*(llvm::Value*)> EnsureI1,
-                  std::function<llvm::Value*(llvm::Value*)> ToI64,
-                  std::function<llvm::Value*(llvm::Value*, llvm::Type*)> CoerceToType,
+                  std::function<llvm::Value*(llvm::Value*, bool)> ToI64,
+                  std::function<llvm::Value*(llvm::Value*, llvm::Type*, bool)> CoerceToType,
                   std::function<llvm::AllocaInst*(llvm::Type*, const std::string&)> CreateEntryAlloca,
                   std::function<void()> ResumeAfterTerminator,
                   std::function<bool()> IsTerminated,
@@ -80,8 +81,15 @@ private:
     std::function<llvm::Value*(const plang::ExprNode&)> EmitExpr;
     std::function<void(const plang::StmtNode*)> EmitStmt;
     std::function<llvm::Value*(llvm::Value*)> EnsureI1;
-    std::function<llvm::Value*(llvm::Value*)> ToI64;
-    std::function<llvm::Value*(llvm::Value*, llvm::Type*)> CoerceToType;
+    /// The bool is the operand's actual Sema-resolved Type::IsSigned; see
+    /// CGBinaryOps.h's identical member for the fuller comment.  emitCase's
+    /// selector/labels pass exprIsSigned(x) (OrdinalSignedness.h) for each
+    /// one's own ExprNode.
+    std::function<llvm::Value*(llvm::Value*, bool)> ToI64;
+    /// As ToI64.  emitFor's From/Limit each pass exprIsSigned of their own
+    /// ExprNode -- see emitFor's own comment for why the destination is the
+    /// control variable's type rather than i64.
+    std::function<llvm::Value*(llvm::Value*, llvm::Type*, bool)> CoerceToType;
     std::function<llvm::AllocaInst*(llvm::Type*, const std::string&)> CreateEntryAlloca;
     std::function<void()> ResumeAfterTerminator;
     std::function<bool()> IsTerminated;

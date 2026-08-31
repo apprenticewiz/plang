@@ -40,7 +40,7 @@ public:
         std::function<llvm::Value*(const plang::ExprNode&)> EmitLValue,
         std::function<llvm::AllocaInst*(llvm::Type*, const std::string&)> CreateEntryAlloca,
         std::function<llvm::Value*(llvm::Value*, const std::string&)> CreateDynAlloca,
-        std::function<llvm::Value*(llvm::Value*, llvm::Type*)> CoerceToType,
+        std::function<llvm::Value*(llvm::Value*, llvm::Type*, bool)> CoerceToType,
         std::function<bool(const plang::ExprNode&)> ExprIsCharStr,
         std::function<bool(const plang::ExprNode&)> ExprIsVarStr,
         std::function<int64_t(const plang::ExprNode&)> ExprCharStrLen,
@@ -114,7 +114,14 @@ private:
     std::function<llvm::Value*(const plang::ExprNode&)> EmitLValue;
     std::function<llvm::AllocaInst*(llvm::Type*, const std::string&)> CreateEntryAlloca;
     std::function<llvm::Value*(llvm::Value*, const std::string&)> CreateDynAlloca;
-    std::function<llvm::Value*(llvm::Value*, llvm::Type*)> CoerceToType;
+    /// The bool is the source operand's actual Sema-resolved Type::IsSigned
+    /// -- CGBinaryOps.h's identical CoerceToType member has the fuller
+    /// version of this comment.  Upgraded from a 2-arg (no operand-type
+    /// context) bridge to this 3-arg one in issue #177's own fix: emitCallArg
+    /// is what threads a value-parameter actual into its formal's declared
+    /// width, and a signed narrow (or unsigned wide) Turbo-ordinal actual
+    /// reaches it with no other coercion in between.
+    std::function<llvm::Value*(llvm::Value*, llvm::Type*, bool)> CoerceToType;
     /// Stateless string-shape predicates -- static Impl methods used far
     /// outside this unit too, so they stay put; reached via closure rather
     /// than a qualified call, which would need this file to see all of

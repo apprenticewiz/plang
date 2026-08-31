@@ -23,6 +23,7 @@
 #include "CGTypes.h"
 #include "ClosureAndCallABI.h"
 #include "FileVarHelpers.h"
+#include "OrdinalSignedness.h"
 #include "RangeCheckGuards.h"
 #include "RuntimeFunctionCache.h"
 #include "SchemaAccess.h"
@@ -51,10 +52,10 @@ public:
                std::function<llvm::AllocaInst*(llvm::Type*, const std::string&)> CreateEntryAlloca,
                std::function<const VarEntry*(const std::string&, const plang::Type*)> ResolveImportedVar,
                std::function<llvm::Value*(llvm::Value*)> EnsureI1,
-               std::function<llvm::Value*(llvm::Value*)> ToI64,
+               std::function<llvm::Value*(llvm::Value*, bool)> ToI64,
                std::function<bool(const plang::ExprNode&)> ExprIsVarStr,
                std::function<int64_t(const plang::ExprNode&)> ExprStrCapStatic,
-               std::function<llvm::Value*(llvm::Value*, llvm::Type*)> CoerceToType,
+               std::function<llvm::Value*(llvm::Value*, llvm::Type*, bool)> CoerceToType,
                std::function<bool(const plang::ExprNode&)> ExprIsShortStr)
         : Ctx(Ctx), Mod(Mod), B(B), RtFns(RtFns), SymTab(SymTab),
           ClosureAbi(ClosureAbi), Linkage(Linkage), FuncCall(FuncCall),
@@ -182,14 +183,21 @@ private:
     std::function<llvm::AllocaInst*(llvm::Type*, const std::string&)> CreateEntryAlloca;
     std::function<const VarEntry*(const std::string&, const plang::Type*)> ResolveImportedVar;
     std::function<llvm::Value*(llvm::Value*)> EnsureI1;
-    std::function<llvm::Value*(llvm::Value*)> ToI64;
+    /// The bool is the operand's actual Sema-resolved Type::IsSigned; see
+    /// CGBinaryOps.h's identical member for the fuller comment.  Used by
+    /// emitExpr's SubstringExpr case (`s[i..j]` used as a value) for Low/
+    /// High, each with exprIsSigned(x) (OrdinalSignedness.h) for its own x.
+    std::function<llvm::Value*(llvm::Value*, bool)> ToI64;
     std::function<bool(const plang::ExprNode&)> ExprIsVarStr;
     std::function<int64_t(const plang::ExprNode&)> ExprStrCapStatic;
     /// Codegen::Impl::coerceToType: widens/narrows/converts an ordinal or
     /// real value to a destination LLVM type.  Used by a Turbo VALUE
     /// typecast's rvalue emission (see emitExpr's TypeCastExpr case) -- see
-    /// its own definition (CodeGenExprs.cpp) for exactly what it does.
-    std::function<llvm::Value*(llvm::Value*, llvm::Type*)> CoerceToType;
+    /// its own definition (CodeGenExprs.cpp) for exactly what it does.  The
+    /// bool is the SOURCE operand's own Sema-resolved signedness (again
+    /// exprIsSigned(n.Operand)), the identical srcSigned parameter every
+    /// other CoerceToType caller supplies.
+    std::function<llvm::Value*(llvm::Value*, llvm::Type*, bool)> CoerceToType;
     /// Turbo string[N]'s own predicate, the sibling ExprIsVarStr has none of
     /// -- see exprIsShortStr's doc comment (CodeGenImpl.h) for why ShortString
     /// needs no capacity-query closure the way ExprStrCapStatic exists for

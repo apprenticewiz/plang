@@ -20,6 +20,7 @@
 #include "ClosureAndCallABI.h"
 #include "ComplexOps.h"
 #include "FileVarHelpers.h"
+#include "OrdinalSignedness.h"
 #include "RangeCheckGuards.h"
 #include "RuntimeFunctionCache.h"
 #include "SchemaAccess.h"
@@ -47,7 +48,7 @@ public:
                std::function<llvm::Value*(const plang::ExprNode&)> EmitExpr,
                std::function<llvm::Value*(const plang::ExprNode&)> EmitLValue,
                std::function<llvm::Value*(llvm::Value*)> ToDouble,
-               std::function<llvm::Value*(llvm::Value*)> ToI64,
+               std::function<llvm::Value*(llvm::Value*, bool)> ToI64,
                std::function<llvm::Value*(llvm::Value*)> EnsureI1,
                std::function<llvm::AllocaInst*(llvm::Type*, const std::string&)> CreateEntryAlloca,
                std::function<llvm::Value*(llvm::Value*, const std::string&)> CreateDynStrAlloca,
@@ -162,7 +163,12 @@ private:
     std::function<llvm::Value*(const plang::ExprNode&)> EmitExpr;
     std::function<llvm::Value*(const plang::ExprNode&)> EmitLValue;
     std::function<llvm::Value*(llvm::Value*)> ToDouble;
-    std::function<llvm::Value*(llvm::Value*)> ToI64;
+    /// The bool is the operand's actual Sema-resolved Type::IsSigned; see
+    /// CGBinaryOps.h's identical member for the fuller comment.  Every
+    /// built-in this file lowers with an ordinal argument (Abs/Sqr/Odd/Chr/
+    /// Succ/Pred/Copy/StringOfChar/...) passes exprIsSigned(x)
+    /// (OrdinalSignedness.h) for whatever ExprNode x the value came from.
+    std::function<llvm::Value*(llvm::Value*, bool)> ToI64;
     std::function<llvm::Value*(llvm::Value*)> EnsureI1;
     std::function<llvm::AllocaInst*(llvm::Type*, const std::string&)> CreateEntryAlloca;
     std::function<llvm::Value*(llvm::Value*, const std::string&)> CreateDynStrAlloca;

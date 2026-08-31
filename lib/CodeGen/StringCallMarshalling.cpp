@@ -6,6 +6,7 @@
 #include "plang/AST/Ast.h"
 
 #include "CodegenICE.h"
+#include "OrdinalSignedness.h"
 
 using namespace plang;
 
@@ -141,7 +142,13 @@ llvm::Value* StringCallMarshalling::emitCallArg(const ExprNode& arg,
     if (paramTy && v && v->getType() != paramTy
             && paramTy->isSingleValueType() && v->getType()->isSingleValueType()
             && !paramTy->isPointerTy() && !v->getType()->isPointerTy())
-        v = CoerceToType(v, paramTy);
+        // arg's own Sema-resolved signedness, not a guess from v's LLVM
+        // width: a signed narrow (ShortInt) or unsigned wide (Word/
+        // Cardinal) Turbo-ordinal actual passed by value used to widen with
+        // the pre-ladder heuristic here, so `s: ShortInt; s := -5;
+        // show(s)` for `procedure show(x: LongInt)` printed x=251 instead
+        // of -5 (issue #177).
+        v = CoerceToType(v, paramTy, exprIsSigned(arg));
     return v;
 }
 

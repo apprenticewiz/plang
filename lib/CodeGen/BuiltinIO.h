@@ -20,6 +20,7 @@
 #include "CGTypes.h"
 #include "ComplexOps.h"
 #include "FileVarHelpers.h"
+#include "OrdinalSignedness.h"
 #include "RangeCheckGuards.h"
 #include "RuntimeFunctionCache.h"
 #include "SchemaAccess.h"
@@ -41,7 +42,7 @@ public:
               llvm::Type* DblTy, llvm::PointerType* PtrTy,
               std::function<llvm::Value*(const plang::ExprNode&)> EmitExpr,
               std::function<llvm::Value*(const plang::ExprNode&)> EmitLValue,
-              std::function<llvm::Value*(llvm::Value*)> ToI64,
+              std::function<llvm::Value*(llvm::Value*, bool)> ToI64,
               std::function<llvm::Value*(llvm::Value*, llvm::Type*)> CoerceToType,
               std::function<llvm::AllocaInst*(llvm::Type*, const std::string&)> CreateEntryAlloca,
               std::function<bool(const plang::ExprNode&)> ExprIsVarStr,
@@ -178,7 +179,21 @@ private:
     llvm::PointerType* PtrTy;
     std::function<llvm::Value*(const plang::ExprNode&)> EmitExpr;
     std::function<llvm::Value*(const plang::ExprNode&)> EmitLValue;
-    std::function<llvm::Value*(llvm::Value*)> ToI64;
+    /// The bool is the operand's actual Sema-resolved Type::IsSigned; see
+    /// CGBinaryOps.h's identical member for the fuller comment.  Used for
+    /// a write-parameter's Width/Decimals (`write(x:w:d)`) and for the
+    /// read-back range check on a subrange-typed read() target, each with
+    /// exprIsSigned(x) (OrdinalSignedness.h) for its own ExprNode.
+    std::function<llvm::Value*(llvm::Value*, bool)> ToI64;
+    /// CoerceToType is 2-arg (no operand-type context), unlike the sibling
+    /// ToI64 just above: every call site here is either explicitly gated
+    /// `!Opts.turbo()` (ISO/EP's own Integer is always 64-bit signed, so
+    /// the pre-ladder LLVM-width guess this falls back to cannot disagree
+    /// with a real operand type -- see emitWriteArgs/emitBuiltinRead's own
+    /// comments) or narrows/holds steady from an always-i64 runtime-loaded
+    /// source (emitReadArg's own comment), for which the guess is exact
+    /// regardless of signedness either way (issue #177's sibling audit
+    /// checked all three and found no live bug).
     std::function<llvm::Value*(llvm::Value*, llvm::Type*)> CoerceToType;
     std::function<llvm::AllocaInst*(llvm::Type*, const std::string&)> CreateEntryAlloca;
     std::function<bool(const plang::ExprNode&)> ExprIsVarStr;

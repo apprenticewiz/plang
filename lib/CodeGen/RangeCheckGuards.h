@@ -2,6 +2,7 @@
 #pragma once
 
 #include <functional>
+#include <optional>
 
 #include "llvm/ADT/STLFunctionalExtras.h"
 #include "llvm/IR/Function.h"
@@ -126,11 +127,28 @@ public:
     /// bound through ToI64's unconditional zero-extend and corrupt it (e.g.
     /// -32768 at i16 becomes +32768 once zero-extended to i64) -- so this
     /// stays i64Ty()-only on purpose.
+    ///
+    /// \p valSigned is \p val's own Sema-resolved signedness (an
+    /// exprIsSigned answer, OrdinalSignedness.h), when the caller has a real
+    /// operand to ask -- consulted instead of ToI64's own guess-from-LLVM-
+    /// width fallback when \p val is not already i64.  Defaults to nullopt,
+    /// preserving every pre-existing caller's exact behavior (most already
+    /// hand this an ALREADY-i64 val, for which ToI64's fast path makes the
+    /// difference moot either way); a caller that hands this a narrower,
+    /// not-yet-widened val -- SetOps' own singleton/range checks, a value
+    /// parameter's incoming Argument, an assignment's pre-coercion rhs --
+    /// has to pass its own answer explicitly or inherit the exact
+    /// LLVM-width-guessing bug issue #177 found on toI64/coerceToType's
+    /// other call sites (issue #177's sibling audit; see e.g. CGAssign.cpp's
+    /// own two callers).
     void emitRangeCheck(llvm::Value* val, int64_t lo, int64_t hi, bool isIndex,
-                         plang::SourceLocation Loc);
-    /// emitRangeCheck for bounds that are only known at run time.
+                         plang::SourceLocation Loc,
+                         std::optional<bool> valSigned = std::nullopt);
+    /// emitRangeCheck for bounds that are only known at run time.  \p
+    /// valSigned as above.
     void emitRangeCheckDyn(llvm::Value* val, llvm::Value* lo, llvm::Value* hi,
-                            bool isIndex, plang::SourceLocation Loc);
+                            bool isIndex, plang::SourceLocation Loc,
+                            std::optional<bool> valSigned = std::nullopt);
 
 private:
     /// Emits the call every Turbo-routed guard failure below shares: TP's
