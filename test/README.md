@@ -54,6 +54,35 @@ to the same-terminator rule above.
   actually iterate day to day:
   `lit --filter='<regex>' build/test/<Category>`
 
+## Test timeouts
+
+`test/lit.cfg.py` sets `lit_config.maxIndividualTestTime = 120` (seconds):
+every test has a 120s backstop, so a genuine compiler hang on adversarial
+input fails fast and points at the responsible test instead of silently
+eating into CI's own outer `timeout-minutes` budget (see
+[issue #189](https://github.com/apprenticewiz/plang/issues/189)). This is
+generous headroom — the slowest test in the whole suite runs in well
+under a second normally, save for one deliberate compile-time-scaling
+guard that measures ~6.62s.
+
+There is currently **no per-directory override mechanism** — nothing in
+the suite needs one today. If a genuinely slow future test (a deliberate
+stress/scaling test, say) needs more than 120s, add a `lit.local.cfg` in
+its directory:
+
+```python
+# test/<Category>/<Subdir>/lit.local.cfg
+lit_config.maxIndividualTestTime = 300  # this directory only
+```
+
+lit applies the most specific `lit.local.cfg` found by walking from
+`test_source_root` down to the test's own directory, so this only widens
+the limit for tests under that one directory — everything else keeps the
+120s default from `test/lit.cfg.py`. Prefer the narrowest directory that
+actually needs the override, and leave a comment explaining why the test
+is slow (see the load-bearing-syntax section above for this tree's
+comment conventions).
+
 ## Substitutions available in `RUN:` lines
 
 | Substitution | Expands to |
