@@ -1096,7 +1096,8 @@ std::shared_ptr<Type> Sema::resolveObjectType(const ObjectTypeNode& Node,
                 OwnLevelNamesLower.insert(Lower);
                 T->RecordFields.push_back(
                     {.Name = Nm, .Ty = Ft, .IsTagField = false,
-                     .IsPrivate = (M.Vis == MemberVisibility::Private)});
+                     .IsPrivate = (M.Vis == MemberVisibility::Private),
+                     .DeclaringModule = CurrentUnit_});
             }
             continue;
         }
@@ -1178,6 +1179,7 @@ std::shared_ptr<Type> Sema::resolveObjectType(const ObjectTypeNode& Node,
         S.Params              = Meth.Params;
         S.ReturnType          = Meth.RetType;
         S.Decl                = Meth.Heading;
+        S.IsMethodPrivate      = Meth.IsPrivate;
         S.IsMethodVirtual      = Meth.IsVirtual;
         S.IsMethodAbstract     = Meth.IsAbstract;
         S.IsMethodConstructor  = Meth.IsConstructor;

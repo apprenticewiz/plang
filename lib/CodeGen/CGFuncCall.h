@@ -27,9 +27,10 @@
 #include "StringCallMarshalling.h"
 #include "StringRuntime.h"
 
-namespace llvm { class Module; class Value; }
+namespace llvm { class Module; class Value; class GlobalVariable; }
 namespace plang {
 struct CallExpr; struct ExprNode; struct ProcedureTypeNode; struct MethodCallExpr;
+struct Type;
 }
 
 class CGFuncCall {
@@ -59,7 +60,8 @@ public:
                std::function<int64_t(const plang::ExprNode&)> ExprCharStrLen,
                std::function<int64_t(const plang::ExprNode&)> ExprStrCapStatic,
                std::function<bool(const plang::ExprNode&)> ExprIsShortStr,
-               std::function<int64_t(const plang::ExprNode&)> ExprShortStrCap)
+               std::function<int64_t(const plang::ExprNode&)> ExprShortStrCap,
+               std::function<llvm::GlobalVariable*(const plang::Type&)> GetOrCreateVmt)
         : Ctx(Ctx), Mod(Mod), B(B), RtFns(RtFns), Sets(Sets), Complex(Complex),
           FileVars(FileVars), Types(Types), Schema(Schema), Strings(Strings),
           StrCall(StrCall), Linkage(Linkage), SymTab(SymTab), ClosureAbi(ClosureAbi),
@@ -75,7 +77,8 @@ public:
           ProcParamArg(std::move(ProcParamArg)), ParamIsByRef(std::move(ParamIsByRef)),
           ExprIsVarStr(std::move(ExprIsVarStr)), ExprIsCharStr(std::move(ExprIsCharStr)),
           ExprCharStrLen(std::move(ExprCharStrLen)), ExprStrCapStatic(std::move(ExprStrCapStatic)),
-          ExprIsShortStr(std::move(ExprIsShortStr)), ExprShortStrCap(std::move(ExprShortStrCap)) {}
+          ExprIsShortStr(std::move(ExprIsShortStr)), ExprShortStrCap(std::move(ExprShortStrCap)),
+          GetOrCreateVmt(std::move(GetOrCreateVmt)) {}
 
     llvm::Value* emitCallExpr(const plang::CallExpr& e);
     llvm::Value* emitUserFuncCall(const plang::CallExpr& e);
@@ -171,6 +174,15 @@ private:
     /// CGBinaryOps' own local sstrOperand lambda already does for `+`/
     /// comparison.  See exprShortStrCap's own doc comment (CodeGenImpl.h).
     std::function<int64_t(const plang::ExprNode&)> ExprShortStrCap;
+    /// Turbo Tier 5, Cluster A item 7: TypeOf(x)'s own lowering -- reuses
+    /// Codegen::Impl::getOrCreateVmt's existing per-type VMT global exactly
+    /// as-is (Sema already refused any argument whose type has no VMT to
+    /// build), rather than duplicating its memoized-global-lookup logic a
+    /// second time the way CGWith.cpp/CGFieldAccess.cpp's own object-field
+    /// GEP walk had to (getOrCreateVmt lives on a different class, Impl,
+    /// with no bytes-and-instructions duplication possible here the way
+    /// there was for that -- this is a single call, not an algorithm).
+    std::function<llvm::GlobalVariable*(const plang::Type&)> GetOrCreateVmt;
 
     llvm::Constant* i64c(int64_t v) const {
         return llvm::ConstantInt::get(I64Ty, v, true);

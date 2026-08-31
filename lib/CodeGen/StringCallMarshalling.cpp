@@ -82,6 +82,46 @@ llvm::Value* StringCallMarshalling::emitCallArg(const ExprNode& arg,
             return B.CreateLoad(st, tmp, "str.arg.val");
         }
     }
+    // Turbo Tier 5, Cluster A item 7: a descendant OBJECT VALUE passed
+    // where an ANCESTOR-typed value parameter is expected (Sema::
+    // isAssignCompatible's own Object case, SemaExpr.cpp, now allows this
+    // -- 'D: TDog; procedure ByVal(A: TAnimal); ByVal(D);').  Loading the
+    // whole descendant struct and handing it to a callee declared over the
+    // (smaller, different-shaped) ancestor struct is an LLVM IR verifier
+    // failure ("Call parameter type does not match function signature"),
+    // not merely a wasted copy -- the two are genuinely different LLVM
+    // types.  Real object "value slicing" (confirmed against a local fpc
+    // -Mtp build, cov1.pas's own 'A := D;') keeps only the ancestor's own
+    // sub-object, which layoutOfObject already places at element 0 of
+    // every descendant's own struct (CGTypes.cpp's own comment) -- so the
+    // fix is the SAME GEP-through-element-0 walk selfFieldPtr/
+    // objectFieldPtr's own ancestor recursion already uses for a single
+    // FIELD, just stopping as soon as the STRUCT TYPE itself matches
+    // paramTy instead of continuing on to a named field.
+    if (paramTy && paramTy->isStructTy() && arg.ResolvedType
+            && arg.ResolvedType->Kind == TypeKind::Object
+            && Types.llvmTypeOfSemaType(*arg.ResolvedType) != paramTy) {
+        auto* addr = EmitLValue(arg);
+        if (!addr) codegenICE("an object value with no address to narrow");
+        auto* zero = llvm::ConstantInt::get(llvm::Type::getInt32Ty(Ctx), 0);
+        llvm::Type* curTy = Types.llvmTypeOfSemaType(*arg.ResolvedType);
+        const Type* curSemaTy = arg.ResolvedType.get();
+        // Walk up Parent/element-0 in lockstep until the struct type
+        // matches what the callee declared, or there is nowhere left to
+        // go (Sema already proved paramTy IS some ancestor's own struct
+        // type, via isAssignCompatible's objectIsOrDescendsFrom, so this
+        // is guaranteed to terminate at or before the root).
+        while (curTy != paramTy && curSemaTy && curSemaTy->Parent) {
+            addr = B.CreateGEP(curTy, addr, {zero, zero}, "obj.narrow");
+            curSemaTy = curSemaTy->Parent.get();
+            curTy = Types.llvmTypeOfSemaType(*curSemaTy);
+        }
+        if (curTy != paramTy)
+            codegenICE("object value-parameter narrowing reached '"
+                       + (curSemaTy ? curSemaTy->Name : std::string("?"))
+                       + "' without matching the callee's own struct type");
+        return B.CreateLoad(paramTy, addr, "obj.narrowed");
+    }
     auto* v = paramTy == PtrTy ? EmitLValue(arg) : EmitExpr(arg);
     // ISO §6.6.3.2: a value parameter is a variable of its own that the actual
     // is assigned to, and an array is passed here as its value rather than its

@@ -486,7 +486,8 @@ void Codegen::Impl::init(const std::string& progName) {
         [](const ExprNode& e){ return exprCharStrLen(e); },
         [](const ExprNode& e){ return exprStrCapStatic(e); },
         [](const ExprNode& e){ return exprIsShortStr(e); },
-        [](const ExprNode& e){ return exprShortStrCap(e); });
+        [](const ExprNode& e){ return exprShortStrCap(e); },
+        [this](const Type& t){ return getOrCreateVmt(t); });
     // ISO §6.7.1 expression emission -- the central recursive-descent
     // dispatcher every other extracted unit already reaches via its own
     // EmitExpr/EmitLValue closure (unaffected by this move, since those

@@ -18,9 +18,14 @@ runtime (`Assign`/`Reset`/`Rewrite`/`Append`/`Close`, `InOutRes`/
 `IOResult`/`{$I+}`/`{$I-}`, `BlockRead`/`BlockWrite`/`Seek`/...) and
 `Random`. Tier 4 is units — `uses`, TP's own scoping rules, real separate
 compilation, and the shipped `Crt`/`Dos`/`Printer`/`Strings` standard
-library. Still not (yet) covered, at any tier: the real-mode DOS surface
-(`Seg`/`Ofs`/`Mem`/`Intr`/...), which plang rejects by name as targeting a
-machine this compiler does not build for, or object types.
+library. Tier 5 (this document's own "Object types" section, near the end)
+is TP7's own `object` model — inheritance, virtual methods and the VMT,
+constructors/destructors, `with`, and visibility — everything Cluster A of
+that tier has shipped so far; objects declared in one module and consumed
+from another (Cluster B) and a capstone integration test corpus (Cluster C)
+are still ahead. Still not (yet) covered, at any tier: the real-mode DOS
+surface (`Seg`/`Ofs`/`Mem`/`Intr`/...), which plang rejects by name as
+targeting a machine this compiler does not build for.
 
 This document covers what `plang(1)` doesn't have room for: every accepted
 `{$...}` directive, the predefined `{$IFDEF}` symbols, how `{$I file}`
@@ -1779,6 +1784,102 @@ source.pas` already established. Closing this gap for real — running
 every `uses`d unit's own initialization section, in dependency order,
 automatically — remains open, unscoped future work, not part of this
 tier.
+
+---
+
+## Object types
+
+TP7's `object` model (not Delphi's `class` — no reference semantics, no
+`try`/`except`, no automatic construction) is Tier 5, Cluster A. Everything
+below is implemented; only cross-**module** object-type consumption (a
+program using an object type declared in a `uses`d unit) and a capstone
+integration test corpus remain, as separate Cluster B/C work.
+
+**Declaration and inheritance.** `object [(Ancestor)] ... end`, with
+`private`/`public` visibility sections (any number, in any order — TP7 has
+no `protected`), `virtual`/`abstract` methods, and `constructor`/
+`destructor`. Method bodies may be given out-of-line, dotted
+(`TAnimal.Speak`), anywhere later in the same block. An object type must
+have a name — `object ... end` used inline, with no `type Name = ...`, is
+rejected (`err_object_type_anonymous`), since inheritance and dispatch need
+something nameable to hang a VMT off of.
+
+**Calls and fields.** `Obj.Method(args)`, `P^.Method(args)`, and the bare
+no-parens form all resolve through the ancestor chain. `Obj.Field`/
+`P^.Field` work both inside a method body (bare, unqualified — the
+implicit `Self` every method body gets) and from ordinary code outside any
+method (`A.Field`, `P^.Field`), reusing the exact same struct-offset
+machinery a plain `record`'s own field access goes through — an object's
+fields live in `RecordFields`, flattened ancestor-then-own, alongside a
+record's.
+
+**Virtual dispatch.** A `virtual` method is called indirectly, through the
+receiver's own hidden `_vptr` field and a per-concrete-type VMT (one
+`llvm::GlobalVariable` array of function pointers per type, built once and
+memoized). `inherited MethodName(...)` / bare `inherited;` is always a
+STATIC call to the direct ancestor's own body, never through the VMT — an
+override calling `inherited` reaches its parent's implementation exactly
+once, never redispatching. Calling an unoverridden **abstract** method
+through the VMT (legal to leave unoverridden — TP7/FPC give only a
+warning, "Constructing a class ... with abstract method ...", not an
+error) traps at run time with **Runtime error 211** ("Call to abstract
+method"), the same numbered code real Borland/FPC's own VMT slot traps
+with — confirmed against a local `fpc -Mtp` build.
+
+**Construction.** `New(P, Init(Args))` allocates, stamps the correct VMT
+address into `_vptr`, and calls the constructor; `Fail` inside a
+constructor sets a hidden per-activation flag `New` reads back to null `P`
+on failure — no exception/unwinding machinery, matching TP7 (which
+predates it). `Dispose(P, Done)` calls the destructor (through the VMT if
+`virtual` — the usual idiom, so a caller holding only an ancestor-typed
+pointer still reaches the real runtime type's own cleanup) and then frees.
+
+**Object-type covariance (Cluster A item 7).** A descendant object VALUE is
+assignment-compatible with an ancestor-typed variable (`A := D;` for
+`A: TAnimal; D: TDog;`) — ordinary Pascal "object" value slicing, since
+(unlike a `class`) an object is a value type and TDog's own storage begins
+with TAnimal's own fields verbatim. A POINTER to a descendant is likewise
+assignment-compatible with an ancestor-typed pointer (`PA := @D;`), and the
+same covariance applies to both by-value and `var` parameters (`procedure
+P(A: TAnimal)` / `procedure P(var A: TAnimal)` both accept a `TDog`
+actual). All of this is one-directional only — the reverse (ancestor into
+descendant) is refused, `cannot assign 'TAnimal' to variable of type
+'TDog'` — confirmed against a local `fpc -Mtp` build throughout.
+
+**Visibility.** `private` is enforced, but its real scope (confirmed
+against `fpc -Mtp`) is the whole declaring **module** (the program or unit
+that declares the object type), not the exact object type and not a TP7
+`protected`-like descendant-only rule — TP7 has no `protected` at all. A
+descendant type's own methods, and even ordinary code with no method
+context whatsoever, may freely reach a private member as long as it is in
+the same module; only code in a genuinely different module (reached
+through `uses`) is refused. Since a single `-std=turbo` compilation today
+has, at most, one module in scope for any one object type (cross-module
+object-type consumption is the still-unshipped Cluster B), this refusal
+cannot yet be demonstrated end-to-end from a real two-file program — the
+comparison it is built from (Sema's `CurrentUnit_` against each private
+field's own recorded declaring module, and each private method's own
+`Symbol::Module`) is in place and ready for Cluster B to exercise.
+
+**`with anObjectInstance do`.** Opens the object's own fields unqualified,
+through the identical with-scope mechanism (`pushWithScope`) the plain
+`record` case already uses. Nests correctly with the implicit `Self` scope
+a method body already has: a `with` block inside a method body, over a
+*different* object instance than `Self`, exposes both at once — the
+`with`-target's own fields unqualified (shadowing `Self`'s if a name
+collides, ordinary innermost-scope-wins Pascal semantics), and `Self`'s own
+fields still reachable by explicit `Self.Field` for any name shadowed this
+way.
+
+**`TypeOf`.** `TypeOf(anObjectValueOrTypeName)` returns the address of that
+object's own VMT global (Turbo's generic `Pointer` type) — compared with
+`=` to ask "is this really a TDog": `TypeOf(D) = TypeOf(D2)` is true for
+two separate `TDog` instances, `TypeOf(A) = TypeOf(D)` is false for an
+ancestor instance against a descendant one, and `TypeOf(anInstance) =
+TypeOf(ATypeName)` both name the one global. Requires an object type with
+at least one virtual method somewhere in its own hierarchy — `typeof can
+only be used on object types with VMT` otherwise, FPC's own wording,
+confirmed against a local `fpc -Mtp` build and reused verbatim.
 
 ---
 

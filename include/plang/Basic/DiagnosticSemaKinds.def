@@ -616,6 +616,24 @@ DIAG(err_inherited_no_ancestor, Error,
 // err_object_method_not_found just above.
 DIAG(err_inherited_method_not_found, Error,
      "ancestor of object type '%0' has no method '%1' for 'inherited' to reach")
+// Turbo Tier 5, Cluster A item 7: 'Obj.Field'/'P^.Field' for an object type
+// -- err_no_such_field's Object-kind sibling (kept distinct so its wording
+// says "object type" rather than "record type", matching
+// err_object_method_not_found's own precedent just above).
+DIAG(err_object_no_such_field, Error,
+     "object type '%0' has no field '%1'")
+// Turbo Tier 5, Cluster A item 7: a 'private' field or method accessed from
+// outside the module (program or unit) that declares its object type.
+// Confirmed against a local fpc -Mtp build: private is scoped to the whole
+// declaring MODULE, not to the exact type or even to a method body -- any
+// code in the SAME module (a descendant type's own methods, or even
+// ordinary code with no method context at all) may reach it, and only a
+// DIFFERENT module (reached through 'uses') is refused ("identifier idents
+// no member").
+DIAG(err_object_private_field, Error,
+     "field '%1' of object type '%0' is private to its own module")
+DIAG(err_object_private_method, Error,
+     "method '%1' of object type '%0' is private to its own module")
 DIAG(err_undefined_type, Error, "undefined type '%0'")
 DIAG(err_not_a_type, Error, "'%0' is not a type")
 // EP §6.2.1(k): the relaxation that lets declaration parts appear in any
@@ -1065,6 +1083,14 @@ DIAG(err_sizeof_unknown_size, Error,
      "cannot determine the size of type '%0'")
 DIAG(err_high_low_argument, Error,
      "'%0' requires an ordinal or array type, got '%1'")
+// Turbo Tier 5, Cluster A item 7: TypeOf(x) -- x must be an object type/value
+// (a type name or an expression, exactly like SizeOf/High/Low's own dual
+// shape) with at least one virtual method somewhere in its own hierarchy, or
+// there is no VMT for it to name.  Confirmed against a local fpc -Mtp build
+// (typeof2.pas): fpc's own wording is "TYPEOF can only be used on object
+// types with VMT", reused here verbatim rather than inventing new phrasing.
+DIAG(err_typeof_argument, Error,
+     "typeof can only be used on object types with VMT, got '%0'")
 // TP-only: FPC's size-aware Hi/Lo/Swap all read or rearrange an integer
 // value's own bytes, so the argument must be one at least 16 bits wide --
 // Byte/ShortInt (8 bits) has no separate high and low half to name.  See

@@ -416,6 +416,23 @@ llvm::Value* CGFuncCall::emitBuiltinCall(const std::string& Name,
         auto* resTy = llvm::cast<llvm::IntegerType>(Types.llvmTypeOfSemaType(*RangeTy));
         return llvm::ConstantInt::get(resTy, static_cast<uint64_t>(V), /*isSigned=*/true);
     }
+    // Turbo Tier 5, Cluster A item 7: TypeOf(x) -- the address of x's own
+    // object type's VMT global.  Like SizeOf/High/Low just above, this
+    // answers a purely STATIC question (which VMT does x's declared TYPE
+    // have -- never "what does x hold at run time", which is exactly the
+    // point of comparing it against TypeOf(SomeOtherInstance): two
+    // instances of the SAME concrete type share one VMT, so their
+    // addresses compare equal, and Args[0] is never evaluated for its
+    // value, only asked for its type, the same unevaluated-operand
+    // treatment SizeOf/High/Low's own comment explains.
+    if (lo == "typeof") {
+        const auto& T = Args[0]->ResolvedType;
+        auto* vmt = T ? GetOrCreateVmt(*T) : nullptr;
+        if (!vmt)
+            codegenICE("TypeOf reached codegen with no VMT for '"
+                       + (T ? T->Name : std::string("?")) + "'");
+        return vmt;
+    }
     // FPC's size-aware Hi/Lo/Swap -- a DELIBERATE divergence from literal
     // Turbo Pascal 7, whose Hi/Lo/Swap only ever worked on a 16-bit value:
     // real TP7 code that Inc/Dec'd a 32-bit value and then called Hi/Lo/Swap

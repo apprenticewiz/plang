@@ -1649,6 +1649,30 @@ struct Codegen::Impl {
     /// anywhere in its own hierarchy (T.VmtSlots.empty()) -- there is
     /// nothing to build and nothing for vptrOffsetOf to have found either.
     llvm::GlobalVariable* getOrCreateVmt(const Type& T);
+    /// Turbo Tier 5, Cluster A item 7: an 'abstract' virtual method
+    /// (Type::Method::IsAbstract) has no body by construction
+    /// (err_object_abstract_method_has_body) and so is never among
+    /// block.Procs -- the ordinary method pre-pass in emitAllProcedures
+    /// never declares (let alone defines) a function for it, which used to
+    /// mean getOrCreateVmt's own codegenICE fired for any concrete type
+    /// that leaves the slot unoverridden, a hard compiler crash for a
+    /// program real Borland/FPC compiles clean (with only a "Constructing
+    /// a class ... with abstract method ..." warning -- confirmed against a
+    /// local fpc -Mtp build, abs2.pas).  Called from emitAllProcedures's
+    /// own pre-pass, once per abstract method heading, for every object
+    /// type declared in the block: synthesizes and DEFINES (not merely
+    /// declares -- there is no out-of-line body ever coming) a function
+    /// under the same mangledMethod(OwnerTypeName, M.Name) name every
+    /// caller and getOrCreateVmt already look up, whose body unconditionally
+    /// traps via plang_tp_runerror(211) -- FPC's own "Runtime error 211:
+    /// Call to abstract method" (confirmed against fpc -Mtp: abs2.pas exits
+    /// 211 when the unoverridden abstract method is actually called through
+    /// the VMT).  A no-op if that name is already defined (an override
+    /// exists elsewhere and will shadow this at the VMT-slot level, never
+    /// at the symbol level -- each concrete ImplementingType still gets its
+    /// own distinct mangled name).
+    void emitAbstractMethodStub(const Type::Method& M,
+                                 const std::string& OwnerTypeName);
     /// Stamps T's own VMT global's address into \p ptr's `_vptr` slot (found
     /// through vptrOffsetOf, which already accounts for an inherited vptr
     /// living inside the embedded ancestor sub-object at a stable offset --

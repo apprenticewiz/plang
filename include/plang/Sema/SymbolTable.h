@@ -287,6 +287,15 @@ struct Symbol {
     /// here rather than re-derived from Name so a diagnostic can name both
     /// halves with their original case.
     std::string MethodOwnerType;
+    /// Turbo Tier 5, Cluster A item 7: 'private' visibility on the in-class
+    /// heading -- see Type::Field::IsPrivate/DeclaringModule's own comment
+    /// (Type.h) for the confirmed real scope (the whole declaring module,
+    /// not the exact type).  Module, above, already carries the "where
+    /// declared" half for a Method symbol (stamped generically by the same
+    /// unit-export harvesting every other symbol kind goes through), so no
+    /// separate DeclaringModule field is needed here the way Type::Field
+    /// needed one.
+    bool IsMethodPrivate{false};
     /// 'virtual' trailing directive on the in-class heading.
     bool IsMethodVirtual{false};
     /// 'abstract' trailing directive; see Type::Method::IsAbstract's own
