@@ -90,6 +90,26 @@ public:
     /// module that declares it.
     std::string mangledGlobal(const std::string& qualifiedName) const;
 
+    /// Turbo Tier 5, Cluster A item 4: the mangled name of the method named
+    /// \p methodName as IMPLEMENTED on the object type \p objectTypeName --
+    /// which, for a call that resolved to an inherited-and-not-overridden
+    /// method (Sema's own ancestor-chain walk, checkMethodCall), is an
+    /// ANCESTOR of the receiver's own declared type, not the receiver's own
+    /// type name.  A direct, purpose-built mangling rather than a call
+    /// through findMangledProc's lexical-nesting-walk: a method is not
+    /// reached by asking "what is visible from here" the way a bare
+    /// procedure call is (that walk answers a different question, and
+    /// findMangledProc's own comment already explains why a qualified name
+    /// skips it) -- callers already know exactly which type's own
+    /// implementation they want, from the same ancestor-chain walk Sema
+    /// used to resolve the call in the first place, so this builds the name
+    /// straight from that answer.  Same generic $-joined-segment shape
+    /// findMangledProc's own module-scope prefix already uses, just with the
+    /// object type as an additional segment: pas_<unit-or-program>$
+    /// <objecttype>$<methodname>.
+    std::string mangledMethod(const std::string& objectTypeName,
+                               const std::string& methodName) const;
+
 private:
     llvm::Module& Mod;
     std::string& NamePrefix;

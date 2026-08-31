@@ -29,7 +29,7 @@
 
 namespace llvm { class Module; class Value; }
 namespace plang {
-struct CallExpr; struct ExprNode; struct ProcedureTypeNode;
+struct CallExpr; struct ExprNode; struct ProcedureTypeNode; struct MethodCallExpr;
 }
 
 class CGFuncCall {
@@ -79,6 +79,16 @@ public:
 
     llvm::Value* emitCallExpr(const plang::CallExpr& e);
     llvm::Value* emitUserFuncCall(const plang::CallExpr& e);
+    /// Turbo Tier 5, Cluster A item 4: 'Obj.Method(args)' / 'P^.Method(args)'
+    /// used as a value -- a STATIC/direct call to Method's own mangled
+    /// symbol (CGLinkage::mangledMethod), with the receiver's address
+    /// prepended as an extra leading argument ahead of the ordinary
+    /// Pascal-declared ones, mirroring emitUserFuncCall's own static-link
+    /// prepend just below it for a nested function.  Virtual dispatch
+    /// through a VMT global is explicitly NOT this item's job (Cluster A
+    /// item 5): whatever method the ancestor-chain walk below finds is
+    /// called directly, whether or not it happens to be declared 'virtual'.
+    llvm::Value* emitMethodCallExpr(const plang::MethodCallExpr& e);
 
     /// The built-in dispatch chain that used to be emitCallExpr's whole body,
     /// factored out so a call site with no CallExpr of its own -- Turbo

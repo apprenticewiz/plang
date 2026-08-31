@@ -775,6 +775,124 @@ llvm::Value* CGFuncCall::tryEmitDosFuncCall(const CallExpr& e) {
     return resPtr;
 }
 
+namespace {
+// Turbo Tier 5, Cluster A item 4: which type in the receiver's own ancestor
+// chain actually IMPLEMENTS the named method -- the ancestor's own type when
+// the call resolved to an inherited, non-overridden method.  Redone here
+// from Type::ObjectMethods directly (available at CodeGen through the
+// ResolvedType Sema already left on the receiver expression, with no Sema/
+// SymbolTable dependency needed) rather than threading a new Sema-set field
+// through MethodCallExpr/MethodCallStmt -- this is the SAME ancestor-chain
+// walk Sema::checkMethodCall (SemaExpr.cpp) did to resolve and accept the
+// call in the first place (that one through the composite-key symbol table,
+// this one through the Type graph directly; SymbolKind::Method's own
+// comment on SemaType.cpp's file-local findMethodInChain notes the two are
+// interchangeable ways to walk the identical Parent chain).
+const plang::Type* methodOwnerType(const plang::Type& RecvTy,
+                                    const std::string& Method) {
+    for (const plang::Type* Cur = &RecvTy; Cur; Cur = Cur->Parent.get())
+        for (const auto& M : Cur->ObjectMethods)
+            if (eqCI(M.Name, Method)) return Cur;
+    return nullptr;
+}
+} // namespace
+
+llvm::Value* CGFuncCall::emitMethodCallExpr(const MethodCallExpr& e) {
+    if (!e.Receiver->ResolvedType)
+        codegenICE("method call has no resolved receiver type");
+    const Type* Owner = methodOwnerType(*e.Receiver->ResolvedType, e.Method);
+    if (!Owner)
+        codegenICE("method '" + e.Method + "' has no owning type in its "
+                   "receiver's own ancestor chain -- Sema should have "
+                   "refused this call already");
+    std::string mangledName = Linkage.mangledMethod(Owner->Name, e.Method);
+
+    // The receiver's own address: EmitLValue already handles both shapes --
+    // a plain IdentExpr ('Obj.Method(...)') through the ordinary variable
+    // table, and a DerefExpr ('P^.Method(...)') by reading P's own pointer
+    // value, which IS the address of what it points to -- with no
+    // object-specific branch needed in either case (CGExprCore.cpp's
+    // generic emitLValue).
+    llvm::Value* selfPtr = EmitLValue(*e.Receiver);
+    if (!selfPtr) codegenICE("method call receiver has no address");
+
+    auto* callee = Mod.getFunction(mangledName);
+    if (!callee) {
+        // Not yet defined in this compilation unit at this point in codegen
+        // order -- mirrors emitUserFuncCall's own identical fallback for an
+        // ordinary function, just below, with 'Self' prepended to the
+        // synthesized signature the same way it is prepended to the real
+        // one in Codegen::Impl::emitFunctionDef.
+        llvm::Type* retLLVMTy = llvm::Type::getVoidTy(Ctx);
+        if (e.ResolvedType && !e.ResolvedType->isError())
+            retLLVMTy = Types.llvmTypeOfSemaType(*e.ResolvedType);
+        std::vector<llvm::Type*> paramTys;
+        paramTys.push_back(PtrTy); // Self
+        for (const auto& Arg : e.Args) {
+            if (Arg && Arg->ResolvedType && !Arg->ResolvedType->isError())
+                paramTys.push_back(Types.llvmTypeOfSemaType(*Arg->ResolvedType));
+            else
+                paramTys.push_back(I64Ty); // safe fallback
+        }
+        auto* fnTy = llvm::FunctionType::get(retLLVMTy, paramTys, false);
+        callee = llvm::Function::Create(fnTy, llvm::Function::ExternalLinkage,
+                                        mangledName, &Mod);
+    }
+
+    std::vector<llvm::Value*> args;
+    args.push_back(selfPtr);
+
+    // Same per-argument marshalling loop emitUserFuncCall uses just below --
+    // conformant/schema/proc-param/plain-value argument shapes apply
+    // identically to a method's own parameters -- just starting pi/args
+    // after Self instead of after a static-link frame.
+    size_t pi = args.size();
+    for (size_t astArgIdx = 0; astArgIdx < e.Args.size(); ++astArgIdx) {
+        const auto& arg = e.Args[astArgIdx];
+
+        if (const auto* pt = ProcParamArg(mangledName, astArgIdx)) {
+            ClosureAbi.pushProcParamArgs(args, *arg, *pt);
+            pi = args.size();
+            continue;
+        }
+        if (unsigned nd = Schema.schemaArgDiscs(mangledName, astArgIdx); nd > 0) {
+            Schema.pushSchemaArgs(args, *arg, nd);
+            pi = args.size();
+            continue;
+        }
+        const size_t dims = ConformantDimsOf(mangledName, astArgIdx);
+        if (dims > 0) {
+            ClosureAbi.pushConformantArgs(args, *arg, dims);
+            pi += 1 + 2 * dims;
+        } else {
+            std::optional<int64_t> destSetBase = ParamSetBaseOf(mangledName, astArgIdx);
+            args.push_back(Sets.alignSetArg(
+                StrCall.emitCallArg(*arg,
+                    pi < callee->arg_size()
+                        ? callee->getFunctionType()->getParamType(pi) : nullptr,
+                    ParamIsByRef(mangledName, astArgIdx)),
+                *arg, destSetBase));
+            ++pi;
+        }
+    }
+    auto* ret = B.CreateCall(callee, args, "mcall");
+    // Same string/ShortString return-value spill emitUserFuncCall performs
+    // just below, for the identical reason: a struct-shaped result comes
+    // back by value, and every consumer of a string expression expects an
+    // address instead.
+    if (ExprIsVarStr(e) && ret->getType()->isStructTy()) {
+        auto* tmp = CreateEntryAlloca(ret->getType(), "str.ret");
+        B.CreateStore(ret, tmp);
+        return tmp;
+    }
+    if (ExprIsShortStr(e) && ret->getType()->isStructTy()) {
+        auto* tmp = CreateEntryAlloca(ret->getType(), "sstr.ret");
+        B.CreateStore(ret, tmp);
+        return tmp;
+    }
+    return ret;
+}
+
 llvm::Value* CGFuncCall::emitUserFuncCall(const CallExpr& e) {
     if (auto* v = tryEmitDosFuncCall(e)) return v;
     // ISO §6.6.3.1: a functional parameter is called through the pair it
