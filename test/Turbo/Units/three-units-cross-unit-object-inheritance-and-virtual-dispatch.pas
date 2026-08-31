@@ -20,6 +20,16 @@ spans all three:
     field of its own (Breed) AFTER the inherited ones -- Breed's own byte
     offset only comes out right if TAnimal's real size (including the
     PRIVATE Legs field declared in a unit B cannot see by name) was counted.
+    TDog also declares Rename(NewName: string) -- a STRING-typed argument
+    on a cross-unit method call, regression coverage for a real bug an
+    independent review of this item's first landing found: the
+    declare-if-missing fallback for a not-yet-declared cross-unit method
+    used to guess the callee's parameter types from the CALL SITE's own
+    argument expressions, which is wrong for a string literal actual (its
+    own static type differs from a `string` formal's) even though it
+    happened to be right for the scalar Integer arguments (SetLegs) this
+    test already had -- see cross-unit-method-call-with-a-string-argument.pas
+    for a narrower, dedicated regression test of the same fix.
   - Program C 'uses' BOTH unit A and unit B directly -- confirmed against a
     real `fpc -Mtp` build that a 'uses' clause does NOT transitively
     re-export a name it itself imported (program C could not otherwise name
@@ -49,6 +59,7 @@ CHECK:Rex the Labrador barks instead of making a generic sound
 CHECK-NEXT:Rex makes a generic animal sound (4 legs)
 CHECK-NEXT:Rex: Woof!
 CHECK-NEXT:Legs via ancestor accessor: 4
+CHECK-NEXT:Renamed to: Buddy
 *)
 
 //--- unita.pas
@@ -98,6 +109,7 @@ type
     Breed: string;
     procedure Speak; virtual;
     procedure Bark;
+    procedure Rename(NewName: string);
   end;
 
 implementation
@@ -111,6 +123,11 @@ end;
 procedure TDog.Bark;
 begin
   writeln(Name, ': Woof!');
+end;
+
+procedure TDog.Rename(NewName: string);
+begin
+  Name := NewName;
 end;
 
 end.
@@ -134,4 +151,7 @@ begin
 
   D.Bark;        { TDog's own, non-virtual method }
   writeln('Legs via ancestor accessor: ', D.GetLegs());
+
+  D.Rename('Buddy');   { cross-unit method call with a STRING argument }
+  writeln('Renamed to: ', D.Name);
 end.

@@ -1105,25 +1105,34 @@ void CGProcCall::emitMethodCallStmt(const MethodCallStmt& s) {
     llvm::Value* selfPtr = EmitLValue(*s.Receiver);
     if (!selfPtr) codegenICE("method call receiver has no address");
 
+    // Turbo Tier 5, Cluster B item 8: this USED to guess the callee's
+    // parameter types from the CALL SITE's own argument expressions
+    // (Arg->ResolvedType) whenever the callee was not yet declared here --
+    // dead code before this item (emitAllProcedures's own method pre-pass
+    // always declares every SAME-TRANSLATION-UNIT method's real signature
+    // before any body runs, so this fallback could only ever fire for a
+    // genuinely foreign method, which did not exist before object types
+    // could cross a unit boundary at all). That guess is wrong whenever an
+    // argument's own static type is merely COMPATIBLE with, rather than
+    // IDENTICAL to, the callee's real declared parameter type -- a string
+    // LITERAL argument (TypeKind::String, lowered to a bare `ptr`) passed to
+    // a `string` (TypeKind::ShortString, lowered to a `{i8,[255 x i8]}`
+    // struct) formal produced a declaration under the literal's OWN type
+    // instead of the formal's, and StringCallMarshalling::emitCallArg,
+    // reading that wrong declared type back at the actual call, sent the
+    // literal through EmitLValue (a literal has no address) instead of the
+    // struct-building path -- an LLVM IR verifier "Operand is null" on
+    // every cross-unit method call passing a string actual. Declared from
+    // Owner's own resolved Method entry instead -- the real signature,
+    // exactly like declareForeignMethod's every other caller below.
     auto* callee = Mod.getFunction(mangledName);
     if (!callee) {
-        // Turbo `{$X+}`: s.ResolvedType is non-null exactly when this is a
-        // FUNCTION method called as a statement (mirrors emitUserProcCall's
-        // own identical fallback for an ordinary CallStmt, just below).
-        llvm::Type* retTy = llvm::Type::getVoidTy(Ctx);
-        if (s.ResolvedType && !s.ResolvedType->isError())
-            retTy = Types.llvmTypeOfSemaType(*s.ResolvedType);
-        std::vector<llvm::Type*> paramTys;
-        paramTys.push_back(PtrTy); // Self
-        for (const auto& Arg : s.Args) {
-            if (Arg && Arg->ResolvedType && !Arg->ResolvedType->isError())
-                paramTys.push_back(Types.llvmTypeOfSemaType(*Arg->ResolvedType));
-            else
-                paramTys.push_back(I64Ty);
-        }
-        auto* fnTy = llvm::FunctionType::get(retTy, paramTys, false);
-        callee = llvm::Function::Create(fnTy, llvm::Function::ExternalLinkage,
-                                        mangledName, &Mod);
+        const Type::Method* MEntry = methodEntryOf(*Owner, s.Method);
+        if (!MEntry)
+            codegenICE("method '" + mangledName + "' reached CodeGen "
+                       "unresolved -- Sema should have refused this call "
+                       "already");
+        callee = declareForeignMethod(Mod, Ctx, PtrTy, Types, *MEntry, mangledName);
     }
 
     std::vector<llvm::Value*> args;
