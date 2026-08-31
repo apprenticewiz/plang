@@ -297,7 +297,7 @@ llvm::StructType* CGTypes::structTypeFor(const RecordTypeNode& rt) {
 }
 
 // See NumTypeKinds in AstBase.h.
-static_assert(NumTypeKinds == 14,
+static_assert(NumTypeKinds == 15,
               "a new type denoter needs a case in llvmTypeOfNode");
 
 // Lowers a type denoter.  The syntax is used where it carries information the
@@ -454,6 +454,14 @@ llvm::Type* CGTypes::llvmTypeOfNode(const TypeNode& node) {
         return llvmTypeOfNodeViaSema(node,
             "schema instantiation '" + n->Name + "' was not resolved");
     }
+    // Turbo Tier 5, Cluster A item 0: object types parse
+    // (Parser::parseObjectType) but Sema::resolveTypeImpl already refuses to
+    // resolve one (err_object_type_not_yet_supported) -- there is no VMT or
+    // layout yet, that is items 1-7's job -- so CodeGen never legitimately
+    // reaches an ObjectTypeNode; a program that got this far already failed
+    // Sema and never runs CodeGen at all.  Falls through to the same
+    // "unhandled type denoter" ICE below as `type of x`, rather than a
+    // dedicated arm, for exactly that reason: there is nothing to lower yet.
     // EP §6.4.9 `type of x` and anything else without a syntactic lowering.
     return llvmTypeOfNodeViaSema(node, "unhandled type denoter");
 }

@@ -124,7 +124,17 @@ std::unique_ptr<BlockNode> Parser::parseUnitDeclarations(bool HeadingsOnly) {
         else if (check(TokenKind::Const))     { parseConstSection(*Block); }
         else if (check(TokenKind::Type))      { parseTypeSection(*Block);  }
         else if (check(TokenKind::Var))       { parseVarSection(*Block);   }
-        else if (check(TokenKind::Procedure) || check(TokenKind::Function))
+        else if (check(TokenKind::Procedure) || check(TokenKind::Function) ||
+                 // Turbo Tier 5: a unit's implementation section is exactly
+                 // where an object-type method's out-of-line body normally
+                 // lives -- 'constructor TAnimal.Init; ...' -- see
+                 // parseProcDecl's own dotted-heading handling.  A unit's
+                 // own interface section can never reach this arm with
+                 // Constructor/Destructor since a method heading belongs
+                 // inside its object type's own 'object ... end', not the
+                 // interface's top-level declaration list.
+                 (Opts.turbo() && (check(TokenKind::Constructor) ||
+                                   check(TokenKind::Destructor))))
             Block->Procs.push_back(
                 parseProcDecl(check(TokenKind::Function), HeadingsOnly));
         else More = false;

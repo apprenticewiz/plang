@@ -120,7 +120,15 @@ std::unique_ptr<BlockNode> Parser::parseBlock() {
             else if (check(TokenKind::Const))     { parseConstSection(*Node); }
             else if (check(TokenKind::Type))      { parseTypeSection(*Node);  }
             else if (check(TokenKind::Var))       { parseVarSection(*Node);   }
-            else if (check(TokenKind::Procedure) || check(TokenKind::Function))
+            else if (check(TokenKind::Procedure) || check(TokenKind::Function) ||
+                     // Turbo Tier 5: an object-type method's out-of-line
+                     // BODY starts with 'constructor'/'destructor' rather
+                     // than 'procedure'/'function' -- parseProcDecl itself
+                     // tells the two apart (and reads the dotted
+                     // 'TypeName.MethodName' qualifier that makes this a
+                     // method body and not an ordinary top-level routine).
+                     (Opts.turbo() && (check(TokenKind::Constructor) ||
+                                       check(TokenKind::Destructor))))
                 Node->Procs.push_back(parseProcDecl(check(TokenKind::Function)));
             else More = false;
         }
@@ -130,7 +138,9 @@ std::unique_ptr<BlockNode> Parser::parseBlock() {
         while (check(TokenKind::Const))     parseConstSection(*Node);
         while (check(TokenKind::Type))      parseTypeSection(*Node);
         while (check(TokenKind::Var))       parseVarSection(*Node);
-        while (check(TokenKind::Procedure) || check(TokenKind::Function)) {
+        while (check(TokenKind::Procedure) || check(TokenKind::Function) ||
+               (Opts.turbo() && (check(TokenKind::Constructor) ||
+                                 check(TokenKind::Destructor)))) {
             bool IsFunction = check(TokenKind::Function);
             Node->Procs.push_back(parseProcDecl(IsFunction));
         }
@@ -408,11 +418,37 @@ std::unique_ptr<ProcDecl> Parser::parseProcDecl(bool IsFunction,
 
     if (IsFunction) {
         expect(TokenKind::Function);
+    } else if (Opts.turbo() && check(TokenKind::Constructor)) {
+        // Turbo Tier 5: 'constructor Init(...)' -- the out-of-line BODY of an
+        // object-type constructor.  Handled here rather than a separate
+        // entry point so this single function stays the one place a
+        // top-level/block-level procedure-shaped declaration is parsed --
+        // see the dotted-heading handling below for the other half of what
+        // makes this a Turbo object method rather than an ordinary
+        // procedure.
+        advance();
+        Node->IsConstructor = true;
+    } else if (Opts.turbo() && check(TokenKind::Destructor)) {
+        advance();
+        Node->IsDestructor = true;
     } else {
         expect(TokenKind::Procedure);
     }
 
-    Node->Name   = expect(TokenKind::Identifier).Lexeme;
+    Node->Name = expect(TokenKind::Identifier).Lexeme;
+    // Turbo Tier 5: an object-type method's out-of-line BODY repeats the
+    // heading qualified by its owning type -- 'procedure TAnimal.Speak;
+    // begin ... end;' -- confirmed against a local fpc -Mtp build (the
+    // dotted qualifier is a plain type name, exactly like the constructs
+    // ImportClause::ModuleName/ProcDecl::OwnerType already model as an
+    // unresolved cross-reference string).  Gated on Opts.turbo(): the '.'
+    // cannot follow a bare procedure/function name in any other dialect, so
+    // this can never misparse an EP/ISO 7185 program.
+    if (Opts.turbo() && check(TokenKind::Dot)) {
+        advance();
+        Node->OwnerType = Node->Name;
+        Node->Name      = expect(TokenKind::Identifier).Lexeme;
+    }
     Node->Params = parseParamList();
 
     if (IsFunction) {

@@ -253,6 +253,22 @@ private:
     // Called with Current pointing at 'record'; Packed is passed in from caller.
     std::unique_ptr<RecordTypeNode> parseRecordType(bool Packed);
 
+    // Turbo Tier 5, Cluster A item 0 (parsing only -- see ObjectTypeNode's own
+    // comment in AstDecl.h for the full grammar and every field-practice
+    // decision this was checked against):
+    //   object-type → 'object' [ '(' ancestor-type-name ')' ]
+    //                 object-member-list 'end'
+    // Called with Current pointing at 'object'.  -std=turbo only.
+    std::unique_ptr<ObjectTypeNode> parseObjectType();
+
+    // One IN-CLASS method heading inside an object-type's member list --
+    // 'constructor'/'destructor'/'procedure'/'function' name param-list
+    // [':' result-type] ';' ['virtual' ';'] ['abstract' ';'].  Always
+    // heading-only (IsForward left true, Body left null): see ObjectMember's
+    // own comment for why this reuses ProcDecl the same way a unit
+    // interface's HeadingsOnly declarations already do.
+    std::unique_ptr<ProcDecl> parseObjectMethodHeading();
+
     // EP §6.7.3.7: parse a parameter-group type starting at 'array'.
     // If the '[' is followed by 'identifier .. identifier :' it is a conformant
     // array schema; otherwise it falls back to a regular array type.

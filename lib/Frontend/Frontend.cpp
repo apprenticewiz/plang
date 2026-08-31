@@ -55,7 +55,7 @@ namespace plang {
 static_assert(NumExprKinds == 17,
               "a new expression may need a case in exprToString and in "
               "canSerializeExpr");
-static_assert(NumTypeKinds == 14,
+static_assert(NumTypeKinds == 15,
               "a new type denoter needs a case in typeDenoterToString");
 
 namespace {
@@ -552,6 +552,17 @@ static std::string typeDenoterToString(const TypeNode& TN) {
         return routineHeadingToString(*PT, "");
     if (auto* TO = llvm::dyn_cast<TypeOfNode>(&TN))
         return "type of " + TO->VarName;
+    // Turbo Tier 5, Cluster A item 0: object types parse but Sema already
+    // refuses to resolve one (err_object_type_not_yet_supported), so a
+    // declaration naming one never reaches a working PMI in the first
+    // place.  No serialization form has been settled for items 1-7 yet
+    // (ancestor clause, visibility sections, method headings all need
+    // their own writeback rules), so this falls through to "no guess"
+    // below exactly like every other not-yet-writable case there,
+    // reachable only if that changes and this call site is not updated
+    // alongside it.
+    if (llvm::isa<ObjectTypeNode>(&TN))
+        return "";
     // Nothing left that a type-denoter can be.  Writing a guess here is worse
     // than saying nothing: the importer would lay out the wrong storage and
     // never know, so the caller drops the declaration instead.

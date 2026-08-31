@@ -71,6 +71,29 @@ struct ProcDecl : Node {
     ~ProcDecl();
     bool IsFunction{false};
     bool IsForward{false};             /// true if this is only a forward declaration (no body)
+
+    // -- Turbo Tier 5, Cluster A item 0: object-type method attributes --
+    // Parsing only: see ObjectTypeNode's own comment for the whole design.
+    // Flat bools, following this struct's existing IsFunction/IsForward idiom
+    // rather than a new abstraction.
+    bool IsVirtual{false};      /// trailing '; virtual;' directive on the heading
+    bool IsAbstract{false};     /// trailing '; abstract;' directive (always with IsVirtual)
+    bool IsConstructor{false};  /// 'constructor' rather than 'procedure'
+    bool IsDestructor{false};   /// 'destructor' rather than 'procedure'/'function'
+    /// The object type this is an OUT-OF-LINE method body for, e.g. the
+    /// 'TAnimal' in 'procedure TAnimal.Speak; begin ... end;' -- confirmed
+    /// against a local fpc -Mtp build that this dotted heading is real Turbo
+    /// Pascal syntax and that the qualifier is a plain type name, not
+    /// re-resolved until Sema runs (see ImportClause::ModuleName's own
+    /// comment for the same "name a not-yet-resolved cross-reference as a
+    /// plain string" precedent).  Left empty for an IN-CLASS method heading
+    /// (one that is itself a member of an ObjectTypeNode::Members list) --
+    /// that association is already structural, the ProcDecl being reached
+    /// only by walking that very list, so recording the same name a second
+    /// time here would just be a second thing that could go out of sync with
+    /// the first.  Also empty for an ordinary (non-method) procedure/function.
+    std::string OwnerType;
+
     std::string                Name;
     std::string                ResultName; /// EP §6.7.2: optional named result variable (empty if not specified)
     std::vector<ParamGroup>    Params;
@@ -117,6 +140,77 @@ struct BlockNode : Node {
 
 inline ProcDecl::ProcDecl()  : Node(NodeKind::ProcDeclKind) {}
 inline ProcDecl::~ProcDecl() = default;
+
+// ---------------------------------------------------------------------------
+// Turbo Tier 5, Cluster A item 0: object types (parsing only)
+// ---------------------------------------------------------------------------
+
+/// Visibility of one ObjectMember.  Confirmed against a local fpc -Mtp build
+/// (Borland TP 7.0+) that real Turbo Pascal objects use SECTION-based
+/// visibility -- 'private'/'public' each open a run of members that keeps
+/// that visibility until the next such keyword or 'end' -- and that, unlike
+/// a Delphi class, a TP7 object allows any number of 'private'/'public'
+/// sections in any order (private-then-public-then-private-again compiled
+/// cleanly).  So this is stamped onto each member individually at parse
+/// time (one enum value per ObjectMember) rather than modeled as a smaller
+/// number of section objects -- Sema and any later consumer then just reads
+/// a member's own Vis and never has to re-derive "which section is this
+/// member in".
+enum class MemberVisibility { Public, Private };
+
+/// One member of an object-type's member list: EITHER a field (reusing
+/// FieldDecl, exactly like RecordTypeNode::Fields) OR a method heading
+/// (reusing ProcDecl, with IsForward left false and Body left null --
+/// mirroring how a unit interface's own HeadingsOnly ProcDecl already means
+/// "signature now, body elsewhere", ParseUnit.cpp/ParseModule.cpp's
+/// parseProcDecl(..., HeadingOnly=true) path).  A single tagged struct
+/// rather than two parallel vectors: real Turbo Pascal interleaves fields
+/// and methods in one declaration list, and the grammar comment on
+/// ObjectTypeNode below needs that same order preserved for anything that
+/// walks it (Sema's future layout pass, in particular, since a field's
+/// offset depends on what was declared before it).
+struct ObjectMember {
+    MemberVisibility           Vis{MemberVisibility::Public};
+    bool                       IsMethod{false};
+    FieldDecl                  Field;   /// valid when !IsMethod
+    std::unique_ptr<ProcDecl>  Method;  /// valid when IsMethod
+};
+
+/// Turbo object-type denoter (parsing only -- see the module-level comment
+/// on this whole item for what is deliberately NOT here yet: no ancestor
+/// resolution, no VMT/layout, no method-body type-checking).
+///
+///   object-type → 'object' [ '(' ancestor-type-name ')' ] object-member-list 'end'
+///   object-member-list → { field-declaration | method-heading | visibility-section }
+///
+/// Confirmed against a local fpc -Mtp build:
+///   - The ancestor clause is optional; a "root" object type (TAnimal =
+///     object ... end, no ancestor at all) is legal and simply starts its
+///     own layout from scratch.
+///   - 'virtual'/'abstract' are TRAILING directives after the heading's own
+///     ';', exactly like this codebase's existing 'forward' -- e.g.
+///     'procedure Draw; virtual; abstract;' -- never written before
+///     'procedure'/'function'/'constructor'/'destructor'.
+///   - An out-of-line method BODY ('procedure TAnimal.Speak; begin ... end;')
+///     repeats the full heading (params, return type) but NEVER repeats
+///     'virtual'/'abstract' -- fpc rejects "VIRTUAL not allowed in
+///     implementation section" -- so those two directives are parsed only
+///     for an in-class ObjectMember::Method heading, never for the
+///     dotted out-of-line ProcDecl (see ProcDecl::OwnerType's own comment
+///     for how that dotted form is represented instead).
+struct ObjectTypeNode : TypeNode {
+    static bool classof(const Node* n) { return n->Kind == NodeKind::ObjectTypeNode; }
+    ObjectTypeNode() : TypeNode(NodeKind::ObjectTypeNode) {}
+    /// The ancestor object type's own name, e.g. the 'TAnimal' in
+    /// 'TDog = object(TAnimal) ... end'.  Empty for a root object type with
+    /// no ancestor.  A plain string, resolved later by Sema -- the same
+    /// not-yet-resolved-cross-reference precedent as ImportClause::ModuleName.
+    std::string                Ancestor;
+    /// Fields and method headings, in declaration order, each carrying its
+    /// own visibility.  See ObjectMember's own comment for why one ordered,
+    /// tagged list rather than separate Fields/Methods vectors.
+    std::vector<ObjectMember>  Members;
+};
 
 // ---------------------------------------------------------------------------
 // EP §6.11: Module support

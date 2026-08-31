@@ -72,7 +72,7 @@ enum class TypeKind {
 /// How many semantic type kinds there are.
 ///
 /// The same tripwire NumTypeKinds gives the AST walks, for the same reason and
-/// against a different enumeration -- NumTypeKinds counts the fourteen *type
+/// against a different enumeration -- NumTypeKinds counts the *type
 /// denoters* the parser produces, and this counts what they resolve to.
 ///
 /// Several switches over TypeKind end in a `default:`, and have to: a set base
