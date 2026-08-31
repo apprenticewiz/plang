@@ -161,6 +161,19 @@ config.substitutions.insert(0,
     ("%plang_schema_printers",
      os.path.join(config.plang_source_dir, "share", "plang", "gdb", "plang_schema_printers.py")))
 
+# Turbo Tier 4, Cluster C item 7: the shipped Printer/Strings units, same
+# "straight from the source tree, not the installed copy" reasoning as
+# %plang_schema_printers just above -- a lit run against the in-tree
+# build-dir binary has no installed <prefix>/lib/plang/units tier to find
+# these through on its own (the identical reason
+# a-uses-clause-resolves-against-plang-unit-dir-with-no-i-flag.pas's own
+# comment gives for using PLANG_UNIT_DIR rather than relying on the default
+# search path), so a test that wants the REAL shipped Printer.pas/Strings.pas
+# -- not a throwaway stand-in -- points PLANG_UNIT_DIR at this directly.
+config.substitutions.insert(0,
+    ("%plang_units_dir",
+     os.path.join(config.plang_source_dir, "share", "plang", "units")))
+
 # ---- available_features ------------------------------------------------
 #
 # fpc-binary, not bare "fpc": include/plang/Basic/Dialects.def already

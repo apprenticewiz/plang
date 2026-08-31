@@ -14,8 +14,22 @@ llvm::Value* StringCallMarshalling::emitCallArg(const ExprNode& arg,
     // ISO §6.6.3.2: a value parameter of pointer type is given the pointer,
     // not the place the pointer was read from.  Both are `ptr` in the
     // signature, so only the formal's kind tells them apart.
+    //
+    // `nil` itself is TypeKind::Nil, not TypeKind::Pointer (Sema's own
+    // checkExpr gives a NilExpr type TyNil, SemaExpr.cpp) -- a real,
+    // separate type so `nil` stays assignment-compatible with EVERY pointer
+    // type rather than one fixed one, but it means a bare `Foo(nil)` call
+    // reached the fallback below instead of this arm: `paramTy == PtrTy`
+    // (true) sent it to EmitLValue(arg), which cannot take the "address" a
+    // literal has none of and returned null -- an LLVM IR verifier failure
+    // ("Operand is null") on ANY value-pointer-parameter call actually
+    // passed a literal `nil`, not anything specific to an extern-declared
+    // callee. Admitting TypeKind::Nil here too fixes it the same way
+    // TypeKind::Pointer already was: EmitExpr(NilExpr) is exactly
+    // ConstantPointerNull (CGExprCore.cpp), the right value either way.
     if (!byRef && paramTy == PtrTy && arg.ResolvedType
-            && arg.ResolvedType->Kind == TypeKind::Pointer)
+            && (arg.ResolvedType->Kind == TypeKind::Pointer
+                || arg.ResolvedType->Kind == TypeKind::Nil))
         return EmitExpr(arg);
     // A string parameter taken by value receives the whole { length, bytes }
     // struct, and its capacity is the callee's, not the argument's.  Build the
