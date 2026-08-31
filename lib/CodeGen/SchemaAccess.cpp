@@ -87,9 +87,11 @@ SchemaAccess::schemaActual(const ExprNode& arg, unsigned discCount) {
     // one discriminant is the capacity.  This is what lets `procedure p(var
     // s: string)` take a string of any capacity.
     //
-    // ExprStrCap is exprStrCapStatic: the probe's answer (typically 1), sized
-    // for a TEMPORARY rather than for this object -- see its own comment in
-    // CodeGenImpl.h.  A string(n) *field* of a schema is VarString +
+    // ExprStrCap is exprStrCapDeclared: the raw declared/probe capacity off
+    // the type, not widened for anything -- see its own comment in
+    // CodeGenImpl.h.  For a schema-varying field that probe answer is
+    // typically 1, not the real run-time extent.  A string(n) *field* of a
+    // schema is VarString +
     // ExtentVaries, not SchemaInstance, so it took this branch rather than
     // the schemaRefOf one above, and every discriminant-sized field passed
     // to `work(var s: string)` handed the callee a string(1): `work(q^.s)`
@@ -355,7 +357,7 @@ llvm::Value* SchemaAccess::exprStrCapV(const ExprNode& e) {
     // that added ShortString support throughout CodeGen.)
     //
     // ISO §6.4.3.2's other string shape, `packed array[1..n] of char`, has a
-    // capacity too -- exprStrCap answers 0 for it, being VarString-only, so a
+    // capacity too -- exprStrCapDeclared answers 0 for it, being VarString-only, so a
     // substr/trim chained off a char-string argument (below) capped its
     // result at zero characters instead of n.
     if (ExprIsCharStr(e)) return i64c(ExprCharStrLen(e));

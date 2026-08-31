@@ -353,7 +353,7 @@ llvm::Value* CGExprCore::emitExpr(const ExprNode& e) {
         // r.s[1..10] came back five characters long, its capacity taken from t.
         //
         // The assignment path a few lines away in CodeGenStmts already asks
-        // exprStrCap.  Only the rvalue did this.
+        // exprStrCapDeclared.  Only the rvalue did this.
         // Two different capacities, and conflating them cut a
         // discriminant-sized string's substring to one character: the result
         // TEMPORARY has to be sized by a constant, while what the runtime is

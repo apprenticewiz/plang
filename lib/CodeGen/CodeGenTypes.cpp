@@ -161,7 +161,7 @@ void Codegen::Impl::init(const std::string& progName) {
         [this](llvm::Value* v){ return toI64(v); },
         [](const ExprNode& e){ return exprIsVarStr(e); },
         [](const ExprNode& e){ return exprIsCharStr(e); },
-        [](const ExprNode& e){ return exprStrCap(e); },
+        [](const ExprNode& e){ return exprStrCapDeclared(e); },
         [](const ExprNode& e){ return exprCharStrLen(e); },
         [this](const std::string& mangledName, size_t astArgIdx) -> unsigned {
             auto it = paramMeta_.find(mangledName);
@@ -185,7 +185,7 @@ void Codegen::Impl::init(const std::string& progName) {
         [](const ExprNode& e){ return exprIsCharStr(e); },
         [](const ExprNode& e){ return exprIsVarStr(e); },
         [](const ExprNode& e){ return exprCharStrLen(e); },
-        [](const ExprNode& e){ return exprStrCapStatic(e); },
+        [](const ExprNode& e){ return exprStrCapForTempAlloc(e); },
         [](const ExprNode& e){ return exprIsShortStr(e); },
         [](const ExprNode& e){ return exprShortStrCap(e); });
     // Procedural-parameter ABI + conformant-array marshalling.
@@ -248,7 +248,7 @@ void Codegen::Impl::init(const std::string& progName) {
         [](const ExprNode& e){ return exprIsVarStr(e); },
         [](const ExprNode& e){ return exprIsCharStr(e); },
         [](const ExprNode& e){ return exprCharStrLen(e); },
-        [](const ExprNode& e){ return exprStrCapStatic(e); },
+        [](const ExprNode& e){ return exprStrCapForTempAlloc(e); },
         [](const ExprNode& e){ return exprIsShortStr(e); },
         [](const ExprNode& e){ return exprShortStrCap(e); });
     // Structured-statement emission.  EmitExpr/EmitStmt/EnsureI1/ToI64/
@@ -447,7 +447,7 @@ void Codegen::Impl::init(const std::string& progName) {
         [](const ExprNode& e){ return exprIsVarStr(e); },
         [](const ExprNode& e){ return exprIsCharStr(e); },
         [](const ExprNode& e){ return exprCharStrLen(e); },
-        [](const ExprNode& e){ return exprStrCapStatic(e); },
+        [](const ExprNode& e){ return exprStrCapForTempAlloc(e); },
         [](const Type* t){ return ordinalIsUnsigned(t); },
         [](const ExprNode& e){ return exprIsShortStr(e); },
         [](const ExprNode& e){ return exprShortStrCap(e); });
@@ -487,7 +487,7 @@ void Codegen::Impl::init(const std::string& progName) {
         [](const ExprNode& e){ return exprIsVarStr(e); },
         [](const ExprNode& e){ return exprIsCharStr(e); },
         [](const ExprNode& e){ return exprCharStrLen(e); },
-        [](const ExprNode& e){ return exprStrCapStatic(e); },
+        [](const ExprNode& e){ return exprStrCapForTempAlloc(e); },
         [](const ExprNode& e){ return exprIsShortStr(e); },
         [](const ExprNode& e){ return exprShortStrCap(e); },
         [this](const Type& t){ return getOrCreateVmt(t); });
@@ -511,7 +511,7 @@ void Codegen::Impl::init(const std::string& progName) {
         [this](llvm::Value* v){ return ensureI1(v); },
         [this](llvm::Value* v, bool s){ return toI64(v, s); },
         [](const ExprNode& e){ return exprIsVarStr(e); },
-        [](const ExprNode& e){ return exprStrCapStatic(e); },
+        [](const ExprNode& e){ return exprStrCapForTempAlloc(e); },
         [this](llvm::Value* v, llvm::Type* t, bool s){ return coerceToType(v, t, s); },
         [](const ExprNode& e){ return exprIsShortStr(e); });
     // DefineBuf/LookupBuf are narrow closures into defVar/findVar
