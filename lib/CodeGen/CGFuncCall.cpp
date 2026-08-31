@@ -1013,6 +1013,22 @@ llvm::Value* CGFuncCall::emitMethodCallExpr(const MethodCallExpr& e) {
         auto* vptrSlot = B.CreateGEP(I8Ty, selfPtr,
             {llvm::ConstantInt::get(I64Ty, *vptrOff)}, "self.vptr.addr");
         auto* vmt = B.CreateLoad(PtrTy, vptrSlot, "self.vmt");
+        // Issue #514: a PLAIN New(p) (no extended New(P, Ctor(...)) syntax,
+        // #511's own vptr-stamping only ever reaches that path) leaves this
+        // slot exactly as plang_new's calloc left it -- NULL, never garbage
+        // (runtime/plang_sys.cpp) -- rather than a real VMT address.
+        // Unchecked, the GEP+load just below reads a function pointer from
+        // memory near address zero (MEntry->VmtSlot*8) and segfaults; real
+        // Borland/FPC instead traps this cleanly, "Runtime error 216:
+        // General protection fault" (confirmed against a local `fpc -Mtp`
+        // build on the same program).  Reuses the exact nil-pointer guard
+        // and error code every other bad-pointer access in this codebase
+        // already routes through (RangeCheckGuards::emitNilCheck) rather
+        // than inventing a new one -- a single cheap icmp+branch that never
+        // fires for any of the many correctly-stamped instances (a directly
+        // declared variable, a var parameter, or New(P, Ctor(...))), which
+        // is every instance except this one specific gap.
+        RangeGuards.emitNilCheck(vmt);
         auto* slotAddr = B.CreateGEP(PtrTy, vmt,
             {llvm::ConstantInt::get(I64Ty, MEntry->VmtSlot)}, "vmt.slot.addr");
         auto* fnPtr = B.CreateLoad(PtrTy, slotAddr, "vmt.fn");

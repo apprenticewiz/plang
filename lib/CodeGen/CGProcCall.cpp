@@ -911,6 +911,25 @@ void CGProcCall::emitCallStmt(const CallStmt& s) {
         // says a variable of it begins in, as a declared one would.
         if (domain && HasInitialState(domain))
             EmitInitialState(ptr, Types.llvmTypeOfNode(*domain), domain);
+        // Issue #514: deliberately NO StampVptr/StampFieldVptrs call here,
+        // for Pointee (or any object-typed field nested inside it, however
+        // deep), even though pointee may well be -- or contain -- an object
+        // type with a `_vptr`.  This is the PLAIN new(p) form -- real
+        // Borland/FPC warns "use extended syntax of NEW and DISPOSE for
+        // instances of objects" for exactly this call and never stamps a
+        // vptr for it either, so a later virtual call through the result
+        // cleanly traps "Runtime error 216" instead of dispatching to a
+        // real override (confirmed against a local `fpc -Mtp` build) --
+        // matched here, not "fixed" to be safer, per this project's own
+        // policy of matching real field practice on a dialect ambiguity.
+        // plang_new's own calloc (runtime/plang_sys.cpp) already leaves
+        // every byte of Pointee's storage NULL, `_vptr` slot(s) included --
+        // never uninitialized garbage -- so nothing needs to be written
+        // here at all: CGFuncCall::emitMethodCallExpr's own vptr-load (and
+        // its two siblings, CGProcCall's emitMethodCallStmt/
+        // emitBoundMethodCall) already check for exactly that NULL and trap
+        // there, right before the indirect call that would otherwise
+        // segfault reading a function pointer from near address zero.
         return;
     }
     // Turbo Tier 5, Cluster A item 6: dispose(p, Dtor[(args)]) -- New/Init's
@@ -1192,6 +1211,12 @@ void CGProcCall::emitMethodCallStmt(const MethodCallStmt& s) {
         auto* vptrSlot = B.CreateGEP(I8Ty, selfPtr,
             {llvm::ConstantInt::get(I64Ty, *vptrOff)}, "self.vptr.addr");
         auto* vmt = B.CreateLoad(PtrTy, vptrSlot, "self.vmt");
+        // Issue #514: see CGFuncCall::emitMethodCallExpr's identical branch
+        // for the whole design -- a plain New(p)'s unstamped `_vptr` slot
+        // reads back NULL (plang_new's own calloc), which this traps
+        // cleanly (Borland/FPC's "Runtime error 216") instead of segfaulting
+        // the GEP+load just below.
+        RangeGuards.emitNilCheck(vmt);
         auto* slotAddr = B.CreateGEP(PtrTy, vmt,
             {llvm::ConstantInt::get(I64Ty, MEntry->VmtSlot)}, "vmt.slot.addr");
         auto* fnPtr = B.CreateLoad(PtrTy, slotAddr, "vmt.fn");
@@ -1289,6 +1314,14 @@ llvm::Value* CGProcCall::emitBoundMethodCall(
         auto* vptrSlot = B.CreateGEP(I8Ty, selfPtr,
             {llvm::ConstantInt::get(I64Ty, *vptrOff)}, "self.vptr.addr");
         auto* vmt = B.CreateLoad(PtrTy, vptrSlot, "self.vmt");
+        // Issue #514: see CGFuncCall::emitMethodCallExpr's identical branch
+        // for the whole design.  Reached here by Dispose(p, Done) on a
+        // VIRTUAL destructor (a constructor can never be virtual --
+        // err_object_virtual_constructor -- so New(P, Ctor(...))'s own call
+        // never takes this branch): a plain New(p), later Dispose(p, Done)'d
+        // without ever having been New(p, Init(...))'d, has the same
+        // unstamped, NULL `_vptr` slot as a virtual METHOD call on it would.
+        RangeGuards.emitNilCheck(vmt);
         auto* slotAddr = B.CreateGEP(PtrTy, vmt,
             {llvm::ConstantInt::get(I64Ty, MEntry->VmtSlot)}, "vmt.slot.addr");
         auto* fnPtr = B.CreateLoad(PtrTy, slotAddr, "vmt.fn");
