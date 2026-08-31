@@ -23,6 +23,7 @@ jobs:
   build:
     name: ${{ matrix.arch }} / ${{ matrix.compiler }} / ${{ matrix.build_type }}
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
     strategy:
       # gcc-14 and gcc-15 are both here to hold the README to "GCC >= 14".
       # They are the versions that reject, and then crash on, lambdas taking an
@@ -238,6 +239,7 @@ jobs:
     # its own compiler; Homebrew supplies LLVM, which plang links against, and
     # GoogleTest.
     runs-on: macos-latest
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -439,6 +441,7 @@ jobs:
   optimized:
     name: emitted programs at -O1/-O2/-O3
     runs-on: ubuntu-latest
+    timeout-minutes: 20
 
     # The suite compiles the programs it runs at -O0, and so does the
     # acceptance test.  A defect that only the optimizer acts on is therefore
@@ -557,6 +560,7 @@ jobs:
   sanitizers:
     name: asan + ubsan
     runs-on: ubuntu-latest
+    timeout-minutes: 20
 
     steps:
       - uses: actions/checkout@v5
@@ -604,6 +608,7 @@ jobs:
   lint-test:
     name: lint test/
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     # No C++ build needed: pure Python text analysis over test/**/*.pas
     # (issue #43's own repeat-offense history -- a stray '}' closing a
     # directive comment early, hit at least 4 times; a bare %t defeating
