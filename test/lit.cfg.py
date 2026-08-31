@@ -33,6 +33,16 @@ config.test_format = lit.formats.ShTest(execute_external=False)
 config.test_source_root = os.path.dirname(__file__)
 config.test_exec_root = os.path.join(config.plang_binary_dir, "test")
 
+# Per-test wall-clock backstop (issue #189).  With no limit set, a genuine
+# compiler hang on adversarial input has nothing to stop it short of the CI
+# job's own outer timeout-minutes, which buries the responsible test in
+# whatever else happened to be running.  120s is ~18x the slowest test
+# observed in the full suite (a deliberate compile-time-scaling guard at
+# 6.62s measured via `lit --time-tests`), with real margin for CI being
+# slower or more contended than a local sandbox.  See test/README.md for how
+# to override this per-directory if a genuinely slow future test needs it.
+lit_config.maxIndividualTestTime = 120
+
 lit.llvm.initialize(lit_config, config)
 llvm_config = lit.llvm.llvm_config  # a global set by initialize(), not a class to construct
 llvm_config.use_default_substitutions()
