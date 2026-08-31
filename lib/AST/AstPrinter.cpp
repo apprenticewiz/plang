@@ -46,9 +46,27 @@ private:
     bool             First_ = true;
 };
 
+// -dump-parse-tree runs before Sema, so none of Sema's own recursion guards
+// (Sema::ExprDepth/MaxExprDepth, or walkExprs/walkStmts's MaxWalkDepth --
+// SemaUtil.h) are ever in the picture here: a source file that Sema would
+// reject with a clean "expression is nested too deeply" diagnostic instead
+// reaches this file directly and, unguarded, overflows the stack (issue
+// #518).  This is a debug-dump-only concern with no correctness stakes
+// beyond "don't crash", so the fix is a silent depth ceiling matching
+// walkExprs/walkStmts's own shape: past MaxDumpDepth, print a placeholder
+// and stop recursing rather than adding a diagnostic mechanism this file
+// doesn't otherwise have (it isn't handed a DiagnosticsEngine at all).
+//
+// The budget need not match Sema's MaxExprDepth (1000) -- this is a
+// separate, pre-Sema path with no shared invariant -- but should stay well
+// clear of a real stack overflow for these small, few-local stack frames
+// while comfortably covering any non-adversarial program's nesting depth.
+// 2000 clears that bar with room to spare in either direction.
+constexpr int MaxDumpDepth = 2000;
+
 // Forward declarations.
-static void printExpr(const ExprNode& node, std::ostream& os);
-static void printType(const TypeNode& node, std::ostream& os);
+static void printExpr(const ExprNode& node, std::ostream& os, int depth = 0);
+static void printType(const TypeNode& node, std::ostream& os, int depth = 0);
 
 // Prints a statement starting at the current column (no leading indent).
 // Does NOT emit a trailing newline. 'depth' controls how deeply
@@ -82,7 +100,11 @@ static_assert(NumTypeKinds == 15, "a new type denoter needs a case in printType"
 // conclude the tree does not have one.  Three of these were missed for exactly
 // that reason — `type of`, a conformant array parameter and a schema
 // instantiation each dumped as blank for as long as they have existed.
-static void printType(const TypeNode& node, std::ostream& os) {
+static void printType(const TypeNode& node, std::ostream& os, int depth) {
+    if (depth >= MaxDumpDepth) {
+        os << "...";
+        return;
+    }
     switch (node.Kind) {
     case NodeKind::NamedTypeNode: {
         const auto* n = llvm::cast<NamedTypeNode>(&node);
@@ -94,14 +116,14 @@ static void printType(const TypeNode& node, std::ostream& os) {
         const auto* n = llvm::cast<ArrayTypeNode>(&node);
         os << (n->Packed ? "(packed-array " : "(array ");
         if (n->Index) {
-            printType(*n->Index, os);
+            printType(*n->Index, os, depth + 1);
         } else {
             printExpr(*n->Low, os);
             os << " ";
             printExpr(*n->High, os);
         }
         os << " ";
-        printType(*n->Element, os);
+        printType(*n->Element, os, depth + 1);
         os << ")";
         break;
     }
@@ -113,7 +135,7 @@ static void printType(const TypeNode& node, std::ostream& os) {
             Sep sp;
             for (const auto& name : fd.Names) os << sp << name;
             os << " ";
-            printType(*fd.Type, os);
+            printType(*fd.Type, os, depth + 1);
             os << ")";
         }
         if (n->Variant) {
@@ -121,7 +143,7 @@ static void printType(const TypeNode& node, std::ostream& os) {
             os << " (case";
             if (!vp.TagField.empty()) os << " " << vp.TagField << " :";
             os << " ";
-            printType(*vp.TagType, os);
+            printType(*vp.TagType, os, depth + 1);
             for (const auto& vc : vp.Cases) {
                 os << " (";
                 Sep lsp;
@@ -135,7 +157,7 @@ static void printType(const TypeNode& node, std::ostream& os) {
                     Sep nsp;
                     for (const auto& name : fd.Names) os << nsp << name;
                     os << " ";
-                    printType(*fd.Type, os);
+                    printType(*fd.Type, os, depth + 1);
                     os << ")";
                 }
                 os << ")";
@@ -161,7 +183,7 @@ static void printType(const TypeNode& node, std::ostream& os) {
                 printParams(pd.Params, os);
                 if (pd.IsFunction && pd.ReturnType) {
                     os << " ";
-                    printType(*pd.ReturnType, os);
+                    printType(*pd.ReturnType, os, depth + 1);
                 }
                 if (pd.IsVirtual) os << " virtual";
                 if (pd.IsAbstract) os << " abstract";
@@ -170,7 +192,7 @@ static void printType(const TypeNode& node, std::ostream& os) {
                 Sep sp;
                 for (const auto& name : m.Field.Names) os << sp << name;
                 os << " ";
-                printType(*m.Field.Type, os);
+                printType(*m.Field.Type, os, depth + 1);
                 os << ")";
             }
             os << ")";
@@ -181,7 +203,7 @@ static void printType(const TypeNode& node, std::ostream& os) {
     case NodeKind::PointerTypeNode: {
         const auto* n = llvm::cast<PointerTypeNode>(&node);
         os << "(^ ";
-        printType(*n->Base, os);
+        printType(*n->Base, os, depth + 1);
         os << ")";
         break;
     }
@@ -204,7 +226,7 @@ static void printType(const TypeNode& node, std::ostream& os) {
     case NodeKind::SetTypeNode: {
         const auto* n = llvm::cast<SetTypeNode>(&node);
         os << (n->Packed ? "(packed-set " : "(set ");
-        printType(*n->Base, os);
+        printType(*n->Base, os, depth + 1);
         os << ")";
         break;
     }
@@ -216,12 +238,12 @@ static void printType(const TypeNode& node, std::ostream& os) {
         // indexed by, which is as much a part of it as what it holds.
         if (n->Index) {
             os << " (index ";
-            printType(*n->Index, os);
+            printType(*n->Index, os, depth + 1);
             os << ")";
         }
         if (n->Element) {
             os << " ";
-            printType(*n->Element, os);
+            printType(*n->Element, os, depth + 1);
         }
         os << ")";
         break;
@@ -229,7 +251,7 @@ static void printType(const TypeNode& node, std::ostream& os) {
     case NodeKind::PackedTypeNode: {
         const auto* n = llvm::cast<PackedTypeNode>(&node);
         os << "(packed ";
-        printType(*n->Inner, os);
+        printType(*n->Inner, os, depth + 1);
         os << ")";
         break;
     }
@@ -259,7 +281,7 @@ static void printType(const TypeNode& node, std::ostream& os) {
         for (const auto& s : n->Specs)
             os << " (" << s.Lo << " " << s.Hi << " " << s.OrdType << ")";
         os << " ";
-        printType(*n->Element, os);
+        printType(*n->Element, os, depth + 1);
         os << ")";
         break;
     }
@@ -277,7 +299,7 @@ static void printType(const TypeNode& node, std::ostream& os) {
         printParams(n->Params, os);
         if (n->ReturnType) {
             os << " ";
-            printType(*n->ReturnType, os);
+            printType(*n->ReturnType, os, depth + 1);
         }
         os << ")";
         break;
@@ -302,7 +324,11 @@ static void printType(const TypeNode& node, std::ostream& os) {
 // Inline expression printing
 // ---------------------------------------------------------------------------
 
-static void printExpr(const ExprNode& node, std::ostream& os) {
+static void printExpr(const ExprNode& node, std::ostream& os, int depth) {
+    if (depth >= MaxDumpDepth) {
+        os << "...";
+        return;
+    }
     switch (node.Kind) {
     case NodeKind::IntLitExpr:
         os << llvm::cast<IntLitExpr>(&node)->Value;
@@ -325,37 +351,37 @@ static void printExpr(const ExprNode& node, std::ostream& os) {
     case NodeKind::IndexExpr: {
         const auto* n = llvm::cast<IndexExpr>(&node);
         os << "(index ";
-        printExpr(*n->Array, os);
+        printExpr(*n->Array, os, depth + 1);
         os << " ";
-        printExpr(*n->Index, os);
+        printExpr(*n->Index, os, depth + 1);
         os << ")";
         break;
     }
     case NodeKind::FieldExpr: {
         const auto* n = llvm::cast<FieldExpr>(&node);
         os << "(field ";
-        printExpr(*n->Record, os);
+        printExpr(*n->Record, os, depth + 1);
         os << " " << n->Field << ")";
         break;
     }
     case NodeKind::DerefExpr:
         os << "(deref ";
-        printExpr(*llvm::cast<DerefExpr>(&node)->Pointer, os);
+        printExpr(*llvm::cast<DerefExpr>(&node)->Pointer, os, depth + 1);
         os << ")";
         break;
     case NodeKind::BinaryExpr: {
         const auto* n = llvm::cast<BinaryExpr>(&node);
         os << "(" << opSym(n->Op) << " ";
-        printExpr(*n->Left, os);
+        printExpr(*n->Left, os, depth + 1);
         os << " ";
-        printExpr(*n->Right, os);
+        printExpr(*n->Right, os, depth + 1);
         os << ")";
         break;
     }
     case NodeKind::UnaryExpr: {
         const auto* n = llvm::cast<UnaryExpr>(&node);
         os << "(" << opSym(n->Op) << " ";
-        printExpr(*n->Operand, os);
+        printExpr(*n->Operand, os, depth + 1);
         os << ")";
         break;
     }
@@ -364,7 +390,7 @@ static void printExpr(const ExprNode& node, std::ostream& os) {
         os << "(call " << n->Name;
         for (const auto& arg : n->Args) {
             os << " ";
-            printExpr(*arg, os);
+            printExpr(*arg, os, depth + 1);
         }
         os << ")";
         break;
@@ -372,11 +398,11 @@ static void printExpr(const ExprNode& node, std::ostream& os) {
     case NodeKind::MethodCallExpr: {
         const auto* n = llvm::cast<MethodCallExpr>(&node);
         os << "(methodcall ";
-        printExpr(*n->Receiver, os);
+        printExpr(*n->Receiver, os, depth + 1);
         os << " " << n->Method;
         for (const auto& arg : n->Args) {
             os << " ";
-            printExpr(*arg, os);
+            printExpr(*arg, os, depth + 1);
         }
         os << ")";
         break;
@@ -386,7 +412,7 @@ static void printExpr(const ExprNode& node, std::ostream& os) {
         os << "(inherited " << n->Method;
         for (const auto& arg : n->Args) {
             os << " ";
-            printExpr(*arg, os);
+            printExpr(*arg, os, depth + 1);
         }
         os << ")";
         break;
@@ -394,9 +420,9 @@ static void printExpr(const ExprNode& node, std::ostream& os) {
     case NodeKind::SetRangeExpr: {
         const auto* n = llvm::cast<SetRangeExpr>(&node);
         os << "(.. ";
-        printExpr(*n->Low, os);
+        printExpr(*n->Low, os, depth + 1);
         os << " ";
-        printExpr(*n->High, os);
+        printExpr(*n->High, os, depth + 1);
         os << ")";
         break;
     }
@@ -411,7 +437,7 @@ static void printExpr(const ExprNode& node, std::ostream& os) {
         Sep sp;
         for (const auto& elem : n->Elements) {
             os << sp;
-            printExpr(*elem, os);
+            printExpr(*elem, os, depth + 1);
         }
         os << "]";
         break;
@@ -419,11 +445,11 @@ static void printExpr(const ExprNode& node, std::ostream& os) {
     case NodeKind::SubstringExpr: {
         const auto* n = llvm::cast<SubstringExpr>(&node);
         os << "(substring ";
-        printExpr(*n->Str, os);
+        printExpr(*n->Str, os, depth + 1);
         os << " ";
-        printExpr(*n->Low, os);
+        printExpr(*n->Low, os, depth + 1);
         os << "..";
-        printExpr(*n->High, os);
+        printExpr(*n->High, os, depth + 1);
         os << ")";
         break;
     }
@@ -441,12 +467,12 @@ static void printExpr(const ExprNode& node, std::ostream& os) {
                 Sep sp;
                 for (const auto& lbl : arm.Labels) {
                     os << sp;
-                    printExpr(*lbl, os);
+                    printExpr(*lbl, os, depth + 1);
                 }
             }
             if (arm.Value) {
                 os << " : ";
-                printExpr(*arm.Value, os);
+                printExpr(*arm.Value, os, depth + 1);
             }
             os << ")";
         }
@@ -456,21 +482,21 @@ static void printExpr(const ExprNode& node, std::ostream& os) {
     case NodeKind::TypeCastExpr: {
         const auto* n = llvm::cast<TypeCastExpr>(&node);
         os << "(cast " << n->TypeName << " ";
-        printExpr(*n->Operand, os);
+        printExpr(*n->Operand, os, depth + 1);
         os << ")";
         break;
     }
     case NodeKind::WriteParam: {
         const auto* n = llvm::cast<WriteParam>(&node);
         os << "(write-param ";
-        printExpr(*n->Value, os);
+        printExpr(*n->Value, os, depth + 1);
         if (n->Width) {
             os << " :";
-            printExpr(*n->Width, os);
+            printExpr(*n->Width, os, depth + 1);
         }
         if (n->Decimals) {
             os << " :";
-            printExpr(*n->Decimals, os);
+            printExpr(*n->Decimals, os, depth + 1);
         }
         os << ")";
         break;
@@ -488,6 +514,10 @@ static void printExpr(const ExprNode& node, std::ostream& os) {
 static void printStmt(const StmtNode* node, std::ostream& os, int depth) {
     if (!node) {
         os << "()";   // empty / ε statement
+        return;
+    }
+    if (depth >= MaxDumpDepth) {
+        os << "(...)";
         return;
     }
 
