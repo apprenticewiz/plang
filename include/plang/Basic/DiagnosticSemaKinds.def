@@ -581,6 +581,23 @@ DIAG(err_object_method_never_defined, Error,
 DIAG(warn_object_method_hides_inherited, Warning,
      "method '%0' hides the inherited method of the same name; declare "
      "'virtual' to override it instead")
+// Turbo Tier 5, Cluster A item 3: 'Obj.Method(...)'/'Obj.Method' where Obj's
+// (or 'P^'s) static type is not TypeKind::Object -- the parser builds a
+// MethodCallExpr/MethodCallStmt for `.identifier` unconditionally (see
+// MethodCallExpr's own comment, AstExpr.h) whenever it is possible this is a
+// method call at all, and this is Sema's rejection of the cases that are
+// not: an ordinary record field, a plain variable, ... none of which this
+// codebase has any procedural-valued form of to call.
+DIAG(err_method_call_receiver_not_object, Error,
+     "'%0' is not an object; '.' followed by '(' is only a method call")
+// Turbo Tier 5, Cluster A item 3: Obj's object type (or one of its
+// ancestors, walked the same way resolveObjectType's own VMT-slot
+// inheritance does) has no method of this name.  The record-field sibling
+// is err_no_such_field; kept distinct because the receiver here is
+// confirmed to already be an object type, so "no such field" would suggest
+// the wrong fix (this is never a field lookup to begin with).
+DIAG(err_object_method_not_found, Error,
+     "object type '%0' has no method '%1'")
 DIAG(err_undefined_type, Error, "undefined type '%0'")
 DIAG(err_not_a_type, Error, "'%0' is not a type")
 // EP §6.2.1(k): the relaxation that lets declaration parts appear in any

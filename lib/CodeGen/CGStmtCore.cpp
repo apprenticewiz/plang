@@ -51,6 +51,13 @@ void CGStmtCore::emitStmt(const StmtNode* stmt) {
     }
     if (auto* s = llvm::dyn_cast<CaseStmt>(stmt)) { ControlFlow.emitCase(*s); return; }
     if (auto* s = llvm::dyn_cast<WithStmt>(stmt)) { With.emitWith(*s); return; }
+    // Turbo Tier 5, Cluster A item 3 is Sema-only: see MethodCallExpr's own
+    // ICE (CGExprCore.cpp) for why a MethodCallStmt reaching here is a real
+    // program exercising more than this tier implements, not a silent
+    // no-op or a fall-through to the generic message below.
+    if (llvm::isa<MethodCallStmt>(stmt))
+        codegenICE("method-call codegen is not implemented yet "
+                    "(Turbo Tier 5, Cluster A item 3 is Sema-only)");
     // Falling off the end would drop the statement from the program silently.
     codegenICE("unhandled statement kind in codegen");
 }

@@ -97,6 +97,35 @@ struct CallStmt : StmtNode {
     mutable std::shared_ptr<Type> ResolvedType;
 };
 
+/// Turbo Tier 5, Cluster A item 3: a method call used as a STATEMENT --
+/// `Obj.Method(args);`, `P^.Method(args);`, or the bare-call form with no
+/// parens at all, `Obj.Method;` (confirmed legal against a local fpc -Mtp
+/// build, matching how a bare `Foo;` calls a zero-argument ordinary
+/// procedure).  See MethodCallExpr (AstExpr.h) for the expression-context
+/// sibling and for why the parser builds this shape unconditionally,
+/// leaving Sema (Sema::checkMethodCallStmt) to confirm it is really a
+/// method call at all.
+///
+/// The bare-call form is built by Parser::parseStatement from a FieldExpr
+/// Lval with an empty Args list -- there is no separate parenthesized-args
+/// production to fall back to, exactly like CallStmt's own bare-identifier
+/// form just above.
+struct MethodCallStmt : StmtNode {
+    static bool classof(const Node* n) { return n->Kind == NodeKind::MethodCallStmt; }
+    MethodCallStmt() : StmtNode(NodeKind::MethodCallStmt) {}
+    std::unique_ptr<ExprNode>              Receiver;  /// object-typed expression (or P^ deref of one)
+    std::string                            Method;    /// method name, as written
+    std::vector<std::unique_ptr<ExprNode>> Args;       /// actual arguments, in order; empty for the bare form
+
+    /// Turbo `{$X+}`: mirrors CallStmt::ResolvedType -- the callee's
+    /// Sema-resolved return type when a function method was let through as a
+    /// statement with its result discarded, null for a procedure method or
+    /// any error.  Not consumed by CodeGen yet (no method-call CodeGen
+    /// exists at all -- see the ICE in CGExprCore.cpp), but recorded now so
+    /// that later item does not have to re-derive it.
+    mutable std::shared_ptr<Type> ResolvedType;
+};
+
 struct WithStmt : StmtNode {
     static bool classof(const Node* n) { return n->Kind == NodeKind::WithStmt; }
     WithStmt() : StmtNode(NodeKind::WithStmt) {}

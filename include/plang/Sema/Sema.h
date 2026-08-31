@@ -923,6 +923,7 @@ private:
     void checkFor       (const ForStmt&      S);
     void checkRepeat    (const RepeatStmt&   S);
     void checkCallStmt  (const CallStmt&     S);
+    void checkMethodCallStmt(const MethodCallStmt& S);
     void checkWith      (const WithStmt&     S);
     void checkGoto      (const GotoStmt&     S);
     void checkLabeled   (const LabeledStmt&  S);
@@ -983,6 +984,29 @@ private:
     [[nodiscard]] std::shared_ptr<Type> checkBinary  (const BinaryExpr& E);
     [[nodiscard]] std::shared_ptr<Type> checkUnary   (const UnaryExpr& E);
     [[nodiscard]] std::shared_ptr<Type> checkCallExpr(const CallExpr& E);
+    /// Turbo Tier 5, Cluster A item 3: 'Obj.Method(args)' / 'P^.Method(args)'
+    /// used as a value.  See checkMethodCall's own comment (SemaExpr.cpp)
+    /// for the shared logic with checkMethodCallStmt (Args-only-statement
+    /// form).
+    [[nodiscard]] std::shared_ptr<Type> checkMethodCallExpr(const MethodCallExpr& E);
+    /// Shared receiver/method-lookup/argument-checking logic behind
+    /// checkMethodCallExpr and checkMethodCallStmt: resolves \p Receiver's
+    /// static type, confirms it is TypeKind::Object, walks its ancestor
+    /// chain (Sema::objectMethodKey + Symtab.lookup, the same composite-key
+    /// lookup resolveObjectType itself registers each method under -- see
+    /// that function's own comment, SemaType.cpp) for a method named
+    /// \p Method, and -- once found -- hands the match to
+    /// checkUserDefinedCall (via a synthetic SymbolKind::Proc stand-in, the
+    /// same trick checkUserDefinedCall's own Var/procedural-value arm
+    /// already uses) so arity/argument-type checking is the ONE existing
+    /// implementation, not a second copy of it.  \p ExpectFunction is
+    /// forwarded to checkUserDefinedCall unchanged: true from
+    /// checkMethodCallExpr (a value is required), false from
+    /// checkMethodCallStmt (a procedure, or a function under Turbo's
+    /// `{$X+}`, is fine).
+    [[nodiscard]] std::shared_ptr<Type> checkMethodCall(
+        const ExprNode& Receiver, const std::string& Method, SourceLocation Loc,
+        std::span<const std::unique_ptr<ExprNode>> Args, bool ExpectFunction);
     /// SizeOf/High/Low's sole argument: either a TYPE NAME -- one of the
     /// five primitive keywords (parsed as a synthetic IdentExpr; see
     /// Parser::parseSizeHighLowArg) or an ordinary user-defined type name

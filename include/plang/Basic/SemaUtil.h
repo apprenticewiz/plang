@@ -18,15 +18,16 @@ namespace plang {
 // output, it silently stops reporting a class of error inside it.
 //
 // See NumExprKinds and NumStmtKinds in AstBase.h.
-// Complete as written: of the twelve statement kinds, the nine that contain a
-// statement appear in walkStmts and the nine that hang an expression off
-// themselves appear in forEachStmtExpr; of the seventeen expression kinds,
-// six are leaves and the other eleven appear in walkExprs.
-static_assert(NumStmtKinds == 12,
+// Complete as written: of the thirteen statement kinds, the nine that
+// contain a statement appear in walkStmts and the ten that hang an
+// expression off themselves appear in forEachStmtExpr; of the eighteen
+// expression kinds, six are leaves and the other twelve appear in
+// walkExprs.
+static_assert(NumStmtKinds == 13,
               "a new statement kind that contains statements needs a branch in "
               "walkStmts, and one that hangs an expression off itself needs a "
               "branch in forEachStmtExpr");
-static_assert(NumExprKinds == 17,
+static_assert(NumExprKinds == 18,
               "a new expression kind that owns a child expression needs a "
               "branch in walkExprs");
 
@@ -83,6 +84,9 @@ void walkExprs(const ExprNode* E, Fn&& F) {
         walkExprs(N->Operand.get(), F);
     } else if (auto* N = llvm::dyn_cast<CallExpr>(E)) {
         for (const auto& A : N->Args) walkExprs(A.get(), F);
+    } else if (auto* N = llvm::dyn_cast<MethodCallExpr>(E)) {
+        walkExprs(N->Receiver.get(), F);
+        for (const auto& A : N->Args) walkExprs(A.get(), F);
     } else if (auto* N = llvm::dyn_cast<SetRangeExpr>(E)) {
         walkExprs(N->Low.get(), F);
         walkExprs(N->High.get(), F);
@@ -116,6 +120,9 @@ void forEachStmtExpr(const StmtNode* S, Fn&& F) {
         F(N->Target.get());
         F(N->Value.get());
     } else if (auto* N = llvm::dyn_cast<CallStmt>(S)) {
+        for (const auto& A : N->Args) F(A.get());
+    } else if (auto* N = llvm::dyn_cast<MethodCallStmt>(S)) {
+        F(N->Receiver.get());
         for (const auto& A : N->Args) F(A.get());
     } else if (auto* N = llvm::dyn_cast<IfStmt>(S)) {
         F(N->Cond.get());
