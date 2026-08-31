@@ -185,6 +185,49 @@ jobs:
           printf 'program usesprobe(output);\nuses InstallProbeUnit;\nbegin writeln(InstallProbeAnswer) end.\n' > usesprobe.pas
           plang -std=turbo usesprobe.pas -o usesprobe
           test "$(./usesprobe)" = "42"
+          # Turbo Tier 4 capstone: the tier's own full end-to-end claim,
+          # made real -- Crt, Dos and Strings all `uses`d together in ONE
+          # program, auto-linked from this REAL installed prefix with NO -I
+          # and NO PLANG_UNIT_DIR (the InstallProbeUnit check above only
+          # proves this for a const-only placeholder with no object code;
+          # Crt/Dos/Strings each need a real .o found and linked the same
+          # way).  The program does real work through all three: Crt emits
+          # a real ANSI color escape (TextColor), Dos.FindFirst/FindNext
+          # iterate a real fixture directory, and Strings.StrPCopy/StrUpper
+          # round-trip a real PChar buffer.  test/Turbo/Units/shipped-rtl-
+          # crt-dos-strings-combined-utility.pas is the equivalent proof
+          # against the build-tree units (the one lit itself can reach,
+          # via -I%plang_unit_dir); this is the "installed, no flags" half
+          # lit cannot do on its own (see that test's own header comment).
+          mkdir -p rtlprobe
+          printf 'x' > rtlprobe/one.txt
+          cat > usesrtl.pas <<'PASEOF'
+          program UsesRtlNoFlags(output);
+          uses Crt, Dos, Strings;
+          var
+            F: SearchRec;
+            Buf: array[0..20] of Char;
+            P: PChar;
+            S: string;
+            Count: Integer;
+          begin
+            TextColor(Green);
+            Count := 0;
+            FindFirst('rtlprobe/*.txt', faAnyFile, F);
+            while DosError = 0 do
+            begin
+              Count := Count + 1;
+              FindNext(F);
+            end;
+            FindClose(F);
+            S := 'widget';
+            P := StrPCopy(Buf, S);
+            P := StrUpper(P);
+            Writeln('count=', Count, ' upper=', P);
+          end.
+          PASEOF
+          plang -std=turbo usesrtl.pas -o usesrtl
+          test "$(./usesrtl | sed -E $'s/\x1b\\[[0-9;]*m//g')" = "count=1 upper=WIDGET"
 
   macos:
     name: macOS / ${{ matrix.build_type }}
@@ -349,6 +392,49 @@ jobs:
           printf 'program usesprobe(output);\nuses InstallProbeUnit;\nbegin writeln(InstallProbeAnswer) end.\n' > usesprobe.pas
           plang -std=turbo usesprobe.pas -o usesprobe
           test "$(./usesprobe)" = "42"
+          # Turbo Tier 4 capstone: the tier's own full end-to-end claim,
+          # made real -- Crt, Dos and Strings all `uses`d together in ONE
+          # program, auto-linked from this REAL installed prefix with NO -I
+          # and NO PLANG_UNIT_DIR (the InstallProbeUnit check above only
+          # proves this for a const-only placeholder with no object code;
+          # Crt/Dos/Strings each need a real .o found and linked the same
+          # way).  The program does real work through all three: Crt emits
+          # a real ANSI color escape (TextColor), Dos.FindFirst/FindNext
+          # iterate a real fixture directory, and Strings.StrPCopy/StrUpper
+          # round-trip a real PChar buffer.  test/Turbo/Units/shipped-rtl-
+          # crt-dos-strings-combined-utility.pas is the equivalent proof
+          # against the build-tree units (the one lit itself can reach,
+          # via -I%plang_unit_dir); this is the "installed, no flags" half
+          # lit cannot do on its own (see that test's own header comment).
+          mkdir -p rtlprobe
+          printf 'x' > rtlprobe/one.txt
+          cat > usesrtl.pas <<'PASEOF'
+          program UsesRtlNoFlags(output);
+          uses Crt, Dos, Strings;
+          var
+            F: SearchRec;
+            Buf: array[0..20] of Char;
+            P: PChar;
+            S: string;
+            Count: Integer;
+          begin
+            TextColor(Green);
+            Count := 0;
+            FindFirst('rtlprobe/*.txt', faAnyFile, F);
+            while DosError = 0 do
+            begin
+              Count := Count + 1;
+              FindNext(F);
+            end;
+            FindClose(F);
+            S := 'widget';
+            P := StrPCopy(Buf, S);
+            P := StrUpper(P);
+            Writeln('count=', Count, ' upper=', P);
+          end.
+          PASEOF
+          plang -std=turbo usesrtl.pas -o usesrtl
+          test "$(./usesrtl | sed -E $'s/\x1b\\[[0-9;]*m//g')" = "count=1 upper=WIDGET"
 
   optimized:
     name: emitted programs at -O1/-O2/-O3

@@ -13,7 +13,12 @@ the sized-integer ladder, `PChar` and pointer arithmetic, procedural types
 and values, typed constants and `absolute`, the Boolean-family variants and
 `Single`, `string[N]` (`ShortString`) with its full TP value semantics, the
 System-unit string routines, and `const`/untyped/open-array parameters.
-Still not (yet) covered, at either tier: the real-mode DOS surface
+Tier 3 (also this document's later sections) is the System-unit file
+runtime (`Assign`/`Reset`/`Rewrite`/`Append`/`Close`, `InOutRes`/
+`IOResult`/`{$I+}`/`{$I-}`, `BlockRead`/`BlockWrite`/`Seek`/...) and
+`Random`. Tier 4 is units — `uses`, TP's own scoping rules, real separate
+compilation, and the shipped `Crt`/`Dos`/`Printer`/`Strings` standard
+library. Still not (yet) covered, at any tier: the real-mode DOS surface
 (`Seg`/`Ofs`/`Mem`/`Intr`/...), which plang rejects by name as targeting a
 machine this compiler does not build for, or object types.
 
@@ -23,9 +28,12 @@ resolves a path, the full shape of every Tier 2 type and routine below, and —
 because a compatibility dialect is only honest if it says where it stops
 being one — every point where plang's Turbo mode is known to diverge from
 what a real `fpc -Mtp` (this project's stand-in for Turbo Pascal 7 itself,
-and empirically checked against throughout) actually does. Both tiers'
+and empirically checked against throughout) actually does. Tiers 1-3's
 divergences are collected in one place, "Documented deviations," near the
-end.
+end; Tier 4's own one open gap (unit initialization sections) is
+documented in its own section instead, since — unlike the others — it is
+not a divergence checked against real `fpc -Mtp` field practice so much as
+a still-unscoped piece of this tier's own work.
 
 ---
 
@@ -1481,6 +1489,299 @@ own comment.
 
 ---
 
+# Tier 4: units — `uses`, separate compilation, and the shipped RTL
+
+Tiers 1-3 are all one compilation unit's own worth of dialect: syntax,
+directives, the type system, the System-unit file/heap/program-control
+runtime. Tier 4 is what a real multi-file Turbo program is built out of —
+`unit`/`interface`/`implementation`/`uses`, TP's own scoping rules, real
+separate compilation (a unit compiled once, used by many programs that
+never see its source again), and the four real, shipped standard-library
+units a Turbo program actually `uses`: `Crt`, `Dos`, `Printer`, `Strings`.
+Every feature below is gated to `-std=turbo` the same way Tiers 1-3's own
+extensions are — a `unit` file, or a `uses` clause naming anything beyond
+the always-implicit `System`, is rejected under `-std=iso7185`/
+`-std=iso10206`.
+
+This tier's own integration-level test corpus lives under
+`test/Turbo/Units/` (richer, multi-unit, multi-file scenarios — a small
+number of realistic programs, not one lit test per isolated behavior, the
+same split `test/Turbo/`'s own Tier 3 capstone already established); the
+per-PR unit-level coverage each item below cites lives under
+`test/Parse/ParserTurboUnits/`, `test/Sema/SemaTurboUnitScoping/`, and
+`test/Driver/Turbo/`.
+
+## `unit`/`interface`/`implementation`/`uses` syntax
+
+A unit source file's top-level shape is fixed, in this order: `unit
+<Name>;`, an `interface` section (its own optional `uses` clause, then
+`const`/`type`/`var` declarations and procedure/function **headings** —
+no bodies), an `implementation` section (its own optional, independent
+`uses` clause, then the bodies for everything the interface declared,
+plus any private `const`/`type`/`var`/procedure/function of its own that
+the interface never mentions), and a final `end.` — no `begin` is
+required before it (see "Unit initialization sections do not run
+automatically" below for what an optional `begin...end` there does and
+does not do). A **program** file's own `uses` clause, if any, comes
+immediately after the `program` heading, before any declaration.
+
+`uses UnitA, UnitB, UnitC;` — a comma-separated list, order significant
+(see "Scoping" below). The interface's own `uses` and the implementation's
+own `uses` are two syntactically and semantically **independent** clauses
+(`interface-uses-and-implementation-uses-are-independent-clauses.pas`):
+a unit named in one is not automatically visible through the other, and
+each is where "who does this unit's own type-checking depend on" is
+actually decided for that section — see "Mutual `uses`" below for exactly
+what that independence buys.
+
+## Scoping: last-used-unit-wins, qualification, and implicit `System`
+
+Every `uses`d unit pushes its own symbol-table scope, one per unit, in
+`uses`-clause order (`Sema::pushUnitUsesScopes`) — **not** one shared scope
+all `uses`d units' exports get merged into. An ordinary, unqualified
+lookup (`SymbolTable::lookup`'s already-existing innermost-first search)
+therefore resolves a name two different units both export to whichever
+one was named **last**: real Turbo Pascal's own well-known "last unit
+wins" rule, confirmed against real `fpc -Mtp` printing the identical
+answer for the identical two-unit setup. `UnitName.Identifier` — explicit
+qualification — reaches a **specific** unit's export directly, including
+one a bare read would not see because a later `uses`d unit shadows it;
+this is the only way to reach the shadowed unit's own value at all. See
+`a-later-uses-clauses-unit-shadows-an-earlier-ones-same-named-export.pas`
+(`test/Driver/Turbo/`) for the minimal two-unit proof and
+`last-unit-wins-shadowing-three-units-realistic-config.pas`
+(`test/Turbo/Units/`) for the same rule exercised across three units with
+both the bare-name and every qualified form checked in one program.
+
+`System` — the implicit unit every Turbo program and unit gets without
+writing `uses System` — is pushed first, so it sits at the **bottom** of
+every lookup: any real, explicitly-`uses`d unit's own export of the same
+name shadows `System`'s own, exactly like any other last-wins pair
+(`a-real-units-export-shadows-the-implicit-system-unit.pas`).
+
+**Transitively** `uses`d units' own identifiers are not visible at all — a
+program that `uses UnitA`, where `UnitA`'s own interface `uses UnitB`,
+sees everything `UnitA` exports but nothing `UnitB` exports unless the
+program also names `UnitB` itself in its own `uses` clause (confirmed
+against real `fpc -Mtp`:
+`transitively-used-units-own-identifiers-are-not-exposed-real-fpc-
+confirmed.pas`). A **circular interface `uses`** (`UnitA`'s interface
+`uses UnitB`, `UnitB`'s interface `uses UnitA`) is a diagnosed Sema error,
+not silently tolerated or infinitely recursed into
+(`circular-interface-uses-is-diagnosed-not-an-infinite-recursion.pas`).
+
+### Mutual `uses` through `implementation` — allowed
+
+Two units' own **implementation** sections may `uses` each other — `UnitA`'s
+implementation `uses UnitB`, `UnitB`'s implementation `uses UnitA` — even
+though the identical shape in both units' **interface** sections is the
+diagnosed circularity above. Real Turbo Pascal allows this too (confirmed
+against `fpc -Mtp`), and it is not actually a circular *dependency* in what
+must be known to type-check: by the time either unit's implementation needs
+the other, it only ever needs the other's already-fully-resolved
+INTERFACE, never the other's implementation. See
+`two-units-mutual-implementation-uses-compiles-and-links-real-fpc-
+confirmed.pas` (`test/Driver/Turbo/`) for the minimal two-procedure proof
+and `mutual-implementation-uses-two-units-real-work.pas`
+(`test/Turbo/Units/`) for the same shape with both directions doing real,
+data-dependent work — one unit validating input and logging into the
+other, the other formatting output by calling back into the first —
+rather than each side just proving the link graph resolves.
+
+## Real separate compilation: `.tui` files, `-c`, and the shipped-RTL search path
+
+`plang -std=turbo -c unit.pas -o unit.o` compiles a unit **on its own**,
+producing both the real object file (`unit.o` — empty if the unit exports
+nothing but constants/types, since those need no code) and a `.tui`
+("turbo unit interface") file next to it — a small, re-parseable Pascal
+source fragment holding exactly the unit's own interface section, written
+by the identical `typeDenoterToString`/`exprToString` machinery the `.pmi`
+writer already used for Extended Pascal modules (`docs/modules.md`). A
+later `plang ... program.pas unit.o -o program` that `uses` that unit reads
+the `.tui`, not the original `.pas`, to type-check against it — proven the
+strongest available way in this project's own test suite by deleting the
+unit's `.pas` source entirely between the two compiles and confirming the
+importer's compile and the final program's runtime behavior are both
+unaffected (`a-unit-compiled-standalone-can-be-used-by-a-program-that-
+never-sees-its-source.pas`, and, at three-unit scale,
+`three-units-separate-compilation-real-string-pipeline.pas` in
+`test/Turbo/Units/`).
+
+The `.tui` writer covers every kind of interface declaration this tier's
+own codegen wires cross-object linkage for: scalar and structured
+(record/array, including nested) typed constants, sized-integer types
+(`Byte`/`Word`/`ShortInt`/`LongInt`), `string[N]`, `PChar`, and procedural
+types — see `a-units-sized-integer-shortstring-pchar-and-procedural-vars-
+round-trip-through-the-tui.pas` and `a-units-record-and-array-typed-
+constant-round-trips-through-the-tui.pas` (`test/Driver/Turbo/`) for the
+single-unit proof and `word-and-record-typed-const-integration.pas`
+(`test/Turbo/Units/`) for a `Word`-typed and a record-typed exported
+constant consumed correctly alongside an unrelated second separately-
+compiled unit, the same round-trip proven at multi-unit scale rather than
+in isolation.
+
+A `uses` clause is resolved (both for the `.tui`/`.pas` interface and, if
+the unit exports anything needing real linked code, for the object file
+itself) against `unitSearchPaths()`'s three tiers, in order
+(`lib/Basic/UnitSearchPath.cpp`): the `PLANG_UNIT_DIR` environment
+variable, `<exeDir>/../lib/plang/units` (where a real install's
+`share/plang/units/` lands — see `install(DIRECTORY share/plang/units/
+...)`, `CMakeLists.txt`), and a compiled-in build-tree fallback
+(`${CMAKE_BINARY_DIR}/lib/plang/units`, so `ninja check-lit`'s own
+in-tree `build/bin/plang` resolves `uses Crt;` with no flags at all, the
+same "no flags" experience an installed `plang` gives). An explicit `-I`
+on the command line, and the current directory, are checked **first**,
+ahead of all three tiers — a user's own separately-compiled unit sitting
+next to the program (its `.o`/`.tui`, no `.pas` required) auto-links the
+identical way a shipped unit does, confirmed directly: with only
+`mathunit.o` and `mathunit.tui` present (its `.pas` deleted), `plang
+-std=turbo main.pas -o main` — no `-o mathunit.o` named on the command
+line at all — still finds and links it; removing the `.o` too turns that
+into a real `ld` "undefined symbol" failure, not a silent skip. This is
+the same driver-side scan (`scanUsesClauseUnitNames`/
+`findShippedUnitObject`, `lib/Driver/Driver.cpp`) that lets `uses Crt;`
+compile and link with zero flags — see
+`crt-uses-clause-auto-links-with-no-flags.pas` — extended here to confirm
+it is not special-cased to the shipped RTL's own install location.
+
+## The shipped units: `Crt`, `Dos`, `Printer`, `Strings`
+
+Four real standard-library units ship with plang, installed to
+`<prefix>/lib/plang/units` and auto-linked by name, the same "no flags"
+experience described above — POSIX terminals only (Linux and macOS; no
+Windows console), a deliberate, already-made scope call matching this
+project's own CI matrix.
+
+**`Crt`** — screen/cursor/color state, all built on ordinary `Write` and
+real ANSI/VT100 escape sequences: `ClrScr`, `ClrEol`, `GotoXY(X, Y)`,
+`WhereX`/`WhereY`, `TextColor`/`TextBackground` (real, readable/settable
+`TextAttr: Byte`, packed exactly like real TP's — bits 0-3 foreground,
+4-6 background, bit 7 blink), `Window(X1, Y1, X2, Y2)` (real,
+readable/settable `WindMin`/`WindMax: Word`), and the 16 named Borland
+color constants (`Black` .. `White`, plus `Blink`). `TextColor`/
+`TextBackground`'s Borland-to-ANSI-SGR color mapping is not simple
+arithmetic — Borland's own color order is not ANSI's — see `ApplyAttr`,
+`share/plang/units/Crt.pas`, confirmed digit-for-digit against `fpc`'s own
+`unix/crt.pp` `AnsiTbl`. `Delay(MS)`, `KeyPressed`, and `ReadKey` are real
+OS-backed builtins (a real wait; raw, unbuffered keyboard input via
+`termios`), declared in `Builtins.def` rather than as ordinary `Crt`
+exports — see that file's own comment for why.
+
+**`Dos`** — real POSIX reinterpretations of TP7's DOS-era Dos unit, every
+routine backed directly by `runtime/plang_dos.cpp` (the unit's own
+`implementation` bodies are never what actually runs — see that unit's
+header comment): `GetDate`/`GetTime`/`SetDate`/`SetTime`, `PackTime`/
+`UnpackTime` (the `DateTime` record), `Exec` (synchronous — the calling
+program blocks — with the child's exit code read back through
+`DosExitCode`), `DiskFree`/`DiskSize` (real `statvfs(2)`), `FindFirst`/
+`FindNext`/`FindClose` (real `opendir`/`readdir`/`closedir` — the
+`SearchRec` record's `Attr`/`Time`/`Size`/`Name` fields are real and
+portable; its first three fields are a private, implementation-defined
+replacement for real TP's opaque `Fill` bytes, carrying directory-
+iteration state), `GetEnv`, and `GetDir`/`ChDir`/`MkDir`/`RmDir` (a DOS
+drive-letter `Drive` parameter is accepted for signature compatibility and
+always means "the current directory" — this project registers no other
+drive). Every one of these reports failure through the global `DosError:
+Integer` (0 on success) instead of a return value or exception — the same
+shape `InOutRes`/`{$I-}` uses for file I/O, but a separate register,
+confirmed against real `fpc -Mtp`.
+
+**`Printer`** — a single exported variable, `Lst: Text`, auto-bound to a
+real, writable text file the first time the program touches it — no
+`Assign`/`Rewrite` of its own required, matching real TP field practice
+where `Lst` just works. Because a used unit's own initialization section
+does not run (see below), this binding happens through a C++ global
+constructor in `runtime/plang_printer.cpp` that calls straight into the
+runtime, bypassing the Pascal-level init path this tier could not rely on
+— the one shipped unit that needed a workaround different from `Crt`'s own
+lazy-`EnsureInit`-per-call pattern, since `Lst` is a bare variable a
+program can read/assign with no intervening call to hook.
+
+**`Strings`** — the classic null-terminated `PChar` toolbox, every routine
+backed by real `runtime/plang_strings.cpp` C string primitives (`strlen`/
+`strcpy`/`strcat`/`strcmp`/... under the hood): `StrLen`, `StrCopy`/
+`StrLCopy`, `StrCat`/`StrLCat`, `StrComp`/`StrLComp`/`StrIComp`,
+`StrPos`/`StrScan`/`StrRScan`, `StrUpper`/`StrLower`, `StrNew`/
+`StrDispose` (heap-allocated `PChar`s), and `StrPCopy`/`StrPLCopy` (copy a
+Pascal `string` INTO a `PChar` buffer — the `Source` parameter is `var`,
+so a string literal must be assigned to a variable first, real TP/FPC
+field practice for the identical reason).
+
+`Dos` and `Strings` need no compiled object of their own to link against —
+every exported routine binds directly to a `runtime/plang_*.cpp` symbol
+already linked into every Turbo program, so only their `.pas`/`.tui` need
+resolving. `Crt` is the one shipped unit with real Pascal-level bodies
+(`ClrScr` and friends are ordinary Pascal, not `extern` declarations), so
+it alone ships a real, precompiled `crt.o` (built once, at plang's own
+build time, by the just-built `plang` compiler itself — `CMakeLists.txt`'s
+`plang_shipped_crt_unit` target — rather than a hand-maintained prebuilt
+object) alongside `Crt.pas`/`crt.tui`.
+
+`shipped-rtl-crt-dos-strings-combined-utility.pas` (`test/Turbo/Units/`)
+is the concrete, end-to-end proof this tier's own goal names directly: one
+real program that `uses Crt, Dos, Strings` together and does something a
+small real Turbo utility might — colors a banner line, lists real files in
+a real directory with their real sizes, upper-cases a name through a real
+`PChar` round-trip — built and run against the build-tree RTL (the only
+tier lit itself can reach). The complementary "from a real INSTALLED
+plang, no flags at all" half of that same claim — which lit cannot drive,
+since a lit run always invokes the in-tree build-dir binary and has no
+installed-prefix layout of its own — is exercised by CI's own "Check the
+install rules" step (`.github/workflows/ci.yml`, both the Linux and macOS
+jobs): a real `sudo cmake --install`, then a program identical in spirit
+to the lit test above, compiled and run with `plang -std=turbo
+usesrtl.pas -o usesrtl` alone, no `-I`, no `PLANG_UNIT_DIR`.
+
+## Unit initialization sections do not run automatically
+
+**This is the one deliberate, still-open scope cut this whole tier
+carries.** A unit's `implementation` section may end with its own
+`begin...end` (instead of a bare `end.`) — real Turbo Pascal runs every
+`uses`d unit's own initialization section, in `uses`-clause dependency
+order, before the program's own `begin` — but plang does not yet run it
+automatically at all: only a **program's** own top-level `begin...end`
+ever executes on its own. A unit compiled and run **standalone** (nothing
+`uses`s it) is unaffected, since nothing about this gap touches how a
+program's own body runs — but a unit's own runtime-computed globals and
+any side effect its `begin...end` section would have produced simply do
+not happen when another program or unit `uses`s it.
+
+Confirmed directly, for this report: a unit
+(`InitUnit`, exporting `var InitRan: Integer` and a `begin...end` section
+that sets `InitRan := 99` and `Writeln`s a marker) compiled with `plang
+-std=turbo -c` and linked into a program that immediately reads
+`InitRan` — with **no** call of any kind into the unit first — prints
+`InitRan=0`, not `99`, and the marker line never appears: the global
+keeps LLVM's own zero-initializer, and the `begin...end` section's
+`Writeln` never runs.
+
+Every shipped unit that needed real initialization state worked around
+this individually rather than waiting on it: `Crt` uses a lazy
+`EnsureInit`, called from the START of every single exported
+procedure/function, so state is set up the first time ANYTHING in the
+unit is actually called (real TP code overwhelmingly calls something —
+`ClrScr` is close to universal — before ever reading `TextAttr`/`WindMin`/
+`WindMax` directly, so a bare, call-free FIRST read of one of those three
+is the one narrow, separately-documented gap `EnsureInit`'s own pattern
+cannot close). `Printer` bypasses the Pascal-level init path entirely with
+a C++ global constructor that calls straight into the runtime. `Dos` and
+`Strings` are mostly stateless (every call is a self-contained real
+syscall or C string operation), so the gap does not matter to either.
+
+This project's own test corpus deliberately does not — and should not —
+assert that a used unit's initialization section runs: doing so would be
+asserting behavior plang does not have. Every multi-unit integration test
+in `test/Turbo/Units/` that needs a unit-level starting value (e.g.
+`three-units-separate-compilation-real-string-pipeline.pas`'s own
+`Counter`) sets it explicitly from the program, the same workaround
+`a-unit-compiled-standalone-can-be-used-by-a-program-that-never-sees-its-
+source.pas` already established. Closing this gap for real — running
+every `uses`d unit's own initialization section, in dependency order,
+automatically — remains open, unscoped future work, not part of this
+tier.
+
+---
+
 ## See also
 
 - `plang(1)` — the full command-line reference, including `-d`/`-u`/`-Fi`/`-frange-checks`.
@@ -1492,3 +1793,6 @@ own comment.
 - `runtime/plang_file.cpp`, `runtime/plang_math.cpp` — Tier 3's file model (`Assign`/`Reset`/`Rewrite`/`Append`/`Close`/`BlockRead`/`BlockWrite`/`Seek`/...), `InOutRes`/`IOResult`, and `Random`'s own empirically-derived semantics, including the `fpc -Mtp` field-practice citations this document's Tier 3 section summarizes.
 - `test/CodeGen/Turbo/`, `test/Driver/Turbo/` — per-feature regression coverage for everything in this document.
 - `test/Turbo/` — integration-level tests exercising realistic COMBINATIONS of Tier 3's file-model/`InOutRes`/`Random` features together (a program that opens a file, does I/O, checks `IOResult`, and exits cleanly — the kind of end-to-end scenario a real Turbo Pascal program actually runs), rather than one lit test per isolated behavior.
+- `lib/Sema/Sema.cpp` (`pushUnitUsesScopes`, `loadUnitInterfaceExports`), `lib/Driver/Driver.cpp` (`scanUsesClauseUnitNames`, `findShippedUnitObject`), `lib/Basic/UnitSearchPath.cpp` — Tier 4's scoping, separate-compilation, and shipped-RTL search-path mechanisms this document's Tier 4 section was written from.
+- `share/plang/units/` — the shipped `Crt`/`Dos`/`Printer`/`Strings` unit sources, each with its own detailed header comment on exactly what it does and does not reproduce from real Turbo Pascal 7 / `fpc -Mtp`.
+- `test/Turbo/Units/` — Tier 4's own integration-level test corpus: realistic multi-unit, multi-file COMBINATIONS (last-unit-wins shadowing across three real units, mutual implementation-`uses` doing real bidirectional work, three-unit separate compilation with sources deleted, the shipped RTL used all together) rather than one lit test per isolated behavior — the same split `test/Turbo/`'s own Tier 3 capstone already established for Tier 3.
