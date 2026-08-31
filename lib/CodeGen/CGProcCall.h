@@ -31,7 +31,7 @@
 namespace llvm { class BasicBlock; class Module; class Value; }
 namespace plang {
 struct CallStmt; struct ExprNode; struct TypeNode;
-struct ProcedureTypeNode;
+struct ProcedureTypeNode; struct MethodCallStmt;
 }
 
 class CGProcCall {
@@ -99,6 +99,13 @@ public:
 
     void emitCallStmt(const plang::CallStmt& s);
     void emitUserProcCall(const plang::CallStmt& s);
+    /// Turbo Tier 5, Cluster A item 4: 'Obj.Method(args);' / 'P^.Method(args);'
+    /// / the bare no-parens 'Obj.Method;' used as a STATEMENT -- the
+    /// CGProcCall sibling of CGFuncCall::emitMethodCallExpr (see its own
+    /// comment for the whole design); a function method reaching here (
+    /// Turbo `{$X+}`, MethodCallStmt::ResolvedType non-null) has its result
+    /// simply discarded, exactly like an ordinary CallStmt's identical case.
+    void emitMethodCallStmt(const plang::MethodCallStmt& s);
 
 private:
     /// Turbo Tier 4, Cluster C item 6: recognizes a call to one of Dos.pas's

@@ -73,6 +73,12 @@ std::string CGLinkage::findMangledProc(const std::string& qualifiedName) const {
          + importLinkName(qualifiedName);
 }
 
+std::string CGLinkage::mangledMethod(const std::string& objectTypeName,
+                                      const std::string& methodName) const {
+    return PlangProcPrefix + moduleScope(CurrentUnit)
+         + toLower(objectTypeName) + PlangScopeSep + toLower(methodName);
+}
+
 std::string CGLinkage::mangledGlobal(const std::string& qualifiedName) const {
     const std::string name = stripQualifier(qualifiedName);
     // Same reasoning as findMangledProc just above: a qualified `M.v`

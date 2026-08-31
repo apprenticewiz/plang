@@ -93,6 +93,17 @@ struct ProcDecl : Node {
     /// time here would just be a second thing that could go out of sync with
     /// the first.  Also empty for an ordinary (non-method) procedure/function.
     std::string OwnerType;
+    /// Turbo Tier 5, Cluster A item 4: the object type OwnerType resolved
+    /// to, set once by Sema::checkMethodBody at the same point it matches
+    /// this body to its in-class heading (Phase 5a) -- so Phase 5b's
+    /// pushMethodSelfScope, and CodeGen's own method-definition emission,
+    /// do not have to re-look-up "T" by spelling a second time.  Null
+    /// (rather than left to the caller to notice) exactly when OwnerType
+    /// itself is empty (an ordinary, non-method procedure/function) or
+    /// when Phase 5a's own heading lookup failed and already reported a
+    /// diagnostic -- mirrors ForwardHeading's own mutable-through-a-const-
+    /// ProcDecl idiom just below.
+    mutable std::shared_ptr<Type> ResolvedOwnerType;
 
     std::string                Name;
     std::string                ResultName; /// EP §6.7.2: optional named result variable (empty if not specified)

@@ -2015,18 +2015,27 @@ void Sema::checkBlock(const BlockNode& Block,
 
     // Phase 5b — Procedure / function bodies
     for (const auto& Proc : Block.Procs) {
-        // Turbo Tier 5, Cluster A item 1 is Sema-only: heading resolution,
-        // matching to the in-class heading, and VMT slot assignment (all
-        // done above, Phase 5a's checkMethodBody).  A method body's own
-        // STATEMENTS reference things (Self, this type's own fields and
-        // methods) that no scope this codebase builds yet makes visible --
-        // that is item 3+'s job -- so checkProcBody, which would resolve
-        // identifiers in the ordinary top-level-procedure scope and either
-        // misreport a field access as an undeclared identifier or (worse)
-        // silently resolve it to an unrelated same-named global, does not
-        // run on one yet.  Skipped the same way a forward declaration's
-        // (bodyless) heading already is, just below.
-        if (!Proc->OwnerType.empty()) continue;
+        // Turbo Tier 5, Cluster A item 4: a method body's own statements are
+        // now checked, with 'Self' and this type's own fields (ancestor-
+        // inherited included) exposed as an implicit with-scope --
+        // pushMethodSelfScope, above -- for exactly the duration of
+        // checkProcBody.  Pushed OUTSIDE checkProcBody's own scope (which
+        // holds the method's parameters and locals), so a parameter or
+        // local shadows a same-named field exactly the way an ordinary
+        // nested scope shadows an outer one -- confirmed against a local
+        // fpc -Mtp build.
+        if (!Proc->OwnerType.empty()) {
+            const int Pushed = pushMethodSelfScope(*Proc);
+            if (Pushed > 0) {
+                checkProcBody(*Proc);
+                Symtab.popScope();
+            }
+            // Pushed == 0: Phase 5a's own heading lookup already failed and
+            // reported a diagnostic (err_object_method_body_without_heading
+            // or similar) -- left unchecked rather than resolving its
+            // fields as unrelated globals, exactly as before this item.
+            continue;
+        }
         if (!Proc->IsForward) {
             checkProcBody(*Proc);
         }
@@ -2218,6 +2227,49 @@ void Sema::checkMethodBody(const ProcDecl& Proc) {
         error(Proc.Loc, diag::err_object_method_return_type, {Proc.OwnerType, Proc.Name});
 
     Heading->MethodBody = &Proc;
+
+    // Turbo Tier 5, Cluster A item 4: resolved once here, rather than
+    // re-looked-up by spelling every time something wants it, exactly the
+    // reasoning ForwardHeading's own comment (AstDecl.h) gives for pointing
+    // straight at the resolved answer instead of the name that led to it.
+    // Symtab.lookup, not lookupCurrent: an out-of-line method body is
+    // checked in the SAME scope its object type's own TypeAlias lives in
+    // (SymbolKind::Method's own comment), so a plain lookup already finds
+    // it -- and reaches an ENCLOSING scope's type of the same name if this
+    // scope, oddly, does not have one, which cannot happen for a
+    // known-valid Heading but costs nothing to allow.
+    if (const Symbol* TypeSym = Symtab.lookup(Proc.OwnerType);
+            TypeSym && TypeSym->Kind == SymbolKind::TypeAlias && TypeSym->Ty
+            && !TypeSym->Ty->isError())
+        Proc.ResolvedOwnerType = TypeSym->Ty;
+}
+
+int Sema::pushMethodSelfScope(const ProcDecl& Proc) {
+    if (!Proc.ResolvedOwnerType) return 0;
+    Symtab.pushScope(/*IsBlock=*/false);
+    // 'Self' itself: a Var of the method's own owning object type, exactly
+    // like an ordinary object variable would resolve, so that an explicit
+    // 'Self.Field' or passing 'Self' on to another call type-checks through
+    // the SAME machinery an ordinary object-typed variable already does.
+    {
+        Symbol SelfSym;
+        SelfSym.Kind = SymbolKind::Var;
+        SelfSym.Name = "Self";
+        SelfSym.Ty   = Proc.ResolvedOwnerType;
+        (void)Symtab.define(std::move(SelfSym));
+    }
+    // Every field this type has -- ancestor-inherited included, since
+    // RecordFields is already the flattened ancestor-then-own list (see its
+    // own comment, Type.h) -- exposed unqualified, the same as
+    // pushWithScope's own plain-Record branch exposes 'with r do' fields.
+    for (const auto& F : Proc.ResolvedOwnerType->RecordFields) {
+        Symbol FS;
+        FS.Kind = SymbolKind::Var;
+        FS.Name = F.Name;
+        FS.Ty   = F.Ty;
+        (void)Symtab.define(std::move(FS));
+    }
+    return 1;
 }
 
 void Sema::checkProcSignature(const ProcDecl& Proc) {

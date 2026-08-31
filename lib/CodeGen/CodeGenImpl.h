@@ -825,6 +825,14 @@ struct Codegen::Impl {
     /// record or has no declaration to lay out.
     const RecordLayout* layoutOfRecord(const Type& T) { return cgTypes_->layoutOfRecord(T); }
 
+    /// Turbo Tier 5, Cluster A item 2's Object analog of layoutOfRecord just
+    /// above; see CGTypes::layoutOfObject's own comment.  Item 4 uses this to
+    /// bind 'Self' and this type's own fields (ancestor's included --
+    /// RecordFields is already flattened) into a method body's implicit
+    /// with-scope, the same way CGWith.cpp's ordinary Record branch uses
+    /// layoutOfRecord.
+    const RecordLayout* layoutOfObject(const Type& T) { return cgTypes_->layoutOfObject(T); }
+
     /// `Impl::SchemaBindingScope` names `CGTypes::SchemaBindingScope`, so the
     /// one external construction site outside CGTypes
     /// (`CodeGenProcs.cpp`'s `emitInitialState`) keeps reading almost
@@ -1297,6 +1305,13 @@ struct Codegen::Impl {
         return linkage_->mangledGlobal(qualifiedName);
     }
 
+    /// Turbo Tier 5, Cluster A item 4: see CGLinkage::mangledMethod's own
+    /// comment.
+    std::string mangledMethod(const std::string& objectTypeName,
+                              const std::string& methodName) const {
+        return linkage_->mangledMethod(objectTypeName, methodName);
+    }
+
     /// The value of \p e in memory, for reading a component of a function
     /// result, which is a value with nowhere of its own to live.
     llvm::Value* spillToTemporary(const ExprNode& e) { return exprCore_->spillToTemporary(e); }
@@ -1491,6 +1506,28 @@ struct Codegen::Impl {
     /// With declareOnly, stops once the signature and the parameter metadata
     /// are in place — what a 'forward' declaration contributes.
     void emitFunctionDef(const ProcDecl& proc, bool declareOnly = false);
+    /// Turbo Tier 5, Cluster A item 4: the address of field \p fieldName as
+    /// seen from a pointer \p base of object type \p T's own struct type,
+    /// used to bind 'Self' and every field of a method's owning object type
+    /// (ancestor-inherited included) into the implicit scope a method body
+    /// runs in -- the CodeGen mirror of Sema::pushMethodSelfScope, and the
+    /// same job CGWith.cpp's ordinary Record branch does for 'with r do',
+    /// just walking layoutOfObject's own recursive, nested-ancestor shape
+    /// (layoutOfObject's own comment, CGTypes.cpp) instead of a flat one.
+    /// layoutOfObject's own RecordLayout::Fields holds only a type's OWN
+    /// fields, deliberately NOT flattened the way Type::RecordFields is --
+    /// an inherited field's real address is a GEP into element 0 (the
+    /// nested ancestor sub-object) and then THAT type's own FieldPlace
+    /// within it, so a field not found in T's own layout recurses into
+    /// T.Parent at the same address (element 0 of any struct starts at
+    /// byte offset 0, whatever the struct holds) rather than being
+    /// mistaken for one this type does not have at all.  Returns null,
+    /// leaving \p outTy untouched, only when \p fieldName is genuinely not
+    /// a field of T or any ancestor -- which cannot happen for a name
+    /// pushMethodSelfScope itself put in scope, since it walked the exact
+    /// same flattened list Sema built from the identical Parent chain.
+    llvm::Value* selfFieldPtr(llvm::Value* base, const Type& T,
+                               const std::string& fieldName, llvm::Type*& outTy);
     /// Introduce the constants of any enumeration written inside \p tn.
     void registerEnumValues(const TypeNode* tn);
     /// The same for a variant part and the variants nested in it.

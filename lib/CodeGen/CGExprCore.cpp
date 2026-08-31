@@ -405,19 +405,11 @@ llvm::Value* CGExprCore::emitExpr(const ExprNode& e) {
 
     if (auto* n = llvm::dyn_cast<TypeCastExpr>(&e)) return emitTypeCastValue(*n);
 
-    // Turbo Tier 5, Cluster A item 3 is Sema-only (parsing + method
-    // resolution): Sema now accepts 'Obj.Method(args)' as a value, but no
-    // CodeGen for a method CALL exists yet at all -- no Self/with-scope
-    // injection (item 4) and no VMT dispatch (item 5) either -- so a
-    // MethodCallExpr that reaches here is a real .pas file exercising more
-    // than this tier implements, not a compiler bug of its own.  A clear ICE
-    // here (matching CGTypes.cpp's own object-typed-variable ICEs from item
-    // 2, "object type '...' has no layout") rather than falling through to
-    // the generic "unhandled expression node" message or an LLVM IR-verifier
-    // crash on a null llvm::Value*.
-    if (llvm::isa<MethodCallExpr>(&e))
-        codegenICE("method-call codegen is not implemented yet "
-                    "(Turbo Tier 5, Cluster A item 3 is Sema-only)");
+    // Turbo Tier 5, Cluster A item 4: 'Obj.Method(args)' / 'P^.Method(args)'
+    // used as a value -- a static/direct call to Method's own mangled
+    // symbol (CGFuncCall::emitMethodCallExpr's own comment for the whole
+    // design; VMT dispatch is item 5's job, not this one's).
+    if (auto* n = llvm::dyn_cast<MethodCallExpr>(&e)) return FuncCall.emitMethodCallExpr(*n);
 
     codegenICE("unhandled expression node in emitExpr");
 }

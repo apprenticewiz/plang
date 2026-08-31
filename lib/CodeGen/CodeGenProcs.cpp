@@ -519,10 +519,48 @@ void Codegen::Impl::emitAllProcedures(const BlockNode& block) {
     for (const auto& proc : block.Procs)
         if (proc->IsForward) emitFunctionDef(*proc, /*declareOnly=*/true);
 
+    // Turbo Tier 5, Cluster A item 4: a method call's target is resolved by
+    // Sema from the object type's own method table, independent of where --
+    // or even whether yet -- its out-of-line body appears in this block, so
+    // a method call may textually precede the body it calls.  Unlike an
+    // ordinary procedure (which needs an explicit 'forward' for that), every
+    // method heading gets its signature (and paramMeta_) registered before
+    // ANY body in this block is emitted, exactly the way the 'forward'
+    // pre-pass just above does.
+    for (const auto& proc : block.Procs)
+        if (!proc->OwnerType.empty()) emitFunctionDef(*proc, /*declareOnly=*/true);
+
     for (const auto& proc : block.Procs) {
         if (proc->IsForward) continue;
         emitFunctionDef(*proc);
     }
+}
+
+llvm::Value* Codegen::Impl::selfFieldPtr(llvm::Value* base, const Type& T,
+                                          const std::string& fieldName,
+                                          llvm::Type*& outTy) {
+    const RecordLayout* L = layoutOfObject(T);
+    if (!L) return nullptr;
+    auto* zero = llvm::ConstantInt::get(i32Ty, 0);
+    if (auto it = L->Fields.find(toLower(fieldName)); it != L->Fields.end()) {
+        const auto& P = it->second;
+        auto* fp = builder.CreateGEP(L->Ty, base,
+                       {zero, llvm::ConstantInt::get(i32Ty, P.Index)},
+                       "self." + fieldName);
+        if (P.InVariant && P.Offset != 0)
+            fp = builder.CreateConstGEP1_64(i8Ty, fp, P.Offset, "self." + fieldName);
+        outTy = P.Ty;
+        return fp;
+    }
+    if (!T.Parent) return nullptr;
+    // Element 0 of every layoutOfObject struct is the nested ancestor
+    // sub-object, unshifted (a struct's first element always starts at its
+    // own byte offset 0), so recursing at the SAME address with the
+    // ancestor's own struct type as the GEP's source type reaches its
+    // fields at their real offsets.
+    auto* parentPtr = builder.CreateGEP(L->Ty, base, {zero, zero},
+                                        "self.parent");
+    return selfFieldPtr(parentPtr, *T.Parent, fieldName, outTy);
 }
 
 void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
@@ -543,7 +581,25 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
     // instead of a fourth save-and-two-manual-restores like its neighbors.
     LabelGotoEngine::FunctionLabelScope labelScope(*gotoEngine_);
 
-    std::string mangledName = namePrefix + proc.Name;
+    // Turbo Tier 5, Cluster A item 4: a method's out-of-line body
+    // ('procedure T.M; ...', proc.OwnerType non-empty) mangles from its
+    // OWNING type and method name (CGLinkage::mangledMethod), never from
+    // namePrefix -- namePrefix walks LEXICAL nesting, and a method's
+    // "enclosing scope" for mangling purposes is the object type it was
+    // declared on, not whatever procedure or module textually surrounds the
+    // 'procedure T.M; ...' declaration in the source (there usually is
+    // none; every method body lives at the same block level its object
+    // type's own declaration does).  isMethod is exactly Sema's own
+    // ProcDecl::OwnerType-non-empty test (SymbolKind::Method's own comment).
+    const bool isMethod = !proc.OwnerType.empty();
+    if (isMethod && !proc.ResolvedOwnerType)
+        codegenICE("method '" + proc.OwnerType + "." + proc.Name
+                   + "' reached CodeGen with no resolved owning type -- "
+                     "Sema::checkMethodBody should have set this or "
+                     "reported a diagnostic that stopped CodeGen from "
+                     "running at all");
+    std::string mangledName = isMethod ? mangledMethod(proc.OwnerType, proc.Name)
+                                       : namePrefix + proc.Name;
     namePrefix = mangledName + PlangScopeSep;
     curFuncName = proc.Name;
 
@@ -553,6 +609,10 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
     const ProcDecl& hd = proc.heading();
 
     // Determine whether this is a nested procedure (has an outer function).
+    // A method is never lexically nested the way this flag means (every
+    // method body is walked from emitAllProcedures' own top-level
+    // block.Procs loop, whatever block that is), so isNested and isMethod
+    // are mutually exclusive in practice; nothing below assumes otherwise.
     bool isNested = (curFn.OuterFunc() != nullptr);
 
     // If nested, collect all outer-scope variables that this procedure may access.
@@ -578,6 +638,17 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
     std::vector<bool>             paramIsVar;
     std::vector<llvm::Type*>      paramValTypes;
     std::vector<const TypeNode*>  paramTypeNodes; // AST TypeNode for each param slot
+
+    // Turbo Tier 5, Cluster A item 4: 'Self' -- an implicit leading pointer
+    // parameter to the receiver's own storage, prepended the same way (and
+    // for the same structural reason) a nested procedure's static link is
+    // prepended just below: neither is a Pascal-declared parameter, and a
+    // call site builds it separately from the Pascal-argument marshalling
+    // loop (see CGFuncCall::emitMethodCallExpr / CGProcCall::
+    // emitMethodCallStmt).  Pushed first, ahead of the static-link check,
+    // though the two never actually co-occur (a method is never isNested --
+    // see isNested's own comment just above).
+    if (isMethod) paramTypes.push_back(ptrTy);
 
     if (isNested && !outerVars.empty())
         paramTypes.push_back(ptrTy); // static link (frame pointer from outer scope)
@@ -875,8 +946,19 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
     CGDebugInfo::ScopeGuard dbgScope(
         *dbgInfo_, dbgInfo_->emitFunctionStart(func, scope, proc.Name, proc.Loc));
 
-    // Name the static-link parameter (first arg of nested procs).
+    // Name 'Self' (first arg of a method), ahead of the static-link check
+    // just below -- the two never actually co-occur (see isNested's own
+    // comment above), but Self is pushed first into paramTypes and must be
+    // consumed first here too, for the same reason.
     auto funcArgIt = func->arg_begin();
+    llvm::Value* selfArg = nullptr;
+    if (isMethod) {
+        funcArgIt->setName("self");
+        selfArg = &*funcArgIt;
+        ++funcArgIt;
+    }
+
+    // Name the static-link parameter (first arg of nested procs).
     llvm::Value* staticLinkArg = nullptr;
     if (isNested && !outerVars.empty()) {
         funcArgIt->setName("static_link");
@@ -900,6 +982,37 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
     // result cell under the function's name, put there so a nested function
     // can assign it, and finding that would defeat the test.
     curFuncScopeDepth = scopes.size();
+
+    // Turbo Tier 5, Cluster A item 4: bind 'Self' and every field of this
+    // method's owning object type (ancestor-inherited included) as bare Var
+    // symbols pointing into the Self struct -- the CodeGen mirror of
+    // Sema::pushMethodSelfScope, using the SAME idiom CGWith.cpp's ordinary
+    // Record branch already uses for 'with r do' (GEP through a layout,
+    // defVar the result), just through layoutOfObject/selfFieldPtr's own
+    // recursive-ancestor walk instead of a flat one.  Bound directly (no
+    // FieldExpr, no synthetic WithStmt): Sema already resolved every bare
+    // field name in this body straight to a Var symbol during
+    // pushMethodSelfScope, so all CodeGen has to do is give that same name
+    // an address here, in the identical outer scope Sema exposed it in
+    // (pushed before the parameter/local scope the statements below open,
+    // exactly mirroring Sema's own nesting).
+    if (isMethod) {
+        llvm::Type* selfTy = llvmTypeOfSemaType(*proc.ResolvedOwnerType);
+        auto* selfStructTy = llvm::dyn_cast_or_null<llvm::StructType>(selfTy);
+        if (!selfStructTy)
+            codegenICE("method '" + proc.OwnerType + "." + proc.Name
+                       + "': its own object type has no struct layout");
+        defVar("Self", selfArg, selfStructTy);
+        for (const auto& F : proc.ResolvedOwnerType->RecordFields) {
+            llvm::Type* fieldTy = nullptr;
+            auto* fp = selfFieldPtr(selfArg, *proc.ResolvedOwnerType, F.Name, fieldTy);
+            if (!fp)
+                codegenICE("method '" + proc.OwnerType + "." + proc.Name
+                           + "': field '" + F.Name
+                           + "' has no address in its own object layout");
+            defVar(F.Name, fp, fieldTy);
+        }
+    }
 
     // If nested, expose outer variables via the static link.
     // The frame struct is { ptr, ptr, ... } — one ptr per outer variable,

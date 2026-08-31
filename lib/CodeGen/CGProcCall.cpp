@@ -911,6 +911,90 @@ bool CGProcCall::tryEmitDosProcCall(const CallStmt& s) {
     return false;
 }
 
+namespace {
+// Same ancestor-chain walk as CGFuncCall.cpp's identical local helper (its
+// own doc comment explains the whole design and why it is a fresh copy
+// rather than a shared one -- this project's own established convention for
+// small per-file call-emission helpers, e.g. CGProcCall.h's own sstrArgPtr
+// vs. CGFuncCall.cpp's).
+const plang::Type* methodOwnerType(const plang::Type& RecvTy,
+                                    const std::string& Method) {
+    for (const plang::Type* Cur = &RecvTy; Cur; Cur = Cur->Parent.get())
+        for (const auto& M : Cur->ObjectMethods)
+            if (eqCI(M.Name, Method)) return Cur;
+    return nullptr;
+}
+} // namespace
+
+void CGProcCall::emitMethodCallStmt(const MethodCallStmt& s) {
+    if (!s.Receiver->ResolvedType)
+        codegenICE("method call has no resolved receiver type");
+    const Type* Owner = methodOwnerType(*s.Receiver->ResolvedType, s.Method);
+    if (!Owner)
+        codegenICE("method '" + s.Method + "' has no owning type in its "
+                   "receiver's own ancestor chain -- Sema should have "
+                   "refused this call already");
+    std::string mangledName = Linkage.mangledMethod(Owner->Name, s.Method);
+
+    llvm::Value* selfPtr = EmitLValue(*s.Receiver);
+    if (!selfPtr) codegenICE("method call receiver has no address");
+
+    auto* callee = Mod.getFunction(mangledName);
+    if (!callee) {
+        // Turbo `{$X+}`: s.ResolvedType is non-null exactly when this is a
+        // FUNCTION method called as a statement (mirrors emitUserProcCall's
+        // own identical fallback for an ordinary CallStmt, just below).
+        llvm::Type* retTy = llvm::Type::getVoidTy(Ctx);
+        if (s.ResolvedType && !s.ResolvedType->isError())
+            retTy = Types.llvmTypeOfSemaType(*s.ResolvedType);
+        std::vector<llvm::Type*> paramTys;
+        paramTys.push_back(PtrTy); // Self
+        for (const auto& Arg : s.Args) {
+            if (Arg && Arg->ResolvedType && !Arg->ResolvedType->isError())
+                paramTys.push_back(Types.llvmTypeOfSemaType(*Arg->ResolvedType));
+            else
+                paramTys.push_back(I64Ty);
+        }
+        auto* fnTy = llvm::FunctionType::get(retTy, paramTys, false);
+        callee = llvm::Function::Create(fnTy, llvm::Function::ExternalLinkage,
+                                        mangledName, &Mod);
+    }
+
+    std::vector<llvm::Value*> args;
+    args.push_back(selfPtr);
+
+    size_t pi = args.size();
+    for (size_t astArgIdx = 0; astArgIdx < s.Args.size(); ++astArgIdx) {
+        const auto& arg = s.Args[astArgIdx];
+
+        if (const auto* pt = ProcParamArg(mangledName, astArgIdx)) {
+            ClosureAbi.pushProcParamArgs(args, *arg, *pt);
+            pi = args.size();
+            continue;
+        }
+        if (unsigned nd = Schema.schemaArgDiscs(mangledName, astArgIdx); nd > 0) {
+            Schema.pushSchemaArgs(args, *arg, nd);
+            pi = args.size();
+            continue;
+        }
+        const size_t dims = ConformantDimsOf(mangledName, astArgIdx);
+        if (dims > 0) {
+            ClosureAbi.pushConformantArgs(args, *arg, dims);
+            pi += 1 + 2 * dims;
+        } else {
+            std::optional<int64_t> destSetBase = ParamSetBaseOf(mangledName, astArgIdx);
+            args.push_back(Sets.alignSetArg(
+                StrCall.emitCallArg(*arg,
+                    pi < callee->arg_size()
+                        ? callee->getFunctionType()->getParamType(pi) : nullptr,
+                    ParamIsByRef(mangledName, astArgIdx)),
+                *arg, destSetBase));
+            ++pi;
+        }
+    }
+    B.CreateCall(callee, args);
+}
+
 void CGProcCall::emitUserProcCall(const CallStmt& s) {
     if (tryEmitDosProcCall(s)) return;
     // User-defined procedure — walk the nesting hierarchy to find the right

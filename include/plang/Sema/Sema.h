@@ -619,6 +619,22 @@ private:
     /// checkProcSignature for exactly the ProcDecls with a non-empty
     /// OwnerType.
     void checkMethodBody(const ProcDecl& Proc);
+    /// Turbo Tier 5, Cluster A item 4: pushes ONE scope exposing 'Self'
+    /// (a Var of Proc.ResolvedOwnerType) and every field of that type --
+    /// ancestor-inherited included, since Type::RecordFields is already
+    /// flattened -- as bare, unqualified Var symbols, the same idiom
+    /// pushWithScope's own plain-Record branch already uses for 'with r
+    /// do'.  Not built as a synthetic WithStmt over a synthetic Self
+    /// IdentExpr: a with-statement's own record-expression has to survive
+    /// isLValue/checkExpr/rejectRestrictedComponent, machinery meant for a
+    /// real, parsed operand, and Self is not one -- it is an identifier
+    /// that does not exist anywhere in the source being checked, only in
+    /// the implicit scope this function builds by hand.  Returns 1 (a
+    /// scope was pushed, pop it after the body) or 0 (Proc.ResolvedOwnerType
+    /// is null -- Phase 5a's own heading lookup already failed and
+    /// reported a diagnostic, so the body is left unchecked entirely
+    /// rather than resolving its fields as unrelated globals).
+    int pushMethodSelfScope(const ProcDecl& Proc);
     /// The composite symbol-table key a method is registered/looked up
     /// under: "<lowercase TypeName>.<lowercase MethodName>".  A '.' cannot
     /// appear in a real Pascal identifier, so this can never collide with
