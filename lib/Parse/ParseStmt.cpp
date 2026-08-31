@@ -288,6 +288,38 @@ std::unique_ptr<StmtNode> Parser::parseStatement() {
             return nullptr;
         }
 
+        // Turbo Tier 5, Cluster A item 5: 'inherited;' (bare) / 'inherited
+        // Method;' / 'inherited Method(args);' -- 'inherited' is a
+        // DIALECT_KEYWORD (TokenKinds.def), reserved only under Turbo, so
+        // this case is reached at all only there; under any other dialect
+        // the identical spelling lexes as TokenKind::Identifier and is an
+        // ordinary (if oddly named) procedure call instead, exactly the
+        // relaxation every other TP-only keyword already gets.  Sema
+        // (Sema::checkInheritedCallStmt) is what actually confirms this
+        // appears inside a method body and resolves Method against the
+        // enclosing method's own OwnerType's ancestor chain -- the parser
+        // only knows the two token shapes, same division of labor
+        // MethodCallExpr/MethodCallStmt's own comment already explains.
+        case TokenKind::Inherited: {
+            Token KwTok = Current;
+            advance();
+            auto Node = std::make_unique<InheritedCallStmt>();
+            Node->Loc = KwTok;
+            if (check(TokenKind::Identifier)) {
+                Node->Method = Current.Lexeme;
+                advance();
+                if (match(TokenKind::LeftParen)) {
+                    if (!check(TokenKind::RightParen)) {
+                        Node->Args.push_back(parseExpression());
+                        while (match(TokenKind::Comma))
+                            Node->Args.push_back(parseExpression());
+                    }
+                    expect(TokenKind::RightParen);
+                }
+            }
+            return Node;
+        }
+
         default:
             // ε — empty statement; the caller is responsible for handling nullptr.
             return nullptr;

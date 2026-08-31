@@ -833,6 +833,10 @@ struct Codegen::Impl {
     /// layoutOfRecord.
     const RecordLayout* layoutOfObject(const Type& T) { return cgTypes_->layoutOfObject(T); }
 
+    /// Turbo Tier 5, Cluster A item 5: see CGTypes::vptrOffsetOf's own
+    /// comment.
+    std::optional<uint64_t> vptrOffsetOf(const Type& T) { return cgTypes_->vptrOffsetOf(T); }
+
     /// `Impl::SchemaBindingScope` names `CGTypes::SchemaBindingScope`, so the
     /// one external construction site outside CGTypes
     /// (`CodeGenProcs.cpp`'s `emitInitialState`) keeps reading almost
@@ -1312,6 +1316,12 @@ struct Codegen::Impl {
         return linkage_->mangledMethod(objectTypeName, methodName);
     }
 
+    /// Turbo Tier 5, Cluster A item 5: see CGLinkage::mangledVmt's own
+    /// comment.
+    std::string mangledVmt(const std::string& objectTypeName) const {
+        return linkage_->mangledVmt(objectTypeName);
+    }
+
     /// The value of \p e in memory, for reading a component of a function
     /// result, which is a value with nowhere of its own to live.
     llvm::Value* spillToTemporary(const ExprNode& e) { return exprCore_->spillToTemporary(e); }
@@ -1586,6 +1596,63 @@ struct Codegen::Impl {
     llvm::Type* structuredConstType(const ConstDef& cd, const TypeNode*& tn);
     /// Those constants, in the order they were declared.
     std::vector<const ConstDef*> structuredConsts_;
+
+    // ====================================================================
+    // Turbo Tier 5, Cluster A item 5: the VMT global and vptr stamping
+    // (CodeGenProcs.cpp)
+    // ====================================================================
+    /// The VMT global for object type \p T -- a `[N x ptr]` constant array,
+    /// one entry per T.VmtSlots (walked directly, exactly as Sema already
+    /// resolved it -- see VmtSlots's own comment, Type.h, for why an
+    /// inherited-and-not-overridden slot and an override both just fall out
+    /// of reading that table, with no re-derivation here), memoized per
+    /// concrete Type* the same way layoutOfObject's own objectLayouts_ is
+    /// (CGTypes.cpp) -- ONE array PER CONCRETE TYPE, not per ancestor
+    /// vptr-introduction point: TDog needs its own full VMT even though it
+    /// inherits _vptr's STORAGE from TAnimal (CGTypes::layoutOfObject), since
+    /// TDog's VMT must hold TDog's own override of Speak at the same slot
+    /// TAnimal's VMT holds TAnimal's own Speak at, plus TAnimal's own answer
+    /// for every slot TDog does not override.
+    ///
+    /// Every slot's function pointer is found by mangledMethod(entry.
+    /// ImplementingType, entry.MethodName) and Mod.getFunction -- always
+    /// already at least DECLARED by the time this can be called, because
+    /// emitAllProcedures's own method pre-pass (CodeGenProcs.cpp) declares
+    /// every method's signature before ANY body in the block is emitted, and
+    /// vptr-stamping (this function's only caller) never runs before that
+    /// pre-pass has: a local variable's stamp runs from inside some body
+    /// (which cannot start until the pre-pass for ITS OWN block has already
+    /// run), and a global's stamp runs from emitGlobalVarInits, called only
+    /// from emitMain/emitModuleInitFn, both of which run after
+    /// emitAllProcedures for every block that could matter here.  A slot
+    /// whose function is missing even so is an internal error, not a
+    /// fabricated null entry -- a program that reaches CodeGen at all has
+    /// already passed Sema, which does not let VmtSlots name a method that
+    /// does not exist.
+    ///
+    /// Returns null for a non-Object T or one with no virtual method
+    /// anywhere in its own hierarchy (T.VmtSlots.empty()) -- there is
+    /// nothing to build and nothing for vptrOffsetOf to have found either.
+    llvm::GlobalVariable* getOrCreateVmt(const Type& T);
+    /// Stamps T's own VMT global's address into \p ptr's `_vptr` slot (found
+    /// through vptrOffsetOf, which already accounts for an inherited vptr
+    /// living inside the embedded ancestor sub-object at a stable offset --
+    /// see its own comment, CGTypes.cpp) -- a byte-offset GEP into i8Ty, the
+    /// same idiom every other byte-offset field write in this codebase uses
+    /// (e.g. SchemaAccess.cpp's own field/element GEPs), not a struct-typed
+    /// GEP: the exact nested element PATH to an inherited vptr is not
+    /// reconstructed here, only its byte offset.  A no-op for a non-Object T
+    /// or one with no `_vptr` at all (vptrOffsetOf returns nullopt).
+    ///
+    /// Called from emitVarValueInit for EVERY directly-declared object-typed
+    /// local or global variable (CodeGenProcs.cpp), which is the only shape
+    /// this item's own scope covers -- New/Init/Fail's heap-allocated,
+    /// bypass-and-rebind vptr stamping is item 6's job, not this function's.
+    void stampVptr(llvm::Value* ptr, const Type& T);
+    /// getOrCreateVmt's own memo, keyed by the canonical Sema Type* exactly
+    /// the way objectLayouts_ is (CGTypes.cpp) -- an object type has exactly
+    /// one Type* for its whole compilation, so no richer key is needed.
+    std::unordered_map<const Type*, llvm::GlobalVariable*> vmtGlobals_;
 
     // ====================================================================
     // TP-only: typed constants (CGTypedConst.cpp)

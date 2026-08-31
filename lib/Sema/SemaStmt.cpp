@@ -14,7 +14,7 @@ using namespace plang;
 
 // See NumStmtKinds in AstBase.h.  checkStmt returns quietly for a statement it
 // does not know, which for a checker means the statement was approved.
-static_assert(NumStmtKinds == 13, "a new statement needs a case in checkStmt");
+static_assert(NumStmtKinds == 14, "a new statement needs a case in checkStmt");
 
 // ---------------------------------------------------------------------------
 // Statement checking
@@ -29,6 +29,7 @@ void Sema::checkStmt(const StmtNode* Stmt) {
     if (auto* S = llvm::dyn_cast<LabeledStmt>(Stmt))   { checkLabeled(*S);  return; }
     if (auto* S = llvm::dyn_cast<CallStmt>(Stmt))      { checkCallStmt(*S); return; }
     if (auto* S = llvm::dyn_cast<MethodCallStmt>(Stmt)) { checkMethodCallStmt(*S); return; }
+    if (auto* S = llvm::dyn_cast<InheritedCallStmt>(Stmt)) { checkInheritedCallStmt(*S); return; }
     // Structured statements: push onto StructStack so checkGoto can determine
     // whether a goto would jump INTO this statement from outside it (ISO §6.8.1).
     if (auto* S = llvm::dyn_cast<IfStmt>(Stmt)) {
@@ -1992,6 +1993,75 @@ void Sema::checkCallStmt(const CallStmt& S) {
 void Sema::checkMethodCallStmt(const MethodCallStmt& S) {
     auto RetTy = checkMethodCall(*S.Receiver, S.Method, S.Loc, S.Args,
                                   /*ExpectFunction=*/false);
+    S.ResolvedType = (RetTy && !RetTy->isError()) ? RetTy : nullptr;
+}
+
+// Turbo Tier 5, Cluster A item 5: see InheritedCallStmt's own comment
+// (AstStmt.h) for the whole design.  Confirmed against a local `fpc -Mtp`
+// build: 'inherited' always resolves STATICALLY, to whichever ancestor's own
+// body the name-lookup below finds -- never through the VMT, even when that
+// body is itself declared 'virtual' (an override calling 'inherited' from
+// inside a call that itself arrived via virtual dispatch reaches the direct
+// parent's own body exactly once, never redispatching and never looping).
+void Sema::checkInheritedCallStmt(const InheritedCallStmt& S) {
+    if (!CurrentProc || CurrentProc->OwnerType.empty()
+            || !CurrentProc->ResolvedOwnerType) {
+        error(S.Loc, diag::err_inherited_outside_method, {});
+        for (const auto& A : S.Args) (void)checkExpr(*A);
+        return;
+    }
+    const Type& OwnerTy = *CurrentProc->ResolvedOwnerType;
+    if (!OwnerTy.Parent) {
+        error(S.Loc, diag::err_inherited_no_ancestor, {OwnerTy.Name});
+        for (const auto& A : S.Args) (void)checkExpr(*A);
+        return;
+    }
+
+    // Bare 'inherited;' means "the same method this activation itself is
+    // overriding" -- CurrentProc's own name -- "called with the same
+    // arguments this activation itself received" -- CodeGen forwards its
+    // own parameters directly (CGProcCall::emitInheritedCallStmt), so there
+    // is nothing here to type-check against S.Args (always empty for this
+    // form; the parser never fills it in without a following identifier).
+    const std::string MethodName = S.Method.empty() ? CurrentProc->Name : S.Method;
+
+    // Same ancestor-chain walk checkMethodCall itself uses (composite-key
+    // lookup, resolveObjectType's own registration), just starting one level
+    // up: Parent, never OwnerTy itself, so a method can never 'inherited'
+    // its own body.
+    const Symbol* MethodSym = nullptr;
+    for (const Type* Cur = OwnerTy.Parent.get(); Cur; Cur = Cur->Parent.get()) {
+        Symbol* Sy = Symtab.lookup(objectMethodKey(Cur->Name, MethodName));
+        if (Sy && Sy->Kind == SymbolKind::Method) { MethodSym = Sy; break; }
+    }
+    if (!MethodSym) {
+        error(S.Loc, diag::err_inherited_method_not_found,
+              {OwnerTy.Name, MethodName});
+        for (const auto& A : S.Args) (void)checkExpr(*A);
+        return;
+    }
+
+    S.ResolvedMethod    = MethodName;
+    S.ImplementingType  = MethodSym->MethodOwnerType;
+
+    if (S.Method.empty()) {
+        // Bare form: no argument list was written at all, so there is
+        // nothing of the caller's own to check -- this activation's own
+        // parameters are forwarded unchanged, and Sema's own
+        // override-signature check (resolveObjectType) already guarantees
+        // the ancestor's own parameter list is identical to CurrentProc's.
+        S.ResolvedType = nullptr;
+        return;
+    }
+
+    Symbol Indirect;
+    Indirect.Kind       = SymbolKind::Proc;
+    Indirect.Name       = MethodSym->MethodOwnerType + "." +
+                           (MethodSym->Decl ? MethodSym->Decl->Name : MethodName);
+    Indirect.IsFunction = MethodSym->IsFunction;
+    Indirect.Params     = MethodSym->Params;
+    Indirect.ReturnType = MethodSym->ReturnType;
+    auto RetTy = checkUserDefinedCall(Indirect, S.Loc, S.Args, /*ExpectFunction=*/false);
     S.ResolvedType = (RetTy && !RetTy->isError()) ? RetTy : nullptr;
 }
 

@@ -79,6 +79,10 @@ std::string CGLinkage::mangledMethod(const std::string& objectTypeName,
          + toLower(objectTypeName) + PlangScopeSep + toLower(methodName);
 }
 
+std::string CGLinkage::mangledVmt(const std::string& objectTypeName) const {
+    return "pas_vmt$" + moduleScope(CurrentUnit) + toLower(objectTypeName);
+}
+
 std::string CGLinkage::mangledGlobal(const std::string& qualifiedName) const {
     const std::string name = stripQualifier(qualifiedName);
     // Same reasoning as findMangledProc just above: a qualified `M.v`

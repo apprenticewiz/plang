@@ -940,6 +940,13 @@ private:
     void checkRepeat    (const RepeatStmt&   S);
     void checkCallStmt  (const CallStmt&     S);
     void checkMethodCallStmt(const MethodCallStmt& S);
+    /// Turbo Tier 5, Cluster A item 5: 'inherited [Method[(args)]];' -- see
+    /// InheritedCallStmt's own comment (AstStmt.h) for the whole design.
+    /// Requires CurrentProc to be a method (OwnerType non-empty) with a
+    /// resolved OwnerType that itself has a Parent; the ancestor-chain
+    /// search for Method (or, for the bare form, CurrentProc's own name)
+    /// starts at that Parent, never at OwnerType itself.
+    void checkInheritedCallStmt(const InheritedCallStmt& S);
     void checkWith      (const WithStmt&     S);
     void checkGoto      (const GotoStmt&     S);
     void checkLabeled   (const LabeledStmt&  S);
