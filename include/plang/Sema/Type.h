@@ -16,6 +16,8 @@
 namespace plang {
 
 struct RecordTypeNode;
+struct ObjectTypeNode;
+struct ProcDecl;
 struct TypeNode;
 
 /// Number of distinct ordinals a set can hold.  A set is lowered to one bit
@@ -54,6 +56,9 @@ enum class TypeKind {
     Subrange,   // ordinal; fields: SubBase (underlying ordinal type)
     Array,      // fields: IndexType, ElemType, Packed
     Record,     // fields: RecordFields
+    Object,     // Turbo Tier 5: fields: RecordFields (flattened, ancestor-then-
+                // own; Field::IsPrivate meaningful here), Parent, ObjectDecl,
+                // ObjectMethods, VmtSlots
     Set,        // fields: ElemType (ordinal element type), Packed
     File,       // fields: ElemType (element type; null for untyped file)
     Pointer,    // fields: PointeeType
@@ -240,6 +245,13 @@ struct Type {
         std::shared_ptr<Type> Ty;
         /// True if this field is a variant tag field.
         bool                  IsTagField{false};
+        /// Object only (Turbo Tier 5): true for a field declared 'private'
+        /// rather than 'public' -- see MemberVisibility's own comment
+        /// (AstDecl.h) for why TP7's own object visibility is section-based
+        /// but stamped per-member.  Always false for a Record field
+        /// (RecordTypeNode has no visibility concept), so nothing outside
+        /// Object-specific code needs to read it.
+        bool                  IsPrivate{false};
     };
     /// Fields of this record type.  A variant part contributes its tag and the
     /// fields of every alternative, flattened, because a field reference names
@@ -286,6 +298,125 @@ struct Type {
     std::vector<Param>    Params;
     /// Return type; null for procedures.
     std::shared_ptr<Type> RetType;
+
+    // --- Object (Turbo Tier 5, Cluster A item 1) ---
+    //
+    // An object type's fields live in RecordFields above, reusing Field
+    // (with IsPrivate, just above, meaningful only here) rather than a
+    // parallel list of its own: everywhere that already knows how to read a
+    // Record's own fields -- typeContainsFile, the byte-size/definite-
+    // assignment walks, ... -- reads an Object's fields identically, with no
+    // new switch arm to keep in sync.  RecordFields for an Object is the
+    // FLATTENED ancestor-then-own field list (ancestor's own RecordFields
+    // copied verbatim, this type's own fields appended after), mirroring the
+    // TP7 memory layout an Object with an ancestor actually gets (the
+    // ancestor's own fields first, at the same offsets in every descendant)
+    // -- item 2 (memory layout) reads the SAME flattened list to lay out
+    // storage, rather than re-deriving it from the Parent chain itself.
+    /// The immediate ancestor object type ('object(Ancestor) ... end'), or
+    /// null for a root object type with no ancestor.  Every VMT slot table
+    /// in this type's own ancestor chain, and every inherited field, is
+    /// reachable by walking Parent -- see VmtSlots and RecordFields above.
+    std::shared_ptr<Type> Parent;
+    /// The declaration this object type was resolved from; the Object
+    /// equivalent of RecordDecl above, for whatever item 2+ needs the
+    /// original member order/visibility for that RecordFields/ObjectMethods
+    /// alone do not carry (e.g. distinguishing a field from a method at its
+    /// original declaration position).
+    const ObjectTypeNode* ObjectDecl{nullptr};
+    /// One method DECLARED BY THIS TYPE (not inherited -- an inherited,
+    /// non-overridden method is reachable only by walking Parent, the same
+    /// way an inherited, non-hidden field is NOT re-listed by a Pascal
+    /// record and RecordFields would not either — except RecordFields
+    /// deliberately breaks that symmetry, see its own comment above, for
+    /// fields specifically; ObjectMethods does not, since a method is
+    /// resolved to a call target by walking a chain, the way a field is
+    /// not).
+    struct Method {
+        /// Method name as declared.
+        std::string Name;
+        /// See Field::IsPrivate just above; same TP7 section-visibility rule.
+        bool        IsPrivate{false};
+        /// 'virtual' trailing directive on the in-class heading.
+        bool        IsVirtual{false};
+        /// 'abstract' trailing directive (always paired with IsVirtual --
+        /// confirmed against a local fpc -Mtp build: 'abstract' with no
+        /// 'virtual' is rejected there, and Sema enforces the same thing —
+        /// see resolveObjectType's own comment, SemaType.cpp).  An abstract
+        /// method has no body, ever (err_object_abstract_method_has_body),
+        /// and needs none (err_object_method_never_defined does not apply).
+        bool        IsAbstract{false};
+        /// 'constructor' rather than 'procedure'/'function'/'destructor'.
+        /// Confirmed against a local fpc -Mtp build that a TP7 object-model
+        /// constructor can never be virtual (IsVirtual/IsConstructor are
+        /// never both true; see err_object_virtual_constructor).
+        bool        IsConstructor{false};
+        /// 'destructor' rather than 'procedure'/'function'/'constructor'.
+        /// Unlike a constructor, a destructor commonly IS virtual in real
+        /// TP7 idiom (confirmed: fpc accepts 'destructor Done; virtual;'
+        /// without complaint) -- that is what lets a caller holding only an
+        /// ancestor-typed pointer dispose of whatever descendant it actually
+        /// points at through the correct (descendant's own) destructor.
+        bool        IsDestructor{false};
+        /// True once this method's own function-result variance has been
+        /// resolved -- i.e. whether it is a function at all; mirrors
+        /// Symbol::IsFunction, kept here rather than inferred from RetType
+        /// being non-null so that a function returning... nothing yet
+        /// resolvable is not silently read back as a procedure.
+        bool        IsFunction{false};
+        /// Resolved parameter list; same shape as a Procedure/Function
+        /// Type's own Params, reusing Param rather than a parallel struct.
+        std::vector<Param> Params;
+        /// Return type; null for a procedure/constructor/destructor.
+        std::shared_ptr<Type> RetType;
+        /// Index into the OWNING type's own VmtSlots (i.e. the FINAL,
+        /// possibly-inherited-and-overridden table, not a table of this
+        /// type's own methods alone) that this method's implementation
+        /// occupies; -1 for a non-virtual method, which is never dispatched
+        /// through the VMT at all -- see resolveObjectType's own comment for
+        /// the whole slot-assignment algorithm.
+        int VmtSlot{-1};
+        /// The in-class heading this method was declared with (borrowed;
+        /// owned by the object type's own ObjectTypeNode::Members).
+        const ProcDecl* Heading{nullptr};
+        /// The out-of-line body ProcDecl matched to this heading
+        /// ('procedure T.M; begin ... end;'), once Sema has found and
+        /// verified one (Sema::checkMethodBody).  Null until matched, and
+        /// stays null forever for an abstract method, which has none by
+        /// construction.
+        const ProcDecl* Body{nullptr};
+    };
+    /// Methods declared BY THIS TYPE, in declaration order.  Does NOT
+    /// include an inherited method this type does not itself redeclare
+    /// (whether as an override or as a same-name static hide) -- reaching
+    /// one of those is a walk up Parent, exactly like reaching an
+    /// inherited-and-not-hidden identifier through an ordinary scope chain.
+    std::vector<Method> ObjectMethods;
+    /// One entry in a VMT slot table: which method NAME occupies this slot
+    /// (fixed for the whole ancestor chain -- every descendant's VMT has the
+    /// same method at the same index, which is what makes dispatch through
+    /// an ancestor-typed pointer/reference correct regardless of the actual
+    /// runtime type) and which type's own implementation currently fills it.
+    struct VmtSlotEntry {
+        /// The virtual method's name, case-preserved as first declared.
+        std::string MethodName;
+        /// The name of the object type (this one, or an ancestor) whose own
+        /// Method entry is the current implementation for this slot.  Empty
+        /// only transiently, during resolveObjectType itself, before the
+        /// type being resolved has been told its own name (Sema.cpp's Phase
+        /// 3b calls resolveType before it knows how to name an anonymous
+        /// result -- see PendingObjectTypeName_'s own comment, Sema.h).
+        std::string ImplementingType;
+    };
+    /// The FINAL, effective VMT slot table for this type: every entry
+    /// inherited from Parent (same name, same index, copied verbatim) plus
+    /// every NEW virtual method this type itself declares (appended after
+    /// the inherited ones), with any OVERRIDE (a virtual method here whose
+    /// name matches an inherited slot) replacing that slot's
+    /// ImplementingType in place rather than adding a new one.  See
+    /// resolveObjectType's own comment (SemaType.cpp) for the whole
+    /// algorithm and the field practice it was confirmed against.
+    std::vector<VmtSlotEntry> VmtSlots;
 
     // --- SchemaInstance and Schema (EP §6.4.7) ---
     /// Name of the schema this is an instance of.

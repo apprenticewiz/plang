@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <format>
 #include <ranges>
+#include <set>
 
 using namespace plang;
 
@@ -334,6 +335,14 @@ const VariantPart* Sema::checkVariantTagArg(const std::string& Which,
 }
 
 std::shared_ptr<Type> Sema::resolveTypeImpl(const TypeNode& Node) {
+    // Turbo Tier 5, Cluster A item 1: read and clear PendingObjectTypeName_
+    // right away, before recursing into anything -- see that member's own
+    // comment (Sema.h) for why this has to happen exactly once per call,
+    // at the top, rather than wherever the ObjectTypeNode arm itself sits
+    // further down.
+    const std::string PendingObjectName = std::move(PendingObjectTypeName_);
+    PendingObjectTypeName_.clear();
+
     // Gated on having the NAMES, not on the probe being active.  A form is
     // arithmetic over discriminant INDICES, so it is the same form for every
     // instantiation -- `array[1..m]` is index 0 whether m is 1, 4 or 7 -- and
@@ -912,19 +921,278 @@ std::shared_ptr<Type> Sema::resolveTypeImpl(const TypeNode& Node) {
         N->ResolvedBody = T;
         return T;
     }
-    if (llvm::isa<ObjectTypeNode>(&Node)) {
-        // Turbo Tier 5, Cluster A item 0: parsing only.  Inheritance
-        // resolution, VMT/layout, and method-body checking are items 1-7's
-        // job -- see ObjectTypeNode's own comment in AstDecl.h.  A parsed
-        // object type reaching type resolution today is a real, if
-        // temporary, terminal case, so it gets its own clear diagnostic
-        // rather than falling through to the generic
-        // err_unrecognized_type below.
-        error(Node.Loc, diag::err_object_type_not_yet_supported);
-        return TyErr;
+    if (auto* N = llvm::dyn_cast<ObjectTypeNode>(&Node)) {
+        return resolveObjectType(*N, PendingObjectName);
     }
     error(Node.Loc, diag::err_unrecognized_type);
     return TyErr;
+}
+
+// ---------------------------------------------------------------------------
+// Turbo Tier 5, Cluster A item 1: object types (inheritance, fields, VMT)
+// ---------------------------------------------------------------------------
+
+std::string Sema::objectMethodKey(const std::string& TypeName,
+                                   const std::string& MethodName) {
+    return toLower(TypeName) + "." + toLower(MethodName);
+}
+
+namespace {
+/// Walks \p T's own ancestor chain (starting at T itself) for a Method
+/// named \p LowerName (already lower-cased).  Used to find the signature a
+/// virtual override has to match, and to find the in-class heading an
+/// out-of-line body's OwnerType.Name has to match (via the Symbol instead,
+/// in checkMethodBody -- this helper is the Type-level equivalent, used
+/// only inside object-type resolution itself).
+const Type::Method* findMethodInChain(const Type* T, const std::string& LowerName) {
+    for (const Type* Cur = T; Cur; Cur = Cur->Parent.get())
+        for (const auto& M : Cur->ObjectMethods)
+            if (toLower(M.Name) == LowerName) return &M;
+    return nullptr;
+}
+
+/// Whether two method signatures (arity, corresponding parameter types
+/// (including var-ness), and return type) are IDENTICAL.  Confirmed against
+/// a local fpc -Mtp build ("function header doesn't match the previous
+/// declaration") that a virtual override's signature must match its
+/// inherited method's EXACTLY -- unlike an ordinary forward declaration's
+/// body, which this codebase already lets a Sema::sameParamType-style
+/// comparison decide, an override additionally requires the VAR-ness of
+/// each parameter to agree, since fpc rejected a var/value mismatch the
+/// same way it rejected a type mismatch in that same experiment.
+bool sameMethodSignature(const Type::Method& A, const Type::Method& B) {
+    if (A.IsFunction != B.IsFunction) return false;
+    if (A.Params.size() != B.Params.size()) return false;
+    for (size_t I = 0; I < A.Params.size(); ++I) {
+        if (A.Params[I].IsVar != B.Params[I].IsVar) return false;
+        if (A.Params[I].IsUntyped != B.Params[I].IsUntyped) return false;
+        if (A.Params[I].IsUntyped) continue;
+        if (!A.Params[I].Ty || !B.Params[I].Ty) continue;
+        if (A.Params[I].Ty->Name != B.Params[I].Ty->Name) return false;
+    }
+    if (A.IsFunction) {
+        if (!A.RetType || !B.RetType) return true; // one side unresolved; already diagnosed elsewhere
+        if (A.RetType->Name != B.RetType->Name) return false;
+    }
+    return true;
+}
+} // namespace
+
+/// Resolves an object-type denoter: ancestor lookup, the flattened
+/// (ancestor-then-own) field list, and the VMT slot-assignment algorithm --
+/// see Type::VmtSlots's own comment (Type.h) for the shape this builds.
+/// Also registers each of this type's own methods (in-class headings) under
+/// their own composite symbol-table key (Sema::objectMethodKey) in the
+/// CURRENT scope, which is the scope Sema.cpp's own Phase 3b is about to
+/// define this type's own TypeAlias symbol into -- see SymbolKind::Method's
+/// own comment (SymbolTable.h) for why a composite key rather than a scope
+/// of its own.
+///
+/// The VMT slot-assignment algorithm (confirmed against a local fpc -Mtp
+/// build; see the individual rules below for what each check was confirmed
+/// against):
+///
+///   1. This type's own VmtSlots STARTS as a verbatim copy of its immediate
+///      ancestor's own (already-final) VmtSlots -- same methods, same
+///      indices, same order.  This is what makes a VMT lookup through an
+///      ancestor-typed pointer/reference correct regardless of the actual
+///      runtime type: every descendant's VMT has the ancestor's own methods
+///      at the same fixed offsets.
+///   2. For each VIRTUAL method this type declares, in declaration order:
+///      if a slot of the SAME NAME already exists (inherited from an
+///      ancestor, or -- impossible here, since within-type duplicates are
+///      rejected below -- from earlier in this same type), it is an
+///      OVERRIDE: the slot's ImplementingType is updated in place (same
+///      index), after checking the two signatures match exactly
+///      (err_object_virtual_override_signature_mismatch if not).  If no
+///      slot of that name exists, a NEW slot is appended.
+///   3. A method redeclaring an inherited name WITHOUT 'virtual' gets no
+///      slot at all (VmtSlot stays -1) and does not touch VmtSlots -- it
+///      statically HIDES the ancestor's method rather than overriding it
+///      (warn_object_method_hides_inherited), confirmed against fpc's own
+///      "An inherited method is hidden by ..." warning for the identical
+///      program.  A NEW virtual method whose name only coincidentally
+///      matches a NON-virtual ancestor method (which therefore has no slot
+///      of its own to find) is handled by the same "no slot of that name
+///      exists" branch as any other new virtual method -- confirmed
+///      against fpc: this compiles clean, with TWO independent identities
+///      (the ancestor's own non-virtual TA.X, and the descendant's own
+///      virtual, VMT-dispatched TB.X), not an error.
+///   4. Every other method (plain, or 'constructor' -- confirmed against
+///      fpc: 'constructor ... virtual' is rejected outright,
+///      "Virtual constructors are only supported in class object model",
+///      so a constructor is always static) gets no slot either.
+std::shared_ptr<Type> Sema::resolveObjectType(const ObjectTypeNode& Node,
+                                               const std::string& DeclName) {
+    // Turbo Tier 5, Cluster A item 1: real Turbo Pascal has no anonymous
+    // object type (confirmed against fpc: "Anonymous class definitions are
+    // not allowed") -- an object's identity has to be nameable for
+    // inheritance/dispatch to mean anything.  DeclName is empty for every
+    // case except the direct right-hand side of a 'type Name = object ...
+    // end' declaration; see PendingObjectTypeName_'s own comment (Sema.h).
+    if (DeclName.empty()) {
+        error(Node.Loc, diag::err_object_type_anonymous);
+        return TyErr;
+    }
+
+    auto T = std::make_shared<Type>();
+    T->Kind       = TypeKind::Object;
+    T->Name       = DeclName;
+    T->Anonymous  = false;
+    T->ObjectDecl = &Node;
+
+    std::shared_ptr<Type> ParentTy;
+    if (!Node.Ancestor.empty()) {
+        const Symbol* AncSym = Symtab.lookup(Node.Ancestor);
+        if (!AncSym || AncSym->Kind != SymbolKind::TypeAlias || !AncSym->Ty) {
+            error(Node.Loc, diag::err_object_ancestor_not_found, {Node.Ancestor});
+            return TyErr;
+        }
+        if (AncSym->Ty->isError()) return TyErr;  // ancestor itself already failed; don't cascade
+        if (AncSym->Ty->Kind != TypeKind::Object) {
+            error(Node.Loc, diag::err_object_ancestor_not_object_type, {Node.Ancestor});
+            return TyErr;
+        }
+        ParentTy    = AncSym->Ty;
+        T->Parent   = ParentTy;
+        // Seed this type's own field list and VMT slot table with the
+        // ancestor's own (already flattened/final) ones -- see this
+        // function's own top comment, rules 1 and the RecordFields comment
+        // on Type.h.
+        T->RecordFields = ParentTy->RecordFields;
+        T->VmtSlots      = ParentTy->VmtSlots;
+    }
+
+    // Names already used AT THIS LEVEL (this type's own fields and methods,
+    // not inherited ones) -- a NEW method may reuse an INHERITED name (hide
+    // or override), but not one already used by this same type's own
+    // declaration (confirmed against fpc: "Duplicate identifier" for two
+    // same-named methods, or a field and method of the same name, in one
+    // type -- "Procedure overloading is switched off" is fpc's more
+    // specific wording for the method/method case, but the underlying rule
+    // is the same one-namespace-per-level rule as a field/method clash).
+    std::set<std::string> OwnLevelNamesLower;
+    // Every name (field or method) reachable from the ancestor chain --
+    // used only to reject a NEW FIELD reusing one (confirmed against fpc:
+    // a descendant field may not share a name with an inherited field OR an
+    // inherited method, "Duplicate identifier", even though a descendant
+    // METHOD reusing either is fine -- see the rule comment above).
+    std::set<std::string> InheritedNamesLower;
+    for (const auto& F : T->RecordFields) InheritedNamesLower.insert(toLower(F.Name));
+    for (const Type* Cur = ParentTy.get(); Cur; Cur = Cur->Parent.get())
+        for (const auto& M : Cur->ObjectMethods)
+            InheritedNamesLower.insert(toLower(M.Name));
+
+    for (const auto& M : Node.Members) {
+        if (!M.IsMethod) {
+            auto Ft = resolveType(*M.Field.Type);
+            for (const auto& Nm : M.Field.Names) {
+                const std::string Lower = toLower(Nm);
+                if (OwnLevelNamesLower.count(Lower) || InheritedNamesLower.count(Lower)) {
+                    error(M.Field.Type->Loc, diag::err_object_duplicate_member,
+                          {Nm, DeclName});
+                    continue;
+                }
+                OwnLevelNamesLower.insert(Lower);
+                T->RecordFields.push_back(
+                    {.Name = Nm, .Ty = Ft, .IsTagField = false,
+                     .IsPrivate = (M.Vis == MemberVisibility::Private)});
+            }
+            continue;
+        }
+
+        // A method heading.
+        const ProcDecl& PD = *M.Method;
+        const std::string Lower = toLower(PD.Name);
+        if (OwnLevelNamesLower.count(Lower)) {
+            error(PD.Loc, diag::err_object_duplicate_member, {PD.Name, DeclName});
+            continue;
+        }
+        OwnLevelNamesLower.insert(Lower);
+
+        if (PD.IsConstructor && PD.IsVirtual)
+            error(PD.Loc, diag::err_object_virtual_constructor, {PD.Name});
+        if (PD.IsAbstract && !PD.IsVirtual)
+            error(PD.Loc, diag::err_object_abstract_not_virtual, {PD.Name});
+
+        Type::Method Meth;
+        Meth.Name          = PD.Name;
+        Meth.IsPrivate     = (M.Vis == MemberVisibility::Private);
+        Meth.IsVirtual     = PD.IsVirtual;
+        Meth.IsAbstract    = PD.IsAbstract;
+        Meth.IsConstructor = PD.IsConstructor;
+        Meth.IsDestructor  = PD.IsDestructor;
+        Meth.IsFunction    = PD.IsFunction;
+        Meth.Heading       = &PD;
+
+        for (const auto& Pg : PD.Params) {
+            auto Pt = Pg.Type ? resolveParamType(*Pg.Type, Pg.IsVar) : nullptr;
+            for (const auto& Nm : Pg.Names)
+                Meth.Params.push_back({Pg.IsVar, Nm, Pt, Pg.IsConst,
+                                        /*IsUntyped=*/!Pg.Type});
+        }
+        if (PD.IsFunction && PD.ReturnType) Meth.RetType = resolveType(*PD.ReturnType);
+
+        if (PD.IsVirtual) {
+            auto SlotIt = std::find_if(T->VmtSlots.begin(), T->VmtSlots.end(),
+                [&](const Type::VmtSlotEntry& E) { return toLower(E.MethodName) == Lower; });
+            if (SlotIt != T->VmtSlots.end()) {
+                // Override: signature must match the inherited method
+                // exactly (rule 2 above).
+                if (const Type::Method* Inherited =
+                        ParentTy ? findMethodInChain(ParentTy.get(), Lower) : nullptr) {
+                    if (!sameMethodSignature(Meth, *Inherited))
+                        error(PD.Loc, diag::err_object_virtual_override_signature_mismatch,
+                              {PD.Name});
+                }
+                SlotIt->ImplementingType = DeclName;
+                Meth.VmtSlot = static_cast<int>(SlotIt - T->VmtSlots.begin());
+            } else {
+                T->VmtSlots.push_back({.MethodName = PD.Name, .ImplementingType = DeclName});
+                Meth.VmtSlot = static_cast<int>(T->VmtSlots.size()) - 1;
+            }
+        } else if (ParentTy && findMethodInChain(ParentTy.get(), Lower)) {
+            // Static hide of an inherited method (rule 3 above): no slot,
+            // but worth a warning -- easy to write by accident.
+            warning(PD.Loc, diag::warn_object_method_hides_inherited, {PD.Name});
+        }
+
+        T->ObjectMethods.push_back(std::move(Meth));
+    }
+
+    // Register each of THIS type's own methods under its composite key, in
+    // the current scope -- the same scope Sema.cpp's own Phase 3b is about
+    // to define this type's own TypeAlias symbol into.  An in-class heading
+    // with no out-of-line body is matched later, by checkMethodBody
+    // (called from checkBlock's own Phase 5a for every ProcDecl with a
+    // non-empty OwnerType); the end-of-block audit that follows Phase 5b
+    // reports err_object_method_never_defined for whichever of these never
+    // got one (skipping an abstract method, which needs none).
+    for (const auto& Meth : T->ObjectMethods) {
+        Symbol S;
+        S.Kind               = SymbolKind::Method;
+        S.Name               = objectMethodKey(DeclName, Meth.Name);
+        S.MethodOwnerType    = DeclName;
+        S.DeclLoc             = Meth.Heading->Loc;
+        S.IsFunction          = Meth.IsFunction;
+        S.Params              = Meth.Params;
+        S.ReturnType          = Meth.RetType;
+        S.Decl                = Meth.Heading;
+        S.IsMethodVirtual      = Meth.IsVirtual;
+        S.IsMethodAbstract     = Meth.IsAbstract;
+        S.IsMethodConstructor  = Meth.IsConstructor;
+        S.IsMethodDestructor   = Meth.IsDestructor;
+        S.VmtSlot              = Meth.VmtSlot;
+        // A duplicate composite key cannot happen here (this loop and its
+        // own name-collision check above already refuse two same-named
+        // methods in one type; a different object type gives a different
+        // key by construction), so a define() failure would mean this
+        // function was called twice for the same declaration -- not
+        // expected, and not worth its own diagnostic.
+        (void)Symtab.define(std::move(S));
+    }
+
+    return T;
 }
 
 std::shared_ptr<Type> Sema::resolveNamed(const NamedTypeNode& N) {
@@ -1289,7 +1557,7 @@ std::shared_ptr<Type> Sema::resolveUndiscriminatedSchema(Symbol& Sym,
 // width check does not run for it -- which is the silent mask-truncation this
 // function exists to report.  A new non-ordinal kind belongs in the default
 // and needs nothing; only the count moves.
-static_assert(NumSemaTypeKinds == 22,
+static_assert(NumSemaTypeKinds == 23,
               "a new ordinal type kind needs a case in checkSetBaseRange");
 
 /// A set stores one bit per ordinal of its base type, so the base type's

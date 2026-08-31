@@ -423,6 +423,25 @@ private:
     /// that an actual of any capacity is accepted.
     int InPointerDomain_{0};
 
+    /// Turbo Tier 5, Cluster A item 1: the name of the 'type Name = object
+    /// ... end' declaration currently being resolved, or empty.  Threaded
+    /// through this member rather than a resolveType parameter because
+    /// every OTHER type denoter is resolved anonymously and named
+    /// afterward, once, by nameNominalType (Sema.cpp's Phase 3b, after
+    /// resolveType has already returned) -- but an object type needs its
+    /// own name WHILE it is being built, to stamp Type::VmtSlotEntry::
+    /// ImplementingType for a slot this very call introduces or overrides
+    /// (see resolveObjectType's own comment, SemaType.cpp) and to reject an
+    /// anonymous object type outright (err_object_type_anonymous) rather
+    /// than silently accepting one Sema could never give an identity to.
+    /// Set by Sema.cpp's Phase 3b immediately before calling resolveType on
+    /// a type-definition's own body, and consumed (read, then cleared) at
+    /// the top of resolveTypeImpl so a nested resolveType call made while
+    /// resolving THIS type's own fields/methods (an object field whose type
+    /// happens to be another named type, say) never sees a stale value left
+    /// over from the outer call.
+    std::string PendingObjectTypeName_;
+
     /// Schema resolutions currently on the stack, by body node and
     /// discriminants.  A schema whose body names itself resolves its own body
     /// while resolving it; the partly-built type is registered here first so
@@ -589,6 +608,34 @@ private:
                     bool IsInterfaceBlock = false);
     void checkProcSignature(const ProcDecl& Proc);
     void checkProcBody     (const ProcDecl& Proc);
+    /// Turbo Tier 5, Cluster A item 1: matches an out-of-line method body
+    /// ('procedure T.M; begin ... end;', ProcDecl::OwnerType = "T") to the
+    /// in-class heading registered for it under the composite key
+    /// "t.m" (Sema::objectMethodKey), verifies the two headings' signatures
+    /// agree, and records the body on that Symbol's own MethodBody so the
+    /// end-of-block audit (checkBlock's Phase 7.6 sibling, run from
+    /// checkBlock itself) can tell a heading that got a body from one that
+    /// never did.  Called from checkBlock's own Phase 5a in place of
+    /// checkProcSignature for exactly the ProcDecls with a non-empty
+    /// OwnerType.
+    void checkMethodBody(const ProcDecl& Proc);
+    /// The composite symbol-table key a method is registered/looked up
+    /// under: "<lowercase TypeName>.<lowercase MethodName>".  A '.' cannot
+    /// appear in a real Pascal identifier, so this can never collide with
+    /// an ordinary declaration -- see SymbolKind::Method's own comment
+    /// (SymbolTable.h) for the whole design.
+    static std::string objectMethodKey(const std::string& TypeName,
+                                        const std::string& MethodName);
+    /// Turbo Tier 5, Cluster A item 1: resolves an object-type denoter --
+    /// ancestor lookup, flattened field list, VMT slot assignment -- and
+    /// registers each of its methods (in-class headings) under their own
+    /// composite key in the CURRENT scope (the same scope the type alias
+    /// itself is about to be defined into by Sema.cpp's own Phase 3b).
+    /// \p DeclName is PendingObjectTypeName_, already read out of that
+    /// member by resolveTypeImpl before this is called; see that member's
+    /// own comment (above) for why it exists.
+    [[nodiscard]] std::shared_ptr<Type> resolveObjectType(
+        const ObjectTypeNode& Node, const std::string& DeclName);
     /// Records which value parameters a body modifies; see ProcDecl::ModifiedParams.
     void recordModifiedParams(const ProcDecl& Proc);
 

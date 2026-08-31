@@ -1791,6 +1791,14 @@ void Sema::checkBlock(const BlockNode& Block,
             // Resolved in Phase 3b(ii) below, after every ordinary type here
             // has its real body -- see that phase's comment for why.
         } else {
+            // Turbo Tier 5, Cluster A item 1: give resolveType (by way of
+            // resolveTypeImpl) this declaration's own name BEFORE calling
+            // it, so an ObjectTypeNode reached as this call's direct
+            // argument can use it -- see PendingObjectTypeName_'s own
+            // comment (Sema.h) for why this can't simply be read back out
+            // AFTER resolveType returns, the way nameNominalType below
+            // names every other kind.
+            PendingObjectTypeName_ = Td.Name;
             auto Resolved = resolveType(*Td.Type);
             nameNominalType(*Resolved, Td.Name);
 
@@ -1985,7 +1993,13 @@ void Sema::checkBlock(const BlockNode& Block,
 
     // Phase 5a — Procedure / function signature stubs
     for (const auto& Proc : Block.Procs) {
-        checkProcSignature(*Proc);
+        // Turbo Tier 5, Cluster A item 1: an out-of-line method body
+        // ('procedure T.M; ...', ProcDecl::OwnerType non-empty) is matched
+        // to its in-class heading by composite key rather than treated as
+        // an ordinary (possibly forward-declared) procedure of its own --
+        // see checkMethodBody's own comment (Sema.h).
+        if (!Proc->OwnerType.empty()) checkMethodBody(*Proc);
+        else                          checkProcSignature(*Proc);
     }
 
     // Phase 5.5 — Pre-scan: find labels placed inside structured statements.
@@ -2001,6 +2015,18 @@ void Sema::checkBlock(const BlockNode& Block,
 
     // Phase 5b — Procedure / function bodies
     for (const auto& Proc : Block.Procs) {
+        // Turbo Tier 5, Cluster A item 1 is Sema-only: heading resolution,
+        // matching to the in-class heading, and VMT slot assignment (all
+        // done above, Phase 5a's checkMethodBody).  A method body's own
+        // STATEMENTS reference things (Self, this type's own fields and
+        // methods) that no scope this codebase builds yet makes visible --
+        // that is item 3+'s job -- so checkProcBody, which would resolve
+        // identifiers in the ordinary top-level-procedure scope and either
+        // misreport a field access as an undeclared identifier or (worse)
+        // silently resolve it to an unrelated same-named global, does not
+        // run on one yet.  Skipped the same way a forward declaration's
+        // (bodyless) heading already is, just below.
+        if (!Proc->OwnerType.empty()) continue;
         if (!Proc->IsForward) {
             checkProcBody(*Proc);
         }
@@ -2097,8 +2123,101 @@ void Sema::checkBlock(const BlockNode& Block,
         });
     }
 
+    // Phase 7.6b — Method-body completion audit (Turbo Tier 5, Cluster A
+    // item 1), the Method sibling of Phase 7.6 just above: an in-class
+    // method heading with no out-of-line body anywhere in this block, and
+    // that is not itself 'abstract' (which needs none by construction --
+    // err_object_abstract_method_has_body, checkMethodBody, is the opposite
+    // mistake), compiled clean under this item's own predecessor and would
+    // otherwise only fail at link time.  Skipped for an interface block for
+    // the identical reason Phase 7.6 is: a unit interface's own object type
+    // gets its methods' bodies in a separate implementation block/scope
+    // this per-scope audit never sees -- exactly the same UnitExports_
+    // re-registration gap that already leaves Phase 7.6 unable to catch a
+    // missing INTERFACE proc body either (checkUnit, above).
+    if (!IsInterfaceBlock) {
+        Symtab.forEachInCurrentScope([&](Symbol& Sym) {
+            if (Sym.Kind != SymbolKind::Method) return;
+            if (Sym.IsMethodAbstract || Sym.MethodBody) return;
+            error(Sym.DeclLoc, diag::err_object_method_never_defined,
+                  {Sym.MethodOwnerType, Sym.Decl ? Sym.Decl->Name : Sym.Name});
+        });
+    }
+
     CurrentBlockLabels = std::move(SavedBlockLabels);
     Symtab.popScope();
+}
+
+void Sema::checkMethodBody(const ProcDecl& Proc) {
+    // Proc is the OUT-OF-LINE body ('procedure T.M; begin ... end;');
+    // Proc.OwnerType is "T", Proc.Name is "M".  Look its heading up by the
+    // same composite key resolveObjectType registered it under
+    // (Sema::objectMethodKey) -- a plain Symtab.lookup (innermost-scope-
+    // first), not a Parent-chain walk: the heading was registered into the
+    // SAME scope the object type's own TypeAlias lives in, which is exactly
+    // the scope Proc's own out-of-line body is being checked in too (both
+    // are declarations in the same block).
+    const std::string Key = objectMethodKey(Proc.OwnerType, Proc.Name);
+    Symbol* Heading = Symtab.lookup(Key);
+    if (!Heading || Heading->Kind != SymbolKind::Method) {
+        error(Proc.Loc, diag::err_object_method_body_without_heading,
+              {Proc.OwnerType, Proc.Name});
+        return;
+    }
+    if (Heading->IsMethodAbstract) {
+        error(Proc.Loc, diag::err_object_abstract_method_has_body,
+              {Proc.OwnerType, Proc.Name});
+        return;
+    }
+    if (Heading->MethodBody) {
+        error(Proc.Loc, diag::err_object_method_body_duplicate,
+              {Proc.OwnerType, Proc.Name});
+        return;
+    }
+
+    // Resolve this body's own heading (parameters, return type) exactly the
+    // way checkProcSignature resolves an ordinary procedure's, then compare
+    // against the in-class heading's already-resolved signature -- the same
+    // three checks (arity, per-parameter type, return type) an ordinary
+    // forward declaration's body is checked against, just worded for a
+    // method (err_object_method_param_count/_param_type/_return_type
+    // instead of err_forward_param_*).
+    std::vector<Type::Param> ResolvedParams;
+    for (const auto& Pg : Proc.Params) {
+        auto Pt = Pg.Type ? resolveParamType(*Pg.Type, Pg.IsVar) : nullptr;
+        for (const auto& Nm : Pg.Names)
+            ResolvedParams.push_back({Pg.IsVar, Nm, Pt, Pg.IsConst, /*IsUntyped=*/!Pg.Type});
+    }
+    std::shared_ptr<Type> Ret;
+    if (Proc.IsFunction && Proc.ReturnType) Ret = resolveType(*Proc.ReturnType);
+
+    if (ResolvedParams.size() != Heading->Params.size()) {
+        error(Proc.Loc, diag::err_object_method_param_count,
+              {Proc.OwnerType, Proc.Name,
+               std::to_string(ResolvedParams.size()),
+               std::to_string(Heading->Params.size())});
+    } else {
+        for (size_t I = 0; I < ResolvedParams.size(); ++I) {
+            if (ResolvedParams[I].IsUntyped != Heading->Params[I].IsUntyped) {
+                error(Proc.Loc, diag::err_object_method_param_type,
+                      {ResolvedParams[I].Name, Proc.OwnerType, Proc.Name,
+                       ResolvedParams[I].IsUntyped ? "untyped" : ResolvedParams[I].Ty->Name,
+                       Heading->Params[I].IsUntyped ? "untyped" : Heading->Params[I].Ty->Name});
+                continue;
+            }
+            if (ResolvedParams[I].IsUntyped) continue;
+            if (!ResolvedParams[I].Ty || !Heading->Params[I].Ty) continue;
+            if (!sameParamType(ResolvedParams[I].Ty, Heading->Params[I].Ty))
+                error(Proc.Loc, diag::err_object_method_param_type,
+                      {ResolvedParams[I].Name, Proc.OwnerType, Proc.Name,
+                       ResolvedParams[I].Ty->Name, Heading->Params[I].Ty->Name});
+        }
+    }
+    if (Proc.IsFunction && Ret && Heading->ReturnType
+            && !isIdenticalType(Ret, Heading->ReturnType))
+        error(Proc.Loc, diag::err_object_method_return_type, {Proc.OwnerType, Proc.Name});
+
+    Heading->MethodBody = &Proc;
 }
 
 void Sema::checkProcSignature(const ProcDecl& Proc) {

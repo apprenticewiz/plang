@@ -370,6 +370,19 @@ std::shared_ptr<Type> Sema::checkIdent(const IdentExpr& E) {
         case SymbolKind::Label:
             error(E.Loc, diag::err_label_as_value, {E.Name});
             return TyErr;
+        // Turbo Tier 5: a Method symbol is registered under a synthetic
+        // "type.method" composite key (SymbolKind::Method's own comment,
+        // SymbolTable.h), which contains a '.' no ordinary identifier can --
+        // so Symtab.lookup(E.Name) here, keyed by a bare IdentExpr::Name,
+        // can never actually find one.  An unqualified 'M' inside a method
+        // body meaning "call my own method M" (or an ancestor's) is a
+        // different, later lookup this codebase does not perform yet --
+        // item 3+'s job, once a method body's own scope exists at all (see
+        // checkMethodBody's own comment, Sema.h, for why Phase 5b does not
+        // even attempt to check a method body's statements today).
+        case SymbolKind::Method:
+            error(E.Loc, diag::err_undefined_identifier, {E.Name});
+            return TyErr;
     }
     return TyErr;
 }
@@ -2300,13 +2313,18 @@ void Sema::checkTypedConstFoldable(const ExprNode& E, const std::string& Name) {
 // See NumSemaTypeKinds in Sema/Type.h.  A new structured kind that can hold a
 // component defaults to "contains no file", and ISO §6.6.3.3's rule that a
 // file may not be passed by value stops being enforced through it.
-static_assert(NumSemaTypeKinds == 22,
+static_assert(NumSemaTypeKinds == 23,
               "a new structured type kind needs a case in typeContainsFile");
 
 bool Sema::typeContainsFile(const Type& T) {
     switch (T.Kind) {
     case TypeKind::File:   return true;
+    // Turbo Tier 5: an Object's own RecordFields is the flattened
+    // ancestor-then-own field list (Type::RecordFields's own comment,
+    // Type.h), so walking it here already covers a file field inherited
+    // from an ancestor, not just one this type declares itself.
     case TypeKind::Record:
+    case TypeKind::Object:
         for (const auto& F : T.RecordFields)
             if (F.Ty && typeContainsFile(*F.Ty)) return true;
         return false;

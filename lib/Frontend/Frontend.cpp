@@ -26,6 +26,7 @@
 #include "plang/Basic/UnitSearchPath.h"
 #include "plang/Parse/Parser.h"
 #include "plang/Lex/Scanner.h"
+#include "plang/Sema/DumpVmt.h"
 #include "plang/Sema/Sema.h"
 
 #include <charconv>
@@ -1240,6 +1241,9 @@ int frontendPC1Main(int Argc, char *Argv[]) {
     bool                      DumpAst       = false;
     bool                      DumpTokens    = false;
     bool                      DumpParseTree = false;
+    // Turbo Tier 5, Cluster A item 1: see plang/Sema/DumpVmt.h for why this
+    // exists as its own dump mode rather than folded into -dump-ast.
+    bool                      DumpVmt       = false;
     std::vector<std::string>  ModuleSearchPaths;
     std::vector<std::string>  IncludeSearchPaths; // -Fi<dir>: {$I}/{$INCLUDE}
     // -d<symbol>/-u<symbol>, in the order given on the command line: true
@@ -1321,10 +1325,12 @@ int frontendPC1Main(int Argc, char *Argv[]) {
             DumpTokens = true;
         } else if (Arg == "-dump-parse-tree") {
             DumpParseTree = true;
+        } else if (Arg == "-dump-vmt") {
+            DumpVmt = true;
         } else if (Arg == "-g") {
             Debug = true;
-        // Must come after the "-dump-ast"/"-dump-tokens"/"-dump-parse-tree"
-        // exact-match arms above: those also start with "-d", and an
+        // Must come after the "-dump-ast"/"-dump-tokens"/"-dump-parse-tree"/
+        // "-dump-vmt" exact-match arms above: those also start with "-d", and an
         // else-if chain resolves on the first match, unlike the driver's
         // own opts::lookup (which picks the longest spelling regardless of
         // arm order) -- see Options.def's -d entry.
@@ -1568,6 +1574,8 @@ int frontendPC1Main(int Argc, char *Argv[]) {
         if (!UnitOk) return 1;
         if (DumpAst)
             return withOutput([&](std::ostream& Os) { printAst(*Program, Os); });
+        if (DumpVmt)
+            return withOutput([&](std::ostream& Os) { printVmt(*Program, Os); });
 
         // Publish this unit's own .tui before codegen, mirroring the
         // program path's own "publish interfaces, then emit" order just
@@ -1635,6 +1643,12 @@ int frontendPC1Main(int Argc, char *Argv[]) {
     // AST.
     if (DumpAst)
         return withOutput([&](std::ostream& Os) { printAst(*Program, Os); });
+    // -dump-vmt: same read-only-inspection placement as -dump-ast just
+    // above, and for the identical reason -- Sema has already run (the VMT
+    // dump reflects its results), but must return before any side effect
+    // (.pmi writing, ...) that normal compilation needs.
+    if (DumpVmt)
+        return withOutput([&](std::ostream& Os) { printVmt(*Program, Os); });
 
     // Write .pmi files for any module bodies found in this compilation unit.
     // This is a no-op for pure-program files (no OwnedModules). A failure

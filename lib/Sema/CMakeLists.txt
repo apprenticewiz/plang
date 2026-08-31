@@ -1,4 +1,5 @@
 add_library(PlangSema OBJECT
+    DumpVmt.cpp
     Sema.cpp
     SemaExpr.cpp
     SemaFlow.cpp
