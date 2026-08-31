@@ -72,6 +72,25 @@ struct IdentExpr : ExprNode {
     /// fixing agent's own testing).
     mutable bool UserDeclaredCallable{false};
 
+    /// True only when Sema::resolveTypeArgOrValue (SizeOf/High/Low/TypeOf's
+    /// shared dual-shape argument resolver) resolved this occurrence as a
+    /// bare TYPE NAME (SizeOf(Byte), TypeOf(TDog)) rather than as an
+    /// ordinary value expression -- set directly by that function, both for
+    /// one of the five primitive-type keywords and for a user TypeAlias
+    /// symbol, the two cases where it returns ResolvedType without ever
+    /// calling checkExpr on this node. Neither UserDeclared nor
+    /// UserDeclaredCallable can stand in for this: UserDeclared is equally
+    /// true for a plain variable of the same syntactic shape, and Pascal
+    /// gives types and variables one shared namespace per scope, so nothing
+    /// about the identifier itself (only which kind of symbol Sema's lookup
+    /// actually found) says which this is. TypeOf's own codegen
+    /// (CGFuncCall.cpp) needs this to know whether Args[0] has a runtime
+    /// value at all to read a `_vptr` from (a value expression) or not (a
+    /// type name) -- issue #508's own bug was CodeGen answering statically
+    /// for EVERY shape; the fix needed a reliable way to keep answering
+    /// statically for just this one, where no runtime instance exists.
+    mutable bool IsTypeArgument{false};
+
     /// What a bare occurrence of an ENCLOSING FUNCTION'S OWN NAME (or its
     /// EP §6.7.2 named result variable) means, decided once by
     /// Sema::checkIdent and read back by codegen instead of re-deriving it

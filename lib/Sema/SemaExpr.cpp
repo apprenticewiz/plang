@@ -1299,6 +1299,7 @@ std::shared_ptr<Type> Sema::resolveTypeArgOrValue(const ExprNode& Arg) {
         else if (Lo == "char")    Primitive = TyChar;
         else if (Lo == "string")  Primitive = TyStr;
         if (Primitive) {
+            Id->IsTypeArgument = true;
             Id->ResolvedType = Primitive;
             return Primitive;
         }
@@ -1316,6 +1317,7 @@ std::shared_ptr<Type> Sema::resolveTypeArgOrValue(const ExprNode& Arg) {
                 Sym && Sym->Kind == SymbolKind::TypeAlias) {
             Sym->Referenced = true;
             Id->UserDeclared = true;
+            Id->IsTypeArgument = true;
             Id->ResolvedType = Sym->Ty ? Sym->Ty : TyErr;
             return Id->ResolvedType;
         }

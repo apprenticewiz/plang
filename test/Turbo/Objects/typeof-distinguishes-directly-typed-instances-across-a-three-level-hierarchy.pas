@@ -8,20 +8,21 @@ shape as this directory's own main capstone test for a consistent "world"
 across test/Turbo/Objects/, rather than a fresh, disconnected cast of
 types.
 
-Deliberately restricted to DIRECTLY-TYPED local variables (E: TEmployee,
-M/M2: TManager, X: TExecutive) -- never through a pointer or any other
-indirection where a variable's own STATIC type could differ from its
-DYNAMIC one. This is not an arbitrary restriction: CGFuncCall.cpp's own
-TypeOf lowering resolves purely from 'Args[0]->ResolvedType' (Sema's
-STATIC type for the argument expression), by explicit design ("this
-answers a purely STATIC question... Args[0] is never evaluated for its
-value, only asked for its type"), so it only ever agrees with real
-`fpc -Mtp` (which reads the operand's own runtime '_vptr' field, a
-genuinely DYNAMIC answer) in the restricted case exercised here, where the
-two coincide. See this same directory's own
-typeof-through-an-ancestor-typed-pointer-answers-statically-not-
-dynamically-known-gap.pas for the polymorphic case, where they do not, and
-docs/turbo.md's "Documented deviations" section for the write-up.
+Restricted to DIRECTLY-TYPED local variables (E: TEmployee, M/M2:
+TManager, X: TExecutive) -- never through a pointer or any other
+indirection -- so this test's own job stays narrowly "does TypeOf
+distinguish concrete types correctly across 3 levels," without also
+re-proving the separate ancestor-typed-pointer (static-vs-dynamic) case
+this same directory's own
+typeof-through-an-ancestor-typed-pointer-answers-dynamically.pas covers.
+That file's own history: this test's restriction used to be load-bearing,
+not stylistic -- CGFuncCall.cpp's own TypeOf lowering used to resolve
+purely from 'Args[0]->ResolvedType' (Sema's STATIC type for the argument
+expression), so it only ever agreed with real `fpc -Mtp` (which reads the
+operand's own runtime '_vptr' field, a genuinely DYNAMIC answer) in the
+restricted case exercised here -- a real bug (issue #508) found while
+writing this very test, fixed since, and now proven fixed by that sibling
+file instead of pinned as a known gap.
 
 Confirmed against a local `fpc -Mtp` build: identical output for this
 exact program (plus its own leading mode-tp compatibility pragma).

@@ -416,21 +416,60 @@ llvm::Value* CGFuncCall::emitBuiltinCall(const std::string& Name,
         auto* resTy = llvm::cast<llvm::IntegerType>(Types.llvmTypeOfSemaType(*RangeTy));
         return llvm::ConstantInt::get(resTy, static_cast<uint64_t>(V), /*isSigned=*/true);
     }
-    // Turbo Tier 5, Cluster A item 7: TypeOf(x) -- the address of x's own
-    // object type's VMT global.  Like SizeOf/High/Low just above, this
-    // answers a purely STATIC question (which VMT does x's declared TYPE
-    // have -- never "what does x hold at run time", which is exactly the
-    // point of comparing it against TypeOf(SomeOtherInstance): two
-    // instances of the SAME concrete type share one VMT, so their
-    // addresses compare equal, and Args[0] is never evaluated for its
-    // value, only asked for its type, the same unevaluated-operand
-    // treatment SizeOf/High/Low's own comment explains.
+    // Turbo Tier 5, Cluster A item 7 (issue #508 fix): TypeOf(x) -- x's own
+    // RUNTIME `_vptr` value, read exactly the way an ordinary virtual method
+    // call already reads it (this same file's emitMethodCallExpr, the
+    // "self.vptr.addr"/"self.vmt" GEP-and-load a few hundred lines below).
+    // Unlike SizeOf/High/Low just above -- which answer a purely STATIC
+    // question and never evaluate Args[0] at all -- TypeOf genuinely asks
+    // "what does x hold at run time": a pointer whose declared pointee type
+    // is an ANCESTOR, but which actually holds a DESCENDANT instance's
+    // address (PA: ^TAnimal; PA := @SomeTDog), must answer with TDog's own
+    // VMT, not TAnimal's, exactly the way P^.SomeVirtualMethod already
+    // dispatches to TDog's override rather than TAnimal's. Confirmed against
+    // a local fpc -Mtp build (issue #508); previously pinned as a known gap.
+    //
+    // This still agrees with the OLD static answer everywhere the old
+    // answer was already right: two instances of the SAME concrete type
+    // share one stamped-in vptr value (stampVptr, CodeGenProcs.cpp), and a
+    // directly declared instance's own vptr IS its own type's VMT global,
+    // since stampVptr stamped it there in the first place -- so
+    // TypeOf(x)'s dynamic read and TypeOf(itsOwnTypeName)'s static one
+    // still coincide for every case that never had a bug to begin with.
+    //
+    // Args[0] can ALSO be a bare TYPE NAME (TypeOf(TDog) -- no instance to
+    // read a `_vptr` from), Sema::resolveTypeArgOrValue's own dual shape
+    // shared with SizeOf/High/Low above -- IdentExpr::IsTypeArgument is
+    // exactly its own record of which shape this occurrence was, set only
+    // when that function resolved Args[0] as a type name rather than
+    // calling checkExpr on it. This can NOT be told apart by asking
+    // EmitLValue to fail instead: a plain identifier this translation unit
+    // never declared is not necessarily a type name -- CodeGenTypes.cpp's
+    // resolveImportedVar treats exactly that shape as a cross-module
+    // variable reference by default (Turbo units, Tier 4) and happily
+    // synthesizes an external global for it, so EmitLValue(TDog) does NOT
+    // reliably return null merely because TDog is a type. A type name has
+    // no runtime instance to read a `_vptr` from, so it still answers
+    // statically, exactly as before this fix.
     if (lo == "typeof") {
         const auto& T = Args[0]->ResolvedType;
-        auto* vmt = T ? GetOrCreateVmt(*T) : nullptr;
-        if (!vmt)
+        auto vptrOff = T ? Types.vptrOffsetOf(*T) : std::nullopt;
+        if (!vptrOff)
             codegenICE("TypeOf reached codegen with no VMT for '"
                        + (T ? T->Name : std::string("?")) + "'");
+        auto* id = llvm::dyn_cast<IdentExpr>(Args[0].get());
+        if (!id || !id->IsTypeArgument) {
+            llvm::Value* addr = EmitLValue(*Args[0]);
+            if (!addr)
+                codegenICE("TypeOf argument has no address to read its "
+                           "runtime '_vptr' field from");
+            auto* vptrSlot = B.CreateGEP(I8Ty, addr,
+                {llvm::ConstantInt::get(I64Ty, *vptrOff)}, "typeof.vptr.addr");
+            return B.CreateLoad(PtrTy, vptrSlot, "typeof.vmt");
+        }
+        auto* vmt = GetOrCreateVmt(*T);
+        if (!vmt)
+            codegenICE("TypeOf reached codegen with no VMT for '" + T->Name + "'");
         return vmt;
     }
     // FPC's size-aware Hi/Lo/Swap -- a DELIBERATE divergence from literal

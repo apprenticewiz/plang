@@ -174,14 +174,19 @@ private:
     /// CGBinaryOps' own local sstrOperand lambda already does for `+`/
     /// comparison.  See exprShortStrCap's own doc comment (CodeGenImpl.h).
     std::function<int64_t(const plang::ExprNode&)> ExprShortStrCap;
-    /// Turbo Tier 5, Cluster A item 7: TypeOf(x)'s own lowering -- reuses
-    /// Codegen::Impl::getOrCreateVmt's existing per-type VMT global exactly
-    /// as-is (Sema already refused any argument whose type has no VMT to
-    /// build), rather than duplicating its memoized-global-lookup logic a
-    /// second time the way CGWith.cpp/CGFieldAccess.cpp's own object-field
-    /// GEP walk had to (getOrCreateVmt lives on a different class, Impl,
-    /// with no bytes-and-instructions duplication possible here the way
-    /// there was for that -- this is a single call, not an algorithm).
+    /// Turbo Tier 5, Cluster A item 7 (issue #508 fix): TypeOf(x)'s own
+    /// lowering -- reuses Codegen::Impl::getOrCreateVmt's existing per-type
+    /// VMT global exactly as-is (Sema already refused any argument whose
+    /// type has no VMT to build), rather than duplicating its
+    /// memoized-global-lookup logic a second time the way
+    /// CGWith.cpp/CGFieldAccess.cpp's own object-field GEP walk had to
+    /// (getOrCreateVmt lives on a different class, Impl, with no
+    /// bytes-and-instructions duplication possible here the way there was
+    /// for that -- this is a single call, not an algorithm). Since the
+    /// #508 fix, only TypeOf's bare-TYPE-NAME shape (TypeOf(TDog), no
+    /// runtime instance to read a `_vptr` from) still goes through this --
+    /// TypeOf(x) for a value expression now reads x's own runtime `_vptr`
+    /// instead (CGFuncCall.cpp's "typeof.vptr.addr"/"typeof.vmt").
     std::function<llvm::GlobalVariable*(const plang::Type&)> GetOrCreateVmt;
 
     llvm::Constant* i64c(int64_t v) const {
