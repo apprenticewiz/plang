@@ -37,48 +37,85 @@
 # a delay to some particular compile's wall-clock time. See
 # run-with-stdin-held-open.sh for why a *backgrounded* watchdog sleep is
 # avoided instead (it can leak a process that outlives this script).
+#
+# Issue #521: on a fast/lightly-loaded runner (or one where filesystem
+# directory-entry visibility lags slightly behind process completion), the
+# command being tested can sometimes finish on its own before the poll
+# loop below ever notices the scratch directory become non-empty -- a
+# real, legitimate, "inconclusive" outcome per the FINISHED-BEFORE-SIGNAL
+# doc above, not a sign anything is broken. Since the caller (the lit
+# test) has no way to tell "inconclusive" apart from "genuinely broken", a
+# single inconclusive attempt used to just fail the test outright. Instead
+# retry the whole cycle -- clear scratch dir, run, poll, kill-or-not --
+# a bounded number of times, and only actually report
+# FINISHED-BEFORE-SIGNAL (letting the lit test's CHECK correctly fail) if
+# every single attempt raced ahead of the poll. 15 attempts is chosen as
+# comfortably more than enough headroom: each inconclusive attempt is
+# cheap (the command already exited, so there is no 2-second poll timeout
+# to wait out) and the flake this is guarding against has only ever been
+# observed as a one-off even under heavy concurrent CI load, so a real,
+# reproducible 15-in-a-row loss would mean something is actually broken
+# rather than just an unlucky scheduling race. A CAUGHT-MID-FLIGHT result
+# breaks out of the loop immediately on the attempt that produced it --
+# retrying after a real, successful catch would defeat the point of
+# re-proving issue #278's fix on that same attempt.
 set -u
 set -m
 tmp="$1"; shift
-# Cleared, not just created: lit reuses the same %t.dir across separate
-# `lit` invocations (split-file re-extracts its own known files on each run
-# but does not clear anything else already there), so a leftover from an
-# earlier run would otherwise make the scratch dir look non-empty from the
-# very first poll -- before this run's own command has created anything --
-# and every check below would report leftovers regardless of whether this
-# run actually behaved correctly.
-rm -rf "$tmp"
-mkdir -p "$tmp"
-TMPDIR="$tmp" "$@" &
-pid=$!
 
-i=0
-while [ "$i" -lt 2000 ] && [ -z "$(ls -A "$tmp" 2>/dev/null)" ] && kill -0 "$pid" 2>/dev/null; do
-    sleep 0.001
-    i=$((i + 1))
+max_attempts=15
+attempt=1
+result="FINISHED-BEFORE-SIGNAL"
+
+while [ "$attempt" -le "$max_attempts" ]; do
+    # Cleared, not just created: lit reuses the same %t.dir across separate
+    # `lit` invocations (split-file re-extracts its own known files on each
+    # run but does not clear anything else already there), so a leftover
+    # from an earlier run (including an earlier retry attempt in this same
+    # invocation, if it was FINISHED-BEFORE-SIGNAL and left files behind)
+    # would otherwise make the scratch dir look non-empty from the very
+    # first poll -- before this attempt's own command has created anything
+    # -- and every check below would report leftovers regardless of
+    # whether this attempt actually behaved correctly.
+    rm -rf "$tmp"
+    mkdir -p "$tmp"
+    TMPDIR="$tmp" "$@" &
+    pid=$!
+
+    i=0
+    while [ "$i" -lt 2000 ] && [ -z "$(ls -A "$tmp" 2>/dev/null)" ] && kill -0 "$pid" 2>/dev/null; do
+        sleep 0.001
+        i=$((i + 1))
+    done
+
+    if kill -0 "$pid" 2>/dev/null; then
+        result="CAUGHT-MID-FLIGHT"
+        # The driver only calls llvm::sys::RemoveFileOnSignal (registering
+        # the temp file for crash-safe cleanup) once the file already
+        # exists on disk -- createTemporaryFile has to create it before it
+        # can return the actual randomized path to register. That leaves
+        # an unavoidable, if normally sub-millisecond, gap between "file
+        # appears" (what the poll above just detected) and "cleanup is
+        # registered". Under heavy CPU contention (e.g. a CI job running
+        # many other compiles concurrently) the scheduler can stretch that
+        # gap enough for a signal landing right after detection to beat
+        # the registration, producing a real but spurious
+        # SCRATCH-DIR-HAS-LEFTOVERS unrelated to the fix being tested. A
+        # short settle delay here is far more than that in-memory
+        # list-append needs to complete even on a loaded runner, without
+        # weakening the test: it still kills the driver well before a real
+        # compile finishes.
+        sleep 0.02
+        kill -TERM -- -"$pid" 2>/dev/null
+        wait "$pid" 2>/dev/null
+        break
+    fi
+
+    wait "$pid" 2>/dev/null
+    attempt=$((attempt + 1))
 done
 
-if kill -0 "$pid" 2>/dev/null; then
-    echo "CAUGHT-MID-FLIGHT"
-    # The driver only calls llvm::sys::RemoveFileOnSignal (registering the
-    # temp file for crash-safe cleanup) once the file already exists on
-    # disk -- createTemporaryFile has to create it before it can return the
-    # actual randomized path to register. That leaves an unavoidable, if
-    # normally sub-millisecond, gap between "file appears" (what the poll
-    # above just detected) and "cleanup is registered". Under heavy CPU
-    # contention (e.g. a CI job running many other compiles concurrently)
-    # the scheduler can stretch that gap enough for a signal landing right
-    # after detection to beat the registration, producing a real but
-    # spurious SCRATCH-DIR-HAS-LEFTOVERS unrelated to the fix being tested.
-    # A short settle delay here is far more than that in-memory list-append
-    # needs to complete even on a loaded runner, without weakening the
-    # test: it still kills the driver well before a real compile finishes.
-    sleep 0.02
-    kill -TERM -- -"$pid" 2>/dev/null
-else
-    echo "FINISHED-BEFORE-SIGNAL"
-fi
-wait "$pid" 2>/dev/null
+echo "$result"
 
 if [ -z "$(ls -A "$tmp" 2>/dev/null)" ]; then
     echo "SCRATCH-DIR-CLEAN"
