@@ -180,6 +180,12 @@ BUILTIN(RunError,     "runerror",     Proc, TP, 0, 1, R_None)
 // err_continue_outside_loop / err_exit_value_outside_function,
 // DiagnosticSemaKinds.def), not Builtins.def's arity/dialect gate alone.
 BUILTIN(Exit,         "exit",         Proc, TP, 0, 1, R_None)
+// Turbo Tier 5, Cluster A item 6: 'Fail' inside a constructor -- see
+// Sema::checkCallStmt's own 'fail' arm (SemaStmt.cpp) and
+// err_fail_outside_constructor for the context restriction Builtins.def
+// alone cannot express (confirmed against a local fpc -Mtp build that
+// 'Fail' is not even a recognized identifier outside a constructor).
+BUILTIN(Fail,          "fail",         Proc, TP, 0, 0, R_None)
 BUILTIN(Break,        "break",        Proc, TP, 0, 0, R_None)
 BUILTIN(Continue,     "continue",     Proc, TP, 0, 0, R_None)
 

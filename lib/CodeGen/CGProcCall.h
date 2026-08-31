@@ -68,9 +68,11 @@ public:
                std::function<llvm::BasicBlock*()> CurrentContinueTarget,
                std::function<llvm::BasicBlock*()> CurrentBreakTarget,
                std::function<llvm::BasicBlock*()> ExitBlock,
+               std::function<llvm::Value*()> CurCtorOkAlloca,
                std::function<llvm::Value*(const std::string&,
                    std::span<const std::unique_ptr<plang::ExprNode>>,
-                   plang::SourceLocation)> EmitBuiltinFuncCall)
+                   plang::SourceLocation)> EmitBuiltinFuncCall,
+               std::function<void(llvm::Value*, const plang::Type&)> StampVptr)
         : Ctx(Ctx), Mod(Mod), B(B), FileVars(FileVars), RtFns(RtFns),
           Builtins(Builtins), ClosureAbi(ClosureAbi), Schema(Schema), Types(Types),
           SymTab(SymTab), Linkage(Linkage), Sets(Sets), StrCall(StrCall),
@@ -95,7 +97,9 @@ public:
           CurrentContinueTarget(std::move(CurrentContinueTarget)),
           CurrentBreakTarget(std::move(CurrentBreakTarget)),
           ExitBlock(std::move(ExitBlock)),
-          EmitBuiltinFuncCall(std::move(EmitBuiltinFuncCall)) {}
+          CurCtorOkAlloca(std::move(CurCtorOkAlloca)),
+          EmitBuiltinFuncCall(std::move(EmitBuiltinFuncCall)),
+          StampVptr(std::move(StampVptr)) {}
 
     void emitCallStmt(const plang::CallStmt& s);
     void emitUserProcCall(const plang::CallStmt& s);
@@ -121,6 +125,27 @@ public:
     void emitInheritedCallStmt(const plang::InheritedCallStmt& s);
 
 private:
+    /// Turbo Tier 5, Cluster A item 6: a bound method call where the
+    /// receiver's own address (\p selfPtr) is already in hand -- built for
+    /// New(P, Init(...))'s constructor call and Dispose(P, Done)'s
+    /// destructor call, neither of which has a real Receiver ExprNode the
+    /// way an ordinary 'Obj.Method(...)' does (P^'s storage did not exist
+    /// as a variable before New allocated it).  Otherwise identical to
+    /// emitMethodCallStmt's own marshal-and-dispatch tail -- same fresh-copy
+    /// convention as methodOwnerType/methodEntryOf (this file's own
+    /// anonymous namespace) rather than a shared helper, see their own
+    /// comments.  \p RecvTy is the STATIC type selfPtr's storage was laid
+    /// out as (Pointee, for both New/Init and Dispose/Done -- never an
+    /// ancestor: unlike an ordinary method call there is no polymorphic
+    /// receiver expression here, only the pointer's own declared domain
+    /// type), used both to find Method's owning type in the ancestor chain
+    /// and, for a virtual Method, to compute '_vptr's own offset.  Returns
+    /// the call's own result (a constructor's i1 success flag; null/void
+    /// for a destructor), matching CreateCall's own return either way.
+    llvm::Value* emitBoundMethodCall(llvm::Value* selfPtr, const plang::Type& RecvTy,
+                                     const std::string& Method,
+                                     std::span<const std::unique_ptr<plang::ExprNode>> Args);
+
     /// Turbo Tier 4, Cluster C item 6: recognizes a call to one of Dos.pas's
     /// six string-VALUE-parameter exports (ChDir/MkDir/RmDir/Exec/FindFirst)
     /// and emits it directly against its own scalar-only runtime entry
@@ -245,6 +270,13 @@ private:
     std::function<llvm::BasicBlock*()> CurrentBreakTarget;
     /// Where Exit branches; see CGFunction::ExitBB.
     std::function<llvm::BasicBlock*()> ExitBlock;
+    /// Turbo Tier 5, Cluster A item 6: the CURRENTLY EXECUTING constructor's
+    /// own hidden success-flag alloca (Codegen::Impl::curCtorOkAlloca --
+    /// see its own comment, CodeGenImpl.h, for the whole ABI design), or
+    /// null outside a constructor body.  'Fail' (this file's own 'fail'
+    /// arm) stores false here then branches to ExitBlock() exactly like
+    /// Exit does -- the two share the same epilogue, just a different flag.
+    std::function<llvm::Value*()> CurCtorOkAlloca;
     /// Turbo `{$X+}`: CGFuncCall::emitBuiltinCall, bridged rather than
     /// called directly because CGFuncCall (funcCall_) is constructed after
     /// CGProcCall (procCall_) in Codegen::Impl::init -- see that ordering's
@@ -255,4 +287,14 @@ private:
     std::function<llvm::Value*(const std::string&,
         std::span<const std::unique_ptr<plang::ExprNode>>,
         plang::SourceLocation)> EmitBuiltinFuncCall;
+    /// Turbo Tier 5, Cluster A item 6: stamps \p Type's own VMT global
+    /// address into the '_vptr' slot of the memory \p llvm::Value* points
+    /// at -- Codegen::Impl::stampVptr itself (CodeGenProcs.cpp), reached
+    /// through a closure the same way BuildStaticLinkFrame/
+    /// EmitBuiltinFuncCall are: getOrCreateVmt (stampVptr's own callee) is
+    /// private to Impl and stays there, so New(P, Init(...))'s freshly
+    /// allocated, not-yet-a-variable memory reaches the exact same
+    /// stamping logic emitVarValueInit already gives a directly declared
+    /// local/global, without a second implementation of it here.
+    std::function<void(llvm::Value*, const plang::Type&)> StampVptr;
 };

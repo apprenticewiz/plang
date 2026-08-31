@@ -498,6 +498,23 @@ void CGProcCall::emitCallStmt(const CallStmt& s) {
         return;
     }
 
+    // Turbo Tier 5, Cluster A item 6: 'Fail' inside a constructor -- see
+    // CurCtorOkAlloca's own comment (CGProcCall.h) and curCtorOkAlloca's
+    // (CodeGenImpl.h) for the whole ABI design.  Shares Exit's own epilogue
+    // block (ExitBB): the only difference from a bare 'Exit;' is which flag
+    // gets set before the branch.
+    if (lo == "fail") {
+        auto* okAlloca = CurCtorOkAlloca();
+        if (!okAlloca)
+            codegenICE("'Fail' reached CodeGen outside a constructor -- "
+                       "Sema::checkCallStmt's own 'fail' arm should have "
+                       "refused this already");
+        B.CreateStore(llvm::ConstantInt::get(llvm::Type::getInt1Ty(Ctx), 0),
+                      okAlloca);
+        B.CreateBr(ExitBlock());
+        return;
+    }
+
     // TP-only: RunError([errorcode: Integer]).  Builtins.def gates this to
     // -std=turbo (Dialects = TP), so unlike RangeCheckGuards' own guards --
     // which serve every dialect from the same call site and so have to ask
@@ -730,6 +747,65 @@ void CGProcCall::emitCallStmt(const CallStmt& s) {
         return;
     }
 
+    // Turbo Tier 5, Cluster A item 6: new(p, Ctor[(args)]) for a pointer to
+    // an object type -- Sema::checkNewInit already confirmed Ctor really is
+    // a constructor and validated its arguments; s.NewInitMethod non-empty
+    // is exactly that confirmation.  Real Borland/FPC's own ABI (confirmed
+    // against a local fpc -Mtp build -- see err_fail_outside_constructor's
+    // own comment, DiagnosticSemaKinds.def, and curCtorOkAlloca's,
+    // CodeGenImpl.h): allocate, stamp '_vptr' (the SAME stampVptr
+    // emitVarValueInit gives a directly declared local/global, just handed
+    // freshly allocated memory instead of a variable's own storage), call
+    // the constructor, and if -- and only if -- it called 'Fail' (returned
+    // false), throw the whole thing away and leave p nil, exactly the
+    // "unwinds back through New itself" contract fpc -Mtp demonstrates.  No
+    // destructor runs on the Fail path either way (confirmed empirically,
+    // even when an ancestor's own portion of construction had already
+    // completed) -- Dispose is not called here, only the raw deallocation
+    // 'new(p)' alone already uses (RtFns.getRuntimeDisposeFn()).
+    if (lo == "new" && !s.NewInitMethod.empty()) {
+        const auto& pt = s.Args[0]->ResolvedType;
+        const plang::Type& Pointee = *pt->PointeeType;
+        auto* addr = EmitLValue(*s.Args[0]);
+        int64_t Bytes = (int64_t)Mod.getDataLayout().getTypeAllocSize(
+            Types.llvmTypeOfSemaType(Pointee));
+        auto* ptr = B.CreateCall(RtFns.getRuntimeNewFn(),
+                                       {llvm::ConstantInt::get(I64Ty, Bytes)});
+        StampVptr(ptr, Pointee);
+
+        std::string ctorName;
+        std::span<const std::unique_ptr<ExprNode>> ctorArgs;
+        if (auto* CE = llvm::dyn_cast<CallExpr>(s.Args[1].get())) {
+            ctorName = CE->Name;
+            ctorArgs = CE->Args;
+        } else if (auto* Id = llvm::dyn_cast<IdentExpr>(s.Args[1].get())) {
+            ctorName = Id->Name;
+        } else {
+            codegenICE("new(p, Ctor) reached CodeGen with an unrecognized "
+                       "second-argument shape -- Sema::checkNewInit should "
+                       "have refused this already");
+        }
+        auto* ok = emitBoundMethodCall(ptr, Pointee, ctorName, ctorArgs);
+
+        auto* curFn = B.GetInsertBlock()->getParent();
+        auto* okBB   = llvm::BasicBlock::Create(Ctx, "new.ctor.ok", curFn);
+        auto* failBB = llvm::BasicBlock::Create(Ctx, "new.ctor.fail", curFn);
+        auto* contBB = llvm::BasicBlock::Create(Ctx, "new.ctor.cont", curFn);
+        B.CreateCondBr(ok, okBB, failBB);
+
+        B.SetInsertPoint(okBB);
+        B.CreateStore(ptr, addr);
+        B.CreateBr(contBB);
+
+        B.SetInsertPoint(failBB);
+        B.CreateCall(RtFns.getRuntimeDisposeFn(), {ptr});
+        B.CreateStore(llvm::ConstantPointerNull::get(PtrTy), addr);
+        B.CreateBr(contBB);
+
+        B.SetInsertPoint(contBB);
+        return;
+    }
+
     if (lo == "new" && !s.Args.empty()) {
         // EP §6.7.5.3: new(p, d1..ds) when p's domain-type is a schema-name.
         if (const auto& pt = s.Args[0]->ResolvedType;
@@ -824,6 +900,41 @@ void CGProcCall::emitCallStmt(const CallStmt& s) {
         // says a variable of it begins in, as a declared one would.
         if (domain && HasInitialState(domain))
             EmitInitialState(ptr, Types.llvmTypeOfNode(*domain), domain);
+        return;
+    }
+    // Turbo Tier 5, Cluster A item 6: dispose(p, Dtor[(args)]) -- New/Init's
+    // mirror.  Sema::checkDisposeDone already confirmed Dtor really is a
+    // destructor; s.DisposeDoneMethod non-empty is that confirmation.  A
+    // destructor commonly IS virtual in real TP7 idiom -- see
+    // emitBoundMethodCall's own comment for why that dispatch is exactly
+    // right here too -- so the destructor named in SOURCE need not be the
+    // one actually run: 'dispose(pAnimal, Done)' through an ancestor-typed
+    // pointer still reaches whatever descendant's own Done override the
+    // object's '_vptr' names.  Runs BEFORE the plain deallocation below
+    // (confirmed against a local fpc -Mtp build: the destructor's own
+    // output appears before the memory is freed), reusing that same
+    // deallocation rather than a second copy of it.
+    if (lo == "dispose" && !s.DisposeDoneMethod.empty()) {
+        const auto& pt = s.Args[0]->ResolvedType;
+        const plang::Type& Pointee = *pt->PointeeType;
+        auto* ptr = EmitExpr(*s.Args[0]);
+
+        std::string dtorName;
+        std::span<const std::unique_ptr<ExprNode>> dtorArgs;
+        if (auto* CE = llvm::dyn_cast<CallExpr>(s.Args[1].get())) {
+            dtorName = CE->Name;
+            dtorArgs = CE->Args;
+        } else if (auto* Id = llvm::dyn_cast<IdentExpr>(s.Args[1].get())) {
+            dtorName = Id->Name;
+        } else {
+            codegenICE("dispose(p, Dtor) reached CodeGen with an "
+                       "unrecognized second-argument shape -- "
+                       "Sema::checkDisposeDone should have refused this "
+                       "already");
+        }
+        (void)emitBoundMethodCall(ptr, Pointee, dtorName, dtorArgs);
+
+        B.CreateCall(RtFns.getRuntimeDisposeFn(), {ptr});
         return;
     }
     if (lo == "dispose" && !s.Args.empty()) {
@@ -1023,6 +1134,93 @@ void CGProcCall::emitMethodCallStmt(const MethodCallStmt& s) {
     } else {
         B.CreateCall(callee, args);
     }
+}
+
+// Turbo Tier 5, Cluster A item 6: see this method's own declaration
+// (CGProcCall.h) for the whole design.
+llvm::Value* CGProcCall::emitBoundMethodCall(
+        llvm::Value* selfPtr, const Type& RecvTy, const std::string& Method,
+        std::span<const std::unique_ptr<ExprNode>> Args) {
+    const Type* Owner = methodOwnerType(RecvTy, Method);
+    if (!Owner)
+        codegenICE("'" + Method + "' has no owning type in '" + RecvTy.Name
+                   + "'s own ancestor chain -- Sema should have refused "
+                     "this already");
+    std::string mangledName = Linkage.mangledMethod(Owner->Name, Method);
+
+    // Every method in this compilation unit is pre-declared (at minimum) by
+    // emitAllProcedures's own method pre-pass before ANY body is emitted --
+    // see emitInheritedCallStmt's own identical comment for why a
+    // not-yet-declared fallback (emitMethodCallStmt's own, for a genuine
+    // Pascal-source method call reached through a real Receiver expression)
+    // is not needed here either: New/Init and Dispose/Done both run from
+    // inside some OTHER function's own body, which cannot itself be
+    // emitted until the pre-pass for its whole block has already run.
+    auto* callee = Mod.getFunction(mangledName);
+    if (!callee)
+        codegenICE("'" + mangledName + "' reached CodeGen unresolved -- "
+                   "Sema::checkNewInit/checkDisposeDone should have refused "
+                   "this already or the method pre-pass should have "
+                   "declared it");
+
+    std::vector<llvm::Value*> args;
+    args.push_back(selfPtr);
+
+    size_t pi = args.size();
+    for (size_t astArgIdx = 0; astArgIdx < Args.size(); ++astArgIdx) {
+        const auto& arg = Args[astArgIdx];
+
+        if (const auto* pt = ProcParamArg(mangledName, astArgIdx)) {
+            ClosureAbi.pushProcParamArgs(args, *arg, *pt);
+            pi = args.size();
+            continue;
+        }
+        if (unsigned nd = Schema.schemaArgDiscs(mangledName, astArgIdx); nd > 0) {
+            Schema.pushSchemaArgs(args, *arg, nd);
+            pi = args.size();
+            continue;
+        }
+        const size_t dims = ConformantDimsOf(mangledName, astArgIdx);
+        if (dims > 0) {
+            ClosureAbi.pushConformantArgs(args, *arg, dims);
+            pi += 1 + 2 * dims;
+        } else {
+            std::optional<int64_t> destSetBase = ParamSetBaseOf(mangledName, astArgIdx);
+            args.push_back(Sets.alignSetArg(
+                StrCall.emitCallArg(*arg,
+                    pi < callee->arg_size()
+                        ? callee->getFunctionType()->getParamType(pi) : nullptr,
+                    ParamIsByRef(mangledName, astArgIdx)),
+                *arg, destSetBase));
+            ++pi;
+        }
+    }
+
+    // A destructor commonly IS virtual in real TP7 idiom (confirmed
+    // against a local fpc -Mtp build) -- exactly the point of
+    // Dispose(P, Done): a caller holding only an ancestor-typed pointer
+    // still reaches the actual runtime type's own destructor.  A
+    // constructor can never be virtual (enforced at Sema:
+    // err_object_virtual_constructor), so MEntry->IsVirtual is always
+    // false for New(P, Init(...))'s own call and this branch is
+    // unreachable for it -- one code path serves both, exactly like
+    // emitMethodCallStmt's own identical branch just above.
+    const Type::Method* MEntry = methodEntryOf(*Owner, Method);
+    if (MEntry && MEntry->IsVirtual) {
+        auto vptrOff = Types.vptrOffsetOf(RecvTy);
+        if (!vptrOff)
+            codegenICE("virtual method '" + Method + "' call has a "
+                       "receiver type with no `_vptr` -- Sema should have "
+                       "refused a virtual method on a hierarchy with none");
+        auto* vptrSlot = B.CreateGEP(I8Ty, selfPtr,
+            {llvm::ConstantInt::get(I64Ty, *vptrOff)}, "self.vptr.addr");
+        auto* vmt = B.CreateLoad(PtrTy, vptrSlot, "self.vmt");
+        auto* slotAddr = B.CreateGEP(PtrTy, vmt,
+            {llvm::ConstantInt::get(I64Ty, MEntry->VmtSlot)}, "vmt.slot.addr");
+        auto* fnPtr = B.CreateLoad(PtrTy, slotAddr, "vmt.fn");
+        return B.CreateCall(callee->getFunctionType(), fnPtr, args);
+    }
+    return B.CreateCall(callee, args);
 }
 
 // Turbo Tier 5, Cluster A item 5: see this method's own declaration

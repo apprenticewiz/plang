@@ -363,6 +363,9 @@ void Codegen::Impl::init(const std::string& progName) {
         [this](){ return currentContinueTarget(); },
         [this](){ return currentBreakTarget(); },
         [this](){ return exitBlock(); },
+        // Turbo Tier 5, Cluster A item 6: see CGProcCall.h's own
+        // CurCtorOkAlloca field for the whole design.
+        [this]() -> llvm::Value* { return curCtorOkAlloca; },
         // Turbo `{$X+}`: a required FUNCTION called as a statement lands in
         // emitCallStmt with no arm of its own to match, and needs
         // funcCall_'s builtin dispatch chain -- built below, after procCall_,
@@ -372,7 +375,11 @@ void Codegen::Impl::init(const std::string& progName) {
                std::span<const std::unique_ptr<ExprNode>> args,
                SourceLocation loc) {
             return funcCall_->emitBuiltinCall(name, args, loc);
-        });
+        },
+        // Turbo Tier 5, Cluster A item 6: New(P, Init(...))'s own vptr
+        // stamp on freshly allocated memory -- see CGProcCall.h's
+        // StampVptr field for the whole design.
+        [this](llvm::Value* ptr, const plang::Type& t){ stampVptr(ptr, t); });
     // Record field access and pointer dereference.  EmitLValue/EmitExpr
     // are narrow closures into methods not yet extracted (both still in
     // CodeGenExprs.cpp -- emitExpr/emitLValue themselves).

@@ -95,6 +95,20 @@ struct CallStmt : StmtNode {
     /// expression in this translation unit.  Null for an ordinary procedure
     /// call, exactly like ExprNode::ResolvedType is null before Sema runs.
     mutable std::shared_ptr<Type> ResolvedType;
+
+    /// Turbo Tier 5, Cluster A item 6: set by Sema::checkNewInit only when
+    /// Name is "new" and this is 'new(p, Ctor(args))' for a pointer to an
+    /// object type -- the constructor's name as written (its OWN chain
+    /// position, i.e. which ancestor actually implements it, is
+    /// re-derived by CodeGen the same way an ordinary method call's own
+    /// CodeGen does, rather than stored twice).  Empty otherwise.  Args[1]
+    /// itself (a CallExpr) still carries the constructor's own argument
+    /// list -- CGProcCall re-reads it from there rather than a duplicate
+    /// copy.
+    mutable std::string NewInitMethod;
+    /// Turbo Tier 5, Cluster A item 6: NewInitMethod's mirror for
+    /// 'dispose(p, Dtor[(args)])', set by Sema::checkDisposeDone.
+    mutable std::string DisposeDoneMethod;
 };
 
 /// Turbo Tier 5, Cluster A item 3: a method call used as a STATEMENT --

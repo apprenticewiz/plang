@@ -1345,6 +1345,16 @@ void Sema::checkCallStmt(const CallStmt& S) {
             // arguments was validated for a variant record.
             const bool ToVariant = !ToSchema && Pointee && Pointee->Kind == TypeKind::Record
                                     && Pointee->RecordDecl && Pointee->RecordDecl->Variant;
+            // Turbo Tier 5, Cluster A item 6: new(p, Ctor[(args)]) -- see
+            // checkNewInit's own comment (Sema.h) for the whole design.
+            // Gated on S.Args.size() > 1: a bare 'new(p)' for an object
+            // pointee is unaffected (confirmed legal against fpc -Mtp,
+            // allocating with no constructor run at all).
+            if (!ToSchema && !ToVariant && Pointee && Pointee->Kind == TypeKind::Object
+                    && S.Args.size() > 1) {
+                checkNewInit(S, *Pointee);
+                return;
+            }
             const VariantPart* Vp = ToVariant ? Pointee->RecordDecl->Variant.get() : nullptr;
             bool ExtraReported = false;
             for (size_t I = 1; I < S.Args.size(); ++I) {
@@ -1425,6 +1435,14 @@ void Sema::checkCallStmt(const CallStmt& S) {
                                       ? PtrTy->PointeeType.get() : nullptr;
             const bool ToVariant = Pointee && Pointee->Kind == TypeKind::Record
                                     && Pointee->RecordDecl && Pointee->RecordDecl->Variant;
+            // Turbo Tier 5, Cluster A item 6: dispose(p, Dtor[(args)]) --
+            // checkNewInit's mirror.  Gated the same way: a bare
+            // 'dispose(p)' for an object pointee is unaffected.
+            if (!ToVariant && Pointee && Pointee->Kind == TypeKind::Object
+                    && S.Args.size() > 1) {
+                checkDisposeDone(S, *Pointee);
+                return;
+            }
             const VariantPart* Vp = ToVariant ? Pointee->RecordDecl->Variant.get() : nullptr;
             bool ExtraReported = false;
             for (size_t I = 1; I < S.Args.size(); ++I) {
@@ -1661,6 +1679,25 @@ void Sema::checkCallStmt(const CallStmt& S) {
                     if (!FuncStack.empty()) FuncStack.back().HasResult = true;
                 }
             }
+            return;
+        }
+
+        // Turbo Tier 5, Cluster A item 6: 'Fail' -- legal only inside a
+        // constructor's own body (confirmed against a local fpc -Mtp
+        // build: 'Fail' is not even a recognized identifier anywhere
+        // else, "Identifier not found"; a direct call to a constructor
+        // outside 'new(p, Ctor(...))' -- e.g. 'A.Init(false);' for an
+        // already-declared A -- still runs Fail's early-return, it is
+        // only the CALLER that has no way to observe it, which fpc -Mtp
+        // also confirms is exactly what real Borland/FPC does).
+        // CurrentProc->OwnerType.empty() mirrors checkInheritedCallStmt's
+        // own "not inside a method at all" test; !CurrentProc->
+        // IsConstructor narrows it from "inside any method" to "inside a
+        // constructor specifically".
+        if (Lo == "fail") {
+            if (!CurrentProc || CurrentProc->OwnerType.empty()
+                    || !CurrentProc->IsConstructor)
+                error(S.Loc, diag::err_fail_outside_constructor, {});
             return;
         }
 
@@ -2063,6 +2100,125 @@ void Sema::checkInheritedCallStmt(const InheritedCallStmt& S) {
     Indirect.ReturnType = MethodSym->ReturnType;
     auto RetTy = checkUserDefinedCall(Indirect, S.Loc, S.Args, /*ExpectFunction=*/false);
     S.ResolvedType = (RetTy && !RetTy->isError()) ? RetTy : nullptr;
+}
+
+namespace {
+/// Turbo Tier 5, Cluster A item 6: the second argument of 'new(p, X)' or
+/// 'dispose(p, X)' for an object pointee is written one of two ways real
+/// Borland/FPC both accept (confirmed against a local fpc -Mtp build) --
+/// a bare identifier for a no-argument constructor/destructor ('Init',
+/// 'Done'), or a CallExpr when there are arguments ('Init(a, b)').  Pulls
+/// the callee name and argument list out of whichever shape it is;
+/// returns false (name left untouched) for anything else, e.g. a literal
+/// or an arbitrary expression, which is not a legal callee shape either
+/// way.
+bool splitCtorDtorArg(const ExprNode& E, std::string& Name,
+                      std::span<const std::unique_ptr<ExprNode>>& Args) {
+    if (auto* CE = llvm::dyn_cast<CallExpr>(&E)) {
+        Name = CE->Name;
+        Args = CE->Args;
+        return true;
+    }
+    if (auto* Id = llvm::dyn_cast<IdentExpr>(&E)) {
+        Name = Id->Name;
+        Args = {};
+        return true;
+    }
+    return false;
+}
+} // namespace
+
+void Sema::checkNewInit(const CallStmt& S, const Type& Pointee) {
+    if (S.Args.size() != 2) {
+        error(S.Loc, diag::err_new_object_needs_init, {Pointee.Name});
+        for (size_t I = 1; I < S.Args.size(); ++I) (void)checkExpr(*S.Args[I]);
+        return;
+    }
+    std::string CtorName;
+    std::span<const std::unique_ptr<ExprNode>> CtorArgs;
+    if (!splitCtorDtorArg(*S.Args[1], CtorName, CtorArgs)) {
+        error(S.Args[1]->Loc, diag::err_new_object_needs_init, {Pointee.Name});
+        (void)checkExpr(*S.Args[1]);
+        return;
+    }
+
+    // Same ancestor-chain composite-key walk checkMethodCall/
+    // checkInheritedCallStmt both use -- a constructor need not be
+    // declared directly on Pointee itself (an unmodified inherited one is
+    // legal: 'new(pDog, Init)' where TDog declares no Init of its own but
+    // TAnimal does).
+    const Symbol* MethodSym = nullptr;
+    for (const Type* Cur = &Pointee; Cur; Cur = Cur->Parent.get()) {
+        Symbol* Sy = Symtab.lookup(objectMethodKey(Cur->Name, CtorName));
+        if (Sy && Sy->Kind == SymbolKind::Method) { MethodSym = Sy; break; }
+    }
+    if (!MethodSym) {
+        error(S.Args[1]->Loc, diag::err_object_method_not_found,
+              {Pointee.Name, CtorName});
+        for (const auto& A : CtorArgs) (void)checkExpr(*A);
+        return;
+    }
+    if (!MethodSym->IsMethodConstructor) {
+        error(S.Args[1]->Loc, diag::err_new_init_not_constructor,
+              {Pointee.Name, CtorName});
+        for (const auto& A : CtorArgs) (void)checkExpr(*A);
+        return;
+    }
+
+    Symbol Indirect;
+    Indirect.Kind       = SymbolKind::Proc;
+    Indirect.Name       = MethodSym->MethodOwnerType + "." +
+                           (MethodSym->Decl ? MethodSym->Decl->Name : CtorName);
+    Indirect.IsFunction = MethodSym->IsFunction;
+    Indirect.Params     = MethodSym->Params;
+    Indirect.ReturnType = MethodSym->ReturnType;
+    (void)checkUserDefinedCall(Indirect, S.Args[1]->Loc, CtorArgs,
+                               /*ExpectFunction=*/false);
+    S.NewInitMethod = CtorName;
+}
+
+void Sema::checkDisposeDone(const CallStmt& S, const Type& Pointee) {
+    if (S.Args.size() != 2) {
+        error(S.Loc, diag::err_dispose_object_needs_done, {Pointee.Name});
+        for (size_t I = 1; I < S.Args.size(); ++I) (void)checkExpr(*S.Args[I]);
+        return;
+    }
+    std::string DtorName;
+    std::span<const std::unique_ptr<ExprNode>> DtorArgs;
+    if (!splitCtorDtorArg(*S.Args[1], DtorName, DtorArgs)) {
+        error(S.Args[1]->Loc, diag::err_dispose_object_needs_done, {Pointee.Name});
+        (void)checkExpr(*S.Args[1]);
+        return;
+    }
+
+    const Symbol* MethodSym = nullptr;
+    for (const Type* Cur = &Pointee; Cur; Cur = Cur->Parent.get()) {
+        Symbol* Sy = Symtab.lookup(objectMethodKey(Cur->Name, DtorName));
+        if (Sy && Sy->Kind == SymbolKind::Method) { MethodSym = Sy; break; }
+    }
+    if (!MethodSym) {
+        error(S.Args[1]->Loc, diag::err_object_method_not_found,
+              {Pointee.Name, DtorName});
+        for (const auto& A : DtorArgs) (void)checkExpr(*A);
+        return;
+    }
+    if (!MethodSym->IsMethodDestructor) {
+        error(S.Args[1]->Loc, diag::err_dispose_done_not_destructor,
+              {Pointee.Name, DtorName});
+        for (const auto& A : DtorArgs) (void)checkExpr(*A);
+        return;
+    }
+
+    Symbol Indirect;
+    Indirect.Kind       = SymbolKind::Proc;
+    Indirect.Name       = MethodSym->MethodOwnerType + "." +
+                           (MethodSym->Decl ? MethodSym->Decl->Name : DtorName);
+    Indirect.IsFunction = MethodSym->IsFunction;
+    Indirect.Params     = MethodSym->Params;
+    Indirect.ReturnType = MethodSym->ReturnType;
+    (void)checkUserDefinedCall(Indirect, S.Args[1]->Loc, DtorArgs,
+                               /*ExpectFunction=*/false);
+    S.DisposeDoneMethod = DtorName;
 }
 
 void Sema::checkWith(const WithStmt& S) {
