@@ -1733,8 +1733,30 @@ int64_t Codegen::Impl::declaredStrCapacity(const TypeNode* tn) {
     return 0;
 }
 
-// Turbo Tier 5, Cluster A item 5: see this function's own declaration
-// (CodeGenImpl.h) for the whole design.
+namespace {
+// Same fresh-copy convention CGProcCall.cpp/CGFuncCall.cpp's own
+// methodOwnerType uses (see either one's comment) -- walks Start's own
+// ancestor chain for the Type NAMED TypeName (case-insensitive), which for
+// a VmtSlotEntry::ImplementingType or an InheritedCallStmt::ImplementingType
+// is always Start itself or one of its ancestors, never anything unrelated.
+const Type* typeNamedInChain(const Type& Start, const std::string& TypeName) {
+    for (const Type* Cur = &Start; Cur; Cur = Cur->Parent.get())
+        if (eqCI(Cur->Name, TypeName)) return Cur;
+    return nullptr;
+}
+// Same fresh-copy convention as methodEntryOf in CGProcCall.cpp/
+// CGFuncCall.cpp, restricted to methods DECLARED BY Owner itself (never an
+// inherited one -- see Type::ObjectMethods's own comment), which is exactly
+// what a VmtSlotEntry::ImplementingType names.
+const Type::Method* methodNamedOn(const Type& Owner, const std::string& MethodName) {
+    for (const auto& M : Owner.ObjectMethods)
+        if (eqCI(M.Name, MethodName)) return &M;
+    return nullptr;
+}
+} // namespace
+
+// Turbo Tier 5, Cluster A item 5 / Cluster B item 8: see this function's own
+// declaration (CodeGenImpl.h) for the whole design.
 llvm::GlobalVariable* Codegen::Impl::getOrCreateVmt(const Type& T) {
     if (T.Kind != TypeKind::Object || T.VmtSlots.empty()) return nullptr;
     if (auto it = vmtGlobals_.find(&T); it != vmtGlobals_.end()) return it->second;
@@ -1742,23 +1764,74 @@ llvm::GlobalVariable* Codegen::Impl::getOrCreateVmt(const Type& T) {
     std::vector<llvm::Constant*> elems;
     elems.reserve(T.VmtSlots.size());
     for (const auto& slot : T.VmtSlots) {
-        std::string mangledName = mangledMethod(slot.ImplementingType, slot.MethodName);
+        std::string mangledName =
+            mangledMethod(slot.ImplementingType, slot.MethodName, slot.DeclaringModule);
         auto* fn = mod->getFunction(mangledName);
-        if (!fn)
-            codegenICE("VMT for object type '" + T.Name + "' needs '"
-                       + mangledName + "' but it was never declared -- every "
-                         "method should be pre-declared before any body or "
-                         "global-init that could need a VMT runs "
-                         "(emitAllProcedures's own method pre-pass)");
+        if (!fn) {
+            // Cluster B item 8: not an error -- the implementing type may be
+            // declared in a unit this translation unit only reaches through
+            // a re-parsed .tui, whose own out-of-line bodies were never (and
+            // are never going to be) part of this compile at all.  Declare
+            // it, from the implementing type's own resolved Method entry,
+            // exactly the way any other cross-unit reference in this
+            // codebase is declared rather than defined.
+            const Type* Impl = typeNamedInChain(T, slot.ImplementingType);
+            const Type::Method* M = Impl ? methodNamedOn(*Impl, slot.MethodName) : nullptr;
+            if (!Impl || !M)
+                codegenICE("VMT for object type '" + T.Name + "' needs '"
+                           + mangledName + "', implemented by '"
+                           + slot.ImplementingType + "." + slot.MethodName
+                           + "', which cannot be found in its own ancestor "
+                             "chain -- Sema should have refused this "
+                             "hierarchy already");
+            fn = declareImportedMethod(*M, mangledName);
+        }
         elems.push_back(fn);
     }
     auto* arrTy = llvm::ArrayType::get(ptrTy, elems.size());
     auto* init  = llvm::ConstantArray::get(arrTy, elems);
     auto* gv = new llvm::GlobalVariable(
         *mod, arrTy, /*isConstant=*/true, llvm::GlobalValue::InternalLinkage,
-        init, mangledVmt(T.Name));
+        init, mangledVmt(T.Name, T.DeclaringModule));
     vmtGlobals_[&T] = gv;
     return gv;
+}
+
+// Turbo Tier 5, Cluster B item 8: see this function's own declaration
+// (CodeGenImpl.h) for the whole design.
+llvm::Function* Codegen::Impl::declareImportedMethod(const Type::Method& M,
+                                                      const std::string& mangledName) {
+    if (auto* existing = mod->getFunction(mangledName)) return existing;
+
+    std::vector<llvm::Type*> paramTys;
+    paramTys.push_back(ptrTy); // Self
+
+    for (const auto& P : M.Params) {
+        if (P.IsUntyped) { paramTys.push_back(ptrTy); continue; }
+        if (!P.Ty)
+            codegenICE("imported method '" + mangledName + "' has a "
+                       "parameter '" + P.Name + "' with no resolved type");
+        if (P.Ty->Kind == TypeKind::ConformantArray
+                || P.Ty->Kind == TypeKind::Procedure
+                || P.Ty->Kind == TypeKind::Function)
+            codegenICE("imported method '" + mangledName + "' has a "
+                       "conformant-array or procedural-type parameter '"
+                       + P.Name + "' -- not yet supported across a unit "
+                         "boundary (see declareImportedMethod's own "
+                         "comment, CodeGenImpl.h)");
+        const bool constByRef = P.IsConst && !P.Ty->isError()
+            && isStructuredForConstByRef(*P.Ty);
+        const bool passByRef = P.IsVar || constByRef;
+        paramTys.push_back(passByRef ? ptrTy : llvmTypeOfSemaType(*P.Ty));
+    }
+
+    llvm::Type* retTy = llvm::Type::getVoidTy(ctx);
+    if (M.IsConstructor) retTy = i1Ty; // hidden success flag -- see emitFunctionDef
+    else if (M.IsFunction && M.RetType) retTy = llvmTypeOfSemaType(*M.RetType);
+
+    auto* fnTy = llvm::FunctionType::get(retTy, paramTys, /*isVarArg=*/false);
+    return llvm::Function::Create(fnTy, llvm::GlobalValue::ExternalLinkage,
+                                  mangledName, mod.get());
 }
 
 // Turbo Tier 5, Cluster A item 5: see this function's own declaration

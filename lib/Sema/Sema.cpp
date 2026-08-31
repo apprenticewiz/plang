@@ -1266,7 +1266,21 @@ Sema::loadUnitInterfaceExports(const std::string& UnitName, SourceLocation Loc) 
 
     const UnitNode* UN = UnitProg->BareUnit.get();
     LoadedUnitNodes_[Key] = UN;
+    // Turbo Tier 5, Cluster B item 8: CurrentUnit_ has to name THIS foreign
+    // unit (Key), not whatever unit/program is doing the 'uses', while its
+    // interface is checked -- resolveObjectType and checkField both stamp
+    // Sema's current CurrentUnit_ onto whatever they declare
+    // (Type::DeclaringModule, Field::DeclaringModule) as "which module owns
+    // this", and an object type's own layout/mangling correctness across a
+    // unit boundary depends on that being the type's REAL declaring unit,
+    // not the importer.  checkUnit already gets this right for a unit
+    // compiled directly (it sets CurrentUnit_ = Key before calling
+    // checkUnitInterfaceOnly itself); this was the one path that reached
+    // checkUnitInterfaceOnly without doing the same.
+    const std::string SavedUnitForInterface = CurrentUnit_;
+    CurrentUnit_ = Key;
     checkUnitInterfaceOnly(*UN); // fills UnitExports_[Key]
+    CurrentUnit_ = SavedUnitForInterface;
 
     // The Symbols just harvested, and any Type resolved while checking this
     // interface, may point back into UN's own AST nodes (a record Type

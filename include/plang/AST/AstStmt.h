@@ -182,6 +182,14 @@ struct InheritedCallStmt : StmtNode {
     /// MethodCallExpr/Stmt codegen's identical "Owner" concept, just found
     /// starting one level higher (Parent, not the receiver's own type).
     mutable std::string ImplementingType;
+    /// Turbo Tier 5, Cluster B item 8: the module that declared
+    /// ImplementingType -- see Type::DeclaringModule's own comment
+    /// (Sema/Type.h) for why CodeGen needs this once the ancestor whose
+    /// method 'inherited' reaches may live in a different translation unit
+    /// than the one compiling this call.  Copied from the resolved method
+    /// Symbol's own Module field (Sema::checkInheritedCallStmt), which
+    /// checkUnitInterfaceOnly already stamps for exactly this reason.
+    mutable std::string ImplementingModule;
     /// Turbo `{$X+}`: mirrors MethodCallStmt::ResolvedType exactly, for the
     /// explicit-name form only (the bare form's own callee is a procedure or
     /// function according to whatever the ENCLOSING method already is, and

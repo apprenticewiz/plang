@@ -836,7 +836,7 @@ llvm::Value* CGFuncCall::emitMethodCallExpr(const MethodCallExpr& e) {
         codegenICE("method '" + e.Method + "' has no owning type in its "
                    "receiver's own ancestor chain -- Sema should have "
                    "refused this call already");
-    std::string mangledName = Linkage.mangledMethod(Owner->Name, e.Method);
+    std::string mangledName = Linkage.mangledMethod(Owner->Name, e.Method, Owner->DeclaringModule);
 
     // The receiver's own address: EmitLValue already handles both shapes --
     // a plain IdentExpr ('Obj.Method(...)') through the ordinary variable

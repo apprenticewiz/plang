@@ -553,17 +553,68 @@ static std::string typeDenoterToString(const TypeNode& TN) {
         return routineHeadingToString(*PT, "");
     if (auto* TO = llvm::dyn_cast<TypeOfNode>(&TN))
         return "type of " + TO->VarName;
-    // Turbo Tier 5, Cluster A item 0: object types parse but Sema already
-    // refuses to resolve one (err_object_type_not_yet_supported), so a
-    // declaration naming one never reaches a working PMI in the first
-    // place.  No serialization form has been settled for items 1-7 yet
-    // (ancestor clause, visibility sections, method headings all need
-    // their own writeback rules), so this falls through to "no guess"
-    // below exactly like every other not-yet-writable case there,
-    // reachable only if that changes and this call site is not updated
-    // alongside it.
-    if (llvm::isa<ObjectTypeNode>(&TN))
-        return "";
+    // Turbo Tier 5, Cluster B item 8: an object type declared in a unit's
+    // own interface, written back as real, re-parseable 'object ... end'
+    // syntax -- exactly the same round-trip contract every other case here
+    // already keeps.  Deliberately does NOT filter members by visibility:
+    // a private field stays inaccessible to code in the consuming unit
+    // (Sema enforces that from each ObjectMember's own Vis, carried through
+    // resolveObjectType exactly as it is for a single-file object type),
+    // but it still has to be PRESENT here, because a descendant object type
+    // declared in a DIFFERENT unit needs the ancestor's full, real field
+    // layout to compute correct memory layout for itself -- an ancestor's
+    // private field omitted here would shrink or misalign every field a
+    // cross-unit descendant declares after it.  Method headings carry their
+    // own 'virtual'/'abstract' markers back out exactly as written (a
+    // constructor/destructor never repeats them, matching
+    // parseObjectMethodHeading's own read side); the out-of-line bodies
+    // themselves are never part of an interface and so never appear here.
+    if (auto* OT = llvm::dyn_cast<ObjectTypeNode>(&TN)) {
+        bool Ok = true;
+        std::string R = "object";
+        if (!OT->Ancestor.empty()) R += "(" + OT->Ancestor + ")";
+        R += "\n";
+        MemberVisibility CurVis = MemberVisibility::Public;
+        for (const auto& M : OT->Members) {
+            if (M.Vis != CurVis) {
+                R += (M.Vis == MemberVisibility::Private ? "private\n" : "public\n");
+                CurVis = M.Vis;
+            }
+            if (M.IsMethod) {
+                const ProcDecl& PD = *M.Method;
+                std::string Head = PD.IsConstructor ? "constructor"
+                                  : PD.IsDestructor  ? "destructor"
+                                  : PD.IsFunction     ? "function"
+                                                       : "procedure";
+                Head += " " + PD.Name;
+                Head += paramListToString(PD.Params, Ok);
+                if (PD.IsFunction && PD.ReturnType) {
+                    std::string T = typeNodeToString(*PD.ReturnType);
+                    if (T.empty()) Ok = false;
+                    Head += ": " + T;
+                }
+                R += "  " + Head + ";";
+                // Confirmed against a local fpc -Mtp build (see
+                // parseObjectMethodHeading's own comment): 'virtual' is
+                // always written before a following 'abstract'.
+                if (PD.IsVirtual)  R += " virtual;";
+                if (PD.IsAbstract) R += " abstract;";
+                R += "\n";
+            } else {
+                std::string T = M.Field.Type ? typeNodeToString(*M.Field.Type)
+                                             : std::string();
+                if (T.empty()) Ok = false;
+                R += "  ";
+                for (size_t J = 0; J < M.Field.Names.size(); ++J) {
+                    if (J) R += ", ";
+                    R += M.Field.Names[J];
+                }
+                R += ": " + T + ";\n";
+            }
+        }
+        if (!Ok) return "";
+        return R + "end";
+    }
     // Nothing left that a type-denoter can be.  Writing a guess here is worse
     // than saying nothing: the importer would lay out the wrong storage and
     // never know, so the caller drops the declaration instead.

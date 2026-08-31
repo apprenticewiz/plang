@@ -1045,6 +1045,51 @@ const plang::Type::Method* methodEntryOf(const plang::Type& Owner,
         if (eqCI(M.Name, Method)) return &M;
     return nullptr;
 }
+
+// Turbo Tier 5, Cluster B item 8: an external declaration (never a
+// definition) for a method this translation unit did not itself compile --
+// same fresh-copy convention as methodOwnerType/methodEntryOf just above;
+// this is CGProcCall.cpp's own copy of Codegen::Impl::declareImportedMethod
+// (CodeGenProcs.cpp), which CGProcCall cannot call directly (constructed
+// standalone, with no reference back to Impl -- see this class's own
+// constructor). Built from M's own RESOLVED signature, exactly like the
+// Impl-side twin; see that one's own comment (CodeGenImpl.h) for why a
+// conformant-array or procedural-type parameter is a clear codegenICE
+// rather than a wrong-ABI guess.
+llvm::Function* declareForeignMethod(llvm::Module& Mod, llvm::LLVMContext& Ctx,
+                                     llvm::PointerType* PtrTy, CGTypes& Types,
+                                     const plang::Type::Method& M,
+                                     const std::string& mangledName) {
+    if (auto* existing = Mod.getFunction(mangledName)) return existing;
+
+    std::vector<llvm::Type*> paramTys;
+    paramTys.push_back(PtrTy); // Self
+    for (const auto& P : M.Params) {
+        if (P.IsUntyped) { paramTys.push_back(PtrTy); continue; }
+        if (!P.Ty)
+            codegenICE("imported method '" + mangledName + "' has a "
+                       "parameter '" + P.Name + "' with no resolved type");
+        if (P.Ty->Kind == plang::TypeKind::ConformantArray
+                || P.Ty->Kind == plang::TypeKind::Procedure
+                || P.Ty->Kind == plang::TypeKind::Function)
+            codegenICE("imported method '" + mangledName + "' has a "
+                       "conformant-array or procedural-type parameter '"
+                       + P.Name + "' -- not yet supported across a unit "
+                         "boundary");
+        const bool constByRef = P.IsConst && !P.Ty->isError()
+            && plang::isStructuredForConstByRef(*P.Ty);
+        const bool passByRef = P.IsVar || constByRef;
+        paramTys.push_back(passByRef ? PtrTy : Types.llvmTypeOfSemaType(*P.Ty));
+    }
+
+    llvm::Type* retTy = llvm::Type::getVoidTy(Ctx);
+    if (M.IsConstructor) retTy = llvm::Type::getInt1Ty(Ctx);
+    else if (M.IsFunction && M.RetType) retTy = Types.llvmTypeOfSemaType(*M.RetType);
+
+    auto* fnTy = llvm::FunctionType::get(retTy, paramTys, /*isVarArg=*/false);
+    return llvm::Function::Create(fnTy, llvm::GlobalValue::ExternalLinkage,
+                                  mangledName, &Mod);
+}
 } // namespace
 
 void CGProcCall::emitMethodCallStmt(const MethodCallStmt& s) {
@@ -1055,7 +1100,7 @@ void CGProcCall::emitMethodCallStmt(const MethodCallStmt& s) {
         codegenICE("method '" + s.Method + "' has no owning type in its "
                    "receiver's own ancestor chain -- Sema should have "
                    "refused this call already");
-    std::string mangledName = Linkage.mangledMethod(Owner->Name, s.Method);
+    std::string mangledName = Linkage.mangledMethod(Owner->Name, s.Method, Owner->DeclaringModule);
 
     llvm::Value* selfPtr = EmitLValue(*s.Receiver);
     if (!selfPtr) codegenICE("method call receiver has no address");
@@ -1146,22 +1191,31 @@ llvm::Value* CGProcCall::emitBoundMethodCall(
         codegenICE("'" + Method + "' has no owning type in '" + RecvTy.Name
                    + "'s own ancestor chain -- Sema should have refused "
                      "this already");
-    std::string mangledName = Linkage.mangledMethod(Owner->Name, Method);
+    std::string mangledName = Linkage.mangledMethod(Owner->Name, Method, Owner->DeclaringModule);
 
-    // Every method in this compilation unit is pre-declared (at minimum) by
-    // emitAllProcedures's own method pre-pass before ANY body is emitted --
-    // see emitInheritedCallStmt's own identical comment for why a
+    // Every method THIS TRANSLATION UNIT declares is pre-declared (at
+    // minimum) by emitAllProcedures's own method pre-pass before ANY body is
+    // emitted -- see emitInheritedCallStmt's own identical comment for why a
     // not-yet-declared fallback (emitMethodCallStmt's own, for a genuine
     // Pascal-source method call reached through a real Receiver expression)
-    // is not needed here either: New/Init and Dispose/Done both run from
-    // inside some OTHER function's own body, which cannot itself be
+    // is not needed here for THAT reason: New/Init and Dispose/Done both run
+    // from inside some OTHER function's own body, which cannot itself be
     // emitted until the pre-pass for its whole block has already run.
+    // Turbo Tier 5, Cluster B item 8: Owner may still be declared in a
+    // DIFFERENT translation unit than this one (New(P, Init(...)) on a
+    // cross-unit object type), which the pre-pass never reaches at all --
+    // declareForeignMethod covers exactly that case, from Owner's own
+    // resolved Method entry.
     auto* callee = Mod.getFunction(mangledName);
-    if (!callee)
-        codegenICE("'" + mangledName + "' reached CodeGen unresolved -- "
-                   "Sema::checkNewInit/checkDisposeDone should have refused "
-                   "this already or the method pre-pass should have "
-                   "declared it");
+    if (!callee) {
+        const Type::Method* MEntry = methodEntryOf(*Owner, Method);
+        if (!MEntry)
+            codegenICE("'" + mangledName + "' reached CodeGen unresolved -- "
+                       "Sema::checkNewInit/checkDisposeDone should have "
+                       "refused this already or the method pre-pass should "
+                       "have declared it");
+        callee = declareForeignMethod(Mod, Ctx, PtrTy, Types, *MEntry, mangledName);
+    }
 
     std::vector<llvm::Value*> args;
     args.push_back(selfPtr);
@@ -1230,20 +1284,65 @@ void CGProcCall::emitInheritedCallStmt(const InheritedCallStmt& s) {
         codegenICE("'inherited' reached CodeGen unresolved -- "
                    "Sema::checkInheritedCallStmt should have refused this "
                    "already or filled in ImplementingType/ResolvedMethod");
-    std::string mangledName = Linkage.mangledMethod(s.ImplementingType, s.ResolvedMethod);
+    std::string mangledName = Linkage.mangledMethod(s.ImplementingType, s.ResolvedMethod,
+                                                    s.ImplementingModule);
 
-    // Every method in this compilation unit is pre-declared (at minimum) by
-    // emitAllProcedures's own method pre-pass before ANY body -- including
-    // this one, whichever method contains this 'inherited' -- is emitted, so
-    // this is never the "not yet defined in this compilation unit" case
-    // CGFuncCall::emitMethodCallExpr's own static-call fallback has to
-    // handle: an out-of-line ancestor method body always has at least a
-    // declaration standing under its mangled name by the time any OTHER
-    // method's own body starts.
+    // Every method THIS TRANSLATION UNIT declares is pre-declared (at
+    // minimum) by emitAllProcedures's own method pre-pass before ANY body --
+    // including this one, whichever method contains this 'inherited' -- is
+    // emitted, so within one translation unit this is never the "not yet
+    // defined" case CGFuncCall::emitMethodCallExpr's own static-call
+    // fallback has to handle: an out-of-line ancestor method body always has
+    // at least a declaration standing under its mangled name by the time any
+    // OTHER method's own body starts.
+    //
+    // Turbo Tier 5, Cluster B item 8: the ancestor 'inherited' reaches may
+    // now be declared in a DIFFERENT translation unit than this one (its own
+    // out-of-line body was never part of this compile, and never will be),
+    // which the pre-pass cannot reach at all -- declared here instead, on
+    // first use.
     auto* callee = Mod.getFunction(mangledName);
-    if (!callee)
-        codegenICE("'inherited " + s.ResolvedMethod + "' resolved to '"
-                   + mangledName + "', which was never declared");
+    if (!callee) {
+        if (s.Method.empty()) {
+            // Bare 'inherited;' forwards this activation's own parameters
+            // positionally and unchanged (just below) -- Sema's own
+            // override-signature check (resolveObjectType) already
+            // guarantees the ancestor's own parameter list is identical to
+            // the CURRENTLY EXECUTING function's, so that function's own
+            // FunctionType (curFn, read a few lines down -- fetched once
+            // more here, before it is otherwise needed, purely to build this
+            // declaration) is exactly the signature to declare, with no
+            // Type::Method lookup needed at all.
+            llvm::Function* enclosing = B.GetInsertBlock()->getParent();
+            callee = llvm::Function::Create(enclosing->getFunctionType(),
+                                            llvm::GlobalValue::ExternalLinkage,
+                                            mangledName, &Mod);
+        } else {
+            // Explicit 'inherited Method(args)': same args-derived signature
+            // heuristic emitMethodCallStmt's own identical fallback uses
+            // just above (this function's own written argument list, plus
+            // s.ResolvedType for a function's result) -- adequate for the
+            // same reason it is there: internal self-consistency between
+            // this declaration and the marshalling loop just below, not
+            // byte-for-byte agreement with some other translation unit's
+            // richer ABI knowledge (constByRef, conformant/schema params, an
+            // object method never has).
+            llvm::Type* retTy = llvm::Type::getVoidTy(Ctx);
+            if (s.ResolvedType && !s.ResolvedType->isError())
+                retTy = Types.llvmTypeOfSemaType(*s.ResolvedType);
+            std::vector<llvm::Type*> paramTys;
+            paramTys.push_back(PtrTy); // Self
+            for (const auto& Arg : s.Args) {
+                if (Arg && Arg->ResolvedType && !Arg->ResolvedType->isError())
+                    paramTys.push_back(Types.llvmTypeOfSemaType(*Arg->ResolvedType));
+                else
+                    paramTys.push_back(I64Ty);
+            }
+            auto* fnTy = llvm::FunctionType::get(retTy, paramTys, false);
+            callee = llvm::Function::Create(fnTy, llvm::GlobalValue::ExternalLinkage,
+                                            mangledName, &Mod);
+        }
+    }
 
     // The CURRENTLY EXECUTING function's own Self -- forwarded unchanged,
     // never re-read through the 'Self' symbol table entry, so this works
