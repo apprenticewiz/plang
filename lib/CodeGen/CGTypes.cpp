@@ -513,7 +513,7 @@ CGTypes::arrayIndexRange(const ArrayTypeNode& n) const {
 // reaches debugTypeOfSemaType and is silently given no DIType at all,
 // which is the *correct*, deliberate answer for a composite kind but a
 // silent gap for a new scalar-like kind that should have gotten one.
-static_assert(NumSemaTypeKinds == 22,
+static_assert(NumSemaTypeKinds == 23,
               "a new semantic type kind needs a case in canLowerSemaType, "
               "llvmTypeOfSemaType, and (if it is scalar-like) "
               "debugTypeOfSemaType");
@@ -535,6 +535,15 @@ bool CGTypes::canLowerSemaType(const Type& T) {
         return true;
     case TypeKind::SchemaInstance:
         return T.SchemaBody && canLowerSemaType(*T.SchemaBody);
+    // Turbo Tier 5, Cluster A item 1 (Sema) resolves an object type fully --
+    // ancestor chain, fields, VMT slot table -- but memory layout is item
+    // 2's own job, not yet done, so there is genuinely no lowering here
+    // yet.  Explicit rather than falling into default below so the next
+    // reader does not have to wonder whether Object was simply forgotten;
+    // see llvmTypeOfSemaTypeImpl's own Object case for what a program that
+    // actually reaches codegen for one does today.
+    case TypeKind::Object:
+        return false;
     default:
         return false;
     }
@@ -914,6 +923,22 @@ llvm::Type* CGTypes::llvmTypeOfSemaTypeImpl(const Type& T) {
         case TypeKind::Procedure:
         case TypeKind::Function:
             return ptrTy;
+        // Turbo Tier 5, Cluster A item 1 (Sema) resolves an object type in
+        // full -- ancestor chain, flattened fields, VMT slot table -- so a
+        // program declaring one, or even a variable of one, now gets past
+        // Sema cleanly.  Memory layout (a VMT pointer field, the field
+        // offsets that give the ancestor's own fields the same offsets in
+        // every descendant) is item 2's job and does not exist yet, so
+        // reaching here is a real, if temporary, gap -- worded as one
+        // (rather than falling into the generic "no LLVM type" default
+        // below, which would look like an ordinary Sema/CodeGen
+        // disagreement bug) so this stays easy to tell apart from an actual
+        // regression once item 2 lands and this case is replaced with a
+        // real lowering.
+        case TypeKind::Object:
+            codegenICE("object type '" + T.Name + "' was resolved by Sema "
+                       "(Turbo Tier 5 item 1) but CodeGen cannot lay one out "
+                       "yet (Turbo Tier 5 item 2, not implemented)");
         default:
             codegenICE("no LLVM type for semantic type '" + T.Name + "'");
     }

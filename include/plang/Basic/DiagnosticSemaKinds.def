@@ -478,14 +478,109 @@ DIAG(err_proc_param_not_congruous, Error,
 DIAG(err_proc_param_not_assignable, Error,
      "'%0' is a procedural parameter and cannot be assigned to")
 DIAG(err_unrecognized_type, Error, "unrecognized type expression")
-// Turbo Tier 5, Cluster A item 0: object types parse (Parser::parseObjectType)
-// but Sema has no inheritance/VMT/layout logic yet -- that is items 1-7's
-// job, not this one's.  A parsed ObjectTypeNode reaching type resolution is
-// therefore a real, if temporary, terminal case rather than a fall-through
-// to err_unrecognized_type, the same way a parsed-but-unprocessed UnitNode
-// once got its own now-unused err_unit_compilation_not_yet_supported.
+// Turbo Tier 5, Cluster A item 0 gave object types their own placeholder
+// diagnostic here while only parsing existed (Parser::parseObjectType);
+// Cluster A item 1 (this one) gives Sema real inheritance/VMT resolution, so
+// this message is no longer emitted by resolveTypeImpl -- kept in the
+// catalog, unused, the same way err_unit_compilation_not_yet_supported was
+// kept after Tier 4's own placeholder was retired (Frontend.cpp's comment).
 DIAG(err_object_type_not_yet_supported, Error,
      "object types are not yet supported")
+// Turbo Tier 5, Cluster A item 1: real Turbo Pascal (confirmed against a
+// local fpc -Mtp build) has no anonymous object type -- 'var x: object ...
+// end' is refused ("Anonymous class definitions are not allowed") --
+// because an object's identity (VMT slot table, ancestor chain) has to be
+// nameable for inheritance and dispatch to mean anything.  So an
+// ObjectTypeNode is only ever resolved as the direct right-hand side of a
+// 'type Name = object ... end' declaration; reached any other way (a field
+// type, an array element type, a var's inline type, ...) it is this error.
+DIAG(err_object_type_anonymous, Error,
+     "object types must be named by a type declaration; an anonymous "
+     "object type is not allowed")
+// Turbo Tier 5, Cluster A item 1: an ancestor clause names a type that
+// either was never declared at all, or was declared but is not itself an
+// object type -- confirmed against a local fpc -Mtp build for both
+// ("Identifier not found" / "class type expected, but got ...").
+DIAG(err_object_ancestor_not_found, Error,
+     "ancestor type '%0' is not declared")
+DIAG(err_object_ancestor_not_object_type, Error,
+     "ancestor '%0' is not an object type")
+// Turbo Tier 5, Cluster A item 1: two members (fields or methods) of one
+// object type sharing a name.  Real Turbo Pascal has no method overloading
+// (confirmed against a local fpc -Mtp build: "Procedure overloading is
+// switched off"), so a second method of the same name in the same type is
+// rejected outright, exactly like a duplicate field.
+DIAG(err_object_duplicate_member, Error,
+     "duplicate member name '%0' in object type '%1'")
+// Turbo Tier 5, Cluster A item 1: confirmed against a local fpc -Mtp build
+// ("Virtual constructors are only supported in class object model") that a
+// TP7 object-model constructor can never be virtual -- only a destructor
+// (or an ordinary method) may be.
+DIAG(err_object_virtual_constructor, Error,
+     "constructor '%0' may not be declared 'virtual'")
+// Turbo Tier 5, Cluster A item 1: confirmed against a local fpc -Mtp build
+// ("Only virtual methods can be abstract") that 'abstract' with no
+// 'virtual' is a semantic error, not merely an unusual ordering -- the
+// parser (Parser::parseObjectMethodHeading) accepts either order or
+// 'abstract' alone precisely because this is Sema's rule to enforce, not
+// the grammar's.
+DIAG(err_object_abstract_not_virtual, Error,
+     "method '%0' is declared 'abstract' but not 'virtual'")
+// Turbo Tier 5, Cluster A item 1: confirmed against a local fpc -Mtp build
+// ("function header doesn't match the previous declaration") that a virtual
+// method overriding an inherited one of the same name must match its
+// signature exactly (arity, parameter types, return type) -- unlike a
+// non-virtual redeclaration of the same name, which merely HIDES the
+// inherited method (a static redeclaration, warned about by fpc as "An
+// inherited method is hidden") and is free to differ.
+DIAG(err_object_virtual_override_signature_mismatch, Error,
+     "virtual method '%0' does not match the signature of the inherited "
+     "method it overrides")
+// Turbo Tier 5, Cluster A item 1: an out-of-line method body ('procedure
+// T.M; begin ... end;') whose 'T.M' names no in-class heading declared in
+// object type T -- either T does not exist/is not an object type, or T has
+// no member named M.
+DIAG(err_object_method_body_without_heading, Error,
+     "'%0.%1' has no matching method heading in object type '%0'")
+// Turbo Tier 5, Cluster A item 1: a second out-of-line body for the same
+// in-class heading.
+DIAG(err_object_method_body_duplicate, Error,
+     "method '%0.%1' already has a defining declaration")
+// Turbo Tier 5, Cluster A item 1: confirmed against a local fpc -Mtp build
+// ("Abstract methods shouldn't have any definition") that an abstract
+// method may never be given a body, out-of-line or otherwise.
+DIAG(err_object_abstract_method_has_body, Error,
+     "abstract method '%0.%1' may not have a body")
+// Turbo Tier 5, Cluster A item 1: an out-of-line body's own heading
+// (parameters, return type) does not match the in-class heading it is the
+// body for.  Reuses the same arity/parameter/return-type checks as an
+// ordinary forward declaration's own body (err_forward_param_count/
+// err_forward_param_type/err_forward_return_type), just worded for a
+// method rather than a plain procedure.
+DIAG(err_object_method_param_count, Error,
+     "implementation of '%0.%1' has %2 parameter(s) but its heading had %3")
+DIAG(err_object_method_param_type, Error,
+     "parameter '%0' of '%1.%2': type '%3' does not match the heading's "
+     "type '%4'")
+DIAG(err_object_method_return_type, Error,
+     "return type of '%0.%1' does not match its heading")
+// Turbo Tier 5, Cluster A item 1: confirmed against a local fpc -Mtp build
+// ("Forward declaration not solved") that every non-abstract method heading
+// -- virtual or not -- needs an out-of-line body somewhere in the same
+// compilation; only an abstract method is exempt (it has no body by
+// construction -- err_object_abstract_method_has_body above is the
+// opposite mistake).
+DIAG(err_object_method_never_defined, Error,
+     "method '%0.%1' is declared but never given a defining declaration")
+// Turbo Tier 5, Cluster A item 1: confirmed against a local fpc -Mtp build
+// ("An inherited method is hidden by ...") that redeclaring an inherited
+// method's name WITHOUT 'virtual' is legal -- it statically hides the
+// ancestor's method rather than overriding it through the VMT -- but is
+// worth flagging, the same way fpc itself does, since it is easy to write
+// by accident (forgetting 'virtual' on what was meant as an override).
+DIAG(warn_object_method_hides_inherited, Warning,
+     "method '%0' hides the inherited method of the same name; declare "
+     "'virtual' to override it instead")
 DIAG(err_undefined_type, Error, "undefined type '%0'")
 DIAG(err_not_a_type, Error, "'%0' is not a type")
 // EP §6.2.1(k): the relaxation that lets declaration parts appear in any

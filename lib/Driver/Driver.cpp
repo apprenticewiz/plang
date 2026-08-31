@@ -670,6 +670,7 @@ std::string Driver::defaultOutput(const std::string &InputFile, OutputMode Mode)
         case OutputMode::DumpAst:    return "";
         case OutputMode::DumpTokens:    return "";
         case OutputMode::DumpParseTree: return "";
+        case OutputMode::DumpVmt:       return "";
     }
     return "a.out";
 }
@@ -792,6 +793,8 @@ Driver::ParseResult Driver::parseArgs(int Argc, char *Argv[]) {
             Opts.mode = OutputMode::DumpTokens;
         } else if (Arg == "-dump-parse-tree") {
             Opts.mode = OutputMode::DumpParseTree;
+        } else if (Arg == "-dump-vmt") {
+            Opts.mode = OutputMode::DumpVmt;
         } else if (Arg.size() > 2 && Arg[0] == '-' && Arg[1] == 'o') {
             // Joined form (issue #244): "-ojoined.o".  Options.def has always
             // declared -o JoinedOrSeparate, but this hardcoded fast path used
@@ -969,7 +972,8 @@ static std::string llcTriple(const Options &Opts) {
 
 /// Build the argv for a -pc1 front-end invocation.  \p DumpFlag, if given, is
 /// one of the front-end-only dump modes ("-dump-ast", "-dump-tokens",
-/// "-dump-parse-tree") that stop the pipeline before code generation.
+/// "-dump-parse-tree", "-dump-vmt") that stop the pipeline before code
+/// generation.
 static std::vector<std::string> makeFEArgs(const Options &Opts,
                                             const std::string &Out,
                                             const char *DumpFlag = nullptr) {
@@ -1251,13 +1255,15 @@ int Driver::compile(const Options &Opts, bool IsExtraFile) {
         ExtraObjs.push_back(ExtraOpts.outputFile);
     }
 
-    // DumpAst/DumpTokens/DumpParseTree modes: front end only.
+    // DumpAst/DumpTokens/DumpParseTree/DumpVmt modes: front end only.
     if (Opts.mode == OutputMode::DumpAst)
         return runTool(Self, makeFEArgs(Opts, OutFile, "-dump-ast"), V, DR);
     if (Opts.mode == OutputMode::DumpTokens)
         return runTool(Self, makeFEArgs(Opts, OutFile, "-dump-tokens"), V, DR);
     if (Opts.mode == OutputMode::DumpParseTree)
         return runTool(Self, makeFEArgs(Opts, OutFile, "-dump-parse-tree"), V, DR);
+    if (Opts.mode == OutputMode::DumpVmt)
+        return runTool(Self, makeFEArgs(Opts, OutFile, "-dump-vmt"), V, DR);
 
     // LLVMIr mode: front end only.
     if (Opts.mode == OutputMode::LLVMIr)

@@ -31,6 +31,15 @@ enum class SymbolKind {
     EnumValue,  // a member of an enumerated type
     Builtin,    // built-in procedure or function (arity/type checks are relaxed)
     Schema,     // EP §6.4.7: schema type definition (parameterized type)
+    Method,     // Turbo Tier 5: an object type's method, registered under a
+                // synthetic "<lowercase-objecttype>.<lowercase-method>"
+                // composite key (never a real identifier -- '.' cannot
+                // appear in one) in the SAME scope the object type's own
+                // TypeAlias symbol lives in, rather than through a scope of
+                // its own -- SymbolTable is a pure scope stack with no
+                // per-type scope concept; see this Symbol's own Method-only
+                // fields below and Sema::resolveObjectType/checkMethodBody
+                // (SemaType.cpp/Sema.cpp) for how the key is built and used.
 };
 
 // ---------------------------------------------------------------------------
@@ -257,6 +266,49 @@ struct Symbol {
     /// instantiating it, or by a pointer naming it as a domain type -- before
     /// the explicit sweep over every schema in the block reaches it.
     bool SchemaParamsResolved{false};
+
+    // --- Method symbols (Turbo Tier 5, Cluster A item 1) ---
+    //
+    // A method's signature reuses this same Symbol's existing Proc/Function
+    // fields above (IsFunction, Params, ReturnType, Decl) rather than a
+    // parallel set of its own -- a method heading is structurally an
+    // ordinary ProcDecl heading once its composite key tells it apart from
+    // an ordinary procedure, exactly the way Sema::checkProcSignature
+    // already resolves one.  Decl points at the IN-CLASS heading (the
+    // ObjectMember::Method this symbol was registered from); MethodBody
+    // below points at the separate out-of-line ProcDecl once one is found
+    // and matched (Sema::checkMethodBody), since the two are two different
+    // AST nodes for a method (unlike an ordinary forward-declared
+    // procedure, whose heading and body share one Name and are matched by
+    // ForwardHeading instead).
+    /// The object type this method belongs to, spelled as declared (not
+    /// lowercased -- Name above already IS the lowercased composite key,
+    /// "t.m", which is what a diagnostic must NOT quote verbatim).  Kept
+    /// here rather than re-derived from Name so a diagnostic can name both
+    /// halves with their original case.
+    std::string MethodOwnerType;
+    /// 'virtual' trailing directive on the in-class heading.
+    bool IsMethodVirtual{false};
+    /// 'abstract' trailing directive; see Type::Method::IsAbstract's own
+    /// comment (Type.h) for why this method then needs no body ever.
+    bool IsMethodAbstract{false};
+    /// 'constructor' rather than 'procedure'/'function'/'destructor'.
+    bool IsMethodConstructor{false};
+    /// 'destructor' rather than 'procedure'/'function'/'constructor'.
+    bool IsMethodDestructor{false};
+    /// This method's own slot index into its owning object type's Type::
+    /// VmtSlots, or -1 for a non-virtual method (never dispatched through
+    /// the VMT).
+    int VmtSlot{-1};
+    /// The out-of-line body ProcDecl once Sema::checkMethodBody has found
+    /// and signature-verified one for this heading (borrowed; owned by
+    /// whichever BlockNode::Procs declared it).  Null until matched, and
+    /// stays null forever for an abstract method by construction.  This is
+    /// what Sema's own end-of-block audit (the Method sibling of Phase
+    /// 7.6's forward-declaration-completion audit) reads to report
+    /// err_object_method_never_defined for a heading nothing ever gave a
+    /// body.
+    const ProcDecl* MethodBody{nullptr};
 };
 
 // ---------------------------------------------------------------------------

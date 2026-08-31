@@ -20,6 +20,14 @@ enum class OutputMode {
     DumpAst,    ///< -dump-ast    print the typed AST and stop
     DumpTokens,    ///< -dump-tokens      print the token stream and stop
     DumpParseTree, ///< -dump-parse-tree  print the pre-Sema parse tree and stop
+    /// -dump-vmt: Turbo Tier 5, Cluster A item 1's own debug-introspection
+    /// mode -- prints every object type's resolved ancestor, flattened
+    /// field list and final VMT slot table (plang/Sema/DumpVmt.h), then
+    /// stops, exactly like -dump-ast does for the typed AST.  Exists
+    /// because there is no CodeGen for an object type yet (item 2's job),
+    /// so nothing an end-to-end compile-and-run test could observe would
+    /// prove the VMT slot-assignment algorithm got the right answer.
+    DumpVmt,
 };
 
 /// Parsed command-line options for the plang driver.
