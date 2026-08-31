@@ -239,6 +239,8 @@ exit status of 70:
   an enumeration, or a subrange (§6.6.6.4). Plain `integer` has no bounded
   range to walk off; see the integer-overflow entry below for what happens
   there instead.
+- `chr` with an argument outside `char`'s ordinal domain, 0..255 (§6.6.6.4,
+  the same clause that governs succ/pred).
 - a `case` statement whose selector matches no case-constant and which has no
   `otherwise` part (§6.8.3.5)
 - division by zero, whether by `/`, `div` or `mod` (§6.7.2.2)
@@ -256,9 +258,10 @@ reported, and the flag is a statement by whoever compiles it that the program is
 known not to commit them. With range checks off, `succ`/`pred` off the end of a
 bounded ordinal type wraps instead, reduced to the width the type is held in —
 `succ(true)` comes back `false`, `succ(chr(255))` comes back `chr(0)`, and
-`succ` of an enumeration's last value comes back its ordinal count. `minint div
--1` and an out-of-range `pow` are unaffected by either flag: both are reported
-regardless.
+`succ` of an enumeration's last value comes back its ordinal count. `chr` wraps
+the same way, reduced to the 8 bits `char` is held in — `chr(1000)` comes back
+`chr(232)`. `minint div -1` and an out-of-range `pow` are unaffected by either
+flag: both are reported regardless.
 
 **Not reported.** Clause 5.1 f) 1) requires these be listed:
 
