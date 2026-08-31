@@ -15,6 +15,7 @@
 #include "plang/Basic/LangOptions.h"
 #include "plang/Basic/MessageCatalog.h"
 #include "plang/Basic/StringUtil.h"
+#include "plang/Basic/UnitSearchPath.h"
 #include "plang/Basic/Version.h"
 
 #include <algorithm>
@@ -126,6 +127,106 @@ static std::string resolvePath(const std::string &Path) {
 /// differently each is spelled on the command line.
 static bool sameResolvedFile(const std::string &A, const std::string &B) {
     return !A.empty() && !B.empty() && resolvePath(A) == resolvePath(B);
+}
+
+// ---------------------------------------------------------------------------
+// Auto-linking a used unit's own shipped object file
+// ---------------------------------------------------------------------------
+//
+// Turbo Tier 4, Cluster C item 5: this is what lets `plang -std=turbo
+// hello.pas -o hello` -- no -I, no naming crt.o by hand -- actually LINK
+// when hello.pas says `uses Crt;`, matching what this item's own brief
+// asked for ("real Turbo programs can uses Crt; with no flags").  Before
+// this, separate compilation only worked with the resulting .o named
+// explicitly on the command line (every existing Driver/Turbo lit test that
+// links a separately-compiled unit does exactly that) -- Sema resolves a
+// `uses` clause's TYPE information from a .tui/.pas on the search path
+// today, but nothing carried that same resolution forward to the DRIVER's
+// own link step, which runs the front end as a separate subprocess (-pc1)
+// with no channel back for "here is what got used and where its object
+// lives". Sema's own resolution is not reused here for exactly that
+// reason: it lives inside that subprocess. What follows is deliberately a
+// second, independent, best-effort resolution, run by the Driver itself,
+// against the same three-tier unitSearchPaths() Sema's own last resort
+// consults -- good enough to make Crt (and any future shipped unit
+// following its own convention) auto-link, without the deeper "have the
+// front end report back what it resolved" plumbing project.
+
+/// A crude but sufficient scan for the identifiers named in \p Path's own
+/// `uses` clause(s): finds the keyword "uses" and collects the comma-
+/// separated identifiers up to the next non-identifier, non-comma,
+/// non-whitespace character (in practice always ';', which is all this
+/// grammar ever allows there). Deliberately whole-file, not scoped to only
+/// the interface/implementation/program heading's own uses clause(s) --
+/// scanning the WHOLE file for "uses" catches every one of them (a unit may
+/// have both an interface and an implementation uses clause) at the cost of
+/// a false positive only if the identifier "uses" appears somewhere else
+/// entirely, which Pascal's own grammar never asks for. This is text
+/// scanning, not real parsing -- unlike Sema's own loadUnitInterfaceExports,
+/// it does not know about comments or string literals, so "uses" spelled
+/// inside either of those (vanishingly unlikely in a Pascal source file)
+/// would be misread; the cost of that is nothing worse than an extra
+/// unresolvable name that findShippedUnitObject below silently ignores.
+static std::vector<std::string> scanUsesClauseUnitNames(const std::string &Path) {
+    std::vector<std::string> Names;
+    auto BufOrErr = llvm::MemoryBuffer::getFile(Path);
+    if (!BufOrErr) return Names;
+    const llvm::StringRef Text = (*BufOrErr)->getBuffer();
+    const size_t N = Text.size();
+    auto isIdentChar = [](char C) {
+        return (C >= 'a' && C <= 'z') || (C >= 'A' && C <= 'Z') ||
+               (C >= '0' && C <= '9') || C == '_';
+    };
+    auto isSpace = [](char C) {
+        return C == ' ' || C == '\t' || C == '\r' || C == '\n';
+    };
+    for (size_t I = 0; I < N; ) {
+        if (!isIdentChar(Text[I])) { ++I; continue; }
+        const size_t Start = I;
+        while (I < N && isIdentChar(Text[I])) ++I;
+        if (!llvm::StringRef(Text.data() + Start, I - Start).equals_insensitive("uses")) continue;
+        size_t J = I;
+        for (;;) {
+            while (J < N && isSpace(Text[J])) ++J;
+            if (J >= N || !isIdentChar(Text[J])) break;
+            const size_t IdStart = J;
+            while (J < N && isIdentChar(Text[J])) ++J;
+            Names.emplace_back(Text.data() + IdStart, J - IdStart);
+            while (J < N && isSpace(Text[J])) ++J;
+            if (J < N && Text[J] == ',') { ++J; continue; }
+            break;
+        }
+        I = J;
+    }
+    return Names;
+}
+
+/// If \p UnitName has a shipped, already-compiled object file next to its
+/// .tui/.pas on the same search path Sema's own loadUnitInterfaceExports
+/// falls back to (ModulePaths/-I, then ".", then unitSearchPaths()),
+/// returns its path; "" if none is found. The object file's own name is a
+/// fixed convention this item establishes for every shipped unit, mirroring
+/// the .tui's own: lowercase(UnitName) + ".o", written next to a lowercase
+/// .tui the identical way share/plang/units/Crt.pas's own CMake rule
+/// (top-level CMakeLists.txt) writes crt.o beside crt.tui.  Only that exact
+/// name is ever tried -- a hand-written unit's own separately-compiled .o
+/// with a differently-cased or differently-named object file is exactly
+/// what this project's existing "name the .o explicitly on the command
+/// line" workflow (every pre-existing Driver/Turbo separate-compilation lit
+/// test) remains for.
+static std::string findShippedUnitObject(const std::string &UnitName,
+                                          const std::vector<std::string> &ModulePaths,
+                                          const std::string &InstallDir) {
+    const std::string Key = plang::toLower(UnitName);
+    std::vector<std::string> Dirs = ModulePaths;
+    Dirs.push_back(".");
+    for (const auto &P : plang::unitSearchPaths(InstallDir)) Dirs.push_back(P);
+    for (const auto &Dir : Dirs) {
+        const std::string ObjPath = Dir + "/" + Key + ".o";
+        if (llvm::sys::fs::exists(ObjPath) && !llvm::sys::fs::is_directory(ObjPath))
+            return ObjPath;
+    }
+    return "";
 }
 
 /// Runs Prog and returns what it wrote to its standard output, with trailing
@@ -1269,7 +1370,39 @@ int Driver::compile(const Options &Opts, bool IsExtraFile) {
 
     if (Opts.mode == OutputMode::Object) return 0;
 
-    // Link, appending any extra object files from multi-file builds.
+    // Turbo Tier 4, Cluster C item 5: auto-link every `uses`d unit (the
+    // main file's own, and every extra file's) that has a shipped,
+    // already-compiled object file waiting on the unit search path -- see
+    // findShippedUnitObject's own comment.  Skipped for anything already
+    // named explicitly, either as an extra input file or as a bare .o/.a
+    // linker argument, so a user overriding a shipped unit's object (e.g.
+    // testing a locally-rebuilt Crt.o) is never fighting this against their
+    // own explicit choice.
+    {
+        std::vector<std::string> Sources{Opts.inputFile};
+        for (const auto &E : Opts.extraInputFiles) Sources.push_back(E);
+        std::vector<std::string> SeenUnits;
+        for (const auto &Src : Sources) {
+            for (const auto &Unit : scanUsesClauseUnitNames(Src)) {
+                const std::string Key = toLower(Unit);
+                if (std::find(SeenUnits.begin(), SeenUnits.end(), Key) != SeenUnits.end())
+                    continue;
+                SeenUnits.push_back(Key);
+                const std::string Obj =
+                    findShippedUnitObject(Unit, Opts.modulePaths, findInstallDir());
+                if (Obj.empty()) continue;
+                bool Already = false;
+                for (const auto &EO : ExtraObjs)
+                    if (sameResolvedFile(EO, Obj)) { Already = true; break; }
+                for (const auto &A : Opts.linkerArgs)
+                    if (sameResolvedFile(A, Obj)) { Already = true; break; }
+                if (!Already) ExtraObjs.push_back(Obj);
+            }
+        }
+    }
+
+    // Link, appending any extra object files from multi-file builds (and any
+    // shipped units' own objects auto-linked just above).
     Options LinkOpts = Opts;
     for (const auto &EO : ExtraObjs) LinkOpts.linkerArgs.push_back(EO);
     Rc = link(*this, LinkOpts, ObjFile, OutFile, findRuntimeLib(ExePath_), V, DR);

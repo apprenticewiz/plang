@@ -430,6 +430,18 @@ void CGProcCall::emitCallStmt(const CallStmt& s) {
         return;
     }
 
+    // Turbo Tier 4, Cluster C item 5: Crt's own Delay(MS: Word) -- see
+    // Builtins.def's own comment on why this is a dialect-wide builtin
+    // rather than scoped to `uses Crt`.  MS is widened to i64 the same way
+    // every other small-integer runtime argument is (e.g. Randomize's
+    // sibling Halt(n) just below).
+    if (lo == "delay" && !s.Args.empty()) {
+        auto* ms = ToI64(EmitExpr(*s.Args[0]));
+        B.CreateCall(RtFns.getExternFnN("plang_crt_delay",
+            llvm::Type::getVoidTy(Ctx), {I64Ty}), {ms});
+        return;
+    }
+
     // ISO §6.7.5.4 transfer procedures.
     if ((lo == "pack" || lo == "unpack") && s.Args.size() == 3) {
         PackUnpack.emitPackUnpack(s, /*isPack=*/lo == "pack");

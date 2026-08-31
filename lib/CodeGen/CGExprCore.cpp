@@ -160,6 +160,21 @@ llvm::Value* CGExprCore::emitExpr(const ExprNode& e) {
                 return B.CreateCall(
                     RtFns.getExternFnN("plang_tp_ioresult", I64Ty, {}), {}, lo);
             }
+            // Turbo Tier 4, Cluster C item 5: KeyPressed/ReadKey, like
+            // ParamCount/IOResult just above, are almost always written bare
+            // in real TP code ("if KeyPressed then ..."/"c := ReadKey").
+            // CGFuncCall::emitBuiltinCall's own "keypressed"/"readkey" arms
+            // handle the WITH-parentheses shape; this is the same runtime
+            // call, reached the other way.
+            if (lo == "keypressed" && !n->UserDeclared) {
+                auto* raw = B.CreateCall(
+                    RtFns.getExternFnN("plang_crt_keypressed", I8Ty, {}), {}, lo);
+                return EnsureI1(raw);
+            }
+            if (lo == "readkey" && !n->UserDeclared) {
+                return B.CreateCall(
+                    RtFns.getExternFnN("plang_crt_readkey", I8Ty, {}), {}, lo);
+            }
         }
         // Function result pseudo-variable (Pascal: assign to function name).
         // n->Resolution == ResultVariable alone is NOT enough: it only says

@@ -10,6 +10,7 @@
 
 import os
 import shutil
+import sys
 
 import lit.formats
 import lit.llvm
@@ -77,6 +78,11 @@ config.substitutions[0:0] = [
     ("%plang_run", f"{plang_exe} {plang_extra_flags} %s -o %t && %t".strip()),
     ("%plang_ep", f"{plang_exe} -std=iso10206 {plang_extra_flags}".strip()),
     ("%plang", f"{plang_exe} {plang_extra_flags}".strip()),
+    # %python: this SAME interpreter lit itself is running under (not a bare
+    # "python3", which may not be the one lit resolved python3-pty against,
+    # e.g. inside a venv) -- for the one test (Crt's own ReadKey/KeyPressed)
+    # that drives a real PTY via the stdlib pty module.
+    ("%python", sys.executable),
 ]
 
 # %run: the one place PLANG_TEST_RUN_WRAPPER (e.g. the guardheap allocator,
@@ -128,6 +134,25 @@ config.substitutions.insert(0,
     ("%checkexit",
      "bash " + os.path.join(config.plang_source_dir, "test", "tools", "check-exit-code.sh")))
 
+# %timed_run_at_least: Crt's own Delay(MS) (Turbo Tier 4, Cluster C item 5)
+# is a real wait, checked by timing a run from outside it -- needs a real
+# script for the same reasons %checkexit/%hold_stdin_open just above do (no
+# real `$( )` arithmetic in lit's own internal shell, and a literal '%' in
+# an in-line RUN: line collides with lit's own %s/%t/... substitution
+# scanning before any shell/quoting is involved) -- see
+# timed-run-at-least-ms.sh's own comment.
+config.substitutions.insert(0,
+    ("%timed_run_at_least",
+     "bash " + os.path.join(config.plang_source_dir, "test", "tools", "timed-run-at-least-ms.sh")))
+
+# %run_under_pty: Crt's own KeyPressed/ReadKey raw-mode behavior (Turbo Tier
+# 4, Cluster C item 5), tested against a REAL pseudo-terminal rather than a
+# pipe -- see run-under-pty.py's own comment for why a pipe cannot exercise
+# this. Gated by test authors on the python3-pty feature above.
+config.substitutions.insert(0,
+    ("%run_under_pty",
+     f"{sys.executable} " + os.path.join(config.plang_source_dir, "test", "tools", "run-under-pty.py")))
+
 # Issue #130's gdb pretty-printer -- referenced straight from the source
 # tree (share/plang/gdb/), not the installed copy, same as every other
 # %substitution here points at the just-built binary rather than anything
@@ -164,6 +189,24 @@ if shutil.which("gdb") is not None:
 
 if os.name != "nt":
     config.available_features.add("posix")
+
+# python3-pty: whether this python3 has the stdlib `pty` module (POSIX
+# pseudo-terminal support). Turbo Tier 4, Cluster C item 5's Crt unit uses
+# real termios raw-mode terminal state for ReadKey/KeyPressed
+# (runtime/plang_crt.cpp's own ensureRawMode); piped stdin is never a tty,
+# so a test that only pipes input could not tell a real raw-mode bug apart
+# from tcgetattr/tcsetattr silently no-op'ing on a non-tty. A PTY is the
+# only portable way to test that for real without a genuine interactive
+# terminal, and this project has no existing PTY-testing infrastructure of
+# its own to build on -- probed the same direct way fpc-binary/gdb-binary
+# above are, rather than assumed present.
+try:
+    import subprocess
+    subprocess.run([sys.executable, "-c", "import pty"],
+                    capture_output=True, timeout=5, check=True)
+    config.available_features.add("python3-pty")
+except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
+    pass
 
 # dev-full: /dev/full is a Linux (and some other Unix) character device that
 # accepts any open but fails every write with ENOSPC -- the only portable way
