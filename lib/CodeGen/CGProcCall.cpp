@@ -772,6 +772,12 @@ void CGProcCall::emitCallStmt(const CallStmt& s) {
         auto* ptr = B.CreateCall(RtFns.getRuntimeNewFn(),
                                        {llvm::ConstantInt::get(I64Ty, Bytes)});
         StampVptr(ptr, Pointee);
+        // Issue #511: Pointee's own OBJECT-typed fields (a value-composed
+        // member, not an ancestor -- an ancestor's vptr is the SAME slot
+        // StampVptr just above already found) need their own '_vptr' too,
+        // exactly like a directly declared instance of Pointee would get from
+        // emitVarValueInit -- see StampFieldVptrs's own comment (CGProcCall.h).
+        StampFieldVptrs(ptr, Pointee);
 
         std::string ctorName;
         std::span<const std::unique_ptr<ExprNode>> ctorArgs;

@@ -379,7 +379,10 @@ void Codegen::Impl::init(const std::string& progName) {
         // Turbo Tier 5, Cluster A item 6: New(P, Init(...))'s own vptr
         // stamp on freshly allocated memory -- see CGProcCall.h's
         // StampVptr field for the whole design.
-        [this](llvm::Value* ptr, const plang::Type& t){ stampVptr(ptr, t); });
+        [this](llvm::Value* ptr, const plang::Type& t){ stampVptr(ptr, t); },
+        // Issue #511: New(P, Init(...))'s own nested-member vptr stamp --
+        // see CGProcCall.h's StampFieldVptrs field for the whole design.
+        [this](llvm::Value* ptr, const plang::Type& t){ stampFieldVptrs(ptr, t); });
     // Record field access and pointer dereference.  EmitLValue/EmitExpr
     // are narrow closures into methods not yet extracted (both still in
     // CodeGenExprs.cpp -- emitExpr/emitLValue themselves).
