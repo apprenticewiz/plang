@@ -196,6 +196,18 @@ BUILTIN(Continue,     "continue",     Proc, TP, 0, 0, R_None)
 // every other single-typed-argument builtin above (Card, Odd, ...) gets.
 BUILTIN(Assigned,     "assigned",     Func, TP, 1, 1, R_Bool)
 
+// Turbo Tier 5, Cluster A item 7: TypeOf(anObjectValueOrVar) -- the address
+// of the object's own VMT (Codegen::Impl::getOrCreateVmt's existing global),
+// confirmed against a local fpc -Mtp build to be exactly what field practice
+// compares with '=' to ask "is this object really a TDog" ('if TypeOf(D) =
+// TypeOf(TDog2) then' for two separate TDog instances is true; 'TypeOf(A) =
+// TypeOf(D)' for an ancestor instance and a descendant one is false).
+// R_None is a placeholder exactly like SizeOf/High/Low's own just below --
+// checkUserDefinedCall's dedicated arm returns TypeContext::
+// getGenericPointer() directly, the same generic 'Pointer' type real
+// TypeOf's own FPC declaration ('function TypeOf(...): Pointer') has.
+BUILTIN(TypeOf,       "typeof",       Func, TP, 1, 1, R_None)
+
 // -std=turbo only: SizeOf/High/Low take a TYPE NAME as well as (like real
 // FPC) an ordinary value expression -- the one argument SHAPE in this whole
 // file that is not a plain expression; see Parser::parseSizeHighLowArg and

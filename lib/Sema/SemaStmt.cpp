@@ -2078,6 +2078,12 @@ void Sema::checkInheritedCallStmt(const InheritedCallStmt& S) {
         return;
     }
 
+    // Turbo Tier 5, Cluster A item 7: same private-visibility gate
+    // checkMethodCall applies -- see its own comment (SemaExpr.cpp).
+    if (MethodSym->IsMethodPrivate && MethodSym->Module != CurrentUnit_)
+        error(S.Loc, diag::err_object_private_method,
+              {MethodSym->MethodOwnerType, MethodName});
+
     S.ResolvedMethod    = MethodName;
     S.ImplementingType  = MethodSym->MethodOwnerType;
 
@@ -2164,6 +2170,11 @@ void Sema::checkNewInit(const CallStmt& S, const Type& Pointee) {
         for (const auto& A : CtorArgs) (void)checkExpr(*A);
         return;
     }
+    // Turbo Tier 5, Cluster A item 7: same private-visibility gate
+    // checkMethodCall applies -- see its own comment (SemaExpr.cpp).
+    if (MethodSym->IsMethodPrivate && MethodSym->Module != CurrentUnit_)
+        error(S.Args[1]->Loc, diag::err_object_private_method,
+              {MethodSym->MethodOwnerType, CtorName});
 
     Symbol Indirect;
     Indirect.Kind       = SymbolKind::Proc;
@@ -2208,6 +2219,11 @@ void Sema::checkDisposeDone(const CallStmt& S, const Type& Pointee) {
         for (const auto& A : DtorArgs) (void)checkExpr(*A);
         return;
     }
+    // Turbo Tier 5, Cluster A item 7: same private-visibility gate
+    // checkMethodCall applies -- see its own comment (SemaExpr.cpp).
+    if (MethodSym->IsMethodPrivate && MethodSym->Module != CurrentUnit_)
+        error(S.Args[1]->Loc, diag::err_object_private_method,
+              {MethodSym->MethodOwnerType, DtorName});
 
     Symbol Indirect;
     Indirect.Kind       = SymbolKind::Proc;
@@ -2336,6 +2352,31 @@ int Sema::pushWithScope(const WithStmt& S) {
                     FS.Module      = ProtectedVia ? ProtectedVia->Module : std::string();
                     (void)Symtab.define(std::move(FS));
                 }
+            }
+            continue;
+        }
+
+        // Turbo Tier 5, Cluster A item 7: 'with anObjectInstance do' -- the
+        // SAME plain-Record branch just below, reused unchanged for an
+        // Object's own (already-flattened, see RecordFields's own comment,
+        // Type.h) field list.  A field this module may not reach (private,
+        // declared by a DIFFERENT module -- see err_object_private_field's
+        // own comment) is simply left OUT of the with-scope rather than
+        // exposed-then-flagged: nothing here re-checks a plain identifier
+        // reference the way checkField does for 'x.Field', so the one
+        // moment this loop has to decide reachability is now, and the field
+        // not existing at all inside the with-body is what fpc's own
+        // wording ("identifier idents no member") already reads as anyway.
+        if (T->Kind == TypeKind::Object) {
+            Symtab.pushScope(/*IsBlock=*/false);
+            ++Count;
+            for (const auto& F : T->RecordFields) {
+                if (F.IsPrivate && F.DeclaringModule != CurrentUnit_) continue;
+                Symbol FS;
+                FS.Kind = SymbolKind::Var;
+                FS.Name = F.Name;
+                FS.Ty   = F.Ty;
+                (void)Symtab.define(std::move(FS));
             }
             continue;
         }

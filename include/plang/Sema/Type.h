@@ -252,6 +252,19 @@ struct Type {
         /// (RecordTypeNode has no visibility concept), so nothing outside
         /// Object-specific code needs to read it.
         bool                  IsPrivate{false};
+        /// Object only, and only meaningful when IsPrivate is set (Turbo
+        /// Tier 5, Cluster A item 7): the lowercased module (unit or
+        /// program) that declared this field, i.e. whatever Sema's own
+        /// CurrentUnit_ held at the moment resolveObjectType pushed it --
+        /// empty for a field declared directly by a program.  Confirmed
+        /// against a local fpc -Mtp build that TP7's 'private' is scoped to
+        /// the whole declaring MODULE (see err_object_private_field's own
+        /// comment, DiagnosticSemaKinds.def), not to the exact type -- this
+        /// is what lets checkField compare "here" against "where declared"
+        /// without re-deriving it from the ancestor chain, which the
+        /// ancestor-then-own flattening in RecordFields (see its own
+        /// comment) would make ambiguous for an inherited field.
+        std::string           DeclaringModule;
     };
     /// Fields of this record type.  A variant part contributes its tag and the
     /// fields of every alternative, flattened, because a field reference names

@@ -9,17 +9,14 @@ item's whole risk, per its own task description) would compile fine and
 print TAnimal's own line instead; only a genuine indirect call through the
 receiver's own `_vptr` and the VMT slot gets this right.
 
-Pointer/var-parameter COVARIANCE (assigning a '^TDog' expression straight to
-a '^TAnimal' variable) is Cluster A item 7's job, not yet implemented -- so
-this gets an ancestor-typed POINTER onto the descendant's own storage via
-Turbo's variable typecast idiom instead (`@TAnimal(D)`), which reinterprets
-D's own storage in place (legal here because TDog adds no fields of its own,
-so TAnimal(D) satisfies the same-size rule checkTypeCast enforces) rather
-than converting anything -- PA ends up pointing at the exact same bytes `@D`
-would, with the exact same real vptr in them, just without needing item 7's
-still-missing implicit upcast.  Confirmed this is the intended workaround
-by first trying a direct `PA := @D;`, which plang currently refuses with
-"cannot assign '^TDog' to variable of type '^TAnimal'" (item 7's own gap).
+Turbo Tier 5, Cluster A item 7 added pointer/var-parameter COVARIANCE
+(assigning a '^TDog' expression straight to a '^TAnimal' variable), so this
+now uses the natural `PA := @D;` idiom directly -- confirmed against a local
+fpc -Mtp build (cov1.pas) that real Turbo/FPC accepts exactly this, and
+Sema::isAssignCompatible's own Pointer case now walks the same Type::Parent
+ancestor chain every other Tier-5 lookup already does to allow it.  This
+replaces the same-size variable-typecast workaround (`@TAnimal(D)`) every
+prior item's own verification had to fall back on.
 *)
 
 (*
@@ -61,7 +58,7 @@ var
   PA: ^TAnimal;
 begin
   D.SetName('Rex');
-  PA := @TAnimal(D);
+  PA := @D;
   PA^.Speak;
 
   A.SetName('Generic');

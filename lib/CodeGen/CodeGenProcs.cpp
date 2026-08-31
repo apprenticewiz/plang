@@ -530,10 +530,68 @@ void Codegen::Impl::emitAllProcedures(const BlockNode& block) {
     for (const auto& proc : block.Procs)
         if (!proc->OwnerType.empty()) emitFunctionDef(*proc, /*declareOnly=*/true);
 
+    // Turbo Tier 5, Cluster A item 7: every ABSTRACT method declared by an
+    // object type in this block gets a real, defined trap-body function
+    // here -- see emitAbstractMethodStub's own comment for why an abstract
+    // heading needs this dedicated pass rather than falling out of the
+    // ordinary block.Procs loop just above (it is never IN block.Procs:
+    // there is no out-of-line body, ever, for one).  Must run before any
+    // body below is emitted, exactly like the method pre-pass just above,
+    // since a method call or a VMT build reached from inside one of those
+    // bodies may need this name to already resolve.
+    for (const auto& td : block.Types) {
+        if (!td.Type || !td.Type->ResolvedType
+                || td.Type->ResolvedType->Kind != TypeKind::Object)
+            continue;
+        for (const auto& M : td.Type->ResolvedType->ObjectMethods)
+            if (M.IsAbstract)
+                emitAbstractMethodStub(M, td.Type->ResolvedType->Name);
+    }
+
     for (const auto& proc : block.Procs) {
         if (proc->IsForward) continue;
         emitFunctionDef(*proc);
     }
+}
+
+// Turbo Tier 5, Cluster A item 7: see this method's own declaration
+// (CodeGenImpl.h) for the whole design.
+void Codegen::Impl::emitAbstractMethodStub(const Type::Method& M,
+                                            const std::string& OwnerTypeName) {
+    std::string mangledName = mangledMethod(OwnerTypeName, M.Name);
+    if (mod->getFunction(mangledName)) return;  // already defined somehow
+
+    // Self, then every declared parameter -- a 'var'/'const'-by-reference
+    // parameter is a pointer, everything else its own value type, mirroring
+    // (not sharing, since there is no ProcDecl here to hand the ordinary
+    // signature-building path -- an abstract heading is never in
+    // block.Procs, see this function's own header comment) the same shape
+    // every other method's own signature already has. The exact ABI details
+    // ordinary parameter marshaling worries about (struct-by-value
+    // thresholds, sret, schema/conformant-array widening, ...) do not
+    // matter here: this function is never linked against a real
+    // implementation and never successfully returns a value to anything --
+    // every caller that looks up this SAME mangled name reads ITS
+    // FunctionType back off THIS declaration to marshal arguments, so all
+    // that is required is internal self-consistency, not byte-for-byte
+    // agreement with some other translation unit's own convention.
+    std::vector<llvm::Type*> paramTys;
+    paramTys.push_back(ptrTy);  // Self
+    for (const auto& P : M.Params)
+        paramTys.push_back(P.IsVar || P.IsConst ? ptrTy
+                            : (P.Ty ? llvmTypeOfSemaType(*P.Ty) : ptrTy));
+    llvm::Type* retTy = (M.IsFunction && M.RetType)
+                             ? llvmTypeOfSemaType(*M.RetType)
+                             : llvm::Type::getVoidTy(ctx);
+    auto* fnTy = llvm::FunctionType::get(retTy, paramTys, /*isVarArg=*/false);
+    auto* fn = llvm::Function::Create(fnTy, llvm::GlobalValue::InternalLinkage,
+                                       mangledName, *mod);
+    auto* entry = llvm::BasicBlock::Create(ctx, "entry", fn);
+    llvm::IRBuilder<> stubB(entry);
+    stubB.CreateCall(
+        getExternFnN("plang_tp_runerror", llvm::Type::getVoidTy(ctx), {i64Ty}),
+        {llvm::ConstantInt::get(i64Ty, 211, /*isSigned=*/true)});
+    stubB.CreateUnreachable();
 }
 
 llvm::Value* Codegen::Impl::selfFieldPtr(llvm::Value* base, const Type& T,

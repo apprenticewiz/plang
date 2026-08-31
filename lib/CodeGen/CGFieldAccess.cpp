@@ -27,6 +27,54 @@ const Type* recordTypeOf(const ExprNode& recExpr) {
 ///
 /// This is the fallback for a record type with no declaration to lay out from,
 /// where the struct was built by walking the same flattened field list.
+/// Turbo Tier 5, Cluster A item 7: 'A.Field'/'P^.Field' for an OBJECT type,
+/// outside a method body (Sema::checkField's own comment, SemaExpr.cpp, has
+/// the Kind-restriction half of this same gap).  Mirrors
+/// Codegen::Impl::selfFieldPtr (CodeGenProcs.cpp) exactly -- same recursive
+/// walk through CGTypes::layoutOfObject's own nested-ancestor struct shape,
+/// GEPing into element 0 (the ancestor sub-object, unshifted -- a struct's
+/// first element always starts at its own byte offset 0) when \p fieldName
+/// is not this level's own -- duplicated rather than shared because
+/// selfFieldPtr is a private member of a different class (Codegen::Impl)
+/// that CGFieldAccess has no access to, not because the logic differs.
+llvm::Value* objectFieldPtr(llvm::IRBuilder<>& B, CGTypes& Types,
+                             llvm::IntegerType* I32Ty, llvm::IntegerType* I8Ty,
+                             llvm::Value* base, const Type& T,
+                             const std::string& fieldName, llvm::Type*& outTy) {
+    const CGTypes::RecordLayout* L = Types.layoutOfObject(T);
+    if (!L) return nullptr;
+    auto* zero = llvm::ConstantInt::get(I32Ty, 0);
+    if (auto it = L->Fields.find(toLower(fieldName)); it != L->Fields.end()) {
+        const auto& P = it->second;
+        auto* fp = B.CreateGEP(L->Ty, base,
+                       {zero, llvm::ConstantInt::get(I32Ty, P.Index)},
+                       "obj." + fieldName);
+        if (P.InVariant && P.Offset != 0)
+            fp = B.CreateConstGEP1_64(I8Ty, fp, P.Offset, "obj." + fieldName);
+        outTy = P.Ty;
+        return fp;
+    }
+    if (!T.Parent) return nullptr;
+    auto* parentPtr = B.CreateGEP(L->Ty, base, {zero, zero}, "obj.parent");
+    return objectFieldPtr(B, Types, I32Ty, I8Ty, parentPtr, *T.Parent, fieldName, outTy);
+}
+
+/// Type-only sibling of objectFieldPtr, just below: which LLVM type does
+/// \p fieldName have in object type \p T (walking the same Parent chain),
+/// with no builder/address involved at all -- what fieldLlvmType needs, since
+/// unlike emitFieldGEP it is asked for a TYPE alone and must not insert any
+/// IR (a GEP off a throwaway base pointer would leave dead instructions in
+/// whatever block happens to be open at the time it is called).
+llvm::Type* objectFieldType(CGTypes& Types, const Type& T,
+                             const std::string& fieldName) {
+    const CGTypes::RecordLayout* L = Types.layoutOfObject(T);
+    if (!L) return nullptr;
+    if (auto it = L->Fields.find(toLower(fieldName)); it != L->Fields.end())
+        return it->second.Ty;
+    if (!T.Parent) return nullptr;
+    return objectFieldType(Types, *T.Parent, fieldName);
+}
+
 std::optional<unsigned> fieldStructIndex(const ExprNode& recExpr,
                                           const std::string& fieldName,
                                           llvm::StructType* st) {
@@ -133,6 +181,12 @@ llvm::StructType* CGFieldAccess::resolveRecordStructType(const FieldExpr& e) {
 }
 
 llvm::Type* CGFieldAccess::fieldLlvmType(const FieldExpr& e) {
+    // Turbo Tier 5, Cluster A item 7: object field, address-independent half.
+    if (e.Record->ResolvedType && e.Record->ResolvedType->Kind == TypeKind::Object) {
+        if (auto* ty = objectFieldType(Types, *e.Record->ResolvedType, e.Field))
+            return ty;
+        codegenICE("object field '" + e.Field + "' has no type in its own layout");
+    }
     // A field of a variant is one of several sharing a single struct element,
     // so the element's type is the storage they share and not the field's own.
     if (const Type* RecTy = recordTypeOf(*e.Record)) {
@@ -165,6 +219,16 @@ llvm::Value* CGFieldAccess::emitFieldGEP(const FieldExpr& e) {
     }
     if (!recPtr) recPtr = EmitLValue(*e.Record);
     if (!recPtr) return nullptr;
+
+    // Turbo Tier 5, Cluster A item 7: 'A.Field'/'P^.Field' for an object
+    // type, outside a method body -- see objectFieldPtr's own comment above.
+    if (e.Record->ResolvedType && e.Record->ResolvedType->Kind == TypeKind::Object) {
+        llvm::Type* outTy = nullptr;
+        auto* fp = objectFieldPtr(B, Types, I32Ty, I8Ty, recPtr,
+                                   *e.Record->ResolvedType, e.Field, outTy);
+        if (!fp) codegenICE("object has no field named '" + e.Field + "'");
+        return fp;
+    }
 
     // EP §6.4.7: a body whose extent a discriminant fixes has no one struct --
     // layoutOf specialises per discriminant tuple and there is no tuple until

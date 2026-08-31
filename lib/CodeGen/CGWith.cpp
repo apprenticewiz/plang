@@ -13,6 +13,38 @@
 
 using namespace plang;
 
+namespace {
+/// Turbo Tier 5, Cluster A item 7: 'with anObjectInstance do' -- the SAME
+/// recursive-ancestor GEP walk as Codegen::Impl::selfFieldPtr
+/// (CodeGenProcs.cpp) and its CGFieldAccess.cpp sibling (objectFieldPtr,
+/// for 'A.Field'/'P^.Field' outside a method body); duplicated rather than
+/// shared for the same reason as the other two copies -- each lives in a
+/// different class with no access to the others' private helpers, and the
+/// logic itself (not the plumbing around it) is what all three actually
+/// share.
+llvm::Value* withObjectFieldPtr(llvm::IRBuilder<>& B, CGTypes& Types,
+                                 llvm::IntegerType* I32Ty, llvm::IntegerType* I8Ty,
+                                 llvm::Value* base, const Type& T,
+                                 const std::string& fieldName, llvm::Type*& outTy) {
+    const CGTypes::RecordLayout* L = Types.layoutOfObject(T);
+    if (!L) return nullptr;
+    auto* zero = llvm::ConstantInt::get(I32Ty, 0);
+    if (auto it = L->Fields.find(toLower(fieldName)); it != L->Fields.end()) {
+        const auto& P = it->second;
+        auto* fp = B.CreateGEP(L->Ty, base,
+                       {zero, llvm::ConstantInt::get(I32Ty, P.Index)},
+                       "with." + fieldName);
+        if (P.InVariant && P.Offset != 0)
+            fp = B.CreateConstGEP1_64(I8Ty, fp, P.Offset, "with." + fieldName);
+        outTy = P.Ty;
+        return fp;
+    }
+    if (!T.Parent) return nullptr;
+    auto* parentPtr = B.CreateGEP(L->Ty, base, {zero, zero}, "with.parent");
+    return withObjectFieldPtr(B, Types, I32Ty, I8Ty, parentPtr, *T.Parent, fieldName, outTy);
+}
+} // namespace
+
 void CGWith::emitWith(const WithStmt& s) {
     // with r1, r2 do stmt — open each record's fields as local variables,
     // innermost record taking priority (last opened = first consulted).
@@ -182,6 +214,30 @@ void CGWith::emitWith(const WithStmt& s) {
                         ++ElemIdx;
                     }
                 }
+            }
+            continue;
+        }
+
+        // Turbo Tier 5, Cluster A item 7: 'with anObjectInstance do' -- the
+        // SAME idiom pushMethodSelfScope's own CodeGen mirror uses
+        // (CodeGenProcs.cpp): one withObjectFieldPtr call per field, bound
+        // as a bare Var symbol.  A field Sema's own pushWithScope declined
+        // to expose (private, declared by a different module -- see its own
+        // comment, SemaStmt.cpp) has no reference anywhere in a
+        // successfully-checked body to reach this at all, so nothing here
+        // re-checks visibility; every field is simply bound, exactly as
+        // pushMethodSelfScope's own CodeGen mirror binds every field of
+        // Self unconditionally.
+        if (rec->ResolvedType->Kind == TypeKind::Object) {
+            auto* objPtr = EmitLValue(*rec);
+            if (!objPtr) codegenICE("'with' on an object that has no address");
+            for (const auto& F : rec->ResolvedType->RecordFields) {
+                llvm::Type* fieldTy = nullptr;
+                auto* fp = withObjectFieldPtr(B, Types, I32Ty, I8Ty, objPtr,
+                                               *rec->ResolvedType, F.Name, fieldTy);
+                if (!fp)
+                    codegenICE("'with' object has no field named '" + F.Name + "'");
+                SymTab.defVar(F.Name, fp, fieldTy);
             }
             continue;
         }

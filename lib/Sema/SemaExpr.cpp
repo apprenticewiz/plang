@@ -529,6 +529,25 @@ std::shared_ptr<Type> Sema::checkField(const FieldExpr& E) {
         RecTy = schemaUnderlying(RecTy);
     }
 
+    // Turbo Tier 5, Cluster A item 7: 'Obj.Field'/'P^.Field' outside a
+    // method body ('P^' already unwrapped to the Object pointee by
+    // checkDeref by the time it reaches here, exactly like a method-call
+    // receiver -- see checkMethodCall's own comment).  RecordFields is
+    // already the flattened ancestor-then-own list every other Tier-5 field
+    // reader relies on (see its own comment, Type.h), so this reuses
+    // fieldByName below completely unchanged from the Record case; the only
+    // new work is the Kind check itself and the private-visibility gate.
+    if (RecTy->Kind == TypeKind::Object) {
+        const Type::Field* F = RecTy->fieldByName(E.Field);
+        if (!F) {
+            error(E.Loc, diag::err_object_no_such_field, {RecTy->Name, E.Field});
+            return TyErr;
+        }
+        if (F->IsPrivate && F->DeclaringModule != CurrentUnit_)
+            error(E.Loc, diag::err_object_private_field, {RecTy->Name, E.Field});
+        return F->Ty ? F->Ty : TyErr;
+    }
+
     if (RecTy->Kind != TypeKind::Record) {
         error(E.Loc, diag::err_field_on_non_record, {E.Field, RecTy->Name});
         return TyErr;
@@ -602,6 +621,13 @@ namespace {
 // it without moving that comment block up past everything it documents.
 bool schemaInstMatch(const Type& A, const Type& B);
 } // anonymous namespace
+
+// Turbo Tier 5, Cluster A item 7: full definition, with its rationale, is
+// below with isAssignCompatible (its main user); forward-declared here so
+// Sema::checkCallArgs's var-parameter covariance check, just below, can
+// reach it without moving that comment block up past everything it
+// documents -- the same reason schemaInstMatch is forward-declared above.
+static bool objectIsOrDescendsFrom(const Type& Descendant, const Type& Ancestor);
 
 std::shared_ptr<Type> Sema::checkBinary(const BinaryExpr& E) {
     auto Lt = checkExpr(*E.Left);
@@ -1658,6 +1684,25 @@ std::shared_ptr<Type> Sema::checkCallExpr(const CallExpr& E) {
             // argument's own type" rule succ/pred already follow above.
             return RangeTy;
         }
+        // Turbo Tier 5, Cluster A item 7: TypeOf(x) -- x a type name or a
+        // value expression (resolveTypeArgOrValue's own dual shape, exactly
+        // like SizeOf/High/Low just above).  Confirmed against a local fpc
+        // -Mtp build (typeof1.pas/typeof2.pas): the argument must be an
+        // object type with at least one virtual method SOMEWHERE in its own
+        // hierarchy -- VmtSlots is empty for one with none (Type::VmtSlots'
+        // own comment, Type.h) -- and the result is always the generic
+        // 'Pointer' type (TypeContext::getGenericPointer), the same type a
+        // real 'function TypeOf(...): Pointer' declaration would answer in.
+        if (Lo == "typeof" && !E.Args.empty()) {
+            auto ArgTy = resolveTypeArgOrValue(*E.Args[0]);
+            for (size_t I = 1; I < E.Args.size(); ++I) (void)checkExpr(*E.Args[I]);
+            if (ArgTy->isError()) return TyErr;
+            if (ArgTy->Kind != TypeKind::Object || ArgTy->VmtSlots.empty()) {
+                error(E.Args[0]->Loc, diag::err_typeof_argument, {ArgTy->Name});
+                return TyErr;
+            }
+            return Ctx_.getGenericPointer();
+        }
         // FPC's size-aware Hi/Lo/Swap -- a DELIBERATE divergence from
         // literal Turbo Pascal 7, whose Hi/Lo/Swap only ever worked on a
         // 16-bit value: fpc -Mtp instead sizes all three off the argument's
@@ -2481,10 +2526,15 @@ std::shared_ptr<Type> Sema::checkMethodCall(
         return TyErr;
     }
 
-    // Turbo Tier 5, Cluster A item 3 is explicitly scoped to parsing + Sema
-    // RESOLUTION only -- no visibility enforcement (item 7's job): a private
-    // method called from outside its own type's implementation is accepted
-    // here exactly like a public one.  Tracked, not silently forgotten.
+    // Turbo Tier 5, Cluster A item 7: private-method visibility -- see
+    // err_object_private_field/err_object_private_method's own comment
+    // (DiagnosticSemaKinds.def) for the confirmed real (whole-module) scope.
+    // MethodSym->Module already carries "where declared" for a Method
+    // symbol via the same generic unit-export stamping every other symbol
+    // kind gets (Sema.cpp/SemaType.cpp's forEachInCurrentScope loops).
+    if (MethodSym->IsMethodPrivate && MethodSym->Module != CurrentUnit_)
+        error(Loc, diag::err_object_private_method,
+              {MethodSym->MethodOwnerType, Method});
 
     // Hand off to the SAME arity/argument-type checking an ordinary
     // procedure/function call gets, via a synthetic SymbolKind::Proc
@@ -2867,7 +2917,19 @@ void Sema::checkCallArgs(const Symbol& Sym, SourceLocation CallLoc,
                        || (At && At->isRestricted()
                            && isIdenticalType(At->RestrictedOf, Param.Ty))
                        || (Param.Ty && Param.Ty->isRestricted()
-                           && isIdenticalType(At, Param.Ty->RestrictedOf));
+                           && isIdenticalType(At, Param.Ty->RestrictedOf))
+                       // Turbo Tier 5, Cluster A item 7: real Turbo/fpc
+                       // relaxes ISO §6.6.3.3's identical-type var-parameter
+                       // rule for object types specifically -- confirmed
+                       // against a local fpc -Mtp build (cov3.pas): 'var A:
+                       // TAnimal' accepts a 'TDog' actual, the same
+                       // descendant-to-ancestor direction isAssignCompatible
+                       // (SemaExpr.cpp, below) and the plain pointer-formal
+                       // disjunct just above already allow.
+                       || (At && Param.Ty
+                           && At->Kind == TypeKind::Object
+                           && Param.Ty->Kind == TypeKind::Object
+                           && objectIsOrDescendsFrom(*At, *Param.Ty));
             if (!typeOk) {
                 if (At && Param.Ty && At->Name == Param.Ty->Name)
                     error(ArgNode.Loc, diag::err_var_param_distinct_anon_type,
@@ -3043,6 +3105,22 @@ void Sema::diagnoseConformMismatch(const std::string& ParamName, SourceLocation 
     error(Loc, diag::err_conformant_elem_mismatch,
           {ParamName, Formal.ElemType ? Formal.ElemType->Name : "?",
            Actual.ElemType             ? Actual.ElemType->Name : "?"});
+}
+
+// Turbo Tier 5, Cluster A item 7: object-type covariance.  Confirmed against
+// a local fpc -Mtp build (cov1.pas/cov2.pas): a descendant OBJECT VALUE may
+// be assigned to an ancestor-typed variable (classic Pascal "object" value
+// slicing -- unlike a 'class', an object type is a value type and this is
+// ordinary, not a special case), and a POINTER to a descendant object may be
+// assigned to an ancestor-typed pointer variable, in both cases only in the
+// descendant-to-ancestor direction: 'D: TDog; A: TAnimal; A := D;' compiles,
+// 'D := A;' is "Incompatible types: got TAnimal expected TDog".  Walks the
+// SAME Type::Parent chain every other Tier-5 ancestor lookup already walks.
+// See also the forward declaration above (Sema::checkCallArgs's own use).
+static bool objectIsOrDescendsFrom(const Type& Descendant, const Type& Ancestor) {
+    for (const Type* Cur = &Descendant; Cur; Cur = Cur->Parent.get())
+        if (Cur == &Ancestor) return true;
+    return false;
 }
 
 bool Sema::isAssignCompatible(const Type& Dst, const Type& Src,
@@ -3306,6 +3384,18 @@ bool Sema::isAssignCompatible(const Type& Dst, const Type& Src,
             // Pointer is untyped and no domain check applies to it at all.
             case TypeKind::Pointer:
                 if (!Dst.PointeeType || !Src.PointeeType) return true;
+                // Turbo Tier 5, Cluster A item 7: a POINTER to a descendant
+                // object type is assignment-compatible with an ancestor-
+                // typed pointer -- see objectIsOrDescendsFrom's own comment
+                // above (cov1.pas: 'PA: ^TAnimal; PA := @D;' for 'D: TDog').
+                // Checked ahead of isIdenticalType, which would otherwise
+                // say no (the two pointee Type objects are genuinely
+                // different declarations, not merely differently-spelled
+                // aliases of one).
+                if (Dst.PointeeType->Kind == TypeKind::Object
+                        && Src.PointeeType->Kind == TypeKind::Object
+                        && objectIsOrDescendsFrom(*Src.PointeeType, *Dst.PointeeType))
+                    return true;
                 return isIdenticalType(Dst.PointeeType, Src.PointeeType)
                     || schemaInstMatch(*Dst.PointeeType, *Src.PointeeType);
 
@@ -3327,6 +3417,14 @@ bool Sema::isAssignCompatible(const Type& Dst, const Type& Src,
             case TypeKind::Procedure:
             case TypeKind::Function:
                 return congruousSignature(Dst, Src);
+
+            // Turbo Tier 5, Cluster A item 7: object VALUE covariance -- see
+            // objectIsOrDescendsFrom's own comment above.  Src may be Dst's
+            // own type (the '&Dst == &Src' shortcut above already covers
+            // that, but the ancestor chain walk finds it too) or any
+            // descendant of it; the reverse is refused, matching fpc.
+            case TypeKind::Object:
+                return objectIsOrDescendsFrom(Src, Dst);
 
             default:
                 return Dst.Name == Src.Name;
