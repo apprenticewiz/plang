@@ -451,6 +451,27 @@ BUILTIN(Flush,        "flush",        Proc, TP, 1, 1, R_None)
 // restriction Eoln/SeekEoln already have.
 BUILTIN(SetTextBuf,   "settextbuf",   Proc, TP, 2, 3, R_None)
 
+// Turbo Tier 4, Cluster C item 5: real TP's own Crt unit's three routines
+// that genuinely need OS support (a real wait; raw, unbuffered keyboard
+// input) rather than being pure Pascal built on top of Write, the way
+// ClrScr/GotoXY/TextColor/... are (see share/plang/units/Crt.pas).  These
+// are declared as ordinary dialect-wide TP builtins -- reachable with no
+// `uses Crt` -- rather than as identifiers scoped to the Crt unit's own
+// interface, because this compiler has no mechanism yet for a Pascal-level
+// unit interface declaration to bind to a NEW runtime entry point (every
+// existing one, this list included, is dispatched by CodeGen matching the
+// call's spelling, in a single global table Sema::registerBuiltins fills
+// once per compile -- there is no per-unit equivalent).  Real Turbo Pascal
+// itself already blurs this same line for Random/Randomize/ParamStr/ParamCount/
+// Halt above, which are actually System unit routines needing no `uses` at
+// all despite "belonging" to a specific unit conceptually; Delay/KeyPressed/
+// ReadKey follow that exact, already-established precedent rather than
+// inventing a new one. A documented, deliberate simplification -- not an
+// oversight -- see this item's own report for the full reasoning.
+BUILTIN(Delay,        "delay",        Proc, TP, 1, 1, R_None)
+BUILTIN(KeyPressed,   "keypressed",   Func, TP, 0, 0, R_Bool)
+BUILTIN(ReadKey,      "readkey",      Func, TP, 0, 0, R_Char)
+
 #undef ALL
 #undef TP
 #undef EP

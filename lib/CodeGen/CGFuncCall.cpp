@@ -725,6 +725,22 @@ llvm::Value* CGFuncCall::emitBuiltinCall(const std::string& Name,
         return resPtr;
     }
 
+    // Turbo Tier 4, Cluster C item 5: Crt's own KeyPressed/ReadKey -- see
+    // Builtins.def's own comment on why these are dialect-wide builtins
+    // rather than scoped to `uses Crt`.  Both also have a bare-identifier
+    // (no-parens) arm in CGExprCore.cpp, the same as ParamCount/IOResult's
+    // own pair of arms just above -- real TP code calls these with no `()`
+    // far more often than with one.
+    if (lo == "keypressed") {
+        auto* fn  = RtFns.getExternFnN("plang_crt_keypressed", I8Ty, {});
+        auto* raw = B.CreateCall(fn, {}, "keypressed.raw");
+        return EnsureI1(raw);
+    }
+    if (lo == "readkey") {
+        auto* fn = RtFns.getExternFnN("plang_crt_readkey", I8Ty, {});
+        return B.CreateCall(fn, {}, "readkey");
+    }
+
     // Every Func-kind row in Builtins.def has a named arm above; reaching
     // here means ResolvedBuiltin was set to a spelling none of them matched,
     // which should not happen.  nullptr, not codegenICE: emitCallExpr's own

@@ -391,15 +391,57 @@ install(DIRECTORY share/plang/gdb/
 # clause finds the shipped RTL by default, with no -I and no PLANG_UNIT_DIR
 # -- see lib/Basic/UnitSearchPath.cpp's own unitSearchPaths() for the three
 # tiers this is the middle one of (<exeDir>/../lib/plang/units, matching
-# CMAKE_INSTALL_LIBDIR/plang/units below exactly).  No real standard-library
-# unit exists yet (Crt/Dos/Printer/Strings are a later cluster); the one file
-# this installs, share/plang/units/InstallProbeUnit.pas, is a deliberately
-# tiny placeholder whose only job is to prove this install layout and the
-# default search path actually resolve a `uses` clause end-to-end from a
-# real installed prefix -- see its own header comment.
+# CMAKE_INSTALL_LIBDIR/plang/units below exactly).  Crt (Cluster C item 5) is
+# the first real standard-library unit; Dos/Printer/Strings are siblings of
+# that same item.  share/plang/units/InstallProbeUnit.pas remains a
+# deliberately tiny, const-only placeholder proving the install layout
+# itself, kept exactly as small as it always was -- see its own header
+# comment.
 install(DIRECTORY share/plang/units/
     DESTINATION ${CMAKE_INSTALL_LIBDIR}/plang/units
     FILES_MATCHING PATTERN "*.pas"
+)
+
+# Turbo Tier 4, Cluster C item 5: unlike InstallProbeUnit.pas (const-only,
+# needing no object code at all), Crt exports real procedures/functions with
+# bodies -- ClrScr, GotoXY, TextColor, and the rest -- so a program that
+# `uses Crt` needs an actual compiled Crt.o to LINK against, not just
+# Crt.pas/.tui to type-check against (Sema::loadUnitInterfaceExports' own
+# comment on its .pas-fallback path is explicit that the fallback alone
+# "will fail to LINK" for exactly this reason).  Compiled here, once, as
+# part of the normal build -- by the plang binary this same build just
+# produced, the identical way a user would run
+# `plang -std=turbo -c Crt.pas -o Crt.o` by hand -- rather than shipping a
+# hand-maintained prebuilt object.
+#
+# Built under CMAKE_BINARY_DIR/lib/plang/units, not alongside the source
+# under share/plang/units/: that exact path is PLANG_UNIT_DIR's own
+# compiled-in build-tree fallback (lib/Basic/CMakeLists.txt's own
+# PLANG_UNIT_DIR="${CMAKE_BINARY_DIR}/lib/plang/units" definition) -- the
+# THIRD tier unitSearchPaths() tries, below PLANG_UNIT_DIR the environment
+# variable and <exeDir>/../lib/plang/units. Landing Crt.o/.tui there for
+# free is what lets `ninja check-lit`'s own in-tree build/bin/plang resolve
+# `uses Crt;` with NO -I and no PLANG_UNIT_DIR set, the same "no flags at
+# all" experience an installed plang gives, without lit needing its own
+# copy of, or special-casing for, the shipped RTL.
+set(PLANG_BUILD_UNIT_DIR "${CMAKE_BINARY_DIR}/lib/plang/units")
+add_custom_command(
+    OUTPUT "${PLANG_BUILD_UNIT_DIR}/crt.o" "${PLANG_BUILD_UNIT_DIR}/crt.tui"
+    COMMAND ${CMAKE_COMMAND} -E make_directory "${PLANG_BUILD_UNIT_DIR}"
+    COMMAND ${CMAKE_COMMAND} -E copy
+            "${CMAKE_SOURCE_DIR}/share/plang/units/Crt.pas"
+            "${PLANG_BUILD_UNIT_DIR}/Crt.pas"
+    COMMAND $<TARGET_FILE:plang> -std=turbo -c
+            "${PLANG_BUILD_UNIT_DIR}/Crt.pas" -o "${PLANG_BUILD_UNIT_DIR}/crt.o"
+    DEPENDS plang "${CMAKE_SOURCE_DIR}/share/plang/units/Crt.pas"
+    COMMENT "plang: compiling the shipped Crt unit"
+    VERBATIM
+)
+add_custom_target(plang_shipped_crt_unit ALL
+    DEPENDS "${PLANG_BUILD_UNIT_DIR}/crt.o" "${PLANG_BUILD_UNIT_DIR}/crt.tui"
+)
+install(FILES "${PLANG_BUILD_UNIT_DIR}/crt.o" "${PLANG_BUILD_UNIT_DIR}/crt.tui"
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/plang/units
 )
 
 # ---- Tests ----
