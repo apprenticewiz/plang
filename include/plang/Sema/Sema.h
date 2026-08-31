@@ -947,6 +947,29 @@ private:
     /// search for Method (or, for the bare form, CurrentProc's own name)
     /// starts at that Parent, never at OwnerType itself.
     void checkInheritedCallStmt(const InheritedCallStmt& S);
+    /// Turbo Tier 5, Cluster A item 6: 'new(p, Ctor(args))' where p's
+    /// pointee type is Pointee, an object type -- the second argument is
+    /// not a schema discriminant or a variant case-constant (the ordinary
+    /// extra-argument loop just above this call's own site in
+    /// checkCallStmt, SemaStmt.cpp), it is itself a CallExpr naming a
+    /// CONSTRUCTOR of Pointee (or one of its ancestors, walked the same
+    /// composite-key chain checkMethodCall itself uses).  Confirmed
+    /// against a local fpc -Mtp build that a bare 'new(p)' for an object
+    /// pointee (no second argument at all) remains legal and calls no
+    /// constructor -- so this is only reached when S.Args.size() > 1;
+    /// see checkCallStmt's own ToObject gate.  Sets S.NewInitMethod (the
+    /// constructor's name as written) on success; CodeGen
+    /// (CGProcCall::emitCallStmt's own 'new' arm) re-derives which type's
+    /// own body actually implements it the same way an ordinary method
+    /// call's CodeGen does, rather than this storing it twice.
+    void checkNewInit(const CallStmt& S, const Type& Pointee);
+    /// Turbo Tier 5, Cluster A item 6: 'dispose(p, Dtor)' / 'dispose(p,
+    /// Dtor(args))' -- checkNewInit's mirror on the free side.  Dtor must
+    /// be a DESTRUCTOR (IsMethodDestructor) of Pointee's own ancestor
+    /// chain; unlike a constructor a destructor commonly IS virtual in
+    /// real TP7 idiom, and CodeGen dispatches it exactly like an ordinary
+    /// virtual method call (through Pointee's own '_vptr') when it is.
+    void checkDisposeDone(const CallStmt& S, const Type& Pointee);
     void checkWith      (const WithStmt&     S);
     void checkGoto      (const GotoStmt&     S);
     void checkLabeled   (const LabeledStmt&  S);

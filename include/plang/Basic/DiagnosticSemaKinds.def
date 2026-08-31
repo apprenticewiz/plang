@@ -718,6 +718,38 @@ DIAG(err_new_string_capacity, Error,
      "plang does not implement '%0' as a schema, so 'new' cannot be given a "
      "capacity for it; write the capacity in the pointer's domain type, as in "
      "'^string(20)'")
+// Turbo Tier 5, Cluster A item 6: 'new(p, X)' / 'new(p, X(...))' where p's
+// pointee is an object type but the second argument is not a genuine
+// constructor call -- either no CallExpr shape at all ('new(p, 5)',
+// 'new(p, SomeVar)'), or the wrong number of top-level arguments to 'new'
+// itself.  A bare 'new(p)' (no second argument) is unaffected -- confirmed
+// legal against a local fpc -Mtp build, allocating with no constructor run
+// at all (real Borland/FPC's own "use extended syntax" warning, which
+// plang does not reproduce).
+DIAG(err_new_object_needs_init, Error,
+     "'new' for a pointer to object type '%0' needs a constructor call, as "
+     "in 'new(p, Init(...))'")
+// Turbo Tier 5, Cluster A item 6: the named callee IS a real method of
+// Pointee's own ancestor chain, but not one declared 'constructor'.
+DIAG(err_new_init_not_constructor, Error,
+     "'%1' is not a constructor of object type '%0'")
+// Turbo Tier 5, Cluster A item 6: 'dispose(p, Dtor)' mirrors
+// err_new_object_needs_init above.
+DIAG(err_dispose_object_needs_done, Error,
+     "'dispose' for a pointer to object type '%0' needs a destructor call, "
+     "as in 'dispose(p, Done)'")
+// Turbo Tier 5, Cluster A item 6: err_new_init_not_constructor's mirror.
+DIAG(err_dispose_done_not_destructor, Error,
+     "'%1' is not a destructor of object type '%0'")
+// Turbo Tier 5, Cluster A item 6: 'Fail' (TP-only, Builtins.def) used
+// outside a constructor's own body.  Confirmed against a local fpc -Mtp
+// build that 'Fail' is not even a recognized identifier outside a
+// constructor ("Identifier not found") -- plang gives it a dedicated
+// diagnostic instead of reusing the generic undefined-identifier one,
+// matching the same "context-restricted required identifier" treatment
+// err_inherited_outside_method already gives 'inherited'.
+DIAG(err_fail_outside_constructor, Error,
+     "'Fail' may only be used inside a constructor")
 DIAG(err_schema_not_a_discriminant, Error, "schema '%0' has no discriminant '%1'")
 DIAG(err_schema_arg_not_schematic, Error,
      "argument for parameter '%0' must be a '%1', got '%2'")

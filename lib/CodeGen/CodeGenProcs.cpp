@@ -872,6 +872,14 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
     curRetSemaType = (hd.IsFunction && hd.ReturnType) ? hd.ReturnType->ResolvedType
                                                        : nullptr;
 
+    // Turbo Tier 5, Cluster A item 6: a constructor's own hidden success
+    // flag -- see curCtorOkAlloca's own comment (CodeGenImpl.h) for the
+    // whole design.  hd.IsConstructor rather than proc.IsConstructor: hd is
+    // the HEADING (the in-class declaration for an out-of-line body), and
+    // that is where the 'constructor' keyword was actually written.
+    const bool isConstructor = isMethod && hd.IsConstructor;
+    if (isConstructor) retTy = i1Ty;
+
     // Create function, or take over the declaration already standing under
     // this name.  A procedure declared 'forward' is called before its body is
     // reached, so the pre-pass in emitAllProcedures has put a declaration
@@ -1148,6 +1156,16 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
         defVar(proc.Name, curRetAlloca, curRetType);
     } else {
         curRetAlloca = nullptr;
+    }
+
+    // Turbo Tier 5, Cluster A item 6: a constructor begins "ok" -- see
+    // curCtorOkAlloca's own comment (CodeGenImpl.h).  'Fail' (CGProcCall)
+    // is the only thing that ever stores false here.
+    if (isConstructor) {
+        curCtorOkAlloca = builder.CreateAlloca(i1Ty, nullptr, proc.Name + ".ctor.ok");
+        builder.CreateStore(llvm::ConstantInt::get(i1Ty, 1), curCtorOkAlloca);
+    } else {
+        curCtorOkAlloca = nullptr;
     }
 
     // TP-only: where Exit branches to -- see CGFunction::ExitBB's own
@@ -1471,6 +1489,11 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
     if (curRetType && curRetAlloca) {
         auto* rv = builder.CreateLoad(curRetType, curRetAlloca, "retval");
         builder.CreateRet(rv);
+    } else if (isConstructor && curCtorOkAlloca) {
+        // Turbo Tier 5, Cluster A item 6: the real TP7/BP ABI -- see
+        // curCtorOkAlloca's own comment.
+        auto* ok = builder.CreateLoad(i1Ty, curCtorOkAlloca, "ctor.ok.result");
+        builder.CreateRet(ok);
     } else {
         builder.CreateRetVoid();
     }

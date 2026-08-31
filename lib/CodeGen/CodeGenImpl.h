@@ -236,6 +236,20 @@ struct Codegen::Impl {
     /// curRetType in emitFunctionDef; saved/restored by CGFunction the same
     /// way.
     std::shared_ptr<Type> curRetSemaType;
+    /// Turbo Tier 5, Cluster A item 6: a constructor's own hidden success
+    /// flag -- confirmed against a local fpc -Mtp build that a TP7/BP
+    /// constructor's real ABI is "returns a boolean the caller never
+    /// spells", set true on entry and false by 'Fail' (CGProcCall's own
+    /// 'fail' arm stores false here then branches to ExitBB exactly like
+    /// Exit does).  Deliberately NOT curRetAlloca/curRetType/
+    /// curRetSemaType: a constructor is never IsFunction (Sema models
+    /// 'constructor' as a kind of procedure), so Pascal's own
+    /// `FuncName := value` result-assignment machinery never touches this,
+    /// and conflating the two would let an ordinary function nested inside
+    /// a constructor's body (if that were ever legal) collide with it.
+    /// Null outside a constructor body; saved/restored by CGFunction the
+    /// same way curRetAlloca is.
+    llvm::AllocaInst*   curCtorOkAlloca{nullptr};
     std::string         curFuncName;            // for result-variable detection
     std::string         namePrefix{PlangProcPrefix};   // mangling prefix
     std::string         globalPrefix{PlangGlobalPrefix}; // ditto, for globals
@@ -471,6 +485,7 @@ struct Codegen::Impl {
         llvm::AllocaInst*  SavedRetAlloca;
         llvm::Type*        SavedRetType;
         std::shared_ptr<Type> SavedRetSemaType;
+        llvm::AllocaInst*  SavedCtorOkAlloca;
         std::string        SavedFuncName;
         std::string        SavedNamePrefix;
         // ISO §6.2.2.3: a type or constant declared in this block is
@@ -1645,9 +1660,11 @@ struct Codegen::Impl {
     /// or one with no `_vptr` at all (vptrOffsetOf returns nullopt).
     ///
     /// Called from emitVarValueInit for EVERY directly-declared object-typed
-    /// local or global variable (CodeGenProcs.cpp), which is the only shape
-    /// this item's own scope covers -- New/Init/Fail's heap-allocated,
-    /// bypass-and-rebind vptr stamping is item 6's job, not this function's.
+    /// local or global variable (CodeGenProcs.cpp), and -- via CGProcCall's
+    /// own StampVptr closure (Turbo Tier 5, Cluster A item 6) -- from
+    /// New(P, Init(...))'s own freshly allocated, not-yet-a-variable
+    /// memory, so both shapes of "an object instance begins to exist" go
+    /// through the exact same stamping logic.
     void stampVptr(llvm::Value* ptr, const Type& T);
     /// getOrCreateVmt's own memo, keyed by the canonical Sema Type* exactly
     /// the way objectLayouts_ is (CGTypes.cpp) -- an object type has exactly
