@@ -924,6 +924,16 @@ const plang::Type* methodOwnerType(const plang::Type& RecvTy,
             if (eqCI(M.Name, Method)) return Cur;
     return nullptr;
 }
+
+// Turbo Tier 5, Cluster A item 5: same fresh-copy convention as
+// methodOwnerType just above; see CGFuncCall.cpp's identical
+// methodEntryOf for the design.
+const plang::Type::Method* methodEntryOf(const plang::Type& Owner,
+                                          const std::string& Method) {
+    for (const auto& M : Owner.ObjectMethods)
+        if (eqCI(M.Name, Method)) return &M;
+    return nullptr;
+}
 } // namespace
 
 void CGProcCall::emitMethodCallStmt(const MethodCallStmt& s) {
@@ -963,6 +973,107 @@ void CGProcCall::emitMethodCallStmt(const MethodCallStmt& s) {
     std::vector<llvm::Value*> args;
     args.push_back(selfPtr);
 
+    size_t pi = args.size();
+    for (size_t astArgIdx = 0; astArgIdx < s.Args.size(); ++astArgIdx) {
+        const auto& arg = s.Args[astArgIdx];
+
+        if (const auto* pt = ProcParamArg(mangledName, astArgIdx)) {
+            ClosureAbi.pushProcParamArgs(args, *arg, *pt);
+            pi = args.size();
+            continue;
+        }
+        if (unsigned nd = Schema.schemaArgDiscs(mangledName, astArgIdx); nd > 0) {
+            Schema.pushSchemaArgs(args, *arg, nd);
+            pi = args.size();
+            continue;
+        }
+        const size_t dims = ConformantDimsOf(mangledName, astArgIdx);
+        if (dims > 0) {
+            ClosureAbi.pushConformantArgs(args, *arg, dims);
+            pi += 1 + 2 * dims;
+        } else {
+            std::optional<int64_t> destSetBase = ParamSetBaseOf(mangledName, astArgIdx);
+            args.push_back(Sets.alignSetArg(
+                StrCall.emitCallArg(*arg,
+                    pi < callee->arg_size()
+                        ? callee->getFunctionType()->getParamType(pi) : nullptr,
+                    ParamIsByRef(mangledName, astArgIdx)),
+                *arg, destSetBase));
+            ++pi;
+        }
+    }
+    // Turbo Tier 5, Cluster A item 5: see CGFuncCall::emitMethodCallExpr's
+    // identical branch for the whole design -- a virtual method is called
+    // INDIRECTLY, through the receiver's own `_vptr` and Owner's own
+    // VmtSlot index, never Owner's mangled symbol directly.
+    const Type::Method* MEntry = methodEntryOf(*Owner, s.Method);
+    if (MEntry && MEntry->IsVirtual) {
+        auto vptrOff = Types.vptrOffsetOf(*s.Receiver->ResolvedType);
+        if (!vptrOff)
+            codegenICE("virtual method '" + s.Method + "' call has a "
+                       "receiver type with no `_vptr` -- Sema should have "
+                       "refused a virtual method on a hierarchy with none");
+        auto* vptrSlot = B.CreateGEP(I8Ty, selfPtr,
+            {llvm::ConstantInt::get(I64Ty, *vptrOff)}, "self.vptr.addr");
+        auto* vmt = B.CreateLoad(PtrTy, vptrSlot, "self.vmt");
+        auto* slotAddr = B.CreateGEP(PtrTy, vmt,
+            {llvm::ConstantInt::get(I64Ty, MEntry->VmtSlot)}, "vmt.slot.addr");
+        auto* fnPtr = B.CreateLoad(PtrTy, slotAddr, "vmt.fn");
+        B.CreateCall(callee->getFunctionType(), fnPtr, args);
+    } else {
+        B.CreateCall(callee, args);
+    }
+}
+
+// Turbo Tier 5, Cluster A item 5: see this method's own declaration
+// (CGProcCall.h) for the whole design.
+void CGProcCall::emitInheritedCallStmt(const InheritedCallStmt& s) {
+    if (s.ImplementingType.empty() || s.ResolvedMethod.empty())
+        codegenICE("'inherited' reached CodeGen unresolved -- "
+                   "Sema::checkInheritedCallStmt should have refused this "
+                   "already or filled in ImplementingType/ResolvedMethod");
+    std::string mangledName = Linkage.mangledMethod(s.ImplementingType, s.ResolvedMethod);
+
+    // Every method in this compilation unit is pre-declared (at minimum) by
+    // emitAllProcedures's own method pre-pass before ANY body -- including
+    // this one, whichever method contains this 'inherited' -- is emitted, so
+    // this is never the "not yet defined in this compilation unit" case
+    // CGFuncCall::emitMethodCallExpr's own static-call fallback has to
+    // handle: an out-of-line ancestor method body always has at least a
+    // declaration standing under its mangled name by the time any OTHER
+    // method's own body starts.
+    auto* callee = Mod.getFunction(mangledName);
+    if (!callee)
+        codegenICE("'inherited " + s.ResolvedMethod + "' resolved to '"
+                   + mangledName + "', which was never declared");
+
+    // The CURRENTLY EXECUTING function's own Self -- forwarded unchanged,
+    // never re-read through the 'Self' symbol table entry, so this works
+    // identically whether or not the enclosing method happens to still have
+    // 'Self' in scope under that name.
+    llvm::Function* curFn = B.GetInsertBlock()->getParent();
+    if (curFn->arg_size() == 0)
+        codegenICE("'inherited' used inside a function with no 'Self' "
+                   "parameter -- Sema::checkInheritedCallStmt should have "
+                   "refused this outside a method body already");
+    llvm::Value* selfPtr = curFn->getArg(0);
+
+    std::vector<llvm::Value*> args;
+    args.push_back(selfPtr);
+
+    if (s.Method.empty()) {
+        // Bare 'inherited;': this activation's own remaining parameters,
+        // forwarded positionally with no re-marshalling -- see this
+        // function's own declaration comment for why that is sound.
+        for (unsigned i = 1; i < curFn->arg_size(); ++i)
+            args.push_back(curFn->getArg(i));
+        B.CreateCall(callee, args);
+        return;
+    }
+
+    // Same per-argument marshalling loop emitMethodCallStmt uses just
+    // above -- an explicit 'inherited Method(args)' takes its own written
+    // argument list exactly like an ordinary method call does.
     size_t pi = args.size();
     for (size_t astArgIdx = 0; astArgIdx < s.Args.size(); ++astArgIdx) {
         const auto& arg = s.Args[astArgIdx];

@@ -31,7 +31,7 @@
 namespace llvm { class BasicBlock; class Module; class Value; }
 namespace plang {
 struct CallStmt; struct ExprNode; struct TypeNode;
-struct ProcedureTypeNode; struct MethodCallStmt;
+struct ProcedureTypeNode; struct MethodCallStmt; struct InheritedCallStmt;
 }
 
 class CGProcCall {
@@ -106,6 +106,19 @@ public:
     /// Turbo `{$X+}`, MethodCallStmt::ResolvedType non-null) has its result
     /// simply discarded, exactly like an ordinary CallStmt's identical case.
     void emitMethodCallStmt(const plang::MethodCallStmt& s);
+    /// Turbo Tier 5, Cluster A item 5: 'inherited [Method[(args)]];' -- a
+    /// STATIC call (never through the VMT) to the mangled symbol
+    /// Sema::checkInheritedCallStmt already resolved (InheritedCallStmt::
+    /// ImplementingType/ResolvedMethod), with the CURRENTLY EXECUTING
+    /// function's own Self argument (llvm::Function::getArg(0) -- every
+    /// method has one prepended, see emitFunctionDef's own 'Self' comment)
+    /// forwarded as this call's own Self, unchanged.  The bare 'inherited;'
+    /// form (InheritedCallStmt::Method empty) forwards this activation's
+    /// remaining LLVM arguments (getArg(1) onward) verbatim, with no
+    /// re-marshalling at all -- sound only because Sema's own override-
+    /// signature check already guarantees the ancestor's own parameter list
+    /// is identical; see InheritedCallStmt's own comment (AstStmt.h).
+    void emitInheritedCallStmt(const plang::InheritedCallStmt& s);
 
 private:
     /// Turbo Tier 4, Cluster C item 6: recognizes a call to one of Dos.pas's

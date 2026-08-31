@@ -18,12 +18,12 @@ namespace plang {
 // output, it silently stops reporting a class of error inside it.
 //
 // See NumExprKinds and NumStmtKinds in AstBase.h.
-// Complete as written: of the thirteen statement kinds, the nine that
-// contain a statement appear in walkStmts and the ten that hang an
+// Complete as written: of the fourteen statement kinds, the nine that
+// contain a statement appear in walkStmts and the eleven that hang an
 // expression off themselves appear in forEachStmtExpr; of the eighteen
 // expression kinds, six are leaves and the other twelve appear in
 // walkExprs.
-static_assert(NumStmtKinds == 13,
+static_assert(NumStmtKinds == 14,
               "a new statement kind that contains statements needs a branch in "
               "walkStmts, and one that hangs an expression off itself needs a "
               "branch in forEachStmtExpr");
@@ -123,6 +123,8 @@ void forEachStmtExpr(const StmtNode* S, Fn&& F) {
         for (const auto& A : N->Args) F(A.get());
     } else if (auto* N = llvm::dyn_cast<MethodCallStmt>(S)) {
         F(N->Receiver.get());
+        for (const auto& A : N->Args) F(A.get());
+    } else if (auto* N = llvm::dyn_cast<InheritedCallStmt>(S)) {
         for (const auto& A : N->Args) F(A.get());
     } else if (auto* N = llvm::dyn_cast<IfStmt>(S)) {
         F(N->Cond.get());

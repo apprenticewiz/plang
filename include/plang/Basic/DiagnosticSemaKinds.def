@@ -598,6 +598,24 @@ DIAG(err_method_call_receiver_not_object, Error,
 // the wrong fix (this is never a field lookup to begin with).
 DIAG(err_object_method_not_found, Error,
      "object type '%0' has no method '%1'")
+// Turbo Tier 5, Cluster A item 5: 'inherited' (with or without a following
+// method name) used outside an object method's own body -- there is no
+// enclosing method to ask "the direct ancestor of WHAT" about, matching
+// fpc -Mtp's own rejection of 'inherited' at ordinary procedure/program scope.
+DIAG(err_inherited_outside_method, Error,
+     "'inherited' may only be used inside an object method")
+// Turbo Tier 5, Cluster A item 5: the enclosing method's own object type has
+// no ancestor at all ('object type 'T' has no ancestor for 'inherited' to
+// reach') -- confirmed against fpc -Mtp: 'inherited' on a root object type
+// is rejected rather than silently a no-op.
+DIAG(err_inherited_no_ancestor, Error,
+     "object type '%0' has no ancestor for 'inherited' to reach")
+// Turbo Tier 5, Cluster A item 5: 'inherited Name(...)' where no ancestor in
+// the chain (searched starting at the DIRECT parent, never this type itself)
+// declares a method of that name -- the 'inherited' sibling of
+// err_object_method_not_found just above.
+DIAG(err_inherited_method_not_found, Error,
+     "ancestor of object type '%0' has no method '%1' for 'inherited' to reach")
 DIAG(err_undefined_type, Error, "undefined type '%0'")
 DIAG(err_not_a_type, Error, "'%0' is not a type")
 // EP §6.2.1(k): the relaxation that lets declaration parts appear in any

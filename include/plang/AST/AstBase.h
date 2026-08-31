@@ -83,7 +83,8 @@ enum class NodeKind {
     LabeledStmt,
     CaseStmt,
     MethodCallStmt,  // Turbo Tier 5: Obj.Method(args) / P^.Method(args), used as a statement
-    StmtLast      = MethodCallStmt,
+    InheritedCallStmt,  // Turbo Tier 5, Cluster A item 5: 'inherited [Method[(args)]];'
+    StmtLast      = InheritedCallStmt,
 
     // -- Type expressions --
     TypeFirst,

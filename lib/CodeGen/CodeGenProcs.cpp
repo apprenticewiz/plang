@@ -1652,22 +1652,76 @@ int64_t Codegen::Impl::declaredStrCapacity(const TypeNode* tn) {
     return 0;
 }
 
+// Turbo Tier 5, Cluster A item 5: see this function's own declaration
+// (CodeGenImpl.h) for the whole design.
+llvm::GlobalVariable* Codegen::Impl::getOrCreateVmt(const Type& T) {
+    if (T.Kind != TypeKind::Object || T.VmtSlots.empty()) return nullptr;
+    if (auto it = vmtGlobals_.find(&T); it != vmtGlobals_.end()) return it->second;
+
+    std::vector<llvm::Constant*> elems;
+    elems.reserve(T.VmtSlots.size());
+    for (const auto& slot : T.VmtSlots) {
+        std::string mangledName = mangledMethod(slot.ImplementingType, slot.MethodName);
+        auto* fn = mod->getFunction(mangledName);
+        if (!fn)
+            codegenICE("VMT for object type '" + T.Name + "' needs '"
+                       + mangledName + "' but it was never declared -- every "
+                         "method should be pre-declared before any body or "
+                         "global-init that could need a VMT runs "
+                         "(emitAllProcedures's own method pre-pass)");
+        elems.push_back(fn);
+    }
+    auto* arrTy = llvm::ArrayType::get(ptrTy, elems.size());
+    auto* init  = llvm::ConstantArray::get(arrTy, elems);
+    auto* gv = new llvm::GlobalVariable(
+        *mod, arrTy, /*isConstant=*/true, llvm::GlobalValue::InternalLinkage,
+        init, mangledVmt(T.Name));
+    vmtGlobals_[&T] = gv;
+    return gv;
+}
+
+// Turbo Tier 5, Cluster A item 5: see this function's own declaration
+// (CodeGenImpl.h) for the whole design.
+void Codegen::Impl::stampVptr(llvm::Value* ptr, const Type& T) {
+    if (T.Kind != TypeKind::Object) return;
+    auto off = vptrOffsetOf(T);
+    if (!off) return;
+    auto* vmt = getOrCreateVmt(T);
+    if (!vmt) return;
+    auto* slot = builder.CreateGEP(i8Ty, ptr,
+        {llvm::ConstantInt::get(i64Ty, *off)}, "vptr.slot");
+    builder.CreateStore(vmt, slot);
+}
+
 // EP §6.6: the value clause of a variable declaration, or of the denoter the
 // variable is declared with.
 void Codegen::Impl::emitVarValueInit(const VarGroup& vg) {
     if (!vg.InitExpr) {
         // The declaration says nothing, but the type may: `var x: t` begins in
         // whatever state t was declared to begin in.
-        if (!hasInitialState(vg.Type.get())) return;
+        if (hasInitialState(vg.Type.get()))
+            for (const auto& nm : vg.Names)
+                if (const auto* ve = findVar(nm))
+                    emitInitialState(ve->ptr, ve->type, vg.Type.get());
+    } else {
         for (const auto& nm : vg.Names)
             if (const auto* ve = findVar(nm))
-                emitInitialState(ve->ptr, ve->type, vg.Type.get());
-        return;
+                storeInitialValue(ve->ptr, ve->type, vg.Type.get(), *vg.InitExpr);
     }
 
-    for (const auto& nm : vg.Names)
-        if (const auto* ve = findVar(nm))
-            storeInitialValue(ve->ptr, ve->type, vg.Type.get(), *vg.InitExpr);
+    // Turbo Tier 5, Cluster A item 5: stamp this concrete type's own VMT
+    // global address into every declared instance's `_vptr` slot, so that a
+    // virtual call dispatched through it -- directly, or via '@X'/'^'
+    // derived from it -- reaches the right override from the moment the
+    // variable exists.  Runs AFTER whatever value/initial-state init just
+    // happened above (not before), so a `value` clause or initial-state
+    // fill that touches this object's own storage can never clobber a vptr
+    // this already set -- see stampVptr's own comment for scope (a directly
+    // declared local/global only; New/Init/Fail is item 6's job).
+    if (vg.Type && vg.Type->ResolvedType && vg.Type->ResolvedType->Kind == TypeKind::Object)
+        for (const auto& nm : vg.Names)
+            if (const auto* ve = findVar(nm))
+                stampVptr(ve->ptr, *vg.Type->ResolvedType);
 }
 
 // Puts one written value into the storage of a variable of the denoter's type.

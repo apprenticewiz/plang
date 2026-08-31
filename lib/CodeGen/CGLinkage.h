@@ -110,6 +110,14 @@ public:
     std::string mangledMethod(const std::string& objectTypeName,
                                const std::string& methodName) const;
 
+    /// Turbo Tier 5, Cluster A item 5: the symbol naming an object type's own
+    /// VMT global -- one array PER CONCRETE TYPE (see Codegen::Impl::
+    /// getOrCreateVmt's own comment for why it is not shared with an
+    /// ancestor's).  Same $-joined-segment shape mangledMethod already uses,
+    /// under a dedicated "vmt$" segment so this can never collide with an
+    /// ordinary global or method symbol of the same object type name.
+    std::string mangledVmt(const std::string& objectTypeName) const;
+
 private:
     llvm::Module& Mod;
     std::string& NamePrefix;

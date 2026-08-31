@@ -58,6 +58,13 @@ void CGStmtCore::emitStmt(const StmtNode* stmt) {
         WithStackScope([&]() -> llvm::Value* { ProcCall.emitMethodCallStmt(*s); return nullptr; });
         return;
     }
+    // Turbo Tier 5, Cluster A item 5: 'inherited [Method[(args)]];' -- a
+    // static call to the direct ancestor's own implementation; see
+    // CGProcCall::emitInheritedCallStmt's own comment.
+    if (auto* s = llvm::dyn_cast<InheritedCallStmt>(stmt)) {
+        WithStackScope([&]() -> llvm::Value* { ProcCall.emitInheritedCallStmt(*s); return nullptr; });
+        return;
+    }
     // Falling off the end would drop the statement from the program silently.
     codegenICE("unhandled statement kind in codegen");
 }

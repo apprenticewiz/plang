@@ -126,6 +126,55 @@ struct MethodCallStmt : StmtNode {
     mutable std::shared_ptr<Type> ResolvedType;
 };
 
+/// Turbo Tier 5, Cluster A item 5: 'inherited [Method[(args)]];' inside an
+/// object method's own body -- a STATIC call (never through the VMT, even
+/// when the method it reaches is itself declared 'virtual') to the DIRECT
+/// PARENT's own implementation of a method with the given name.  Confirmed
+/// against a local `fpc -Mtp` build: 'inherited' never redispatches, and the
+/// search for which ancestor's own body actually implements the name starts
+/// at the enclosing method's OwnerType's immediate Parent (never at OwnerType
+/// itself, so a method can never "inherited" its own body) and walks upward
+/// exactly like an ordinary method call's own ancestor-chain resolution
+/// (Sema::checkMethodCall) -- see Sema::checkInheritedCallStmt.
+///
+/// Two surface forms, both real Borland/FPC syntax:
+///   'inherited MethodName(args);' / 'inherited MethodName;' -- Method is
+///   the name as written, Args as written (possibly empty).
+///   'inherited;' (bare) -- Method is empty; means "the same method THIS
+///   method body itself overrides, called with the same arguments this
+///   activation itself received" -- CodeGen forwards this activation's own
+///   parameters unchanged rather than re-marshalling anything (see
+///   CGProcCall::emitInheritedCallStmt), which is sound only because
+///   Sema's own override-signature check (resolveObjectType,
+///   sameMethodSignature) already guarantees the ancestor's own parameter
+///   list is identical.
+struct InheritedCallStmt : StmtNode {
+    static bool classof(const Node* n) { return n->Kind == NodeKind::InheritedCallStmt; }
+    InheritedCallStmt() : StmtNode(NodeKind::InheritedCallStmt) {}
+    /// The method name as written, or empty for the bare 'inherited;' form.
+    std::string                            Method;
+    /// Actual arguments, in order; always empty for the bare form (see
+    /// Method's own comment -- CodeGen supplies this activation's own
+    /// parameters directly, with no Args to marshal).
+    std::vector<std::unique_ptr<ExprNode>> Args;
+
+    /// Sema::checkInheritedCallStmt's resolution, consumed by
+    /// CGProcCall::emitInheritedCallStmt:
+    /// The method name actually being resolved -- Method verbatim for the
+    /// explicit form, or the enclosing method's own name for the bare form.
+    mutable std::string ResolvedMethod;
+    /// The ancestor object type (in CurrentProc's OwnerType's own Parent
+    /// chain) whose OWN implementation this statically calls -- mirrors
+    /// MethodCallExpr/Stmt codegen's identical "Owner" concept, just found
+    /// starting one level higher (Parent, not the receiver's own type).
+    mutable std::string ImplementingType;
+    /// Turbo `{$X+}`: mirrors MethodCallStmt::ResolvedType exactly, for the
+    /// explicit-name form only (the bare form's own callee is a procedure or
+    /// function according to whatever the ENCLOSING method already is, and
+    /// its result -- if any -- is unused here regardless).
+    mutable std::shared_ptr<Type> ResolvedType;
+};
+
 struct WithStmt : StmtNode {
     static bool classof(const Node* n) { return n->Kind == NodeKind::WithStmt; }
     WithStmt() : StmtNode(NodeKind::WithStmt) {}

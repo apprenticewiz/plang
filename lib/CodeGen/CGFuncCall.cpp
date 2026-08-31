@@ -795,6 +795,20 @@ const plang::Type* methodOwnerType(const plang::Type& RecvTy,
             if (eqCI(M.Name, Method)) return Cur;
     return nullptr;
 }
+
+// Turbo Tier 5, Cluster A item 5: the Type::Method entry itself (IsVirtual/
+// VmtSlot), from the SAME Owner methodOwnerType just found -- Owner's own
+// ObjectMethods is where resolveObjectType actually recorded IsVirtual and
+// the FINAL VmtSlot index for a method DECLARED BY Owner (see VmtSlot's own
+// comment, Type.h: "index into the OWNING type's own VmtSlots", where
+// "owning" means Owner here), so no second ancestor walk is needed once
+// Owner is already in hand.
+const plang::Type::Method* methodEntryOf(const plang::Type& Owner,
+                                          const std::string& Method) {
+    for (const auto& M : Owner.ObjectMethods)
+        if (eqCI(M.Name, Method)) return &M;
+    return nullptr;
+}
 } // namespace
 
 llvm::Value* CGFuncCall::emitMethodCallExpr(const MethodCallExpr& e) {
@@ -875,7 +889,33 @@ llvm::Value* CGFuncCall::emitMethodCallExpr(const MethodCallExpr& e) {
             ++pi;
         }
     }
-    auto* ret = B.CreateCall(callee, args, "mcall");
+    // Turbo Tier 5, Cluster A item 5: a virtual method is called INDIRECTLY,
+    // through the receiver's own `_vptr` and Owner's own VmtSlot index --
+    // never the direct call to Owner's mangled symbol every OTHER call still
+    // uses.  callee (found above) still supplies the call's SIGNATURE (every
+    // slot filler in one hierarchy shares byte-for-byte the same one, since
+    // an override must match its ancestor's signature exactly --
+    // resolveObjectType's own sameMethodSignature check) even when the
+    // function actually invoked at run time is a different override
+    // entirely.
+    const Type::Method* MEntry = methodEntryOf(*Owner, e.Method);
+    llvm::Value* ret;
+    if (MEntry && MEntry->IsVirtual) {
+        auto vptrOff = Types.vptrOffsetOf(*e.Receiver->ResolvedType);
+        if (!vptrOff)
+            codegenICE("virtual method '" + e.Method + "' call has a "
+                       "receiver type with no `_vptr` -- Sema should have "
+                       "refused a virtual method on a hierarchy with none");
+        auto* vptrSlot = B.CreateGEP(I8Ty, selfPtr,
+            {llvm::ConstantInt::get(I64Ty, *vptrOff)}, "self.vptr.addr");
+        auto* vmt = B.CreateLoad(PtrTy, vptrSlot, "self.vmt");
+        auto* slotAddr = B.CreateGEP(PtrTy, vmt,
+            {llvm::ConstantInt::get(I64Ty, MEntry->VmtSlot)}, "vmt.slot.addr");
+        auto* fnPtr = B.CreateLoad(PtrTy, slotAddr, "vmt.fn");
+        ret = B.CreateCall(callee->getFunctionType(), fnPtr, args, "mcall.v");
+    } else {
+        ret = B.CreateCall(callee, args, "mcall");
+    }
     // Same string/ShortString return-value spill emitUserFuncCall performs
     // just below, for the identical reason: a struct-shaped result comes
     // back by value, and every consumer of a string expression expects an
