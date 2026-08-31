@@ -21,6 +21,8 @@ set(PLANG_RUNTIME_SOURCES
     plang_val.cpp
     plang_time.cpp
     plang_crt.cpp
+    plang_strings.cpp
+    plang_printer.cpp
 )
 add_library(plang_runtime        STATIC ${PLANG_RUNTIME_SOURCES})
 add_library(plang_runtime_shared SHARED ${PLANG_RUNTIME_SOURCES})
