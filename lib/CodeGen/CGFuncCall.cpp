@@ -750,7 +750,33 @@ llvm::Value* CGFuncCall::emitBuiltinCall(const std::string& Name,
     return nullptr;
 }
 
+llvm::Value* CGFuncCall::tryEmitDosFuncCall(const CallExpr& e) {
+    // Turbo Tier 4, Cluster C item 6: GetEnv is Dos.pas's only FUNCTION
+    // export with a `string` VALUE parameter/result -- CGProcCall::
+    // tryEmitDosProcCall's own comment explains why that needs a direct,
+    // scalar-only runtime entry point rather than the ordinary mangled-
+    // external-call path; ParamStr just above (this same file) already
+    // writes its own ShortString result the identical way, into an
+    // out-pointer plus its capacity, rather than returning one.
+    if (!eqCI(Linkage.importOwner(e.Name), "dos")) return nullptr;
+    if (toLower(e.Name) != "getenv") return nullptr;
+    auto* resPtr = CreateEntryAlloca(Types.sstrStructType(PlangMaxStringCapacity),
+                                      "dos.getenv.res");
+    auto* fn = RtFns.getExternFnN("plang_dos_getenv", llvm::Type::getVoidTy(Ctx),
+                                   {PtrTy, PtrTy, I64Ty});
+    auto* nameArg = StrCall.emitCStrArg(*e.Args[0]);
+    B.CreateCall(fn, {nameArg, resPtr, i64c(PlangMaxStringCapacity)});
+    // A string result is represented as its ADDRESS, not its loaded value --
+    // every consumer of a string expression expects that (see
+    // emitUserFuncCall's own "A string result comes back as the whole
+    // struct... spill the returned value" comment just below, whose exact
+    // convention this matches; ParamStr, just above in this file, already
+    // returns its own out-pointer the identical way).
+    return resPtr;
+}
+
 llvm::Value* CGFuncCall::emitUserFuncCall(const CallExpr& e) {
+    if (auto* v = tryEmitDosFuncCall(e)) return v;
     // ISO §6.6.3.1: a functional parameter is called through the pair it
     // arrived as, so there is no name to resolve.
     if (auto* pve = SymTab.findVar(e.Name); pve && pve->isProcParam)

@@ -101,6 +101,16 @@ public:
     void emitUserProcCall(const plang::CallStmt& s);
 
 private:
+    /// Turbo Tier 4, Cluster C item 6: recognizes a call to one of Dos.pas's
+    /// six string-VALUE-parameter exports (ChDir/MkDir/RmDir/Exec/FindFirst)
+    /// and emits it directly against its own scalar-only runtime entry
+    /// point, bypassing the ordinary mangled-external-call path below --
+    /// see this method's own definition (CGProcCall.cpp) for why.  Returns
+    /// false (having emitted nothing) for every other call, including one
+    /// that merely happens to share a name with one of these but was never
+    /// reached through 'uses Dos'.
+    bool tryEmitDosProcCall(const plang::CallStmt& s);
+
     /// -std=turbo only: emits `call void @plang_iocheck()` right after a
     /// write/writeln/read/readln/Reset/Rewrite/Append/Close statement's own
     /// call sequence, but ONLY when RangeGuards.isTurbo() && RangeGuards.

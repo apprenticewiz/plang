@@ -869,7 +869,50 @@ void CGProcCall::emitCallStmt(const CallStmt& s) {
                "no builtin-function dispatch arm");
 }
 
+bool CGProcCall::tryEmitDosProcCall(const CallStmt& s) {
+    // Turbo Tier 4, Cluster C item 6: share/plang/units/Dos.pas's own header
+    // comment explains why six of its exports (every one with a `string`
+    // VALUE parameter) cannot be reached the way the REST of Dos's exports
+    // are, by a plain linker-symbol alias -- plang's own calling convention
+    // for a `string` passed by value does not match the real x86-64 SysV
+    // ABI a hand-written C++ function can reproduce.  Recognized here by
+    // NAME, but only once Linkage.importOwner confirms the call actually
+    // resolved to something 'uses Dos' brought into scope -- a program's
+    // OWN same-named procedure (no 'uses Dos' at all) has an empty
+    // importOwner and falls straight through to the ordinary path below,
+    // unaffected.
+    if (!eqCI(Linkage.importOwner(s.Name), "dos")) return false;
+    const std::string lo = toLower(s.Name);
+    auto* voidTy = llvm::Type::getVoidTy(Ctx);
+    auto* i16Ty  = llvm::Type::getInt16Ty(Ctx);
+    if (lo == "chdir" || lo == "mkdir" || lo == "rmdir") {
+        const char* rt = lo == "chdir" ? "plang_dos_chdir"
+                        : lo == "mkdir" ? "plang_dos_mkdir"
+                                        : "plang_dos_rmdir";
+        auto* fn = RtFns.getExternFnN(rt, voidTy, {PtrTy});
+        B.CreateCall(fn, {StrCall.emitCStrArg(*s.Args[0])});
+        return true;
+    }
+    if (lo == "exec") {
+        auto* fn = RtFns.getExternFnN("plang_dos_exec", voidTy, {PtrTy, PtrTy});
+        B.CreateCall(fn, {StrCall.emitCStrArg(*s.Args[0]),
+                           StrCall.emitCStrArg(*s.Args[1])});
+        return true;
+    }
+    if (lo == "findfirst") {
+        auto* fn = RtFns.getExternFnN("plang_dos_findfirst", voidTy,
+                                       {PtrTy, i16Ty, PtrTy});
+        auto* pathArg = StrCall.emitCStrArg(*s.Args[0]);
+        auto* attrArg = EmitExpr(*s.Args[1]);
+        auto* recArg  = EmitLValue(*s.Args[2]);
+        B.CreateCall(fn, {pathArg, attrArg, recArg});
+        return true;
+    }
+    return false;
+}
+
 void CGProcCall::emitUserProcCall(const CallStmt& s) {
+    if (tryEmitDosProcCall(s)) return;
     // User-defined procedure — walk the nesting hierarchy to find the right
     // LLVM mangled name (plang_outer__inner, not just plang_inner).
     std::string mangledName = Linkage.findMangledProc(s.Name);

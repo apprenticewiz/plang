@@ -174,6 +174,18 @@ config.substitutions.insert(0,
     ("%plang_units_dir",
      os.path.join(config.plang_source_dir, "share", "plang", "units")))
 
+# The shipped RTL's own source directory (share/plang/units/), referenced
+# straight from the source tree the same way %plang_schema_printers just
+# above is -- Turbo Tier 4, Cluster C item 6's own lit tests use this as an
+# explicit `-I%plang_unit_dir` rather than relying on PLANG_UNIT_DIR or the
+# installed-prefix default tier (Cluster B item 4's own job to prove; a lit
+# run always invokes the in-tree build-dir binary, which has no installed
+# layout of its own -- see that item's own comment on the identical
+# limitation).
+config.substitutions.insert(0,
+    ("%plang_unit_dir",
+     os.path.join(config.plang_source_dir, "share", "plang", "units")))
+
 # ---- available_features ------------------------------------------------
 #
 # fpc-binary, not bare "fpc": include/plang/Basic/Dialects.def already

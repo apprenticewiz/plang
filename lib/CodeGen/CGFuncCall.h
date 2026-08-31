@@ -105,6 +105,13 @@ public:
                                   plang::SourceLocation Loc);
 
 private:
+    /// Turbo Tier 4, Cluster C item 6: CGProcCall::tryEmitDosProcCall's own
+    /// twin for GetEnv, Dos.pas's only Func-kind export needing this
+    /// treatment.  Returns nullptr (having emitted nothing) unless the
+    /// call resolved to Dos's own GetEnv -- see that method's own comment
+    /// (CGProcCall.h) for the full rationale, shared unchanged here.
+    llvm::Value* tryEmitDosFuncCall(const plang::CallExpr& e);
+
     llvm::LLVMContext& Ctx;
     llvm::Module& Mod;
     llvm::IRBuilder<>& B;
