@@ -411,6 +411,12 @@ llvm::Value* CGExprCore::emitExpr(const ExprNode& e) {
     // design; VMT dispatch is item 5's job, not this one's).
     if (auto* n = llvm::dyn_cast<MethodCallExpr>(&e)) return FuncCall.emitMethodCallExpr(*n);
 
+    // Turbo Tier 5, issue #509: 'inherited [Method[(args)]]' used as a value
+    // -- a static/direct call to the resolved ancestor's own mangled symbol,
+    // never through the VMT; see CGFuncCall::emitInheritedCallExpr's own
+    // comment for the whole design.
+    if (auto* n = llvm::dyn_cast<InheritedCallExpr>(&e)) return FuncCall.emitInheritedCallExpr(*n);
+
     codegenICE("unhandled expression node in emitExpr");
 }
 

@@ -30,6 +30,7 @@
 namespace llvm { class Module; class Value; class GlobalVariable; }
 namespace plang {
 struct CallExpr; struct ExprNode; struct ProcedureTypeNode; struct MethodCallExpr;
+struct InheritedCallExpr;
 struct Type;
 }
 
@@ -92,6 +93,20 @@ public:
     /// item 5): whatever method the ancestor-chain walk below finds is
     /// called directly, whether or not it happens to be declared 'virtual'.
     llvm::Value* emitMethodCallExpr(const plang::MethodCallExpr& e);
+
+    /// Turbo Tier 5, issue #509: 'inherited [Method[(args)]]' used as a
+    /// VALUE -- the CGFuncCall sibling of CGProcCall::emitInheritedCallStmt
+    /// (see its own comment, CGProcCall.h, for the whole design): a STATIC
+    /// call (never through the VMT) to the mangled symbol Sema::
+    /// checkInheritedCall already resolved (InheritedCallExpr::
+    /// ImplementingType/ResolvedMethod), with the CURRENTLY EXECUTING
+    /// function's own Self argument forwarded as this call's own Self,
+    /// unchanged, and this call's own result returned rather than
+    /// discarded -- including the same string/ShortString return-value
+    /// spill emitMethodCallExpr/emitUserFuncCall perform just above/below,
+    /// since an inherited FUNCTION returning one is exactly as reachable
+    /// here as through an ordinary call.
+    llvm::Value* emitInheritedCallExpr(const plang::InheritedCallExpr& e);
 
     /// The built-in dispatch chain that used to be emitCallExpr's whole body,
     /// factored out so a call site with no CallExpr of its own -- Turbo

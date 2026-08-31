@@ -1053,6 +1053,40 @@ private:
     [[nodiscard]] std::shared_ptr<Type> checkMethodCall(
         const ExprNode& Receiver, const std::string& Method, SourceLocation Loc,
         std::span<const std::unique_ptr<ExprNode>> Args, bool ExpectFunction);
+    /// Turbo Tier 5, issue #509: 'inherited [Method[(args)]]' used as a
+    /// value.  See checkInheritedCall's own comment (SemaExpr.cpp) for the
+    /// shared logic with checkInheritedCallStmt (SemaStmt.cpp) -- the same
+    /// checkMethodCallExpr/checkMethodCall split just above, applied to
+    /// 'inherited' instead of an ordinary receiver-carrying call.
+    [[nodiscard]] std::shared_ptr<Type> checkInheritedCallExpr(const InheritedCallExpr& E);
+    /// Shared ancestor-resolution logic behind checkInheritedCallExpr and
+    /// checkInheritedCallStmt (SemaStmt.cpp): requires CurrentProc to be a
+    /// method (OwnerType non-empty) with a resolved OwnerType that itself
+    /// has a Parent, then walks the ancestor chain starting at that Parent
+    /// (never OwnerType itself) for \p Method (or, for the bare form --
+    /// \p Method empty -- CurrentProc's own name) exactly like
+    /// checkMethodCall's own walk -- see InheritedCallStmt's own comment
+    /// (AstStmt.h) for the whole design.  \p ResolvedMethod/
+    /// \p ImplementingType/\p ImplementingModule are OUT parameters because
+    /// InheritedCallStmt and InheritedCallExpr each carry their own copy of
+    /// these three fields (mirroring each other exactly) rather than a
+    /// shared base to write through.  \p ExpectFunction is forwarded to
+    /// checkUserDefinedCall for the explicit-name form unchanged: true from
+    /// checkInheritedCallExpr (a value is required), false from
+    /// checkInheritedCallStmt.  The BARE form (\p Method empty) never
+    /// reaches checkUserDefinedCall at all -- it has no actual argument list
+    /// of its own to hold against arity (CodeGen forwards this activation's
+    /// own parameters unchanged instead) -- so \p ExpectFunction is handled
+    /// directly for that form: statement context (false) leaves the result
+    /// unused exactly as checkInheritedCallStmt always has, expression
+    /// context (true) requires the resolved ancestor to really be a
+    /// function (err_proc_cannot_return_value otherwise, the same
+    /// diagnostic checkUserDefinedCall itself would give).
+    [[nodiscard]] std::shared_ptr<Type> checkInheritedCall(
+        const std::string& Method, SourceLocation Loc,
+        std::span<const std::unique_ptr<ExprNode>> Args, bool ExpectFunction,
+        std::string& ResolvedMethod, std::string& ImplementingType,
+        std::string& ImplementingModule);
     /// SizeOf/High/Low's sole argument: either a TYPE NAME -- one of the
     /// five primitive keywords (parsed as a synthetic IdentExpr; see
     /// Parser::parseSizeHighLowArg) or an ordinary user-defined type name

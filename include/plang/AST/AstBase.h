@@ -61,7 +61,8 @@ enum class NodeKind {
     StructuredValueExpr,  // EP §6.8.7: typed value constructor (array/record/set)
     TypeCastExpr,         // Turbo: TypeName '(' expr ')' value/variable typecast
     MethodCallExpr,       // Turbo Tier 5: Obj.Method(args) / P^.Method(args), used as a value
-    ExprLast      = MethodCallExpr,
+    InheritedCallExpr,    // Turbo Tier 5, issue #509: 'inherited [Method[(args)]]' used as a value
+    ExprLast      = InheritedCallExpr,
 
     // write/writeln argument wrapper: appears only in write/writeln arg lists.
     // Stored as ExprNode* via C++ inheritance but excluded from ExprFirst..ExprLast

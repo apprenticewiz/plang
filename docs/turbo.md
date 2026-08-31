@@ -1913,31 +1913,13 @@ that shape.
 
 ### Known gaps
 
-Three restrictions a user of this tier's `object` model can actually run
-into, confirmed against a local `fpc -Mtp` build rather than assumed. The
-first below (`inherited`) is a real bug this capstone item's own
-integration testing found while building the tests above — genuinely new,
-not previously known or documented; the other two (bare no-parens method
-calls, the by-value self-reference restriction) were already known and are
-repeated here only so this section is a complete list, not scattered
-across the document.
-
-**`inherited` is a statement, never an expression.** Real Turbo Pascal
-routinely calls an inherited *function* and uses its result directly —
-`Result := inherited GetValue + 1;` is ordinary TP7 object code, confirmed
-here against a local `fpc -Mtp` build. plang's parser only ever reaches
-`TokenKind::Inherited` from its statement dispatch (`ParseStmt.cpp`,
-building an `InheritedCallStmt`) — there is no expression-level production
-for it at all, so `S := inherited Describe;` and even the fully-parenthesized
-`S := inherited Describe();` both fail to parse (`expected expression, got
-'inherited'`). Calling an inherited method and merely discarding its
-result — `inherited Describe;` as its own statement, even when `Describe`
-is a function — works fine and is exactly how every multi-level chain in
-this tier's own tests (including this capstone's own
-`test/Turbo/Objects/` scenario) is written. Not pinned as its own test
-here — a parser rejection does not fit this suite's own "real compiled and
-run, with observed output" convention the way a wrong-but-running answer
-does — but written down here so it is not a surprise.
+Two restrictions a user of this tier's `object` model can actually run
+into, confirmed against a local `fpc -Mtp` build rather than assumed.
+(This capstone item's own integration testing found two more,
+genuinely new bugs while building the tests above — `TypeOf` resolving
+its argument's static type instead of its dynamic one, and `inherited`
+only being usable as a statement, never an expression — both since
+fixed, see issues #508 and #509.)
 
 **A bare (no-parens) method call does not resolve in expression
 position.** `Obj.Method(args)`/`P^.Method(args)` and a bare, argument-free

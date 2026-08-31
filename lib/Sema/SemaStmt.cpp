@@ -2040,72 +2040,16 @@ void Sema::checkMethodCallStmt(const MethodCallStmt& S) {
 // body is itself declared 'virtual' (an override calling 'inherited' from
 // inside a call that itself arrived via virtual dispatch reaches the direct
 // parent's own body exactly once, never redispatching and never looping).
+//
+// Issue #509: the ancestor-resolution logic itself now lives in
+// checkInheritedCall (SemaExpr.cpp), shared with checkInheritedCallExpr --
+// this wrapper is unchanged in OBSERVABLE behavior from before that
+// extraction: same diagnostics, same S.ResolvedMethod/ImplementingType/
+// ImplementingModule/ResolvedType results for every input that was already
+// legal or already refused.
 void Sema::checkInheritedCallStmt(const InheritedCallStmt& S) {
-    if (!CurrentProc || CurrentProc->OwnerType.empty()
-            || !CurrentProc->ResolvedOwnerType) {
-        error(S.Loc, diag::err_inherited_outside_method, {});
-        for (const auto& A : S.Args) (void)checkExpr(*A);
-        return;
-    }
-    const Type& OwnerTy = *CurrentProc->ResolvedOwnerType;
-    if (!OwnerTy.Parent) {
-        error(S.Loc, diag::err_inherited_no_ancestor, {OwnerTy.Name});
-        for (const auto& A : S.Args) (void)checkExpr(*A);
-        return;
-    }
-
-    // Bare 'inherited;' means "the same method this activation itself is
-    // overriding" -- CurrentProc's own name -- "called with the same
-    // arguments this activation itself received" -- CodeGen forwards its
-    // own parameters directly (CGProcCall::emitInheritedCallStmt), so there
-    // is nothing here to type-check against S.Args (always empty for this
-    // form; the parser never fills it in without a following identifier).
-    const std::string MethodName = S.Method.empty() ? CurrentProc->Name : S.Method;
-
-    // Same ancestor-chain walk checkMethodCall itself uses (composite-key
-    // lookup, resolveObjectType's own registration), just starting one level
-    // up: Parent, never OwnerTy itself, so a method can never 'inherited'
-    // its own body.
-    const Symbol* MethodSym = nullptr;
-    for (const Type* Cur = OwnerTy.Parent.get(); Cur; Cur = Cur->Parent.get()) {
-        Symbol* Sy = Symtab.lookup(objectMethodKey(Cur->Name, MethodName));
-        if (Sy && Sy->Kind == SymbolKind::Method) { MethodSym = Sy; break; }
-    }
-    if (!MethodSym) {
-        error(S.Loc, diag::err_inherited_method_not_found,
-              {OwnerTy.Name, MethodName});
-        for (const auto& A : S.Args) (void)checkExpr(*A);
-        return;
-    }
-
-    // Turbo Tier 5, Cluster A item 7: same private-visibility gate
-    // checkMethodCall applies -- see its own comment (SemaExpr.cpp).
-    if (MethodSym->IsMethodPrivate && MethodSym->Module != CurrentUnit_)
-        error(S.Loc, diag::err_object_private_method,
-              {MethodSym->MethodOwnerType, MethodName});
-
-    S.ResolvedMethod    = MethodName;
-    S.ImplementingType  = MethodSym->MethodOwnerType;
-    S.ImplementingModule = MethodSym->Module;
-
-    if (S.Method.empty()) {
-        // Bare form: no argument list was written at all, so there is
-        // nothing of the caller's own to check -- this activation's own
-        // parameters are forwarded unchanged, and Sema's own
-        // override-signature check (resolveObjectType) already guarantees
-        // the ancestor's own parameter list is identical to CurrentProc's.
-        S.ResolvedType = nullptr;
-        return;
-    }
-
-    Symbol Indirect;
-    Indirect.Kind       = SymbolKind::Proc;
-    Indirect.Name       = MethodSym->MethodOwnerType + "." +
-                           (MethodSym->Decl ? MethodSym->Decl->Name : MethodName);
-    Indirect.IsFunction = MethodSym->IsFunction;
-    Indirect.Params     = MethodSym->Params;
-    Indirect.ReturnType = MethodSym->ReturnType;
-    auto RetTy = checkUserDefinedCall(Indirect, S.Loc, S.Args, /*ExpectFunction=*/false);
+    auto RetTy = checkInheritedCall(S.Method, S.Loc, S.Args, /*ExpectFunction=*/false,
+                                    S.ResolvedMethod, S.ImplementingType, S.ImplementingModule);
     S.ResolvedType = (RetTy && !RetTy->isError()) ? RetTy : nullptr;
 }
 
