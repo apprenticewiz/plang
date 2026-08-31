@@ -33,6 +33,18 @@ namespace plang {
 /// §6.4.2.3 makes each enumerated-type definition a distinct type, and a
 /// record type is likewise identified by its declaration.  One Type object per
 /// declaration is exactly the right representation for them.
+///
+/// A NAMED array type is nominal for the identical reason (ISO §6.4.2.3,
+/// §6.4.3.2 -- issue #178) and gets the identical treatment: getArray below
+/// interns only the ANONYMOUS spelling (an array type-denoter written inline,
+/// with no `type` declaration of its own), and a named one is instead minted
+/// through makeArrayUncached, one object per declaration, exactly as Enum and
+/// Record already are.  Array could not simply join Enum/Record's "never
+/// interned" rule outright: unlike them, its anonymous form is common (every
+/// `var v: array[1..N] of T` writes one) and the interning is what keeps two
+/// such spellings sharing a representation, which is worth keeping for the
+/// common case and is not itself a bug -- see Sema::isAssignCompatible's
+/// Array arm for the identity-vs-structural line this draws at Sema's level.
 class TypeContext {
 public:
     /// \p DefaultIntWidth is what an unqualified `integer` is.  It is 64 for
@@ -391,7 +403,15 @@ public:
         return slot;
     }
 
-    /// Canonical array type.
+    /// Canonical array type, for an ANONYMOUS array type-denoter (no `type`
+    /// declaration names it).  Two inline spellings of the same shape share
+    /// this one object, so they stay structurally interchangeable -- see
+    /// Sema::isAssignCompatible's Array arm and Type::Anonymous.
+    ///
+    /// A NAMED array type-denoter (the direct body of `type X = array...`)
+    /// must NOT be minted here: Sema's caller for that case uses
+    /// makeArrayUncached below instead, precisely so the object it gets back
+    /// is not this shared one -- see that function's own comment.
     std::shared_ptr<Type> getArray(std::shared_ptr<Type> idx,
                                    std::shared_ptr<Type> elem,
                                    bool packed) {
@@ -402,11 +422,22 @@ public:
         return slot;
     }
 
-    /// The same array type, deliberately NOT interned.  An array whose extent
-    /// is fixed by a schema discriminant was resolved against a probe binding,
-    /// so its recorded bounds are the probe's; sharing one object with the
-    /// array that genuinely has those bounds is what would let a fold read the
-    /// probe's answer as the program's.  See Type::ExtentVaries.
+    /// The same array type, deliberately NOT interned.  Two callers need this:
+    ///
+    ///   - An array whose extent is fixed by a schema discriminant was
+    ///     resolved against a probe binding, so its recorded bounds are the
+    ///     probe's; sharing one object with the array that genuinely has
+    ///     those bounds is what would let a fold read the probe's answer as
+    ///     the program's.  See Type::ExtentVaries.
+    ///   - A NAMED array type-denoter (issue #178): ISO §6.4.2.3/§6.4.3.2
+    ///     make each `type` declaration a distinct type, the same rule
+    ///     Enum/Record already get (see this class's own comment).  Sema's
+    ///     Phase 3b (Sema.cpp) calls this instead of getArray for exactly
+    ///     that one case, so the Type it gets back is safe for
+    ///     nameNominalType to rename and un-anonymize in place -- an object
+    ///     getArray had handed out would still be sitting in ArrayCache_
+    ///     above, and renaming IT would rename every other, unrelated array
+    ///     of the identical shape right along with it.
     std::shared_ptr<Type> makeArrayUncached(std::shared_ptr<Type> idx,
                                             std::shared_ptr<Type> elem,
                                             bool packed) {
@@ -542,8 +573,21 @@ private:
                                             bool packed) {
         auto T   = std::make_shared<Type>();
         T->Kind  = TypeKind::Array;
+        // Enum/Record's own starting state (SemaType.cpp): every array minted
+        // here starts anonymous, whether or not this particular call is the
+        // one Sema.cpp's Phase 3b makes for a NAMED array type-denoter.
+        // nameNominalType (Sema.cpp) is what clears it, exactly as it does
+        // for Enum/Record, once resolveType has returned to Phase 3b and it
+        // is known this was in fact a `type` declaration's own body -- see
+        // makeArrayUncached's comment for why that rename is only safe on
+        // the object THAT call receives, never on one shared through
+        // ArrayCache_ (getArray) below.
+        T->Anonymous = true;
         // Include index bounds in the display name so diagnostics say
         // "array[1..3] of integer" rather than just "array of integer".
+        // nameNominalType overwrites this with the declared name for a
+        // named array, the same as it does for Enum/Record's own
+        // structural starting name.
         T->Name  = "array[" + std::to_string(idx->SubLo) + ".."
                  + std::to_string(idx->SubHi) + "] of " + elem->Name;
         T->ElemType  = std::move(elem);

@@ -164,8 +164,17 @@ struct Type {
     /// (done for this feature; see the PR description for the list).
     bool     IsLooseBool{false};
 
-    /// Enum and Record only: written inline rather than declared, so it has no
-    /// declared name to be identified by.  See isAnonymousNominal.
+    /// Enum, Record and Array only: written inline rather than declared, so it
+    /// has no declared name to be identified by.  See isAnonymousNominal.
+    /// This field's own struct default is irrelevant to all three: Enum,
+    /// Record and Array every one explicitly set it true at construction
+    /// (SemaType.cpp's EnumTypeNode/RecordTypeNode arms, TypeContext::
+    /// buildArray), including for what is, for all three, the common case --
+    /// a type-denoter written inline with no `type` declaration of its own.
+    /// A NAMED one of any of the three is what changes it: nameNominalType
+    /// (Sema.cpp) clears this once Phase 3b knows the denoter it just
+    /// resolved was the direct body of a `type` declaration (Array's own
+    /// case is issue #178).
     bool        Anonymous{false};
 
     // --- Enum ---
@@ -621,14 +630,19 @@ struct Type {
     [[nodiscard]] static std::shared_ptr<Type> makeError()    { auto T = std::make_shared<Type>(); T->Kind = TypeKind::Error;    T->Name = "<error>"; return T; }
 };
 
-/// True for an enumeration or record written inline rather than declared.
+/// True for an enumeration, record or array written inline rather than
+/// declared.
 ///
-/// Enumerations and records are identified by their declaration (ISO §6.4.2.3,
-/// §6.4.3.3), so comparing declared names is how two of them are told apart.
-/// One written inline has no declared name, and must not be told apart by its
-/// display name — every such type used to be called "(record)", which made
-/// every record type compatible with every other one.  Name is for reading;
-/// this flag is for deciding.
+/// Enumerations, records and (named) arrays are identified by their
+/// declaration (ISO §6.4.2.3; §6.4.3.3 for record; §6.4.3.2 for array,
+/// issue #178), so comparing declared names is how two of them are told
+/// apart.  One written inline has no declared name, and must not be told
+/// apart by its display name — every such type used to be called "(record)",
+/// which made every record type compatible with every other one (and, before
+/// #178, every anonymous array kept a descriptive name like "array[1..5] of
+/// integer" that a SECOND, separately-declared `type` of the identical shape
+/// also received, with the identical result). Name is for reading; this flag
+/// is for deciding.
 [[nodiscard]] inline bool isAnonymousNominal(const Type& T) {
     return T.Anonymous;
 }

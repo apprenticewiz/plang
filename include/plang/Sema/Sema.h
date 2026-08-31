@@ -442,6 +442,34 @@ private:
     /// over from the outer call.
     std::string PendingObjectTypeName_;
 
+    /// Issue #178: true exactly while resolveTypeImpl is resolving the
+    /// direct body of a `type Name = ...;` declaration whose type-denoter is
+    /// an ArrayTypeNode -- i.e. while resolving a NAMED array type (ISO
+    /// §6.4.2.3, §6.4.3.2 give it, like Enum/Record, its own declaration
+    /// identity, and TypeContext::getArray's interning is wrong for it; see
+    /// that class's own comment).  Set by Sema.cpp's Phase 3b immediately
+    /// before calling resolveType on a type-definition's own body -- the
+    /// identical point PendingObjectTypeName_ above is set from, and for the
+    /// same structural reason: consumed (read, then cleared) at the top of
+    /// resolveTypeImpl, before recursing into anything, so a nested
+    /// resolveType call made while resolving THIS array's own element type
+    /// (an array-of-array's inner dimension, say) never mistakes itself for
+    /// the outer, named one.
+    ///
+    /// Unlike PendingObjectTypeName_, only a bool: the declared NAME itself
+    /// is not needed while resolving the array's body (nothing here stamps
+    /// it on anything the way an object's VMT slot does), so nameNominalType
+    /// (Sema.cpp) still supplies it afterward, once resolveType has
+    /// returned, the same way it names every other kind.  That after-the-fact
+    /// rename is safe here specifically because this flag being set is also
+    /// what makes the ArrayTypeNode arm (SemaType.cpp) call
+    /// TypeContext::makeArrayUncached instead of the interning getArray --
+    /// the Type nameNominalType goes on to mutate is therefore always a
+    /// fresh object never shared with any other array of the same shape, the
+    /// same precondition that makes mutating an Enum's or a Record's
+    /// freshly-`make_shared`'d Type in place safe.
+    bool PendingArrayTypeIsNamed_{false};
+
     /// Schema resolutions currently on the stack, by body node and
     /// discriminants.  A schema whose body names itself resolves its own body
     /// while resolving it; the partly-built type is registered here first so
