@@ -1734,8 +1734,40 @@ struct Codegen::Impl {
     /// own StampVptr closure (Turbo Tier 5, Cluster A item 6) -- from
     /// New(P, Init(...))'s own freshly allocated, not-yet-a-variable
     /// memory, so both shapes of "an object instance begins to exist" go
-    /// through the exact same stamping logic.
+    /// through the exact same stamping logic.  Stamps \p T's OWN single
+    /// slot only -- never one belonging to a member nested inside \p T's
+    /// storage; that is stampFieldVptrs's job, just below.
     void stampVptr(llvm::Value* ptr, const Type& T);
+    /// Issue #511: stampVptr just above only ever reaches the OUTERMOST
+    /// instance's own `_vptr` -- it never looks inside that instance's
+    /// storage for further object-typed MEMBERS, so a record (or array, or
+    /// object) with an object-typed field anywhere in its structure left
+    /// that field's own `_vptr` exactly as its storage started out (zero
+    /// for a global, indeterminate for a stack local or fresh heap block):
+    /// a virtual call dispatched through it read a function pointer from
+    /// that same garbage.  This descends INTO \p T's own structure --
+    /// record fields, array elements, and (recursively) an object type's
+    /// own declared fields, ancestor's included -- and calls stampVptr on
+    /// every TypeKind::Object member it finds, however deeply nested (a
+    /// record containing a record containing an object field, an array of
+    /// objects, an object whose own field is itself another object, ...).
+    /// Never stamps \p T's OWN top-level slot even when \p T itself is
+    /// Kind::Object -- that is always the CALLER's job (an explicit
+    /// stampVptr call beside this one's own call site) -- so calling both
+    /// on the same (ptr, T) is the normal, required pairing, not a
+    /// redundant duplicate.
+    ///
+    /// Reuses the exact struct-GEP shape ordinary field access already
+    /// computes (layoutOfRecord/layoutOfObject's own RecordLayout; see
+    /// selfFieldPtr/objectFieldPtr for the identical GEP-by-index +
+    /// InVariant byte-offset idiom, and layoutOfObject's own comment for
+    /// why an ancestor sub-object is embedded, unshifted, at element 0)
+    /// rather than computing any offset by hand.  Gated by
+    /// typeContainsObject (an anonymous-namespace predicate in
+    /// CodeGenProcs.cpp mirroring Sema::typeContainsFile's own recursive
+    /// shape) at every level, so a large record/array with no object
+    /// anywhere in it costs nothing beyond that one cheap check.
+    void stampFieldVptrs(llvm::Value* ptr, const Type& T, int depth = 0);
     /// getOrCreateVmt's own memo, keyed by the canonical Sema Type* exactly
     /// the way objectLayouts_ is (CGTypes.cpp) -- an object type has exactly
     /// one Type* for its whole compilation, so no richer key is needed.

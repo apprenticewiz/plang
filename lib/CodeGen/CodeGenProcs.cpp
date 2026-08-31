@@ -1753,6 +1753,29 @@ const Type::Method* methodNamedOn(const Type& Owner, const std::string& MethodNa
         if (eqCI(M.Name, MethodName)) return &M;
     return nullptr;
 }
+// Issue #511: whether T either IS a TypeKind::Object, or has one nested
+// ANYWHERE in its own structure -- a record/object field (including one
+// inherited from an ancestor: RecordFields is already the flattened
+// ancestor-then-own list, see its own comment, Type.h), or an array's
+// element type, arbitrarily deep.  Mirrors Sema::typeContainsFile's own
+// recursive shape exactly (SemaExpr.cpp) -- the identical question about
+// TypeKind::File instead of TypeKind::Object -- duplicated rather than
+// shared because that one lives in Sema and answers a different question
+// (ISO §6.6.3.3's file-by-value rule) that just happens to need the same
+// walk.  Used to gate stampFieldVptrs at every level, so a large record or
+// array with no object anywhere in it costs nothing beyond this one check.
+bool typeContainsObject(const Type& T) {
+    switch (T.Kind) {
+    case TypeKind::Object: return true;
+    case TypeKind::Record:
+        for (const auto& F : T.RecordFields)
+            if (F.Ty && typeContainsObject(*F.Ty)) return true;
+        return false;
+    case TypeKind::Array:
+        return T.ElemType && typeContainsObject(*T.ElemType);
+    default: return false;
+    }
+}
 } // namespace
 
 // Turbo Tier 5, Cluster A item 5 / Cluster B item 8: see this function's own
@@ -1847,6 +1870,96 @@ void Codegen::Impl::stampVptr(llvm::Value* ptr, const Type& T) {
     builder.CreateStore(vmt, slot);
 }
 
+// Issue #511: see this function's own declaration (CodeGenImpl.h) for the
+// whole design -- the nested-member counterpart to stampVptr just above.
+void Codegen::Impl::stampFieldVptrs(llvm::Value* ptr, const Type& T, int depth) {
+    if (!ptr || depth > 16 || !typeContainsObject(T)) return;
+
+    if (T.Kind == TypeKind::Array) {
+        auto* arrTy = llvm::dyn_cast_or_null<llvm::ArrayType>(llvmTypeOfSemaType(T));
+        if (!arrTy) return; // no IndexType/ElemType to lay out (llvmTypeOfSemaType's own guard)
+        const uint64_t count = arrTy->getNumElements();
+        const bool elemIsObject = T.ElemType->Kind == TypeKind::Object;
+        auto stampElem = [&](llvm::Value* elemPtr) {
+            if (elemIsObject) stampVptr(elemPtr, *T.ElemType);
+            stampFieldVptrs(elemPtr, *T.ElemType, depth + 1);
+        };
+        // Every element begins the same way, so one body serves them all; see
+        // emitInitialState's own array branch (same shape, same threshold) for
+        // why this is written out per element only while that stays the
+        // smaller of the two, and run as a loop once the array is long enough
+        // to matter.
+        if (count <= 8) {
+            for (uint64_t i = 0; i < count; ++i) {
+                auto* gep = builder.CreateGEP(arrTy, ptr,
+                    {llvm::ConstantInt::get(i64Ty, 0),
+                     llvm::ConstantInt::get(i64Ty, i)}, "vptr.e");
+                stampElem(gep);
+            }
+            return;
+        }
+        auto* fn   = builder.GetInsertBlock()->getParent();
+        auto* head = llvm::BasicBlock::Create(ctx, "vptr.head", fn);
+        auto* body = llvm::BasicBlock::Create(ctx, "vptr.body", fn);
+        auto* done = llvm::BasicBlock::Create(ctx, "vptr.done", fn);
+        auto* iv   = createEntryAlloca(i64Ty, "vptr.i");
+        builder.CreateStore(llvm::ConstantInt::get(i64Ty, 0), iv);
+        builder.CreateBr(head);
+        builder.SetInsertPoint(head);
+        auto* i = builder.CreateLoad(i64Ty, iv, "vptr.i.cur");
+        builder.CreateCondBr(
+            builder.CreateICmpULT(i, llvm::ConstantInt::get(i64Ty, count)),
+            body, done);
+        builder.SetInsertPoint(body);
+        auto* gep = builder.CreateGEP(arrTy, ptr,
+            {llvm::ConstantInt::get(i64Ty, 0), i}, "vptr.e");
+        stampElem(gep);
+        builder.CreateStore(
+            builder.CreateAdd(i, llvm::ConstantInt::get(i64Ty, 1)), iv);
+        builder.CreateBr(head);
+        builder.SetInsertPoint(done);
+        return;
+    }
+
+    const RecordLayout* L = T.Kind == TypeKind::Object ? layoutOfObject(T)
+                           : T.Kind == TypeKind::Record ? layoutOfRecord(T)
+                                                         : nullptr;
+    if (!L || !L->Ty->isSized()) return;
+    auto* zero = llvm::ConstantInt::get(i32Ty, 0);
+
+    size_t ownStart = 0;
+    if (T.Kind == TypeKind::Object && T.Parent) {
+        // Same nested-ancestor-embedding idiom as selfFieldPtr/objectFieldPtr
+        // (CGFieldAccess.cpp): element 0 of every layoutOfObject struct is the
+        // WHOLE ancestor sub-object, unshifted -- so a field the ANCESTOR
+        // declares (never re-listed by this level's own layout -- see
+        // layoutOfObject's own comment) is reached by recursing at the SAME
+        // address under the ancestor's own type, not by an extra GEP.
+        auto* parentPtr = builder.CreateGEP(L->Ty, ptr, {zero, zero}, "vptr.parent");
+        stampFieldVptrs(parentPtr, *T.Parent, depth + 1);
+        ownStart = T.Parent->RecordFields.size();
+    }
+
+    for (size_t i = ownStart; i < T.RecordFields.size(); ++i) {
+        const auto& F = T.RecordFields[i];
+        if (!F.Ty || !typeContainsObject(*F.Ty)) continue;
+        auto fit = L->Fields.find(toLower(F.Name));
+        if (fit == L->Fields.end()) continue;
+        const auto& P = fit->second;
+        if (P.Index >= L->Ty->getNumElements()) continue;
+        auto* fp = builder.CreateGEP(L->Ty, ptr,
+            {zero, llvm::ConstantInt::get(i32Ty, P.Index)}, "vptr.f");
+        if (P.InVariant && P.Offset != 0)
+            fp = builder.CreateConstGEP1_64(i8Ty, fp, P.Offset, "vptr.f");
+        // F's OWN slot (when F.Ty is itself Kind::Object) and whatever F.Ty
+        // holds nested even deeper are two separate questions -- exactly the
+        // same pairing this function's own caller (emitVarValueInit) uses for
+        // the outermost instance, applied recursively one level in.
+        if (F.Ty->Kind == TypeKind::Object) stampVptr(fp, *F.Ty);
+        stampFieldVptrs(fp, *F.Ty, depth + 1);
+    }
+}
+
 // EP §6.6: the value clause of a variable declaration, or of the denoter the
 // variable is declared with.
 void Codegen::Impl::emitVarValueInit(const VarGroup& vg) {
@@ -1872,10 +1985,24 @@ void Codegen::Impl::emitVarValueInit(const VarGroup& vg) {
     // fill that touches this object's own storage can never clobber a vptr
     // this already set -- see stampVptr's own comment for scope (a directly
     // declared local/global only; New/Init/Fail is item 6's job).
-    if (vg.Type && vg.Type->ResolvedType && vg.Type->ResolvedType->Kind == TypeKind::Object)
-        for (const auto& nm : vg.Names)
-            if (const auto* ve = findVar(nm))
-                stampVptr(ve->ptr, *vg.Type->ResolvedType);
+    if (vg.Type && vg.Type->ResolvedType) {
+        const Type& RT = *vg.Type->ResolvedType;
+        if (RT.Kind == TypeKind::Object)
+            for (const auto& nm : vg.Names)
+                if (const auto* ve = findVar(nm))
+                    stampVptr(ve->ptr, RT);
+        // Issue #511: the call above reaches only a directly declared OBJECT
+        // variable's own top-level slot.  A record, array, or object with an
+        // object-typed member anywhere inside its own structure needs each
+        // of THOSE stamped too -- see stampFieldVptrs's own comment.  Same
+        // "after value/initial-state init" ordering as above, and for the
+        // same reason (nothing stamped here can be a store this already-run
+        // init could go on to clobber).
+        if (typeContainsObject(RT))
+            for (const auto& nm : vg.Names)
+                if (const auto* ve = findVar(nm))
+                    stampFieldVptrs(ve->ptr, RT);
+    }
 }
 
 // Puts one written value into the storage of a variable of the denoter's type.

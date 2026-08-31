@@ -72,7 +72,8 @@ public:
                std::function<llvm::Value*(const std::string&,
                    std::span<const std::unique_ptr<plang::ExprNode>>,
                    plang::SourceLocation)> EmitBuiltinFuncCall,
-               std::function<void(llvm::Value*, const plang::Type&)> StampVptr)
+               std::function<void(llvm::Value*, const plang::Type&)> StampVptr,
+               std::function<void(llvm::Value*, const plang::Type&)> StampFieldVptrs)
         : Ctx(Ctx), Mod(Mod), B(B), FileVars(FileVars), RtFns(RtFns),
           Builtins(Builtins), ClosureAbi(ClosureAbi), Schema(Schema), Types(Types),
           SymTab(SymTab), Linkage(Linkage), Sets(Sets), StrCall(StrCall),
@@ -99,7 +100,8 @@ public:
           ExitBlock(std::move(ExitBlock)),
           CurCtorOkAlloca(std::move(CurCtorOkAlloca)),
           EmitBuiltinFuncCall(std::move(EmitBuiltinFuncCall)),
-          StampVptr(std::move(StampVptr)) {}
+          StampVptr(std::move(StampVptr)),
+          StampFieldVptrs(std::move(StampFieldVptrs)) {}
 
     void emitCallStmt(const plang::CallStmt& s);
     void emitUserProcCall(const plang::CallStmt& s);
@@ -297,4 +299,12 @@ private:
     /// stamping logic emitVarValueInit already gives a directly declared
     /// local/global, without a second implementation of it here.
     std::function<void(llvm::Value*, const plang::Type&)> StampVptr;
+    /// Issue #511: Codegen::Impl::stampFieldVptrs, reached the same way
+    /// StampVptr just above is -- the nested-member counterpart New(P,
+    /// Init(...)) needs exactly as much as a directly declared local/global
+    /// does, for the identical reason (see stampFieldVptrs's own comment,
+    /// CodeGenImpl.h).  Called right beside StampVptr, never instead of it:
+    /// this reaches only what \p Type's OWN structure holds nested inside
+    /// it, not \p Type's own top-level slot.
+    std::function<void(llvm::Value*, const plang::Type&)> StampFieldVptrs;
 };
