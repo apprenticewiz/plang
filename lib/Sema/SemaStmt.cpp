@@ -2086,6 +2086,7 @@ void Sema::checkInheritedCallStmt(const InheritedCallStmt& S) {
 
     S.ResolvedMethod    = MethodName;
     S.ImplementingType  = MethodSym->MethodOwnerType;
+    S.ImplementingModule = MethodSym->Module;
 
     if (S.Method.empty()) {
         // Bare form: no argument list was written at all, so there is

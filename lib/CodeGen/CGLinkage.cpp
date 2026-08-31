@@ -74,13 +74,17 @@ std::string CGLinkage::findMangledProc(const std::string& qualifiedName) const {
 }
 
 std::string CGLinkage::mangledMethod(const std::string& objectTypeName,
-                                      const std::string& methodName) const {
-    return PlangProcPrefix + moduleScope(CurrentUnit)
+                                      const std::string& methodName,
+                                      const std::string& declaringModule) const {
+    const std::string& Unit = declaringModule.empty() ? CurrentUnit : declaringModule;
+    return PlangProcPrefix + moduleScope(Unit)
          + toLower(objectTypeName) + PlangScopeSep + toLower(methodName);
 }
 
-std::string CGLinkage::mangledVmt(const std::string& objectTypeName) const {
-    return "pas_vmt$" + moduleScope(CurrentUnit) + toLower(objectTypeName);
+std::string CGLinkage::mangledVmt(const std::string& objectTypeName,
+                                  const std::string& declaringModule) const {
+    const std::string& Unit = declaringModule.empty() ? CurrentUnit : declaringModule;
+    return "pas_vmt$" + moduleScope(Unit) + toLower(objectTypeName);
 }
 
 std::string CGLinkage::mangledGlobal(const std::string& qualifiedName) const {

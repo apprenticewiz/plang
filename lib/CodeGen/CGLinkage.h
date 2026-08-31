@@ -107,16 +107,31 @@ public:
     /// findMangledProc's own module-scope prefix already uses, just with the
     /// object type as an additional segment: pas_<unit-or-program>$
     /// <objecttype>$<methodname>.
+    ///
+    /// Turbo Tier 5, Cluster B item 8: \p declaringModule is the object
+    /// type's own Type::DeclaringModule (or a VmtSlotEntry/method Symbol's
+    /// matching DeclaringModule/Module) -- the unit that ACTUALLY compiled
+    /// objectTypeName's own implementation, which now may differ from
+    /// CurrentUnit (the translation unit making this call) once an object
+    /// type can cross a unit boundary.  Empty falls back to CurrentUnit
+    /// unchanged -- the single-TU case this always was before this item, and
+    /// also the (in practice already-correct) answer for a type declared in
+    /// a unit's own IMPLEMENTATION section, which never crosses a unit
+    /// boundary at all and so is never harvested with a real Module by
+    /// checkUnitInterfaceOnly.
     std::string mangledMethod(const std::string& objectTypeName,
-                               const std::string& methodName) const;
+                               const std::string& methodName,
+                               const std::string& declaringModule = "") const;
 
     /// Turbo Tier 5, Cluster A item 5: the symbol naming an object type's own
     /// VMT global -- one array PER CONCRETE TYPE (see Codegen::Impl::
     /// getOrCreateVmt's own comment for why it is not shared with an
     /// ancestor's).  Same $-joined-segment shape mangledMethod already uses,
     /// under a dedicated "vmt$" segment so this can never collide with an
-    /// ordinary global or method symbol of the same object type name.
-    std::string mangledVmt(const std::string& objectTypeName) const;
+    /// ordinary global or method symbol of the same object type name.  See
+    /// mangledMethod's own comment just above for \p declaringModule.
+    std::string mangledVmt(const std::string& objectTypeName,
+                           const std::string& declaringModule = "") const;
 
 private:
     llvm::Module& Mod;

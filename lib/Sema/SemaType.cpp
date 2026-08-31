@@ -1040,6 +1040,13 @@ std::shared_ptr<Type> Sema::resolveObjectType(const ObjectTypeNode& Node,
     T->Name       = DeclName;
     T->Anonymous  = false;
     T->ObjectDecl = &Node;
+    // Turbo Tier 5, Cluster B item 8: see Type::DeclaringModule's own
+    // comment.  CurrentUnit_ is exactly what checkUnitInterfaceOnly sets it
+    // to while resolving a FOREIGN unit's own interface (loadUnitInterfaceExports),
+    // and what checkUnit/checkModule already set it to for this compile's
+    // own unit/program, so this one assignment covers a type declared here
+    // directly and one reached only by re-parsing another unit's .tui alike.
+    T->DeclaringModule = CurrentUnit_;
 
     std::shared_ptr<Type> ParentTy;
     if (!Node.Ancestor.empty()) {
@@ -1147,9 +1154,12 @@ std::shared_ptr<Type> Sema::resolveObjectType(const ObjectTypeNode& Node,
                               {PD.Name});
                 }
                 SlotIt->ImplementingType = DeclName;
+                SlotIt->DeclaringModule  = CurrentUnit_;
                 Meth.VmtSlot = static_cast<int>(SlotIt - T->VmtSlots.begin());
             } else {
-                T->VmtSlots.push_back({.MethodName = PD.Name, .ImplementingType = DeclName});
+                T->VmtSlots.push_back({.MethodName = PD.Name,
+                                        .ImplementingType = DeclName,
+                                        .DeclaringModule = CurrentUnit_});
                 Meth.VmtSlot = static_cast<int>(T->VmtSlots.size()) - 1;
             }
         } else if (ParentTy && findMethodInChain(ParentTy.get(), Lower)) {

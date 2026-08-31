@@ -20,10 +20,14 @@ runtime (`Assign`/`Reset`/`Rewrite`/`Append`/`Close`, `InOutRes`/
 compilation, and the shipped `Crt`/`Dos`/`Printer`/`Strings` standard
 library. Tier 5 (this document's own "Object types" section, near the end)
 is TP7's own `object` model — inheritance, virtual methods and the VMT,
-constructors/destructors, `with`, and visibility — everything Cluster A of
-that tier has shipped so far; objects declared in one module and consumed
-from another (Cluster B) and a capstone integration test corpus (Cluster C)
-are still ahead. Still not (yet) covered, at any tier: the real-mode DOS
+constructors/destructors, `with`, and visibility (Cluster A), plus an
+object type declared in one separately-compiled unit, inherited from and
+overridden in a second, and used from a third (Cluster B item 8) — a real
+cross-unit ancestor chain, `.tui`-serialized private fields included, with
+virtual dispatch through an ancestor-typed pointer still reaching the
+correct override across the unit boundary. A capstone integration test
+corpus at the scale of Tier 4's own (Cluster C) is still ahead. Still not
+(yet) covered, at any tier: the real-mode DOS
 surface (`Seg`/`Ofs`/`Mem`/`Intr`/...), which plang rejects by name as
 targeting a machine this compiler does not build for.
 
@@ -1853,13 +1857,13 @@ that declares the object type), not the exact object type and not a TP7
 descendant type's own methods, and even ordinary code with no method
 context whatsoever, may freely reach a private member as long as it is in
 the same module; only code in a genuinely different module (reached
-through `uses`) is refused. Since a single `-std=turbo` compilation today
-has, at most, one module in scope for any one object type (cross-module
-object-type consumption is the still-unshipped Cluster B), this refusal
-cannot yet be demonstrated end-to-end from a real two-file program — the
-comparison it is built from (Sema's `CurrentUnit_` against each private
-field's own recorded declaring module, and each private method's own
-`Symbol::Module`) is in place and ready for Cluster B to exercise.
+through `uses`) is refused. Now demonstrated end-to-end across a real
+multi-file program (Cluster B item 8): a private field declared by an
+ancestor object type in one unit is still counted — invisibly, at its real
+offset — when a descendant declared in a *different* unit lays out its own
+fields, but stays refused for genuinely unqualified name access from that
+other unit, exactly the same `CurrentUnit_`-against-`DeclaringModule`
+comparison the single-module case already used.
 
 **`with anObjectInstance do`.** Opens the object's own fields unqualified,
 through the identical with-scope mechanism (`pushWithScope`) the plain

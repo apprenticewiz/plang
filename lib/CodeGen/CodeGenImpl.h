@@ -1324,17 +1324,21 @@ struct Codegen::Impl {
         return linkage_->mangledGlobal(qualifiedName);
     }
 
-    /// Turbo Tier 5, Cluster A item 4: see CGLinkage::mangledMethod's own
-    /// comment.
+    /// Turbo Tier 5, Cluster A item 4 / Cluster B item 8: see
+    /// CGLinkage::mangledMethod's own comment.  declaringModule defaults to
+    /// "" (CGLinkage falls back to its own ambient CurrentUnit), which is
+    /// every call site's answer except the ones Cluster B item 8 added.
     std::string mangledMethod(const std::string& objectTypeName,
-                              const std::string& methodName) const {
-        return linkage_->mangledMethod(objectTypeName, methodName);
+                              const std::string& methodName,
+                              const std::string& declaringModule = "") const {
+        return linkage_->mangledMethod(objectTypeName, methodName, declaringModule);
     }
 
-    /// Turbo Tier 5, Cluster A item 5: see CGLinkage::mangledVmt's own
-    /// comment.
-    std::string mangledVmt(const std::string& objectTypeName) const {
-        return linkage_->mangledVmt(objectTypeName);
+    /// Turbo Tier 5, Cluster A item 5 / Cluster B item 8: see
+    /// CGLinkage::mangledVmt's own comment.
+    std::string mangledVmt(const std::string& objectTypeName,
+                           const std::string& declaringModule = "") const {
+        return linkage_->mangledVmt(objectTypeName, declaringModule);
     }
 
     /// The value of \p e in memory, for reading a component of a function
@@ -1648,7 +1652,49 @@ struct Codegen::Impl {
     /// Returns null for a non-Object T or one with no virtual method
     /// anywhere in its own hierarchy (T.VmtSlots.empty()) -- there is
     /// nothing to build and nothing for vptrOffsetOf to have found either.
+    ///
+    /// Turbo Tier 5, Cluster B item 8: a slot's own implementing method may
+    /// now live in a DIFFERENT translation unit than the one building this
+    /// VMT (e.g. TDog's own VMT, built while compiling a program that only
+    /// 'uses' the unit TDog was declared in, still needs a slot for
+    /// TAnimal's own Speak when TDog does not override it, and TAnimal was
+    /// compiled as a wholly separate .o).  Every translation unit that needs
+    /// a concrete type's VMT at all builds its OWN full copy of it (this
+    /// memo is per-Impl, i.e. per translation unit) -- deliberately not
+    /// shared or exported: the array itself stays InternalLinkage exactly as
+    /// it always has, and correctness across the unit boundary rests
+    /// entirely on every slot's FUNCTION POINTER resolving to the real,
+    /// correctly-mangled external symbol (mangledMethod's own
+    /// declaringModule parameter) -- declareImportedMethod's own comment.
     llvm::GlobalVariable* getOrCreateVmt(const Type& T);
+    /// Turbo Tier 5, Cluster B item 8: an external declaration (never a
+    /// definition) for a method this translation unit did not itself
+    /// compile, under \p mangledName (already computed by the caller, from
+    /// the declaring type's own name and DeclaringModule -- mangledMethod's
+    /// own comment). A no-op, returning the existing llvm::Function*, if
+    /// mangledName is already declared or defined here (a forward reference
+    /// within the SAME translation unit, already handled by
+    /// emitAllProcedures's own method pre-pass, or a repeat call for the
+    /// same foreign method from two different VMTs/call sites).
+    ///
+    /// Builds the parameter/return LLVM types from M's own RESOLVED
+    /// signature (M.Params/M.RetType), not by re-walking any AST -- the
+    /// same var/const-by-reference-vs-value distinction emitFunctionDef's
+    /// own parameter loop makes (CodeGenProcs.cpp), just read off the
+    /// already-resolved Type::Param list instead of a ParamGroup, because a
+    /// foreign method's own heading, once loaded back from another unit's
+    /// .tui, is exactly as real and exactly as resolved as one declared
+    /// here (Sema::resolveObjectType makes no distinction). Deliberately
+    /// does not attempt a conformant-array/open-array or procedural-type
+    /// parameter (codegenICE instead of a wrong-ABI guess): building either
+    /// one's own multi-value ABI (ptr+bounds, or entry+frame) needs the
+    /// original AST ParamGroup emitFunctionDef's own parameter loop reads
+    /// (CodeGenProcs.cpp), not just a resolved Type::Param, and no
+    /// construction in this codebase can put either shape on an object
+    /// method's heading today -- left as a clear stop rather than a silent
+    /// wrong guess for whenever that changes.
+    llvm::Function* declareImportedMethod(const Type::Method& M,
+                                          const std::string& mangledName);
     /// Turbo Tier 5, Cluster A item 7: an 'abstract' virtual method
     /// (Type::Method::IsAbstract) has no body by construction
     /// (err_object_abstract_method_has_body) and so is never among

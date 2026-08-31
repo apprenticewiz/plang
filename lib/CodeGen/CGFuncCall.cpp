@@ -826,6 +826,54 @@ const plang::Type::Method* methodEntryOf(const plang::Type& Owner,
         if (eqCI(M.Name, Method)) return &M;
     return nullptr;
 }
+
+// Turbo Tier 5, Cluster B item 8: an external declaration (never a
+// definition) for a method this translation unit did not itself compile --
+// same fresh-copy convention as methodOwnerType/methodEntryOf just above;
+// CGFuncCall.cpp's own copy of CGProcCall.cpp's identical declareForeignMethod
+// (itself a fresh copy of Codegen::Impl::declareImportedMethod,
+// CodeGenProcs.cpp -- see that one's own comment, CodeGenImpl.h, for why a
+// conformant-array or procedural-type parameter is a clear codegenICE
+// rather than a wrong-ABI guess). Built from M's own RESOLVED signature,
+// never from a call site's own argument types -- see emitMethodCallExpr's
+// own comment for why guessing from the argument side is wrong whenever an
+// actual's static type is merely COMPATIBLE with, rather than IDENTICAL to,
+// the formal's real declared type (a string literal vs. a `string` formal,
+// concretely).
+llvm::Function* declareForeignMethod(llvm::Module& Mod, llvm::LLVMContext& Ctx,
+                                     llvm::PointerType* PtrTy, CGTypes& Types,
+                                     const plang::Type::Method& M,
+                                     const std::string& mangledName) {
+    if (auto* existing = Mod.getFunction(mangledName)) return existing;
+
+    std::vector<llvm::Type*> paramTys;
+    paramTys.push_back(PtrTy); // Self
+    for (const auto& P : M.Params) {
+        if (P.IsUntyped) { paramTys.push_back(PtrTy); continue; }
+        if (!P.Ty)
+            codegenICE("imported method '" + mangledName + "' has a "
+                       "parameter '" + P.Name + "' with no resolved type");
+        if (P.Ty->Kind == plang::TypeKind::ConformantArray
+                || P.Ty->Kind == plang::TypeKind::Procedure
+                || P.Ty->Kind == plang::TypeKind::Function)
+            codegenICE("imported method '" + mangledName + "' has a "
+                       "conformant-array or procedural-type parameter '"
+                       + P.Name + "' -- not yet supported across a unit "
+                         "boundary");
+        const bool constByRef = P.IsConst && !P.Ty->isError()
+            && plang::isStructuredForConstByRef(*P.Ty);
+        const bool passByRef = P.IsVar || constByRef;
+        paramTys.push_back(passByRef ? PtrTy : Types.llvmTypeOfSemaType(*P.Ty));
+    }
+
+    llvm::Type* retTy = llvm::Type::getVoidTy(Ctx);
+    if (M.IsConstructor) retTy = llvm::Type::getInt1Ty(Ctx);
+    else if (M.IsFunction && M.RetType) retTy = Types.llvmTypeOfSemaType(*M.RetType);
+
+    auto* fnTy = llvm::FunctionType::get(retTy, paramTys, /*isVarArg=*/false);
+    return llvm::Function::Create(fnTy, llvm::GlobalValue::ExternalLinkage,
+                                  mangledName, &Mod);
+}
 } // namespace
 
 llvm::Value* CGFuncCall::emitMethodCallExpr(const MethodCallExpr& e) {
@@ -836,7 +884,7 @@ llvm::Value* CGFuncCall::emitMethodCallExpr(const MethodCallExpr& e) {
         codegenICE("method '" + e.Method + "' has no owning type in its "
                    "receiver's own ancestor chain -- Sema should have "
                    "refused this call already");
-    std::string mangledName = Linkage.mangledMethod(Owner->Name, e.Method);
+    std::string mangledName = Linkage.mangledMethod(Owner->Name, e.Method, Owner->DeclaringModule);
 
     // The receiver's own address: EmitLValue already handles both shapes --
     // a plain IdentExpr ('Obj.Method(...)') through the ordinary variable
@@ -847,27 +895,20 @@ llvm::Value* CGFuncCall::emitMethodCallExpr(const MethodCallExpr& e) {
     llvm::Value* selfPtr = EmitLValue(*e.Receiver);
     if (!selfPtr) codegenICE("method call receiver has no address");
 
+    // Turbo Tier 5, Cluster B item 8: see CGProcCall::emitMethodCallStmt's
+    // identical fix for why guessing the callee's parameter types from the
+    // CALL SITE's own argument expressions (e.Args' ResolvedType) is wrong
+    // -- dead code before this item, and wrong the first time it actually
+    // fired, for the same "a string literal is not a `string` formal"
+    // reason. Declared from Owner's own resolved Method entry instead.
     auto* callee = Mod.getFunction(mangledName);
     if (!callee) {
-        // Not yet defined in this compilation unit at this point in codegen
-        // order -- mirrors emitUserFuncCall's own identical fallback for an
-        // ordinary function, just below, with 'Self' prepended to the
-        // synthesized signature the same way it is prepended to the real
-        // one in Codegen::Impl::emitFunctionDef.
-        llvm::Type* retLLVMTy = llvm::Type::getVoidTy(Ctx);
-        if (e.ResolvedType && !e.ResolvedType->isError())
-            retLLVMTy = Types.llvmTypeOfSemaType(*e.ResolvedType);
-        std::vector<llvm::Type*> paramTys;
-        paramTys.push_back(PtrTy); // Self
-        for (const auto& Arg : e.Args) {
-            if (Arg && Arg->ResolvedType && !Arg->ResolvedType->isError())
-                paramTys.push_back(Types.llvmTypeOfSemaType(*Arg->ResolvedType));
-            else
-                paramTys.push_back(I64Ty); // safe fallback
-        }
-        auto* fnTy = llvm::FunctionType::get(retLLVMTy, paramTys, false);
-        callee = llvm::Function::Create(fnTy, llvm::Function::ExternalLinkage,
-                                        mangledName, &Mod);
+        const Type::Method* MEntry = methodEntryOf(*Owner, e.Method);
+        if (!MEntry)
+            codegenICE("method '" + mangledName + "' reached CodeGen "
+                       "unresolved -- Sema should have refused this call "
+                       "already");
+        callee = declareForeignMethod(Mod, Ctx, PtrTy, Types, *MEntry, mangledName);
     }
 
     std::vector<llvm::Value*> args;

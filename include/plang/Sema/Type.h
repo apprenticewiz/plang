@@ -337,6 +337,18 @@ struct Type {
     /// alone do not carry (e.g. distinguishing a field from a method at its
     /// original declaration position).
     const ObjectTypeNode* ObjectDecl{nullptr};
+    /// Object only (Turbo Tier 5, Cluster B item 8): the lowercased module
+    /// (unit or program) that DECLARED this object type -- whatever Sema's
+    /// own CurrentUnit_ held at the moment resolveObjectType built this Type,
+    /// the same convention Field::DeclaringModule already uses per-field.
+    /// Needed once an object type can cross a unit boundary: a method call
+    /// resolved to THIS type's own implementation (CGProcCall's Owner) has to
+    /// mangle under the unit that actually compiled that method's body, which
+    /// is this type's own declaring unit, not necessarily whichever
+    /// translation unit is compiling the CALL.  Empty for a type declared
+    /// directly by a program (mirrors Field::DeclaringModule's identical
+    /// empty-for-a-program convention).
+    std::string DeclaringModule;
     /// One method DECLARED BY THIS TYPE (not inherited -- an inherited,
     /// non-overridden method is reachable only by walking Parent, the same
     /// way an inherited, non-hidden field is NOT re-listed by a Pascal
@@ -420,6 +432,17 @@ struct Type {
         /// 3b calls resolveType before it knows how to name an anonymous
         /// result -- see PendingObjectTypeName_'s own comment, Sema.h).
         std::string ImplementingType;
+        /// Turbo Tier 5, Cluster B item 8: the module that declared
+        /// ImplementingType -- see Type::DeclaringModule's own comment just
+        /// above for why CodeGen needs this to mangle the slot's function
+        /// correctly once the implementing type may live in a different
+        /// translation unit than the one building this VMT.  Set alongside
+        /// ImplementingType at both of resolveObjectType's own write sites
+        /// (a new virtual method, or an override taking over an inherited
+        /// slot), always to CurrentUnit_ at that moment -- an inherited,
+        /// non-overridden slot simply keeps whatever DeclaringModule it
+        /// already carried, exactly like ImplementingType itself.
+        std::string DeclaringModule;
     };
     /// The FINAL, effective VMT slot table for this type: every entry
     /// inherited from Parent (same name, same index, copied verbatim) plus
