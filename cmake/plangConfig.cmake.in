@@ -3,8 +3,16 @@
 # plangConfig.cmake -- CMake package config for the plang frontend library
 # (issue #191). Consumers do:
 #
+#   project(my_project LANGUAGES C CXX)   # see LLVM note below -- C is required
 #   find_package(plang REQUIRED)
 #   target_link_libraries(my_target PRIVATE plang::plang_frontend)
+#
+# LANGUAGES C CXX, not just CXX: LLVMConfig.cmake's own FindLibEdit.cmake
+# runs check_include_file(), which needs a C compiler enabled in the calling
+# project even though nothing plang-specific touches C. plang's own
+# top-level CMakeLists.txt enables C CXX for the identical reason. A
+# CXX-only consumer project fails find_package(plang) with "Unknown
+# extension '.c' ... try_compile() works only for enabled languages."
 #
 # and get plang::plang_frontend's own public include directory for free
 # (see lib/CMakeLists.txt's target_include_directories INSTALL_INTERFACE).
