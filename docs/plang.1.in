@@ -331,6 +331,20 @@ Pass the comma-separated list \fIargs\fR directly to the linker.
 .TP
 .BI \-Xlinker " arg"
 Pass \fIarg\fR as a single argument to the linker.
+.TP
+.B \-sanitize\-runtime
+Link the compiled program against an AddressSanitizer/UndefinedBehaviorSanitizer
+\-instrumented build of the runtime instead of the normal one, and bring in
+the ASan/UBSan support libraries at link time.  Only the runtime is
+instrumented this way \(en the compiled Pascal program's own code is not, so
+this can only catch a bug reached through a runtime call.  For test
+infrastructure only: it requires a
+.B plang
+build configured with
+.BR \-DPLANG_ENABLE_RUNTIME_SANITIZER_TESTS=ON ,
+and reports an error naming that option rather than a confusing linker
+failure when it was not.  An ordinary build, and an ordinary compile without
+this option, are entirely unaffected.
 .SS "Diagnostic / informational"
 .PP
 A diagnostic names the file, the line and the column, then quotes the line and
