@@ -1222,6 +1222,15 @@ std::vector<std::shared_ptr<Type>> Sema::checkBuiltinArgKinds(
             if (T->Kind != TypeKind::Complex)
                 error(Arg->Loc, diag::err_complex_argument, {LowerName, T->Name});
             break;
+        // ISO §6.6.6.4 (ord, chr) / §6.6.6.5 (odd): all three transfer
+        // between an ordinal value and its ordinal position, so the
+        // argument has to be ordinal-type -- isOrdinal() admits integer-,
+        // boolean-, char- and enumeration-type (or a subrange of one), the
+        // same predicate all three shared by hand before this was generic.
+        case BuiltinArgKind::Ordinal:
+            if (!T->isOrdinal())
+                error(Arg->Loc, diag::err_ordinal_argument, {LowerName, T->Name});
+            break;
         }
     }
     return Types;
@@ -1553,20 +1562,20 @@ std::shared_ptr<Type> Sema::checkCallExpr(const CallExpr& E) {
         // an ordinal value and its ordinal position -- ord(x) is x's position,
         // chr(x) is the value at position x, odd(x) reads position x's low
         // bit -- so, like succ/pred just above, the argument has to be
-        // ordinal. Unlike succ/pred none of the three were special-cased
-        // here, so they fell through to the generic "check each argument,
-        // trust the declared return type" path below with nothing stopping a
-        // non-ordinal argument. CodeGen has nothing valid to lower one to
-        // either: ord's case zext's its operand unconditionally, so
-        // ord(1.5) reached the LLVM verifier as `zext double ... to i64`
-        // and aborted the compiler instead of Sema reporting it (issue #212).
+        // ordinal.  Argument-kind checking is generic now (Builtins.def's
+        // AK_Ordinal row for all three, issue #306's second slice); before
+        // that existed, unlike succ/pred, none of the three were
+        // special-cased here at all, so they fell through to the generic
+        // "check each argument, trust the declared return type" path below
+        // with nothing stopping a non-ordinal argument. CodeGen has nothing
+        // valid to lower one to either: ord's case zext's its operand
+        // unconditionally, so ord(1.5) reached the LLVM verifier as `zext
+        // double ... to i64` and aborted the compiler instead of Sema
+        // reporting it (issue #212).
         if ((Lo == "ord" || Lo == "chr" || Lo == "odd") && !E.Args.empty()) {
-            auto ArgTy = checkExpr(*E.Args[0]);
-            if (ArgTy->isError()) return TyErr;
-            if (!ArgTy->isOrdinal()) {
-                error(E.Loc, diag::err_ordinal_argument, {Lo, ArgTy->Name});
-                return TyErr;
-            }
+            auto Types = checkBuiltinArgKinds(Sym->BuiltinKind, Lo, E.Args);
+            auto& ArgTy = Types[0];
+            if (ArgTy->isError() || !ArgTy->isOrdinal()) return TyErr;
             return Sym->ReturnType ? Sym->ReturnType : TyErr;
         }
         // ISO §6.6.6.3: trunc and round convert a real value to an integer,
