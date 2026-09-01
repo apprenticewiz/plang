@@ -189,13 +189,18 @@ llvm::FunctionType* ClosureAndCallABI::procParamFnType(const ProcedureTypeNode& 
         const size_t cdims = conformantDimCount(pg.Type.get());
         const unsigned discs = schemaParamDiscCount(pg.Type.get());
         // Turbo untyped parameter: pg.Type is deliberately null
-        // (ParamGroup::Type's own comment), so dyn_cast MUST be the
-        // null-safe _or_null form here -- and IsVar is always true for one
+        // (ParamGroup::Type's own comment), so resolveProcTypeAlias's own
+        // null check covers it here -- and IsVar is always true for one
         // (checked against fpc -Mtp: only the 'var' form is legal), so the
         // *pg.Type dereference in the plain 'else' branch just below is
-        // never reached for it either.
-        const bool isProc =
-            llvm::dyn_cast_or_null<ProcedureTypeNode>(pg.Type.get()) != nullptr;
+        // never reached for it either.  A NAMED procedural type nested
+        // inside a procedural parameter's OWN parameter list -- Turbo's only
+        // legal spelling, same as an outer procedural parameter's own
+        // (issue #543) -- has to be walked through NamedTypeNode::Denotes
+        // the same way, or the nested slot's own two-pointer shape is
+        // missed and this signature no longer matches the one built for the
+        // relayed argument (CGSymbolTable.h's resolveProcTypeAlias, shared).
+        const bool isProc = resolveProcTypeAlias(pg.Type.get()) != nullptr;
 
         for (size_t i = 0; i < pg.Names.size(); ++i) {
             if (cdims) {
@@ -331,10 +336,14 @@ std::vector<FlatProcParamMeta> flattenProcParams(
         std::function<unsigned(const TypeNode*)> SchemaParamDiscCount) {
     std::vector<FlatProcParamMeta> meta;
     for (const auto& pg : params) {
-        // Turbo untyped parameter: pg.Type is deliberately null; dyn_cast
-        // must be the null-safe _or_null form (ParamGroup::Type's own
-        // comment).
-        auto*          inner = llvm::dyn_cast_or_null<ProcedureTypeNode>(pg.Type.get());
+        // Turbo untyped parameter: pg.Type is deliberately null;
+        // resolveProcTypeAlias's own null check covers it (ParamGroup::
+        // Type's own comment).  A NAMED procedural type -- Turbo's only
+        // legal spelling, issue #543 -- has to be walked through
+        // NamedTypeNode::Denotes the same way procParamFnType's identical
+        // isProc check just above does now, or a nested procedural slot in
+        // this signature is missed here too.
+        auto*          inner = resolveProcTypeAlias(pg.Type.get());
         const size_t   cdims = ConformantDimCount(pg.Type.get());
         const unsigned discs = SchemaParamDiscCount(pg.Type.get());
         // Same rule CodeGenProcs.cpp's own plain-parameter arm uses to fill
@@ -439,12 +448,12 @@ llvm::FunctionType* ClosureAndCallABI::procVarFnType(const ProcedureTypeNode& no
     std::vector<llvm::Type*> params;
     for (const auto& pg : node.Params) {
         // Turbo untyped parameter: pg.Type is deliberately null
-        // (ParamGroup::Type's own comment); dyn_cast must be the null-safe
-        // _or_null form, and (IsVar always true for one) the plain 'else'
+        // (ParamGroup::Type's own comment); resolveProcTypeAlias's own null
+        // check covers it, and (IsVar always true for one) the plain 'else'
         // branch's *pg.Type is never reached for it -- same reasoning as
-        // procParamFnType just above.
-        const bool isProc =
-            llvm::dyn_cast_or_null<ProcedureTypeNode>(pg.Type.get()) != nullptr;
+        // procParamFnType just above, including the NAMED-procedural-type
+        // walk (issue #543).
+        const bool isProc = resolveProcTypeAlias(pg.Type.get()) != nullptr;
         for (size_t i = 0; i < pg.Names.size(); ++i) {
             if (isProc) {
                 params.push_back(PtrTy); // entry point
@@ -474,10 +483,13 @@ ClosureAndCallABI::emitProcVarCall(const VarEntry& ve,
     std::vector<llvm::Value*> args;
     size_t flat = 0;
     for (const auto& pg : ve.procType->Params) {
-        // Turbo untyped parameter: pg.Type is deliberately null; dyn_cast
-        // must be the null-safe _or_null form (ParamGroup::Type's own
-        // comment).
-        auto* inner = llvm::dyn_cast_or_null<ProcedureTypeNode>(pg.Type.get());
+        // Turbo untyped parameter: pg.Type is deliberately null;
+        // resolveProcTypeAlias's own null check covers it (ParamGroup::
+        // Type's own comment).  Same NAMED-procedural-type walk as
+        // procParamFnType/procVarFnType above (issue #543): a nested
+        // parameter here is exactly as likely to be spelled with a named
+        // type as an outer one is.
+        auto* inner = resolveProcTypeAlias(pg.Type.get());
         for (size_t k = 0; k < pg.Names.size(); ++k, ++flat) {
             if (flat >= argExprs.size()) break;
             const auto& a = *argExprs[flat];

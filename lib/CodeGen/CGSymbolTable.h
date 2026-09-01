@@ -26,6 +26,20 @@
 
 namespace plang {
 struct TypeNode;
+struct ProcedureTypeNode;
+
+// Turbo procedural TYPES: \p tn may name a procedural type through any
+// number of `type Alias = OtherAlias;` hops (NamedTypeNode::Denotes, set by
+// Sema::resolveNamed at every one of them) before finally being written out
+// as `procedure(...)`/`function(...): T`. Shared between CGSymbolTable::
+// defVar (a procedural VARIABLE's declared type, resolved once at the
+// variable's own declaration) and CodeGenProcs.cpp's parameter-list walk (a
+// procedural PARAMETER's declared type, fix for issue #543 -- a NAMED
+// parameter type used to fail this same recognition and fall through to
+// being evaluated as an implicit zero-argument call instead of having its
+// address taken).  Returns null for anything that is not, eventually, a
+// procedural type -- the overwhelming majority of callers' arguments.
+const ProcedureTypeNode* resolveProcTypeAlias(const TypeNode* tn);
 }
 
 class CGSymbolTable {

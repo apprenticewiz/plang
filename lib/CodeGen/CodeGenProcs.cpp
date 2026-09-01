@@ -749,7 +749,22 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
         // point and the frame its body reads outer variables through.  Both
         // have to travel together: the frame is built from names visible where
         // the procedure is passed, which is not where it is finally called.
-        if (auto* pt = llvm::dyn_cast<ProcedureTypeNode>(pg.Type.get())) {
+        //
+        // pg.Type is not always literally a ProcedureTypeNode: Turbo Pascal's
+        // only legal spelling for a procedural PARAMETER is a NAMED type
+        // (`op: BinOp`, `type BinOp = function(...): Integer`) -- `fpc -Mtp`
+        // rejects the inline `op: function(...): Integer` spelling in a
+        // parameter list outright -- so pg.Type.get() is then a NamedTypeNode
+        // whose Denotes chain has to be walked to reach the real
+        // ProcedureTypeNode, exactly the way CGSymbolTable::defVar already
+        // does for a procedural VARIABLE's declared type (resolveProcTypeAlias,
+        // shared with it -- see that function's own comment, CGSymbolTable.h).
+        // A bare llvm::dyn_cast on pg.Type.get() alone missed every named-type
+        // case, leaving ParamMeta::procType null for that argument position and
+        // letting the call site (CGCallMarshal::marshalArgs) fall through to
+        // treating a bare routine-name actual as an implicit zero-argument call
+        // instead of taking its address (issue #543).
+        if (auto* pt = resolveProcTypeAlias(pg.Type.get())) {
             for (const auto& nm : pg.Names) {
                 paramTypes.push_back(ptrTy);          // entry point
                 paramNames.push_back(nm);
