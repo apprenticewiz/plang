@@ -869,6 +869,67 @@ void Sema::harvestModuleExports(const ModuleNode& Mod) {
     });
 }
 
+// ---------------------------------------------------------------------------
+// Issue #180/#304: mtime-based staleness check for a published interface file
+// ---------------------------------------------------------------------------
+
+namespace {
+// A case-insensitive search for "<Key>.pas" in exactly ONE directory (the
+// directory an interface file was itself found in) -- deliberately narrower
+// than loadUnitInterfaceExports's own SearchDirs-wide fallback, since the
+// question here is only "is there a companion source sitting right beside
+// THIS published interface", not "can a .pas for this name be found
+// somewhere on the search path".  A .pmi's companion is not guaranteed to
+// exist under this name at all (EP allows several modules in one hand-named
+// file, e.g. multi.pas publishing a.pmi/bad.pmi/good.pmi -- see
+// writePMIFiles' own comment), so coming up empty here is the ordinary,
+// silent, no-warning case, not a search failure to report.
+std::string findCompanionPas(const std::string& Dir, const std::string& Key) {
+    const std::string Fast = Dir + "/" + Key + ".pas";
+    if (llvm::sys::fs::exists(Fast)) return Fast;
+    std::error_code EC;
+    for (llvm::sys::fs::directory_iterator It(Dir, EC), End;
+            It != End && !EC; It.increment(EC)) {
+        llvm::SmallString<64> Stem = llvm::sys::path::filename(It->path());
+        if (eqCI(std::string(Stem), Key + ".pas")) return std::string(It->path());
+    }
+    return "";
+}
+} // namespace
+
+void Sema::warnIfInterfaceStale(SourceLocation Loc, const std::string& InterfacePath,
+                                 const std::string& PasPath) {
+    llvm::sys::fs::file_status PasStatus;
+    llvm::sys::fs::file_status IfaceStatus;
+    if (llvm::sys::fs::status(PasPath, PasStatus)) return;
+    if (llvm::sys::fs::status(InterfacePath, IfaceStatus)) return;
+
+    const auto PasTime = PasStatus.getLastModificationTime();
+    bool Stale = PasTime > IfaceStatus.getLastModificationTime();
+
+    // Also check the paired .o -- same directory, same base name as the
+    // interface file itself (that is how both writePMIFiles and
+    // writeTUIFile's own callers in Frontend.cpp name it, and how every
+    // lit test in test/Module/SeparateCompilation and test/Turbo/Units
+    // invokes `-c ... -o <name>.o` already).  A program that only reads the
+    // .tui/.pmi's declarations never touches the .o, but a program being
+    // LINKED against the compiled unit/module does, and that .o is exactly
+    // what silently carries stale code in this item's own repro: the
+    // interface text can be byte-identical (so re-publishing it would prove
+    // nothing) while the implementation behind it has changed.
+    if (!Stale) {
+        llvm::SmallString<256> ObjPath(InterfacePath);
+        llvm::sys::path::replace_extension(ObjPath, "o");
+        llvm::sys::fs::file_status ObjStatus;
+        if (llvm::sys::fs::exists(ObjPath) &&
+                !llvm::sys::fs::status(ObjPath, ObjStatus))
+            Stale = PasTime > ObjStatus.getLastModificationTime();
+    }
+
+    if (Stale)
+        warning(Loc, diag::warn_stale_interface_file, {InterfacePath, PasPath});
+}
+
 void Sema::processModuleBody(const ModuleNode& Mod) {
     if (!Mod.Body) return;
 
@@ -953,6 +1014,18 @@ void Sema::processImports(const std::vector<ImportClause>& Imports) {
                 PMILoadResult R = loadPMI(Key, PMIPath);
                 if (R.St == PMILoadResult::Status::Ok) {
                     It = ModuleExports_.find(Key);
+                    // Issue #180/#304: this .pmi is a real, successfully-
+                    // loaded interface -- see if a companion "<Key>.pas"
+                    // sits right beside it and, if so, whether it is newer
+                    // than the .pmi or its paired .o (findCompanionPas's
+                    // own comment on why coming up empty here is the
+                    // ordinary case, not a search failure).
+                    const std::string PmiDir =
+                        std::string(llvm::sys::path::parent_path(PMIPath));
+                    const std::string PasCandidate =
+                        findCompanionPas(PmiDir.empty() ? "." : PmiDir, Key);
+                    if (!PasCandidate.empty())
+                        warnIfInterfaceStale(Clause.Loc, PMIPath, PasCandidate);
                     return true;
                 }
                 if (R.St != PMILoadResult::Status::Unreadable) {
@@ -1211,6 +1284,7 @@ Sema::loadUnitInterfaceExports(const std::string& UnitName, SourceLocation Loc) 
         return "";
     };
     std::string Path;
+    std::string TuiDir;
     bool        Found = false;
     bool        IsTUI = false;
     std::vector<std::string> SearchDirs = Opts.ModuleSearchPaths;
@@ -1223,7 +1297,8 @@ Sema::loadUnitInterfaceExports(const std::string& UnitName, SourceLocation Loc) 
                        Opts.UnitSearchPaths.end());
     for (const auto& Dir : SearchDirs) {
         if (Path = findExact(Dir, Key + ".tui"); !Path.empty()) {
-            Found = true; IsTUI = true; break;
+            Found = true; IsTUI = true; TuiDir = Dir;
+            break;
         }
     }
     if (!Found)
@@ -1236,7 +1311,14 @@ Sema::loadUnitInterfaceExports(const std::string& UnitName, SourceLocation Loc) 
         UnitLoading_.erase(Key);
         return UnitExports_[Key];
     }
-    (void)IsTUI; // both formats parse identically below -- a .tui IS a unit file
+    // Issue #180/#304: only a genuinely PUBLISHED interface (a .tui) can be
+    // stale relative to a companion source -- the .pas fallback just below
+    // parses the unit's own current source directly, so by construction
+    // there is nothing for it to go stale against.
+    if (IsTUI) {
+        const std::string PasCandidate = findCompanionPas(TuiDir, Key);
+        if (!PasCandidate.empty()) warnIfInterfaceStale(Loc, Path, PasCandidate);
+    }
 
     std::ifstream UnitFile(Path);
     if (!UnitFile) {
