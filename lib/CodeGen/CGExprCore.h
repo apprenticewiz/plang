@@ -156,6 +156,29 @@ private:
     // diagnosable failure (codegenICE, CodegenICE.h) every other invariant
     // violation in codegen produces.
     //
+    // A note for anyone writing a lit regression fixture that needs to reach
+    // codegen with a deep, non-folded expression tree (a call-statement
+    // argument, for instance -- unlike a `const` initializer, which Sema
+    // folds away before codegen ever sees it): under this project's own
+    // ASan+UBSan CI build specifically, 200 above is a HARD, deterministic
+    // activation-count ceiling, not a live-stack-headroom trip, so it fires
+    // at the exact same term count on every machine -- there is no "usually
+    // safe up to N terms" the way there is for the live stackNearlyExhausted
+    // check just below. A fixture pattern this size or larger will fail that
+    // CI job's build specifically, even though the very same input compiles
+    // fine on every non-ASan configuration in this project's CI matrix. Stay
+    // well clear of 200 (not just of Sema's much higher MaxExprDepth=1000,
+    // Sema.h) for any such fixture. This is exactly the mistake issue #556's
+    // own PR #558 regression test made the first time around -- it copied a
+    // 900-term figure from a sibling fixture whose shape (a `const`
+    // initializer) never reaches codegen at all, so 900 was never actually
+    // exercising this ceiling until it was fixed to use a for-loop-body
+    // call-statement argument instead. See
+    // test/Driver/ParserRobustness/a-100-term-power-chain-in-a-for-loop-
+    // body-call-argument-still-compiles-cleanly.pas for the empirically-
+    // measured boundary (an exact, deterministic 200/201 terms) and the
+    // margin this project settled on.
+    //
     // Neither of those defenses is a live stack-headroom check, though: both
     // are term-count ceilings, tuned against a NORMAL-sized (multi-MiB, or
     // ASan-inflated-but-still-multi-MiB) stack. Under a small but real
