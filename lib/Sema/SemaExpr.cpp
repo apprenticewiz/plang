@@ -806,7 +806,13 @@ std::shared_ptr<Type> Sema::checkBinary(const BinaryExpr& E) {
                           {opSpelling(E.Op), Lu->ElemType->Name, Ru->ElemType->Name});
                     return TyErr;
                 }
-                // Both operands agree now; the definite one names the result.
+                // Both operands agree now; the definite one names the result
+                // for '-' and '*', whose result is always a subset of the
+                // LEFT operand's own window.  '+' (union) is different: it
+                // can hold a right-only member outside that window, so it
+                // needs the WIDER of the two rather than just the left one
+                // -- see widenSetResult's own comment (issue #681).
+                if (E.Op == TokenKind::Plus) return widenSetResult(Lu, Ru);
                 return isLooseSet(*E.Left) ? Ru : Lu;
             }
             if (!Lt->isNumeric() || !Rt->isNumeric()) {
@@ -943,8 +949,10 @@ std::shared_ptr<Type> Sema::checkBinary(const BinaryExpr& E) {
                 return TyErr;
             }
             unifyLooseSets(*E.Left, *E.Right, Lt, Rt);
-            return isLooseSet(*E.Left) ? E.Right->ResolvedType
-                                       : E.Left->ResolvedType;
+            // A><B is (A∪B)-(A∩B): it can hold a member from EITHER side
+            // alone, the identical reason '+' needs widenSetResult rather
+            // than just one operand's own window (issue #681).
+            return widenSetResult(E.Left->ResolvedType, E.Right->ResolvedType);
 
         case TokenKind::Equal:
         case TokenKind::NotEqual:
@@ -2324,6 +2332,48 @@ void Sema::unifyLooseSets(const ExprNode& L, const ExprNode& R,
     if (isLooseSet(L) == isLooseSet(R)) return; // nothing definite to copy
     if (isLooseSet(L)) adoptSetType(L, Rt);
     else               adoptSetType(R, Lt);
+}
+
+// See the declaration's own comment (Sema.h) for why '+' and '><' need this
+// and '-'/'*' do not.
+std::shared_ptr<Type> Sema::widenSetResult(const std::shared_ptr<Type>& Lu,
+                                           const std::shared_ptr<Type>& Ru) {
+    // Same Type object already (identical named type, or a loose operand
+    // unifyLooseSets already retyped onto the other side): nothing to widen,
+    // and the fast, overwhelmingly common path.
+    if (Lu == Ru || !Lu || !Ru || !Lu->ElemType || !Ru->ElemType) return Lu;
+    const auto LR = ordinalRange(*Lu->ElemType);
+    const auto RR = ordinalRange(*Ru->ElemType);
+    // An unbounded base (a bare 64-bit `integer`) offers no range to widen
+    // into or out of -- its own window is already base-0/unshifted, the
+    // layout every non-negative base type uses, so reusing Lu is exactly as
+    // safe here as the pre-existing behavior this replaces.
+    if (!LR || !RR) return Lu;
+    // One side's declared range already contains the other's -- e.g. `set of
+    // char` (0..255) unioned with `set of 'a'..'z'` -- so its own window
+    // already loses nothing and no new type need be minted.
+    if (LR->first <= RR->first && RR->second <= LR->second) return Lu;
+    if (RR->first <= LR->first && LR->second <= RR->second) return Ru;
+    // Genuinely mismatched windows (issue #681's repro: `set of 0..10` union
+    // `set of -5..5`, neither containing the other): the result has to be
+    // representable across BOTH, so span the union of the two ranges rather
+    // than either operand's alone.
+    const int64_t Lo = std::min(LR->first, RR->first);
+    const int64_t Hi = std::max(LR->second, RR->second);
+    // '+'s own call site above already checked the two element types
+    // assign-compatible (err_op_set_base) before ever reaching here, so for
+    // a well-formed '+' they share one common host ordinal type (Integer, or
+    // the same Enum) to build the widened subrange over.  '><' has no such
+    // check of its own (a pre-existing gap this fix does not extend), so an
+    // ill-formed `charSet >< intSet` can still reach this point -- Lu's own
+    // host is as good a choice as Ru's regardless, and a subrange over
+    // another subrange's host falls back through getSubrange's own
+    // DefaultIntWidth_ branch rather than crashing if the two hosts ever
+    // genuinely differ.
+    const std::shared_ptr<Type>& Host =
+        (Lu->ElemType->Kind == TypeKind::Subrange && Lu->ElemType->SubBase)
+            ? Lu->ElemType->SubBase : Lu->ElemType;
+    return Ctx_.getSet(Ctx_.getSubrange(Host, Lo, Hi), Lu->Packed || Ru->Packed);
 }
 
 // ---------------------------------------------------------------------------

@@ -1324,6 +1324,25 @@ private:
                                const std::shared_ptr<Type>& Lt,
                                const std::shared_ptr<Type>& Rt);
 
+    /// The result type of a set UNION ('+') or symmetric difference ('><').
+    /// Unlike intersection and difference, whose result is always a subset
+    /// of the LEFT operand's own declared range and so safely reuses its
+    /// window (ISO §6.7.2.4 -- neither operator can ever need a member
+    /// outside it), a union (and symmetric difference, which is
+    /// (A∪B)-(A∩B) and so can hold the identical right-only member for the
+    /// identical reason) can hold a member from EITHER side alone.  Picking
+    /// just one operand's window -- what plain assignment-compatibility
+    /// checking leaves in place -- silently discards any such member once
+    /// the two windows do not already nest: issue #681.  Returns \p Lu
+    /// unchanged when the two operands already share one Type object (the
+    /// common case: same named type, or a loose operand already unified
+    /// onto the other's type by unifyLooseSets) or when one side's declared
+    /// range already contains the other's, and otherwise mints a set type
+    /// whose window spans the union of both -- min low bound through max
+    /// high bound -- wide enough to lose nothing from either input.
+    [[nodiscard]] std::shared_ptr<Type>
+    widenSetResult(const std::shared_ptr<Type>& Lu, const std::shared_ptr<Type>& Ru);
+
     /// EP §6.9.2.2: reports a string value whose length is already known to
     /// exceed the capacity of the variable it is being assigned to.  The rest
     /// of the cases are checked when the assignment runs.
