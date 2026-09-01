@@ -164,6 +164,13 @@ set(CMAKE_CXX_EXTENSIONS  OFF)
 find_package(LLVM REQUIRED CONFIG)
 message(STATUS "Found LLVM ${LLVM_PACKAGE_VERSION} at ${LLVM_DIR}")
 
+# Needed before add_subdirectory(lib) below: plang_frontend's
+# target_include_directories() (issue #191) references
+# CMAKE_INSTALL_INCLUDEDIR in its INSTALL_INTERFACE entry, so
+# GNUInstallDirs has to be included before lib/ is processed, not down in
+# the "Installation" section where install(TARGETS ...) itself lives.
+include(GNUInstallDirs)
+
 # ---- Compiler warnings (applied to plang sources, not generated test files) ----
 add_library(plang_warnings INTERFACE)
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
@@ -319,12 +326,18 @@ add_custom_target(plang_catalogs ALL
 )
 
 # ---- Installation ----
-include(GNUInstallDirs)
+# (GNUInstallDirs already included above, before add_subdirectory(lib))
 
 install(TARGETS plang
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
 )
+# EXPORT plangTargets (issue #191): the plang driver executable stays
+# unexported deliberately -- this issue's own title scopes it to "the
+# frontend library" -- but plang_frontend gets namespaced CMake package
+# metadata so embedders can `find_package(plang)` instead of hand-
+# reconstructing include paths, library names, and LLVM dependencies.
 install(TARGETS plang_frontend
+    EXPORT plangTargets
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )
 install(TARGETS plang_runtime plang_runtime_shared
@@ -442,6 +455,40 @@ add_custom_target(plang_shipped_crt_unit ALL
 )
 install(FILES "${PLANG_BUILD_UNIT_DIR}/crt.o" "${PLANG_BUILD_UNIT_DIR}/crt.tui"
     DESTINATION ${CMAKE_INSTALL_LIBDIR}/plang/units
+)
+
+# ---- CMake package config (issue #191) ----
+# Exports plang::plang_frontend as a namespaced imported target plus a
+# plangConfig.cmake/plangConfigVersion.cmake pair, so an external project can
+# do `find_package(plang REQUIRED)` and
+# `target_link_libraries(x PRIVATE plang::plang_frontend)` instead of
+# reconstructing include paths, the library name, and LLVM dependencies by
+# hand. PROJECT_VERSION is the same single-sourced version
+# (top-level VERSION file, see the project() call above) plang_frontend's own
+# SOVERSION/VERSION target properties already use -- not hardcoded here.
+include(CMakePackageConfigHelpers)
+set(PLANG_INSTALL_CMAKEDIR "${CMAKE_INSTALL_LIBDIR}/cmake/plang")
+
+configure_package_config_file(
+    "${CMAKE_SOURCE_DIR}/cmake/plangConfig.cmake.in"
+    "${CMAKE_CURRENT_BINARY_DIR}/plangConfig.cmake"
+    INSTALL_DESTINATION "${PLANG_INSTALL_CMAKEDIR}"
+)
+write_basic_package_version_file(
+    "${CMAKE_CURRENT_BINARY_DIR}/plangConfigVersion.cmake"
+    VERSION ${PROJECT_VERSION}
+    COMPATIBILITY SameMajorVersion
+)
+
+install(FILES
+    "${CMAKE_CURRENT_BINARY_DIR}/plangConfig.cmake"
+    "${CMAKE_CURRENT_BINARY_DIR}/plangConfigVersion.cmake"
+    DESTINATION "${PLANG_INSTALL_CMAKEDIR}"
+)
+install(EXPORT plangTargets
+    NAMESPACE plang::
+    DESTINATION "${PLANG_INSTALL_CMAKEDIR}"
+    FILE plangTargets.cmake
 )
 
 # ---- Tests ----

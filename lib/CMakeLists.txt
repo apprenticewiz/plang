@@ -40,6 +40,18 @@ set_target_properties(plang_frontend PROPERTIES
     SOVERSION   0
     VERSION     ${PROJECT_VERSION}
 )
+# Usage requirement for the EXPORT'd plang::plang_frontend target (issue
+# #191): the top-level CMakeLists.txt's own include_directories() calls are
+# directory-scoped and don't propagate through install(EXPORT ...), so an
+# external consumer needs this recorded on the target itself. The
+# BUILD_INTERFACE entries just mirror what every other target already gets
+# from the directory-scoped include_directories() above; INSTALL_INTERFACE
+# is the one path only an external consumer of the installed package uses.
+target_include_directories(plang_frontend PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include>
+    $<BUILD_INTERFACE:${CMAKE_BINARY_DIR}/include>
+    $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+)
 if(TARGET LLVM)
     target_link_libraries(plang_frontend PRIVATE LLVM)
 else()
