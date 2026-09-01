@@ -59,11 +59,29 @@
 //                       footnote (1) and does not extend it to these).
 //   AK_Complex          TypeKind::Complex alone: re/im/arg (ISO 10206 Table
 //                       2 footnote (4), narrower than footnote (1) above).
+//   AK_Ordinal          Type::isOrdinal(): integer-, boolean-, char-, or
+//                       enumeration-type (or a subrange of one).  ord/chr/
+//                       odd (ISO §6.6.6.4 transfer functions and §6.6.6.5)
+//                       all read or produce an ordinal position and share
+//                       this one hand-written predicate exactly as it stood
+//                       before migration -- chr's argument is ordinal, not
+//                       narrower to integer-type alone, confirmed by reading
+//                       its own pre-migration arm (issue #306's second
+//                       slice), which used isOrdinal() for all three
+//                       identically.
 //
-// Only the numeric family (including EP's complex functions) has been
-// migrated to ArgKind so far -- the rest of AK_Any's ~60 special-cased
-// builtins are exactly as before.  A later slice widening this to the
-// ordinal/string/file families should extend this vocabulary the same way:
+// The numeric family (including EP's complex functions) and, as of issue
+// #306's second slice, ord/chr/odd of the ordinal family have been migrated
+// to ArgKind -- the rest of AK_Any's special-cased builtins are exactly as
+// before.  succ/pred are ALSO ordinal-argument-shaped in their first
+// argument, but are deliberately NOT migrated: their optional second
+// (step-count) argument requires a different kind (isIntegral(), EP
+// §6.7.6.5) than their first, and checkBuiltinArgKinds applies one AK_* tag
+// to every argument uniformly, so a builtin whose arguments do not all share
+// one required kind has to stay hand-written (see the ArgKind column
+// description above) -- this was anticipated in this same comment before
+// any of the ordinal family was migrated.  A later slice widening this to
+// the string/file families should extend this vocabulary the same way:
 // cross-check against the predicate a hand-written arm already calls before
 // adding a new AK_* tag for it, rather than inventing one no arm needed.
 //
@@ -114,17 +132,21 @@ BUILTIN(Ln,        "ln",        Func, ALL, 1,  1, R_Real, AK_Numeric)
 BUILTIN(Arctan,    "arctan",    Func, ALL, 1,  1, R_Real, AK_Numeric)
 BUILTIN(Trunc,     "trunc",     Func, ALL, 1,  1, R_Int, AK_NumericNonComplex)
 BUILTIN(Round,     "round",     Func, ALL, 1,  1, R_Int, AK_NumericNonComplex)
-BUILTIN(Ord,       "ord",       Func, ALL, 1,  1, R_Int, AK_Any)
+BUILTIN(Ord,       "ord",       Func, ALL, 1,  1, R_Int, AK_Ordinal)
 // abs and sqr take the type of their argument; R_Int is the placeholder the
 // symbol carries, and the real result is worked out in checkCallExpr.
 BUILTIN(Abs,       "abs",       Func, ALL, 1,  1, R_Int, AK_Numeric)
 BUILTIN(Sqr,       "sqr",       Func, ALL, 1,  1, R_Int, AK_Numeric)
 // EP §6.7.6.5 adds the second argument; ISO 7185 takes only the first, and the
-// extra one is refused in checkCallExpr rather than by the arity here.
+// extra one is refused in checkCallExpr rather than by the arity here.  The
+// first argument is ordinal-shaped exactly like ord/chr/odd below, but the
+// second (optional) step count is a DIFFERENT required kind (isIntegral(),
+// not isOrdinal()) -- checkBuiltinArgKinds has no per-position vocabulary, so
+// this stays AK_Any and hand-written (see this file's header comment).
 BUILTIN(Succ,      "succ",      Func, ALL, 1,  2, R_Int, AK_Any)
 BUILTIN(Pred,      "pred",      Func, ALL, 1,  2, R_Int, AK_Any)
-BUILTIN(Chr,       "chr",       Func, ALL, 1,  1, R_Char, AK_Any)
-BUILTIN(Odd,       "odd",       Func, ALL, 1,  1, R_Bool, AK_Any)
+BUILTIN(Chr,       "chr",       Func, ALL, 1,  1, R_Char, AK_Ordinal)
+BUILTIN(Odd,       "odd",       Func, ALL, 1,  1, R_Bool, AK_Ordinal)
 BUILTIN(Eof,       "eof",       Func, ALL, 0,  1, R_Bool, AK_Any)
 BUILTIN(Eoln,      "eoln",      Func, ALL, 0,  1, R_Bool, AK_Any)
 
