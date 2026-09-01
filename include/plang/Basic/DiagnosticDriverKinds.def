@@ -74,6 +74,17 @@ DIAG(err_no_macos_sdk, Error,
      "could not find the macOS SDK; install the Xcode command line tools "
      "with 'xcode-select --install', or set SDKROOT to override")
 DIAG(err_cannot_find_program, Error, "cannot find '%0': %1")
+// -sanitize-runtime (issue #190 part B option 2) needs plang_runtime_sanitized,
+// which runtime/CMakeLists.txt only builds when
+// -DPLANG_ENABLE_RUNTIME_SANITIZER_TESTS=ON was given at CMake configure
+// time (see that option's own long comment in the top-level CMakeLists.txt).
+// Checked explicitly, before ever reaching the link step, so that using the
+// flag against an ordinary build reports this instead of a confusing "no
+// such file" from the linker several layers further down.
+DIAG(err_sanitized_runtime_not_built, Error,
+     "-sanitize-runtime requires the sanitized runtime, which this build of "
+     "plang was not configured with; reconfigure with "
+     "-DPLANG_ENABLE_RUNTIME_SANITIZER_TESTS=ON (Clang only) and rebuild")
 DIAG(err_program_exec_failed, Error, "failed to execute '%0': %1")
 // A subprocess that died on a signal rather than exiting.  Without this the
 // driver returned llvm's -2 as its own status -- exit 254 and not one word of

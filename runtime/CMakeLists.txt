@@ -50,17 +50,28 @@ if(PLANG_SANITIZE)
 endif()
 
 # ---- Sanitized runtime variant for the runtime-exerciser harness (issue
-# #190 part B option 1; PLANG_ENABLE_RUNTIME_SANITIZER_TESTS itself is
-# declared, and validated, in the top-level CMakeLists.txt -- see that
+# #190 part B option 1) and for the driver's own -sanitize-runtime flag
+# (issue #190 part B option 2); PLANG_ENABLE_RUNTIME_SANITIZER_TESTS itself
+# is declared, and validated, in the top-level CMakeLists.txt -- see that
 # option's own long comment for the full "why a separate target" story). ----
 #
 # A SEPARATE target, plang_runtime_sanitized, built from the exact same
 # PLANG_RUNTIME_SOURCES list the two targets above already share -- so it
 # cannot silently drift out of sync with the real runtime -- but compiled
 # independently with ASan+UBSan and never linked into plang_runtime,
-# plang_runtime_shared, or anything either of those two feeds (the driver,
-# every compiled Pascal program). test/unittests/RuntimeSanitized/ is the
-# only thing that ever links this.
+# plang_runtime_shared, or anything either of those two feeds (the driver's
+# own ORDINARY link, or any Pascal program plang compiles without
+# -sanitize-runtime). Two things link this, both test infrastructure only:
+# test/unittests/RuntimeSanitized/, a CMake target_link_libraries consumer
+# calling its public C-ABI entry points directly with no driver involved at
+# all, and lib/Driver/Driver.cpp's linkSanitized (reachable only via the
+# driver's own -sanitize-runtime flag), which finds this target's built
+# archive by its OUTPUT_NAME path at run time rather than through CMake's
+# own dependency graph -- the driver is a separately-invoked program, not a
+# CMake target that could target_link_libraries against this one directly.
+# OUTPUT_NAME "plang_sanitized" (libplang_sanitized.a) gives linkSanitized a
+# predictable name alongside plang_runtime's own libplang.a, rather than
+# CMake's default libplang_runtime_sanitized.a.
 #
 # PUBLIC (not PRIVATE) on both target_compile_options and target_link_options
 # below: a static library's own compile flags never apply to a consumer's own
@@ -70,9 +81,14 @@ endif()
 # just plang_runtime_sanitized's own sources) -- and PUBLIC on
 # target_link_options is what pulls the ASan/UBSan runtime itself into the
 # final test executable's link, since a static library carries no runtime of
-# its own the way a shared one would.
+# its own the way a shared one would. Neither PUBLIC setting reaches
+# linkSanitized's own link, which never target_link_libraries against this
+# CMake target at all -- it re-derives the identical -fsanitize=address,undefined
+# -fno-sanitize=vptr pair itself (see its own comment in Driver.cpp).
 if(PLANG_ENABLE_RUNTIME_SANITIZER_TESTS)
     add_library(plang_runtime_sanitized STATIC ${PLANG_RUNTIME_SOURCES})
+    set_target_properties(plang_runtime_sanitized PROPERTIES
+        OUTPUT_NAME "plang_sanitized")
     target_include_directories(plang_runtime_sanitized
         PRIVATE ${CMAKE_SOURCE_DIR}/include)
     # -fno-sanitize=vptr: same reason the sanitizers CI job's own PLANG_SANITIZE

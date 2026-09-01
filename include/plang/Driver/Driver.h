@@ -39,6 +39,19 @@ struct Options {
     bool         verbose{false};           ///< -v: echo each tool invocation
     bool         dryRun{false};            ///< -###: print commands, don't run
     bool         saveTemps{false};         ///< -save-temps: keep .ll and .o files
+    /// -sanitize-runtime (issue #190 part B option 2): link against
+    /// plang_runtime_sanitized (the ASan/UBSan-instrumented runtime variant
+    /// runtime/CMakeLists.txt builds only when
+    /// -DPLANG_ENABLE_RUNTIME_SANITIZER_TESTS=ON was given at CMake
+    /// configure time) instead of the ordinary plang_runtime, and invoke
+    /// clang -fsanitize=address,undefined as the final link step so the
+    /// ASan/UBSan compiler-rt runtime itself is present too. Strictly
+    /// opt-in, off by default, test infrastructure only: an ordinary
+    /// `plang foo.pas` never sets this, and the ordinary plang_runtime/
+    /// plang_runtime_shared targets remain unconditionally excluded from
+    /// sanitizer instrumentation regardless of this flag (see
+    /// runtime/CMakeLists.txt's own "-fno-sanitize=all" comment).
+    bool         sanitizeRuntime{false};
     bool         debug{false};             ///< -g: generate debug information
     std::string  target;                   ///< --target=<triple>
     std::string  std;                      ///< -std=<dialect>

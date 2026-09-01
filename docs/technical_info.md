@@ -837,3 +837,232 @@ only the program's own text and no Valgrind noise; and a clean, bug-free
 program under a bare `%run %t` still passes silently. All four are now
 permanent `run-under-valgrind.sh --self-test` cases, not just one-off manual
 checks.
+
+### `-sanitize-runtime` (scheduled) (issue #190 part B option 2)
+
+The runtime sanitizer exerciser above (option 1) calls `plang_runtime_sanitized`'s
+public C-ABI entry points directly, sidestepping the driver and every compiled
+Pascal program entirely. The Valgrind pass above (option 3) wraps the
+*execution* of an ordinarily-linked compiled program — real end-to-end
+coverage, but still bound by whatever `malloc` `plang_runtime` itself was
+linked against, and blind to a UBSan-class bug (signed overflow, misaligned
+access, ...) the same way guardheap is. `-sanitize-runtime` is the third,
+most invasive piece the issue's own re-triage comment named: a driver flag
+that links a *compiled Pascal program* against `plang_runtime_sanitized`
+itself — the exact ASan/UBSan-instrumented archive option 1 already builds —
+instead of the ordinary `plang_runtime`, letting the *entire* existing lit
+corpus run end-to-end against a sanitized runtime.
+
+**The contract this cannot disturb.** `runtime/CMakeLists.txt` opts
+`plang_runtime`/`plang_runtime_shared` out of sanitizer instrumentation
+specifically because the driver links them into every compiled Pascal
+program with no sanitizer runtime present — an instrumented `plang_runtime`
+by default would leave `undefined symbol: __asan_report_load8` in every
+single program plang compiles for an ordinary user. `-sanitize-runtime` does
+not touch that: it is a plain command-line flag, off unless given, read once
+in `Driver::parseArgs` into `Options::sanitizeRuntime`, consulted in exactly
+two places (both immediately before the link step) — nothing about parsing,
+code generation, or an *ordinary* link changes in its absence. Confirmed
+empirically, not just by inspection: compiling the same `.pas` file with a
+build of the driver from *before* this flag existed and one from *after*,
+both without the flag, produced byte-identical executables (`cmp` reported
+no difference) from the same source checkout, and `readelf -d`'s `NEEDED`
+entries were identical (`libm.so.6`/`libc.so.6`, nothing added).
+
+**What actually changes when the flag is given.** Two things, both confined
+to `lib/Driver/Driver.cpp`:
+
+1. `findRuntimeLib` resolves `libplang_sanitized.a` (`plang_runtime_sanitized`'s
+   own `OUTPUT_NAME`, set in `runtime/CMakeLists.txt`) instead of the ordinary
+   `libplang.a`, from the same `PLANG_RUNTIME_DIR` build-tree location
+   `libplang.a` itself is found at. If it is not there — meaning this build
+   was never configured with `-DPLANG_ENABLE_RUNTIME_SANITIZER_TESTS=ON` in
+   the first place — `resolveRuntimeLib` reports `err_sanitized_runtime_not_built`
+   and stops before ever reaching the link step, rather than letting a
+   missing-file linker error stand in for an explanation:
+
+   ```
+   $ plang -sanitize-runtime foo.pas -o foo
+   plang: error: -sanitize-runtime requires the sanitized runtime, which this
+   build of plang was not configured with; reconfigure with
+   -DPLANG_ENABLE_RUNTIME_SANITIZER_TESTS=ON (Clang only) and rebuild
+   ```
+
+2. `link()` dispatches to a third backend, `linkSanitized`, instead of
+   `linkELF`/`linkDarwin`. Both of those invoke `ld.lld`/the system `ld`
+   *directly*, with every CRT object and system library found and named by
+   hand — there is no comparable hand-written recipe for an ASan/UBSan link:
+   which compiler-rt archives to pull in, in what order, wrapped in
+   `--whole-archive` or not, each with its own `--dynamic-list` of the
+   symbols the sanitizer runtime intercepts, plus extra system libraries the
+   runtime itself needs, is a clang/compiler-rt-version- and
+   platform-specific recipe with no stable command-line contract of its own
+   — confirmed empirically while wiring this in (`clang
+   -fsanitize=address,undefined -### ...` against this project's own pinned
+   LLVM/Clang version shows a nine-archive, three-`--dynamic-list` recipe
+   that differs across a plain `clang` vs `clang++` invocation alone).
+   `linkSanitized` instead hands the *whole* link to a real `clang
+   -fsanitize=address,undefined -fno-sanitize=vptr` invocation — the same
+   flag pair `plang_runtime_sanitized`'s own `PUBLIC target_link_options`
+   already puts on `test/unittests/RuntimeSanitized`'s link — letting clang
+   assemble that recipe itself, the same way it would for any other
+   ASan/UBSan-instrumented C program. `clang`, not `clang++`: like the
+   runtime itself (`plang_sys.cpp`'s own comment on why it avoids
+   `std::string`), this deliberately never needs `libstdc++` — confirmed
+   empirically that `clang++` always adds `-lstdc++` plus a second,
+   C++-specific ASan archive even when every input is a plain `.o`/`.a`,
+   purely because it was invoked in C++ mode. The exact `clang` invoked is
+   baked in at configure time from `CMAKE_C_COMPILER` (`lib/Driver/CMakeLists.txt`),
+   the same compiler `plang_runtime_sanitized` was itself built with — not
+   whatever `clang` first resolves to on `PATH` at run time, which could be a
+   different, ABI-incompatible sanitizer runtime version. This is also why
+   `PLANG_ENABLE_RUNTIME_SANITIZER_TESTS`'s own configure-time check now
+   requires `CMAKE_C_COMPILER_ID` to match Clang too, not just
+   `CMAKE_CXX_COMPILER_ID`.
+
+**A real ordering bug this surfaced.** `linkSanitized` originally placed
+`RuntimeLib` *before* the extra object files a multi-file/unit build
+forwards through `Opts.linkerArgs` — the same order `linkELF`/`linkDarwin`
+already use. `ld.lld` (what the ordinary ELF path invokes directly) tolerates
+that order; a plain GNU `ld` (what this project's pinned Clang happens to
+pick as *its own* default linker, with no `-fuse-ld=lld` given) does not: it
+resolves a static archive's members in one single left-to-right pass, never
+reconsidering an archive already scanned once a *later* file needs a symbol
+only that archive provides. A real multi-unit Turbo test (a `uses`d unit
+whose own initializer calls `plang_str_init`) failed to link with "undefined
+reference to `plang_str_init`" until `RuntimeLib` was moved to the very end
+of the link line, after every object file that might need a runtime symbol
+— the standard "objects first, libraries last" convention, found the hard
+way rather than assumed correct up front.
+
+**Scope — what this can and cannot catch.** A Pascal *program* plang
+compiles is never itself sanitizer-instrumented; only the *runtime* it links
+against is. `-fsanitize=address,undefined` inserts its shadow-memory checks
+and its arithmetic-overflow checks at compile time, into the specific
+translation units compiled with that flag — never into the machine code
+`llc` emits for a compiled Pascal program, which goes through an entirely
+separate, sanitizer-oblivious pipeline. So `-sanitize-runtime` can only ever
+catch a bug whose faulting instruction is inside `runtime/*.cpp` itself: a
+heap allocation is checked because ASan's malloc/free interception is
+global process-wide once its runtime is linked in (regardless of which `.o`
+allocated the memory), but a write that walks off the end of that
+allocation is only caught if the *writing* instruction was itself compiled
+with `-fsanitize=address` — true of `plang_str_assign`'s own `memcpy`, never
+true of a compiled Pascal program's own `array[i] := x`. Confirmed the hard
+way while wiring this in, twice: (1) deliberately shrinking a `malloc(n +
+1)` to `malloc(n)` one line above a `buf[n] = '\0'` in
+`plang_val_parse_real` (`runtime/plang_val.cpp`, exercised via a 64+
+character `Val(...)` literal, `-std=turbo`) produced a real, precise
+heap-buffer-overflow report naming that exact line and its allocation site
+— reverted immediately after confirming it, never committed; (2) a `.pas`
+program computing `2000000000 + 2000000000` into an `Integer` under
+`-sanitize-runtime` ran clean, exit 0, no report at all — plang's own
+`Integer` is 64-bit under ISO 7185/Extended Pascal (`-std=turbo`'s 16-bit
+`Integer` is a separate, deliberate dialect choice — see the Turbo Pascal
+milestone notes), so that addition does not even overflow it, and even a
+genuinely overflowing add in the compiled program's own machine code would
+still not be UBSan-instrumented in the first place. The CI self-test below
+exercises the driver's own *link step* directly (via its linker-only mode:
+bare `.o`/`.a` inputs, no `.pas` source) with a hand-compiled,
+already-ASan-instrumented `.o` containing a deliberate bug, rather than
+relying on Pascal-generated code to demonstrate the gate — the only way to
+prove the mechanism itself works without ever touching real runtime source
+with a throwaway bug.
+
+**Requires** `-DPLANG_ENABLE_RUNTIME_SANITIZER_TESTS=ON` at configure time —
+the identical option and identical Clang-only requirement option 1 above
+uses, now also requiring `CMAKE_C_COMPILER_ID` to match Clang (see above):
+
+```bash
+cmake -S . -B build-sanitized-runtime -G Ninja -DCMAKE_BUILD_TYPE=Debug \
+  -DPLANG_ENABLE_TESTS=ON -DPLANG_ENABLE_RUNTIME_SANITIZER_TESTS=ON \
+  -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
+cmake --build build-sanitized-runtime -j$(getconf _NPROCESSORS_ONLN)
+cd build-sanitized-runtime/test
+PLANG_TEST_EXTRA_FLAGS="-sanitize-runtime" \
+  ASAN_OPTIONS=detect_leaks=0:allocator_may_return_null=1 \
+  UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 \
+  lit -sv .
+```
+
+`PLANG_TEST_EXTRA_FLAGS` is the same environment variable
+`test/lit.cfg.py`'s `%plang` substitution already reads for the `optimized`
+CI job's `-O1`/`-O2`/`-O3` re-run — no new lit-side plumbing needed, only a
+new value for an existing hook.
+
+**Two `ASAN_OPTIONS` are load-bearing**, both found by running the full
+corpus rather than assumed: `detect_leaks=0`, for the identical reason
+Valgrind's own invocation above excludes leaks — this gate targets memory
+*corruption*, not leak hygiene, a standing policy choice independent of any
+one instance (see the Valgrind section's own note on `iso7185pat.pas`'s
+leak, filed and fixed as issue #560 — closing it did not retire the
+policy). Confirmed still necessary post-#560: a from-scratch run of the
+full corpus under `-sanitize-runtime` with `detect_leaks=0` removed turned
+up three more small, unrelated `New()`-without-`Dispose()` leaks in
+ordinary `CodeGen`/`EP` test `.pas` files — minimal fixtures written to
+demonstrate one narrow code-generation property, never audited for
+dispose-everything cleanliness, exactly the shape `--errors-for-leak-kinds=
+none` already anticipates for Valgrind. Not filed as bugs: leaking is not
+this gate's concern, and auditing the corpus for it is a separate piece of
+work from standing up this gate, same as the Valgrind section's own
+reasoning; and `allocator_may_return_null=1`, because a Turbo `GetMem`/`HeapError` test
+(`program-control-combined-getmem-heaperror-exitproc-paramcount.pas`)
+deliberately requests an absurdly large allocation to exercise Pascal's own
+out-of-memory handling, which ordinary glibc `malloc` answers with `NULL` —
+ASan's own allocator instead treats a request past its own internal size
+ceiling as a *fatal* ASan error by default, aborting before the program's
+own `HeapError` handler ever runs. `allocator_may_return_null=1` is ASan's
+own documented answer to exactly this (named in its own abort message):
+with it, the allocator returns `NULL` the same way glibc's does, letting the
+test's intentional out-of-memory path run as designed.
+
+**Scope: the full corpus, not a filtered subset.** Unlike guardheap's
+always-on CI filter and the Valgrind pass's own guardheap-matching scope
+(both narrowed for real cost reasons — see their own sections above),
+`sanitized-runtime-scheduled.yml` runs *every* lit category: `Acceptance`,
+`CodeGen`, `Driver`, `EP`, `Module`, `Turbo`. Measured, not assumed, per the
+issue's own "the full corpus, if genuinely cheap enough" framing: all 2,946
+tests complete in roughly 10 seconds once the build is done — comparable to
+a plain, unsanitized run of the same corpus on the same machine (roughly 15
+seconds) — because compiling and linking each small test program is cheap
+regardless of which runtime it links against, unlike Valgrind's
+per-instruction interpretation overhead, which is what actually forced that
+job's own narrower scope.
+
+**Scheduled, not per-PR**, for the same reason `fuzz-scheduled.yml` and
+`valgrind-scheduled.yml` both are: the issue's own re-triage comment named
+this option "the more-complete-but-invasive option" with "a genuine
+per-PR-vs-scheduled cost decision" and recommended scheduled/periodic given
+this cluster's CI footprint. Nightly at 06:53 UTC (offset from
+`fuzz-scheduled.yml`'s 04:37 UTC and `valgrind-scheduled.yml`'s 05:19 UTC, so
+none of the three scheduled jobs queue-contend against each other), plus
+`workflow_dispatch` for an on-demand run. Before trusting a clean corpus run
+to mean anything, the workflow's own self-test step (described above, under
+"Scope — what this can and cannot catch") confirms the gate itself still
+catches a known, deliberate bug through the real `-sanitize-runtime` link
+path. On a real finding — self-test or corpus — the job fails visibly,
+uploads the full `lit -sv` output as a
+`sanitized-runtime-lit-output-<run id>` build artifact, and prints a
+local-repro recipe in the job log, the same triage-transparency shape
+`fuzz-scheduled.yml` and `valgrind-scheduled.yml` both already established.
+
+What was verified before this workflow was added, all against a real local
+build (the exact `apt.llvm.org`-equivalent LLVM 22 toolchain CI installs):
+byte-identical-output and identical-`NEEDED`-entries proof for an *ordinary*
+compile, both before and after this change, from the same checkout; the flag
+working end-to-end (links against `libplang_sanitized.a` and the real
+ASan/UBSan runtime, runs a bug-free program correctly); the clear
+configure-time and run-time diagnostics for a build without
+`-DPLANG_ENABLE_RUNTIME_SANITIZER_TESTS=ON`; the deliberately-injected
+`plang_val_parse_real` bug described above, caught with a precise ASan
+report and reverted before anything was committed; the full 2,946-test
+corpus passing clean under `-sanitize-runtime` with the `ASAN_OPTIONS` above
+(matching the pre-existing, unrelated single `Unsupported` result an
+ordinary run also reports); `ctest -j16` passing in full, in both Debug and
+Release, with `PLANG_ENABLE_RUNTIME_SANITIZER_TESTS` left OFF (the default
+CI matrix); and `actionlint`/`python3 tools/lint_test.py --strict` both
+reporting zero findings. What could **not** be verified locally: a real
+`schedule:` trigger only fires on GitHub's own scheduler, and
+`actions/upload-artifact` is real GitHub-hosted storage — the same honest
+limitation `fuzz-scheduled.yml`'s and `valgrind-scheduled.yml`'s own
+verification sections already carried.

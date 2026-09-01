@@ -131,6 +131,11 @@ OPTION("-Wl,",      "-Wl,<args>",       Joined,   Driver, "Pass comma-separated 
 OPTION("-Xlinker",  "-Xlinker <arg>",   Separate, Driver, "Pass <arg> to the linker")
 OPTION("-###",      "-###",             Flag,     Driver, "Print (but do not run) the compilation commands")
 OPTION("-save-temps", "-save-temps",    Flag,     Driver, "Keep intermediate .ll and .o files")
+OPTION("-sanitize-runtime", "-sanitize-runtime", Flag, Driver,
+       "Link against the ASan/UBSan-instrumented runtime instead of the\n"
+       "                     normal one (test infrastructure only; requires a build\n"
+       "                     configured with -DPLANG_ENABLE_RUNTIME_SANITIZER_TESTS=ON;\n"
+       "                     see issue #190)")
 OPTION("--target=", "--target=<triple>", Joined,  Both, "Generate code for the given target")
 OPTION("-v",        "-v",               Flag,     Driver, "Show commands to run and use verbose output")
 

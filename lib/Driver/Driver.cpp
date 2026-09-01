@@ -349,21 +349,33 @@ std::string Driver::findInstallDir() const {
     return std::string(Dir);
 }
 
-/// Returns the path to libplang.a: checks PREFIX/lib at runtime first
-/// (installed layout), then falls back to the baked-in build-directory path.
-static std::string findRuntimeLib(const std::string &ExePath) {
+/// Returns the path to libplang.a (the ordinary runtime) or, when \p
+/// Sanitized is true (-sanitize-runtime, issue #190 part B option 2),
+/// libplang_sanitized.a -- the ASan/UBSan-instrumented plang_runtime_sanitized
+/// variant runtime/CMakeLists.txt only builds when
+/// -DPLANG_ENABLE_RUNTIME_SANITIZER_TESTS=ON was given at CMake configure
+/// time. Checks PREFIX/lib at runtime first (installed layout -- never where
+/// the sanitized variant lives, since it is test infrastructure and never
+/// installed, but harmless to also check there), then falls back to the
+/// baked-in build-directory path. Returns "" if the file was not found
+/// either place; the sanitized caller turns that into
+/// err_sanitized_runtime_not_built rather than pressing on into a confusing
+/// linker failure (the ordinary caller already tolerates "" on its own —
+/// see the linker-only-mode call site's own comment).
+static std::string findRuntimeLib(const std::string &ExePath, bool Sanitized = false) {
+    const char *LibFile = Sanitized ? "libplang_sanitized.a" : "libplang.a";
     if (!ExePath.empty()) {
         llvm::SmallString<256> BinDir(ExePath);
         llvm::sys::path::remove_filename(BinDir);
         llvm::SmallString<256> Prefix(BinDir);
         llvm::sys::path::remove_filename(Prefix);
         llvm::SmallString<256> Candidate(Prefix);
-        llvm::sys::path::append(Candidate, "lib", "libplang.a");
+        llvm::sys::path::append(Candidate, "lib", LibFile);
         if (isRegFile(Candidate)) return std::string(Candidate);
     }
 #ifdef PLANG_RUNTIME_DIR
     {
-        std::string Fallback = PLANG_RUNTIME_DIR "/libplang.a";
+        std::string Fallback = std::string(PLANG_RUNTIME_DIR) + "/" + LibFile;
         if (isRegFile(Fallback)) return Fallback;
     }
 #endif
@@ -780,6 +792,8 @@ Driver::ParseResult Driver::parseArgs(int Argc, char *Argv[]) {
             Opts.verbose = true;
         } else if (Arg == "-save-temps") {
             Opts.saveTemps = true;
+        } else if (Arg == "-sanitize-runtime") {
+            Opts.sanitizeRuntime = true;
 
         } else if (Arg == "-S") {
             Opts.mode = OutputMode::Assembly;
@@ -1122,13 +1136,135 @@ static int linkDarwin(Driver &D, const Options &Opts, const std::string &ObjFile
     return D.runTool(TC.Linker, Args, Verbose, DryRun);
 }
 
+/// Link ObjFile into OutFile using clang as the whole link driver, for
+/// -sanitize-runtime (issue #190 part B option 2) only.
+///
+/// linkELF/linkDarwin above invoke ld.lld/ld directly, with every CRT object
+/// and system library they need found and named by hand -- there is no
+/// comparable hand-written recipe to give an ASan/UBSan-instrumented link:
+/// which compiler-rt archives to pull in, in what order, wrapped in
+/// --whole-archive or not, each with its own --dynamic-list of the symbols
+/// the sanitizer runtime intercepts, plus extra system libraries the runtime
+/// itself needs (-lpthread/-lrt/-ldl/-lresolv on this project's ELF
+/// targets) is a clang/compiler-rt-version- and platform-specific recipe
+/// with no stable command-line contract of its own -- confirmed empirically
+/// while wiring this in (`clang -fsanitize=address,undefined -### ...`
+/// against this project's own pinned LLVM/Clang version shows a nine-
+/// archive, three-dynamic-list recipe that differs across a plain `clang`
+/// vs `clang++` invocation alone). Reimplementing that by hand here would
+/// be exactly the kind of version-fragile guesswork this project's own
+/// Darwin builtins-lib lookup (builtinsUnder, above) already tries to avoid
+/// even for the single, much simpler -lclang_rt.osx.a case. Handing the
+/// whole link to clang -fsanitize=address,undefined instead -- the same
+/// flag pair plang_runtime_sanitized's own PUBLIC target_link_options
+/// already puts on test/unittests/RuntimeSanitized's link (runtime/
+/// CMakeLists.txt) -- makes clang assemble that recipe itself, the same way
+/// it would for any other ASan/UBSan-instrumented C program.
+///
+/// clang, not clang++: plang_runtime_sanitized recompiles the same
+/// PLANG_RUNTIME_SOURCES the ordinary runtime does, which (runtime/
+/// plang_sys.cpp's own comment on why it avoids std::string) deliberately
+/// never uses operator new/delete, exceptions or the STL specifically so
+/// that linking it never needs libstdc++ -- confirmed empirically that
+/// clang++ (unlike clang) always adds -lstdc++ plus a second,
+/// C++-specific ASan archive even when every input is a plain .o/.a, purely
+/// because it was invoked in C++ mode. clang keeps this link on the same
+/// "no libstdc++ dependency" footing the ordinary linkELF/linkDarwin paths
+/// are already on.
+///
+/// Opts.linkerArgs entries (-L/-l/-Wl,-split tokens/-Xlinker values/bare
+/// .o or .a files, and any auto-linked shipped-unit objects) are each
+/// individually re-wrapped in their own "-Xlinker" here rather than passed
+/// through as bare argv entries: unlike ld.lld above, which takes every one
+/// of them literally as its own argv, clang's own driver would otherwise
+/// try to interpret a plain GNU-style linker flag (e.g. one that started
+/// out as "-Wl,--defsym,x=y" and was already comma-split by parseArgs) as a
+/// *compiler* flag it does not recognize, rather than forwarding it to the
+/// linker untouched the way -Xlinker guarantees.
+static int linkSanitized(Driver &D, const Options &Opts,
+                         const std::string &ObjFile, const std::string &OutFile,
+                         const std::string &RuntimeLib, bool Verbose, bool DryRun) {
+    // Baked in at configure time from CMAKE_C_COMPILER (lib/Driver/
+    // CMakeLists.txt), which PLANG_ENABLE_RUNTIME_SANITIZER_TESTS's own
+    // configure-time check (top-level CMakeLists.txt) requires to be Clang
+    // -- the same compiler plang_runtime_sanitized was itself built with,
+    // rather than whatever "clang" first resolves to on PATH at run time,
+    // which could be a different (and ABI-incompatible) sanitizer runtime
+    // version. The plain "clang" fallback below is unreachable in a build
+    // that actually has plang_runtime_sanitized to link (findRuntimeLib
+    // already turns a missing sanitized archive into
+    // err_sanitized_runtime_not_built before this function is ever called)
+    // -- kept only so this still names a real program rather than an empty
+    // string in the hypothetical case of a non-CMake build system defining
+    // things differently.
+#ifdef PLANG_SANITIZER_CLANG
+    static constexpr char ClangProg[] = PLANG_SANITIZER_CLANG;
+#else
+    static constexpr char ClangProg[] = "clang";
+#endif
+
+    std::vector<std::string> Args;
+    if (!Opts.target.empty()) Args.push_back("--target=" + Opts.target);
+    Args.push_back("-fsanitize=address,undefined");
+    // -fno-sanitize=vptr: matches plang_runtime_sanitized's own compile
+    // flags (runtime/CMakeLists.txt) -- the runtime is plain C structs, no
+    // RTTI, so UBSan's vptr check has nothing to check.
+    Args.push_back("-fno-sanitize=vptr");
+    Args.push_back("-o"); Args.push_back(OutFile);
+    // See the matching comment in linkELF: empty in linker-only mode.
+    if (!ObjFile.empty()) Args.push_back(ObjFile);
+    for (const auto &A : Opts.linkerArgs) {
+        Args.push_back("-Xlinker");
+        Args.push_back(A);
+    }
+    // RuntimeLib LAST, after every other object file (ObjFile, and any
+    // multi-file build's extra unit .o's forwarded through Opts.linkerArgs
+    // just above) -- confirmed the hard way while wiring this in: a plain
+    // GNU ld (unlike ld.lld, which linkELF above uses directly and tolerates
+    // either order) resolves a static archive's members in one single left-
+    // to-right pass, never reconsidering an archive already scanned once
+    // the file after it needs a symbol only that archive provides. Placing
+    // it before a multi-file build's own extra unit object (e.g.
+    // vartypesunit.o calling plang_str_init from its own unit initializer)
+    // left that reference undefined -- clang has no fixed default linker of
+    // its own to rely on here the way ld.lld's own direct invocation does,
+    // so this has to be right for whichever one clang picks.
+    if (!RuntimeLib.empty()) Args.push_back(RuntimeLib);
+
+    return D.runTool(ClangProg, Args, Verbose, DryRun);
+}
+
 /// Link ObjFile into OutFile with whichever linker the target calls for.
 static int link(Driver &D, const Options &Opts, const std::string &ObjFile,
                 const std::string &OutFile, const std::string &RuntimeLib,
                 bool Verbose, bool DryRun) {
+    if (Opts.sanitizeRuntime)
+        return linkSanitized(D, Opts, ObjFile, OutFile, RuntimeLib, Verbose, DryRun);
     if (targetTriple(Opts).isOSDarwin())
         return linkDarwin(D, Opts, ObjFile, OutFile, RuntimeLib, Verbose, DryRun);
     return linkELF(D, Opts, ObjFile, OutFile, RuntimeLib, Verbose, DryRun);
+}
+
+/// Resolves the runtime library to link against -- plang_runtime_sanitized
+/// when Opts.sanitizeRuntime (-sanitize-runtime) is set, the ordinary
+/// plang_runtime otherwise -- into \p RuntimeLib, and reports
+/// err_sanitized_runtime_not_built up front (returning false) when the
+/// former was asked for but this build was not configured with
+/// -DPLANG_ENABLE_RUNTIME_SANITIZER_TESTS=ON (see findRuntimeLib's own
+/// comment for why that leaves \p RuntimeLib empty). A missing *ordinary*
+/// runtime is not diagnosed here -- unchanged from before this flag
+/// existed; link() and its ELF/Darwin backends already tolerate an empty
+/// RuntimeLib on their own (see linkELF's "empty in linker-only mode"
+/// comment, the one existing case that leaves it empty today).
+static bool resolveRuntimeLib(Driver &D, const Options &Opts,
+                              const std::string &ExePath,
+                              std::string &RuntimeLib) {
+    RuntimeLib = findRuntimeLib(ExePath, Opts.sanitizeRuntime);
+    if (Opts.sanitizeRuntime && RuntimeLib.empty()) {
+        D.diag(diag::err_sanitized_runtime_not_built);
+        return false;
+    }
+    return true;
 }
 
 int Driver::compile(const Options &Opts, bool IsExtraFile) {
@@ -1141,8 +1277,10 @@ int Driver::compile(const Options &Opts, bool IsExtraFile) {
     // or assembler on -- go straight to the link step, matching the standard
     // "compile with -c, link separately" workflow every C toolchain supports.
     if (Opts.inputFile.empty()) {
+        std::string RuntimeLib;
+        if (!resolveRuntimeLib(*this, Opts, ExePath_, RuntimeLib)) return 1;
         return link(*this, Opts, /*ObjFile=*/"", OutFile,
-                    findRuntimeLib(ExePath_), Opts.verbose, Opts.dryRun);
+                    RuntimeLib, Opts.verbose, Opts.dryRun);
     }
 
     const std::string Self = findSelf();
@@ -1411,7 +1549,12 @@ int Driver::compile(const Options &Opts, bool IsExtraFile) {
     // shipped units' own objects auto-linked just above).
     Options LinkOpts = Opts;
     for (const auto &EO : ExtraObjs) LinkOpts.linkerArgs.push_back(EO);
-    Rc = link(*this, LinkOpts, ObjFile, OutFile, findRuntimeLib(ExePath_), V, DR);
+    std::string RuntimeLib;
+    if (!resolveRuntimeLib(*this, LinkOpts, ExePath_, RuntimeLib)) {
+        if (OwnObj) removeOwnTemp(ObjFile);
+        return 1;
+    }
+    Rc = link(*this, LinkOpts, ObjFile, OutFile, RuntimeLib, V, DR);
     if (OwnObj) removeOwnTemp(ObjFile);
     return Rc;
 }
