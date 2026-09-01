@@ -1750,13 +1750,20 @@ int64_t Codegen::Impl::declaredStrCapacity(const TypeNode* tn) {
         // onto the shared node, see Sema::constBound).  Falling back to that
         // answer instead is exactly what the "written through a name" arm
         // below already does for the same reason.
-        if (tn->ResolvedType && tn->ResolvedType->Kind == TypeKind::VarString)
-            return tn->ResolvedType->StrCapacity;
+        if (const Type* vt = varStrTypeOf(tn->ResolvedType.get())) return vt->StrCapacity;
         return 0;
     }
     // Written through a name, so the syntax says nothing; Sema resolved it.
-    if (tn->ResolvedType && tn->ResolvedType->Kind == TypeKind::VarString)
-        return tn->ResolvedType->StrCapacity;
+    // varStrTypeOf, not a direct Kind==VarString check: EP §6.4.3.3 makes
+    // `string` itself a schema, so a NamedTypeNode denoter whose chain
+    // bottoms out at `string(n)` through one or more schema instantiations
+    // -- `type s(n: integer) = string(n); type t = s(8) value 'hi'; var a: t`
+    // -- resolves to a SchemaInstance Type, not a VarString one directly.
+    // Checking Kind alone said this was not a string at all, so the value
+    // clause below fell to the scalar/pointer store path and wrote the
+    // string LITERAL'S POINTER into the string's own length field instead
+    // of initializing it (issue #606).
+    if (const Type* vt = varStrTypeOf(tn->ResolvedType.get())) return vt->StrCapacity;
     return 0;
 }
 
