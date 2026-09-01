@@ -83,7 +83,10 @@ struct BuiltinArity { int Min, Max; };
 /// is the default: it means "no generic check", not "no arguments" -- a
 /// builtin not yet migrated to this column keeps whatever hand-written check
 /// (or lack of one) it already had in checkCallExpr/checkCallStmt.
-enum class BuiltinArgKind { Any, Numeric, NumericNonComplex, Complex, Ordinal };
+enum class BuiltinArgKind {
+    Any, Numeric, NumericNonComplex, Complex, Ordinal,
+    StringLike, EPStringLike, TurboStringLike
+};
 
 [[nodiscard]] constexpr BuiltinArgKind builtinArgKind(BuiltinID ID) {
 #define AK_Any               BuiltinArgKind::Any
@@ -91,6 +94,9 @@ enum class BuiltinArgKind { Any, Numeric, NumericNonComplex, Complex, Ordinal };
 #define AK_NumericNonComplex  BuiltinArgKind::NumericNonComplex
 #define AK_Complex            BuiltinArgKind::Complex
 #define AK_Ordinal            BuiltinArgKind::Ordinal
+#define AK_StringLike         BuiltinArgKind::StringLike
+#define AK_EPStringLike       BuiltinArgKind::EPStringLike
+#define AK_TurboStringLike    BuiltinArgKind::TurboStringLike
     switch (ID) {
     case BuiltinID::None: return BuiltinArgKind::Any;
 #define BUILTIN(Id, Spelling, Kind, Dialects, MinArgs, MaxArgs, Result, ArgKind) \
@@ -98,6 +104,9 @@ enum class BuiltinArgKind { Any, Numeric, NumericNonComplex, Complex, Ordinal };
 #include "plang/Basic/Builtins.def"
     }
     return BuiltinArgKind::Any;
+#undef AK_TurboStringLike
+#undef AK_EPStringLike
+#undef AK_StringLike
 #undef AK_Ordinal
 #undef AK_Complex
 #undef AK_NumericNonComplex

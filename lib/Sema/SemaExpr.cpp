@@ -1231,6 +1231,33 @@ std::vector<std::shared_ptr<Type>> Sema::checkBuiltinArgKinds(
             if (!T->isOrdinal())
                 error(Arg->Loc, diag::err_ordinal_argument, {LowerName, T->Name});
             break;
+        // length/index: the UNION of every dialect's string-like shape --
+        // see Builtins.def's header comment on why a union rather than one
+        // of the two narrower kinds just below.
+        case BuiltinArgKind::StringLike:
+            if (!isVarStringLike(T.get()) && !isCharStringType(*T)
+                    && !isShortStringLike(T.get()) && T->Kind != TypeKind::Char
+                    && T->Kind != TypeKind::String)
+                error(Arg->Loc, diag::err_string_fn_arg_type, {LowerName, T->Name});
+            break;
+        // trim, eq/ne/lt/gt/le/ge: EP §6.7.6.7's canonical-string-type
+        // requirement -- isVarStringLike/isCharStringType, never
+        // isShortStringLike (unreachable under EP, Builtins.def's own
+        // comment on why).
+        case BuiltinArgKind::EPStringLike:
+            if (!isVarStringLike(T.get()) && !isCharStringType(*T)
+                    && T->Kind != TypeKind::Char && T->Kind != TypeKind::String)
+                error(Arg->Loc, diag::err_string_fn_arg_type, {LowerName, T->Name});
+            break;
+        // pos, concat: Turbo's own narrower string-like shape --
+        // isShortStringLike, deliberately never isCharStringType
+        // (Builtins.def's own comment on why Turbo's operators don't widen
+        // for that ISO/EP shape either).
+        case BuiltinArgKind::TurboStringLike:
+            if (!isShortStringLike(T.get()) && T->Kind != TypeKind::Char
+                    && T->Kind != TypeKind::String)
+                error(Arg->Loc, diag::err_string_fn_arg_type, {LowerName, T->Name});
+            break;
         }
     }
     return Types;
@@ -1606,13 +1633,20 @@ std::shared_ptr<Type> Sema::checkCallExpr(const CallExpr& E) {
                 return TyErr;
             return Sym->ReturnType ? Sym->ReturnType : TyErr;
         }
-        // EP §6.7.6.7: substr/trim return the same string capacity as their
-        // input.  ISO §6.4.3.2's other string shape -- a packed array[1..n] of
-        // char -- is string-like too (isCharStringType), and was missing here:
-        // it type-checked into the generic TyStr fallback instead of a
-        // capacity of its own, and codegen had no case for it at all, so
+        // EP §6.7.6.7: substr returns the same string capacity as its input.
+        // ISO §6.4.3.2's other string shape -- a packed array[1..n] of char --
+        // is string-like too (isCharStringType), and was missing here: it
+        // type-checked into the generic TyStr fallback instead of a capacity
+        // of its own, and codegen had no case for it at all, so
         // `substr(charArr, 1, 3)` link-failed on an undefined runtime symbol.
-        if ((Lo == "substr" || Lo == "trim") && !E.Args.empty()) {
+        // Only arg[0] (the string) is checked here; args[1] and [2] (the
+        // start position and, optionally, the length) are integer-shaped, a
+        // DIFFERENT required kind from arg[0] -- checkBuiltinArgKinds applies
+        // one AK_* tag to every argument uniformly, so, like succ/pred's own
+        // step-count argument (this file's header comment), substr's
+        // position-specific shape has to stay hand-written rather than
+        // migrate to ArgKind (issue #306's third slice).
+        if (Lo == "substr" && !E.Args.empty()) {
             auto ArgTy = checkExpr(*E.Args[0]);
             for (size_t I = 1; I < E.Args.size(); ++I) (void)checkExpr(*E.Args[I]);
             if (isVarStringLike(ArgTy.get())) return ArgTy;
@@ -1632,6 +1666,24 @@ std::shared_ptr<Type> Sema::checkCallExpr(const CallExpr& E) {
                 error(E.Args[0]->Loc, diag::err_string_fn_arg_type, {Lo, ArgTy->Name});
             return TyStr;
         }
+        // EP §6.7.6.7: trim returns the same string capacity as its input --
+        // the identical polymorphic-return shape substr has just above, but
+        // trim takes exactly one argument (Builtins.def), so its own
+        // argument check IS uniform and is generic now (Builtins.def's
+        // AK_EPStringLike row, issue #306's third slice) -- before that
+        // existed this shared substr's hand-written loop; the return-type
+        // computation below is unchanged, and no longer re-diagnoses a bad
+        // argument (checkBuiltinArgKinds above already did), the same
+        // "check once, decide the return type from what came back" shape
+        // ord/chr/odd's own migrated arm already established.
+        if (Lo == "trim" && !E.Args.empty()) {
+            auto Types = checkBuiltinArgKinds(Sym->BuiltinKind, Lo, E.Args);
+            auto& ArgTy = Types[0];
+            if (isVarStringLike(ArgTy.get())) return ArgTy;
+            if (!ArgTy->isError() && isCharStringType(*ArgTy))
+                return Ctx_.getVarString(charStringLength(*ArgTy));
+            return TyStr;
+        }
         // EP §6.7.6.7: length and index are the same string-function family
         // as substr/trim just above and eq/ne/... below, and had no argument
         // check of their own: every argument type-checked regardless, so
@@ -1639,25 +1691,13 @@ std::shared_ptr<Type> Sema::checkCallExpr(const CallExpr& E) {
         // nothing to reject them.  CodeGen's fallback for anything it does
         // not recognize as string-shaped is worse for length than the link
         // failure substr's got: it calls libc strlen on the raw integer
-        // value reinterpreted as a pointer (issue #261).
+        // value reinterpreted as a pointer (issue #261).  Both take every
+        // argument identically (index(s, t) checks s and t the same way),
+        // so this is generic now too (Builtins.def's AK_StringLike row,
+        // issue #306's third slice) -- see that row's own comment on why the
+        // union rather than one of the two narrower string-like kinds.
         if ((Lo == "length" || Lo == "index") && !E.Args.empty()) {
-            for (const auto& Arg : E.Args) {
-                auto T = checkExpr(*Arg);
-                if (T->isError()) continue;
-                // isShortStringLike widens this for "length" only in
-                // practice: "index" is EP-only (Builtins.def), so under
-                // -std=turbo checkEPOnly has already refused a call to it
-                // before this arm is ever reached, and under EP a
-                // ShortString type does not exist for isShortStringLike to
-                // ever match -- so this one extra disjunct is a genuine
-                // no-op for "index" in both dialects, not a widening of what
-                // "index" itself accepts.
-                const bool StringLike = isVarStringLike(T.get())
-                    || isCharStringType(*T) || isShortStringLike(T.get())
-                    || T->Kind == TypeKind::Char || T->Kind == TypeKind::String;
-                if (!StringLike)
-                    error(Arg->Loc, diag::err_string_fn_arg_type, {Lo, T->Name});
-            }
+            (void)checkBuiltinArgKinds(Sym->BuiltinKind, Lo, E.Args);
             return Sym->ReturnType ? Sym->ReturnType : TyErr;
         }
         // EP §6.7.6.3: card is the cardinality of a set, so its argument must
@@ -1868,18 +1908,12 @@ std::shared_ptr<Type> Sema::checkCallExpr(const CallExpr& E) {
         // like `eq(3, 5)` was accepted here and had nothing to lower it to
         // in CodeGen (only the genuinely string-shaped case emits a call),
         // reaching the ordinary user-function path and link-failing on an
-        // undefined `pas_eq`.
+        // undefined `pas_eq`.  Both arguments share the identical
+        // requirement, so this is generic now too (Builtins.def's
+        // AK_EPStringLike row for all six, issue #306's third slice).
         if (Lo == "eq" || Lo == "ne" || Lo == "lt"
                 || Lo == "gt" || Lo == "le" || Lo == "ge") {
-            for (const auto& Arg : E.Args) {
-                auto T = checkExpr(*Arg);
-                if (T->isError()) continue;
-                const bool StringLike = isVarStringLike(T.get())
-                    || (!T->isError() && isCharStringType(*T))
-                    || T->Kind == TypeKind::Char || T->Kind == TypeKind::String;
-                if (!StringLike)
-                    error(Arg->Loc, diag::err_string_fn_arg_type, {Lo, T->Name});
-            }
+            (void)checkBuiltinArgKinds(Sym->BuiltinKind, Lo, E.Args);
             return TyBool;
         }
         // TP-only: the System-unit ShortString routines.  A string-like
@@ -1915,23 +1949,25 @@ std::shared_ptr<Type> Sema::checkCallExpr(const CallExpr& E) {
         }
         // Pos(substr, s) -- 1-based index of the first match, 0 if none.
         // Builtins.def's own comment: an EMPTY pattern is 0 here (confirmed
-        // against `fpc -Mtp`), the OPPOSITE of EP's index('', s) = 1.
+        // against `fpc -Mtp`), the OPPOSITE of EP's index('', s) = 1.  Both
+        // arguments share the identical isTurboStringLike requirement, so
+        // this is generic now too (Builtins.def's AK_TurboStringLike row,
+        // issue #306's third slice).
         if (Lo == "pos" && E.Args.size() == 2) {
-            auto PT = checkExpr(*E.Args[0]);
-            auto ST = checkExpr(*E.Args[1]);
-            if (!PT->isError() && !isTurboStringLike(PT))
-                error(E.Args[0]->Loc, diag::err_string_fn_arg_type, {Lo, PT->Name});
-            if (!ST->isError() && !isTurboStringLike(ST))
-                error(E.Args[1]->Loc, diag::err_string_fn_arg_type, {Lo, ST->Name});
+            (void)checkBuiltinArgKinds(Sym->BuiltinKind, Lo, E.Args);
             return TyInt;
         }
         // Concat(s1, ..., sn) -- variadic; same capacity-255 result as Copy.
+        // Every argument shares the identical isTurboStringLike requirement
+        // -- checkBuiltinArgKinds's own per-argument loop (SemaExpr.cpp)
+        // already handles however many arguments a variadic builtin like
+        // this one has, so the variadic arity here is no obstacle to
+        // migrating the CHECK, only to expressing the arity itself (which
+        // Builtins.def's MinArgs/MaxArgs columns already do, -1 meaning
+        // unbounded) -- generic now too (Builtins.def's AK_TurboStringLike
+        // row, issue #306's third slice).
         if (Lo == "concat") {
-            for (const auto& Arg : E.Args) {
-                auto T = checkExpr(*Arg);
-                if (!T->isError() && !isTurboStringLike(T))
-                    error(Arg->Loc, diag::err_string_fn_arg_type, {Lo, T->Name});
-            }
+            (void)checkBuiltinArgKinds(Sym->BuiltinKind, Lo, E.Args);
             return Ctx_.getShortString(PlangMaxStringCapacity);
         }
         // StringOfChar(ch, count) -- count copies of ch, capacity-255 result.
