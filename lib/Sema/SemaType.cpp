@@ -734,7 +734,7 @@ std::shared_ptr<Type> Sema::resolveTypeImpl(const TypeNode& Node) {
         // named directly by the type-denoter, not through an expression the
         // identifier check would otherwise see.
         Sym->Referenced = true;
-        return Sym->Ty ? Sym->Ty : TyErr;
+        return Sym->hasDeclaredType() ? Sym->declaredType() : TyErr;
     }
     if (auto* N = llvm::dyn_cast<ConformantArrayTypeNode>(&Node)) {
         // EP §6.7.3.7: conformant array parameter type.
@@ -1069,16 +1069,16 @@ std::shared_ptr<Type> Sema::resolveObjectType(const ObjectTypeNode& Node,
     std::shared_ptr<Type> ParentTy;
     if (!Node.Ancestor.empty()) {
         const Symbol* AncSym = Symtab.lookup(Node.Ancestor);
-        if (!AncSym || AncSym->Kind != SymbolKind::TypeAlias || !AncSym->Ty) {
+        if (!AncSym || AncSym->Kind != SymbolKind::TypeAlias || !AncSym->hasDeclaredType()) {
             error(Node.Loc, diag::err_object_ancestor_not_found, {Node.Ancestor});
             return TyErr;
         }
-        if (AncSym->Ty->isError()) return TyErr;  // ancestor itself already failed; don't cascade
-        if (AncSym->Ty->Kind != TypeKind::Object) {
+        if (AncSym->declaredType()->isError()) return TyErr;  // ancestor itself already failed; don't cascade
+        if (AncSym->declaredType()->Kind != TypeKind::Object) {
             error(Node.Loc, diag::err_object_ancestor_not_object_type, {Node.Ancestor});
             return TyErr;
         }
-        ParentTy    = AncSym->Ty;
+        ParentTy    = AncSym->declaredType();
         T->Parent   = ParentTy;
         // Seed this type's own field list and VMT slot table with the
         // ancestor's own (already flattened/final) ones -- see this
@@ -1370,11 +1370,11 @@ std::shared_ptr<Type> Sema::resolveNamedUnrestricted(const NamedTypeNode& N) {
     // declaration" from fanning out of the one real "undefined type
     // 'nosuchtype'" error. A real error was already reported when TyErr was
     // produced, so nothing further is said here.
-    if (InPointerDomain_ <= 0 && Sym->Ty && Sym->Ty->isUnresolved()) {
+    if (InPointerDomain_ <= 0 && Sym->hasDeclaredType() && Sym->declaredType()->isUnresolved()) {
         error(N.Loc, diag::err_forward_type_reference, {N.Name});
         return TyErr;
     }
-    return Sym->Ty ? Sym->Ty : TyErr;
+    return Sym->hasDeclaredType() ? Sym->declaredType() : TyErr;
 }
 
 std::shared_ptr<Type> Sema::stringSchemaType() {
