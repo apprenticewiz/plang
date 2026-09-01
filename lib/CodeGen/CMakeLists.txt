@@ -22,6 +22,7 @@ add_library(PlangCodeGen OBJECT
     CGControlFlow.cpp
     CGWith.cpp
     CGPackUnpack.cpp
+    CGCallMarshal.cpp
     CGProcCall.cpp
     CGFieldAccess.cpp
     CGIndexAccess.cpp

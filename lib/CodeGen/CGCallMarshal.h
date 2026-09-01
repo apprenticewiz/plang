@@ -1,0 +1,103 @@
+// CGCallMarshal.h — the per-argument marshalling loop shared by every
+// DIRECT call site keyed by a mangled callee name (issue #299, Phase 1):
+// CGProcCall::emitUserProcCall, CGFuncCall::emitUserFuncCall, and
+// CGFuncCall::emitMethodCallExpr used to each carry their own byte-for-byte
+// copy of "how do I marshal one Pascal-formal-shaped actual argument" --
+// the same ProcParamArg/pushSchemaArgs/pushConformantArgs/plain-value
+// dispatch chain, keyed by (mangledName, astArgIdx) lookups into the same
+// paramMeta_-backed accessors.  Extracted here so there is exactly ONE
+// implementation of that chain, not three.
+//
+// Deliberately NOT used by ClosureAndCallABI::emitProcParamCall (Phase 2,
+// out of scope here): that call site is structurally different -- it
+// dispatches per ParamGroup from a bare procedural type, with no mangled
+// callee name to key ConformantDimsOf/ParamSetBaseOf/ProcParamArg/
+// ParamIsByRef by -- so folding it in is a separate, larger reshaping this
+// issue's own comment defers on purpose.
+#pragma once
+
+#include <cstdint>
+#include <functional>
+#include <memory>
+#include <optional>
+#include <span>
+#include <string>
+#include <vector>
+
+#include "llvm/IR/IRBuilder.h"
+
+namespace llvm { class Function; class LLVMContext; class Value; class AllocaInst; }
+namespace plang { struct ExprNode; struct ProcedureTypeNode; }
+
+class ClosureAndCallABI;
+class SchemaAccess;
+class SetOps;
+class StringCallMarshalling;
+
+class CGCallMarshal {
+public:
+    CGCallMarshal(llvm::IRBuilder<>& B, ClosureAndCallABI& ClosureAbi,
+                  SchemaAccess& Schema, SetOps& Sets, StringCallMarshalling& StrCall,
+                  std::function<llvm::AllocaInst*(llvm::Type*, const std::string&)> CreateEntryAlloca,
+                  std::function<const plang::ProcedureTypeNode*(const std::string&, size_t)> ProcParamArg,
+                  std::function<bool(const std::string&, size_t)> ParamIsByRef,
+                  std::function<size_t(const std::string&, size_t)> ConformantDimsOf,
+                  std::function<std::optional<int64_t>(const std::string&, size_t)> ParamSetBaseOf,
+                  std::function<bool(const plang::ExprNode&)> ExprIsVarStr,
+                  std::function<bool(const plang::ExprNode&)> ExprIsShortStr)
+        : B(B), ClosureAbi(ClosureAbi), Schema(Schema), Sets(Sets), StrCall(StrCall),
+          CreateEntryAlloca(std::move(CreateEntryAlloca)),
+          ProcParamArg(std::move(ProcParamArg)), ParamIsByRef(std::move(ParamIsByRef)),
+          ConformantDimsOf(std::move(ConformantDimsOf)),
+          ParamSetBaseOf(std::move(ParamSetBaseOf)),
+          ExprIsVarStr(std::move(ExprIsVarStr)), ExprIsShortStr(std::move(ExprIsShortStr)) {}
+
+    /// Marshals \p Args (the call's own written argument list, in AST order)
+    /// into \p args (the LLVM actual-argument list being built for a call to
+    /// \p callee, named \p mangledName for the ProcParamArg/schemaArgDiscs/
+    /// ConformantDimsOf/ParamSetBaseOf/ParamIsByRef lookups below) --
+    /// appending one or more llvm::Value*s per Pascal-level actual, exactly
+    /// mirroring whatever shape \p mangledName's astArgIdx-th formal has:
+    /// a procedural parameter (entry point plus frame), a schema parameter
+    /// (body pointer plus discriminants), a conformant-array parameter (data
+    /// pointer plus two bounds words per dimension), or an ordinary
+    /// value/var parameter (a single value, set-rebased through
+    /// SetOps::alignSetArg where relevant).
+    ///
+    /// \p args may already hold a leading static-link frame or Self pointer
+    /// -- the loop starts counting LLVM parameter positions (for the
+    /// getFunctionType()->getParamType(pi) probe plain values use to pick a
+    /// destination type) from args.size() as it stands on entry, exactly as
+    /// each of the three original call sites did before this was factored
+    /// out.
+    void marshalArgs(const std::string& mangledName, llvm::Function* callee,
+                      std::span<const std::unique_ptr<plang::ExprNode>> Args,
+                      std::vector<llvm::Value*>& args) const;
+
+    /// A string/ShortString RESULT comes back from \p ret as the whole
+    /// struct-shaped value ({length,bytes} or the packed ShortString
+    /// layout), but every consumer of a string expression expects an
+    /// address instead.  Spills \p ret into a fresh entry-block temporary
+    /// and returns its address whenever \p e's own static type calls for
+    /// that treatment (ExprIsVarStr/ExprIsShortStr) AND \p ret is in fact
+    /// struct-shaped (a call declared to return one of these but reached
+    /// through an external/foreign declaration with a differently-shaped
+    /// LLVM type would not be); returns \p ret unchanged otherwise.  Shared
+    /// by CGFuncCall::emitUserFuncCall and CGFuncCall::emitMethodCallExpr,
+    /// which used to each carry their own byte-for-byte copy of this tail.
+    llvm::Value* spillStructReturnIfNeeded(const plang::ExprNode& e, llvm::Value* ret) const;
+
+private:
+    llvm::IRBuilder<>& B;
+    ClosureAndCallABI& ClosureAbi;
+    SchemaAccess& Schema;
+    SetOps& Sets;
+    StringCallMarshalling& StrCall;
+    std::function<llvm::AllocaInst*(llvm::Type*, const std::string&)> CreateEntryAlloca;
+    std::function<const plang::ProcedureTypeNode*(const std::string&, size_t)> ProcParamArg;
+    std::function<bool(const std::string&, size_t)> ParamIsByRef;
+    std::function<size_t(const std::string&, size_t)> ConformantDimsOf;
+    std::function<std::optional<int64_t>(const std::string&, size_t)> ParamSetBaseOf;
+    std::function<bool(const plang::ExprNode&)> ExprIsVarStr;
+    std::function<bool(const plang::ExprNode&)> ExprIsShortStr;
+};

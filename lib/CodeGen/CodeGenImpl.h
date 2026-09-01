@@ -48,6 +48,7 @@
 #include "BuiltinIO.h"
 #include "CGAssign.h"
 #include "CGBinaryOps.h"
+#include "CGCallMarshal.h"
 #include "CGControlFlow.h"
 #include "CGDebugInfo.h"
 #include "CGExprCore.h"
@@ -154,6 +155,12 @@ struct Codegen::Impl {
     // once symTab_/schemaAccess_/schemaLayout_/cgTypes_/rangeGuards_ all
     // exist.  Built before procCall_, which holds a reference to it.
     std::unique_ptr<CGPackUnpack>         packUnpack_;
+    // Issue #299 Phase 1: the per-argument marshalling loop shared by
+    // procCall_/funcCall_'s direct-call-shaped sites; built after
+    // packUnpack_ (needs closureAbi_/schemaAccess_/setOps_/strCallMarshal_,
+    // all already built by then), before procCall_/funcCall_, which each
+    // hold a reference to it.
+    std::unique_ptr<CGCallMarshal>        callMarshal_;
     // The required-procedure dispatch chain and user-declared procedure
     // call statements; built after packUnpack_, once every sibling unit
     // it touches already exists.

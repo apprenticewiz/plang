@@ -15,6 +15,7 @@
 
 #include "BuiltinIO.h"
 #include "CGAssign.h"
+#include "CGCallMarshal.h"
 #include "CGLinkage.h"
 #include "CGPackUnpack.h"
 #include "CGSymbolTable.h"
@@ -43,7 +44,7 @@ public:
                SchemaAccess& Schema, CGTypes& Types, CGSymbolTable& SymTab,
                CGLinkage& Linkage, SetOps& Sets, StringCallMarshalling& StrCall,
                CGPackUnpack& PackUnpack, RangeCheckGuards& RangeGuards,
-               CGAssign& Assign, StringRuntime& Strings,
+               CGAssign& Assign, StringRuntime& Strings, CGCallMarshal& Marshal,
                llvm::IntegerType* I8Ty, llvm::IntegerType* I64Ty, llvm::PointerType* PtrTy,
                llvm::Type* DblTy,
                std::function<llvm::Value*(const plang::ExprNode&)> EmitExpr,
@@ -79,7 +80,7 @@ public:
           Builtins(Builtins), ClosureAbi(ClosureAbi), Schema(Schema), Types(Types),
           SymTab(SymTab), Linkage(Linkage), Sets(Sets), StrCall(StrCall),
           PackUnpack(PackUnpack), RangeGuards(RangeGuards), Assign(Assign),
-          Strings(Strings),
+          Marshal(Marshal), Strings(Strings),
           I8Ty(I8Ty), I64Ty(I64Ty), PtrTy(PtrTy), DblTy(DblTy),
           EmitExpr(std::move(EmitExpr)), EmitLValue(std::move(EmitLValue)),
           ToI64(std::move(ToI64)), EnsureI1(std::move(EnsureI1)),
@@ -194,6 +195,9 @@ private:
     /// see emitAssignValue's own doc comment for why this is reused rather
     /// than reimplemented here.
     CGAssign& Assign;
+    /// Issue #299 Phase 1: the per-argument marshalling loop shared with
+    /// CGFuncCall::emitUserFuncCall/emitMethodCallExpr -- see CGCallMarshal.h.
+    CGCallMarshal& Marshal;
     /// The Turbo System-unit string routines that mutate a ShortString var
     /// parameter in place (Delete/Insert/SetLength) and Str/Val (CGProcCall.cpp)
     /// call plang_sstr_*/plang_val_* runtime entry points directly through

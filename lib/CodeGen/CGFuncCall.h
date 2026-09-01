@@ -14,6 +14,7 @@
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/LLVMContext.h"
 
+#include "CGCallMarshal.h"
 #include "CGLinkage.h"
 #include "CGSymbolTable.h"
 #include "CGTypes.h"
@@ -43,6 +44,7 @@ public:
                StringRuntime& Strings, StringCallMarshalling& StrCall,
                CGLinkage& Linkage, CGSymbolTable& SymTab,
                ClosureAndCallABI& ClosureAbi, RangeCheckGuards& RangeGuards,
+               CGCallMarshal& Marshal,
                llvm::IntegerType* I64Ty, llvm::IntegerType* I8Ty,
                llvm::Type* DblTy, llvm::PointerType* PtrTy,
                std::function<llvm::Value*(const plang::ExprNode&)> EmitExpr,
@@ -67,7 +69,7 @@ public:
         : Ctx(Ctx), Mod(Mod), B(B), RtFns(RtFns), Sets(Sets), Complex(Complex),
           FileVars(FileVars), Types(Types), Schema(Schema), Strings(Strings),
           StrCall(StrCall), Linkage(Linkage), SymTab(SymTab), ClosureAbi(ClosureAbi),
-          RangeGuards(RangeGuards),
+          RangeGuards(RangeGuards), Marshal(Marshal),
           I64Ty(I64Ty), I8Ty(I8Ty), DblTy(DblTy), PtrTy(PtrTy),
           EmitExpr(std::move(EmitExpr)), EmitLValue(std::move(EmitLValue)),
           ToDouble(std::move(ToDouble)), ToI64(std::move(ToI64)), EnsureI1(std::move(EnsureI1)),
@@ -156,6 +158,9 @@ private:
     CGSymbolTable& SymTab;
     ClosureAndCallABI& ClosureAbi;
     RangeCheckGuards& RangeGuards;
+    /// Issue #299 Phase 1: the per-argument marshalling loop shared with
+    /// CGProcCall::emitUserProcCall -- see CGCallMarshal.h.
+    CGCallMarshal& Marshal;
     llvm::IntegerType* I64Ty;
     llvm::IntegerType* I8Ty;
     llvm::Type* DblTy;
