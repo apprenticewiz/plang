@@ -1772,7 +1772,7 @@ void Sema::checkBlock(const BlockNode& Block,
             if (auto* Id = llvm::dyn_cast<IdentExpr>(X))
                 if (!Symtab.lookup(Id->Name) && PendingEnumNames.count(toLower(Id->Name)))
                     Found = true;
-        });
+        }, StackBaseline);
         return Found;
     };
     auto defineConst = [&](const ConstDef& Cd) {
@@ -2208,7 +2208,7 @@ void Sema::checkBlock(const BlockNode& Block,
         std::vector<const ForStmt*> ForLoops;
         walkStmts(Block.Body.get(), [&](const StmtNode* S) {
             if (auto* F = llvm::dyn_cast<ForStmt>(S)) ForLoops.push_back(F);
-        });
+        }, StackBaseline);
 
         for (const auto* F : ForLoops)
             for (const auto& Proc : Block.Procs)
@@ -2603,7 +2603,7 @@ void Sema::recordModifiedParams(const ProcDecl& Proc) {
                     if (ByRef) note(Cs->Args[I].get());
                 }
             }
-        });
+        }, StackBaseline);
     // A function call in an expression can take a var parameter too.
     walkStmts(Proc.Body->Body.get(), [&](const StmtNode* S) {
             forEachStmtExpr(S, [&](const ExprNode* E) {
@@ -2617,9 +2617,9 @@ void Sema::recordModifiedParams(const ProcDecl& Proc) {
                             || Callee->Params[I].IsVar;
                         if (ByRef) note(Ce->Args[I].get());
                     }
-                });
+                }, StackBaseline);
             });
-        });
+        }, StackBaseline);
 }
 
 void Sema::checkProcBody(const ProcDecl& Proc) {
