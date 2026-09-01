@@ -286,6 +286,77 @@ else()
     message(STATUS "Fuzzers: disabled (-DPLANG_ENABLE_FUZZERS=ON to build them, Clang only)")
 endif()
 
+# ---- Runtime sanitizer exerciser preset (-DPLANG_ENABLE_RUNTIME_SANITIZER_TESTS=ON,
+# issue #190 part B option 1) --
+#
+# The sanitizers job above (PLANG_SANITIZE) instruments plang_frontend and its
+# own GoogleTest/lit consumers thoroughly, but runtime/CMakeLists.txt
+# deliberately opts plang_runtime/plang_runtime_shared OUT of that (see the
+# "-fno-sanitize=all" block's own comment, right below add_subdirectory(lib)):
+# the driver links those two into every compiled Pascal program with no
+# sanitizer runtime present, so an instrumented plang_runtime would leave
+# "undefined symbol: __asan_report_load8" (and a dozen siblings) in every
+# single program plang compiles. That leaves guardheap (test/'s black-box
+# allocator wrapper) as the only thing exercising the runtime under any kind
+# of memory-safety check at all -- and guardheap can only ever see a heap
+# OVERFLOW crossing an allocation it wrapped; it is structurally unable to
+# see a UBSan-class bug (signed overflow, misaligned access, ...) or a
+# non-heap-overflow ASan-class bug (stack buffer overflow, use-after-free,
+# double-free, ...) inside the runtime's own C++ implementation.
+#
+# This option closes that gap the same way PLANG_ENABLE_FUZZERS closes the
+# analogous one for the frontend (immediately above, same shape, same
+# "separate, isolated target" answer to "how do you sanitize code some other
+# consumer needs UN-sanitized" -- see that option's own long comment for the
+# two independent reasons a blanket add_compile_options() broke both times it
+# was tried): runtime/CMakeLists.txt recompiles the exact same
+# PLANG_RUNTIME_SOURCES list into a SEPARATE static library,
+# plang_runtime_sanitized, with -fsanitize=address,undefined added -- never
+# linked into plang_runtime, plang_runtime_shared, the driver, or any
+# compiled Pascal program, so the "no sanitizer runtime in compiled output"
+# contract above is entirely undisturbed. test/unittests/RuntimeSanitized/
+# links directly against plang_runtime_sanitized and calls its public C-ABI
+# entry points with adversarial arguments -- no driver, no compiled Pascal
+# program, no lit -- sidestepping the driver entirely the way the fuzz
+# targets sidestep it for the frontend.
+#
+# Gated on Clang for the identical reason PLANG_ENABLE_FUZZERS is: consistent
+# with every other -fsanitize=... preset in this file (PLANG_SANITIZE,
+# PLANG_ENABLE_FUZZERS), all of which this project only ever runs under
+# Clang/compiler-rt in CI.  Also requires PLANG_ENABLE_TESTS: the harness
+# this option exists to build lives under test/unittests/RuntimeSanitized/,
+# which test/unittests/CMakeLists.txt only ever adds once PLANG_ENABLE_TESTS
+# has already added test/unittests/ itself -- checked here, at configure
+# time, so turning this on alone (a natural first guess) fails with an
+# immediate, readable error instead of silently building
+# plang_runtime_sanitized with no GTest harness ever linking it.
+option(PLANG_ENABLE_RUNTIME_SANITIZER_TESTS
+    "Build an ASan/UBSan-instrumented plang_runtime variant plus a GTest \
+harness exercising its public entry points directly (Clang only, also \
+requires PLANG_ENABLE_TESTS=ON; see issue #190)"
+    OFF)
+if(PLANG_ENABLE_RUNTIME_SANITIZER_TESTS)
+    if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+        message(FATAL_ERROR
+            "PLANG_ENABLE_RUNTIME_SANITIZER_TESTS requires Clang "
+            "(-fsanitize=address,undefined here matches every other "
+            "sanitizer preset in this file, all Clang/compiler-rt only); "
+            "CMAKE_CXX_COMPILER_ID is '${CMAKE_CXX_COMPILER_ID}'. "
+            "Reconfigure with -DCMAKE_CXX_COMPILER=clang++ (and "
+            "-DCMAKE_C_COMPILER=clang).")
+    endif()
+    if(NOT PLANG_ENABLE_TESTS)
+        message(FATAL_ERROR
+            "PLANG_ENABLE_RUNTIME_SANITIZER_TESTS also requires "
+            "-DPLANG_ENABLE_TESTS=ON: its GTest harness lives under "
+            "test/unittests/RuntimeSanitized/, which is only ever built "
+            "once PLANG_ENABLE_TESTS has added test/unittests/ itself.")
+    endif()
+    message(STATUS "Runtime sanitizer tests: enabled")
+else()
+    message(STATUS "Runtime sanitizer tests: disabled (-DPLANG_ENABLE_RUNTIME_SANITIZER_TESTS=ON to build them, Clang only)")
+endif()
+
 # Version.h is the one generated header, so the build directory joins the
 # include path — before the source one, though nothing there can shadow it now
 # that the hand-written copy is gone.

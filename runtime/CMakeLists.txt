@@ -48,3 +48,40 @@ if(PLANG_SANITIZE)
         target_link_options(${rt_target}    PRIVATE -fno-sanitize=all)
     endforeach()
 endif()
+
+# ---- Sanitized runtime variant for the runtime-exerciser harness (issue
+# #190 part B option 1; PLANG_ENABLE_RUNTIME_SANITIZER_TESTS itself is
+# declared, and validated, in the top-level CMakeLists.txt -- see that
+# option's own long comment for the full "why a separate target" story). ----
+#
+# A SEPARATE target, plang_runtime_sanitized, built from the exact same
+# PLANG_RUNTIME_SOURCES list the two targets above already share -- so it
+# cannot silently drift out of sync with the real runtime -- but compiled
+# independently with ASan+UBSan and never linked into plang_runtime,
+# plang_runtime_shared, or anything either of those two feeds (the driver,
+# every compiled Pascal program). test/unittests/RuntimeSanitized/ is the
+# only thing that ever links this.
+#
+# PUBLIC (not PRIVATE) on both target_compile_options and target_link_options
+# below: a static library's own compile flags never apply to a consumer's own
+# translation units, so PUBLIC is what makes -fsanitize=address,undefined
+# also apply to test/unittests/RuntimeSanitized/'s own .cpp files (stack-
+# buffer and use-after-scope checks need the CALLER instrumented too, not
+# just plang_runtime_sanitized's own sources) -- and PUBLIC on
+# target_link_options is what pulls the ASan/UBSan runtime itself into the
+# final test executable's link, since a static library carries no runtime of
+# its own the way a shared one would.
+if(PLANG_ENABLE_RUNTIME_SANITIZER_TESTS)
+    add_library(plang_runtime_sanitized STATIC ${PLANG_RUNTIME_SOURCES})
+    target_include_directories(plang_runtime_sanitized
+        PRIVATE ${CMAKE_SOURCE_DIR}/include)
+    # -fno-sanitize=vptr: same reason the sanitizers CI job's own PLANG_SANITIZE
+    # configure step disables it (see that job's own comment) -- the runtime is
+    # built -fno-rtti-equivalent (plain C structs, no polymorphism), and UBSan's
+    # vptr check needs RTTI to have anything to check in the first place.
+    target_compile_options(plang_runtime_sanitized PUBLIC
+        -fsanitize=address,undefined -fno-sanitize=vptr
+        -fno-omit-frame-pointer -g)
+    target_link_options(plang_runtime_sanitized PUBLIC
+        -fsanitize=address,undefined -fno-sanitize=vptr)
+endif()
