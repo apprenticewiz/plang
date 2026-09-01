@@ -214,13 +214,17 @@ jobs:
       # ASAN_OPTIONS=detect_leaks=0: this gate targets memory CORRUPTION and
       # undefined behavior, not leak hygiene -- the identical scope choice
       # valgrind-scheduled.yml's own memcheck invocation makes (see that
-      # workflow's own comment). Confirmed empirically while wiring this in:
-      # without it, the ISO 7185 acceptance program's own already-known,
-      # already-filed 25-byte leak (test/Acceptance/iso7185pat.pas, issue
-      # #560, not fixed here) trips LeakSanitizer and corrupts that test's
-      # own stdout/stderr expectations, failing a test that has nothing to
-      # do with the corruption/UB bug class this job actually exists to
-      # catch.
+      # workflow's own comment), a standing policy independent of any one
+      # instance. Confirmed still necessary with a from-scratch full-corpus
+      # run with this option removed: three small, unrelated New()-without-
+      # Dispose() leaks turned up in ordinary CodeGen/EP test .pas files --
+      # minimal fixtures written to demonstrate one narrow codegen property,
+      # never audited for dispose-everything cleanliness (the identical
+      # shape the ISO 7185 acceptance program's own now-fixed issue #560
+      # leak had). Without this option, each one trips LeakSanitizer and
+      # corrupts that test's own stdout/stderr expectations, failing a test
+      # that has nothing to do with the corruption/UB bug class this job
+      # actually exists to catch.
       #
       # ASAN_OPTIONS=allocator_may_return_null=1: confirmed empirically
       # while wiring this in that Turbo's own GetMem/HeapError test

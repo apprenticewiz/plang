@@ -992,11 +992,20 @@ new value for an existing hook.
 
 **Two `ASAN_OPTIONS` are load-bearing**, both found by running the full
 corpus rather than assumed: `detect_leaks=0`, for the identical reason
-Valgrind's own invocation above excludes leaks — the same already-known,
-already-filed `iso7185pat.pas` 25-byte leak (issue #560, not fixed here)
-trips LeakSanitizer and corrupts that one test's own stdout/stderr
-expectations otherwise, for a bug class this gate does not exist to police;
-and `allocator_may_return_null=1`, because a Turbo `GetMem`/`HeapError` test
+Valgrind's own invocation above excludes leaks — this gate targets memory
+*corruption*, not leak hygiene, a standing policy choice independent of any
+one instance (see the Valgrind section's own note on `iso7185pat.pas`'s
+leak, filed and fixed as issue #560 — closing it did not retire the
+policy). Confirmed still necessary post-#560: a from-scratch run of the
+full corpus under `-sanitize-runtime` with `detect_leaks=0` removed turned
+up three more small, unrelated `New()`-without-`Dispose()` leaks in
+ordinary `CodeGen`/`EP` test `.pas` files — minimal fixtures written to
+demonstrate one narrow code-generation property, never audited for
+dispose-everything cleanliness, exactly the shape `--errors-for-leak-kinds=
+none` already anticipates for Valgrind. Not filed as bugs: leaking is not
+this gate's concern, and auditing the corpus for it is a separate piece of
+work from standing up this gate, same as the Valgrind section's own
+reasoning; and `allocator_may_return_null=1`, because a Turbo `GetMem`/`HeapError` test
 (`program-control-combined-getmem-heaperror-exitproc-paramcount.pas`)
 deliberately requests an absurdly large allocation to exercise Pascal's own
 out-of-memory handling, which ordinary glibc `malloc` answers with `NULL` —
