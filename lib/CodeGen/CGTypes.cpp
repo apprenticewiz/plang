@@ -505,13 +505,15 @@ llvm::Type* CGTypes::llvmTypeOfNode(const TypeNode& node) {
     if (llvm::dyn_cast<PointerTypeNode>(&node))   return ptrTy;
     // Turbo procedural VALUES: this arm is reached only for a procedural
     // TYPE'S own denoter -- a variable, a record field, an array element,
-    // and so on -- never for a procedural PARAMETER's ProcedureTypeNode,
-    // which CodeGenProcs.cpp's parameter loop matches and lowers to its own
-    // {entry point, frame} ABI shape BEFORE ever calling llvmTypeOfNode on
-    // it (see the `if (auto* pt = llvm::dyn_cast<ProcedureTypeNode>(...))`
-    // arm there, which `continue`s past the rest of that loop).  A
-    // procedural VARIABLE has no frame slot to carry, so it lowers as one
-    // flat pointer, same as PointerTypeNode just above.
+    // and so on -- never for a procedural PARAMETER's ProcedureTypeNode
+    // (inline-spelled OR, since issue #543, named), which CodeGenProcs.cpp's
+    // parameter loop matches (via resolveProcTypeAlias, CGSymbolTable.h) and
+    // lowers to its own {entry point, frame} ABI shape BEFORE ever calling
+    // llvmTypeOfNode on it (see the `if (auto* pt =
+    // resolveProcTypeAlias(pg.Type.get()))` arm there, which `continue`s
+    // past the rest of that loop).  A procedural VARIABLE has no frame slot
+    // to carry, so it lowers as one flat pointer, same as PointerTypeNode
+    // just above.
     if (llvm::dyn_cast<ProcedureTypeNode>(&node)) return ptrTy;
     // A subrange and an enumeration are as wide as Sema resolved them to be.
     // Answering i64 here regardless is what would make the two readings of a
