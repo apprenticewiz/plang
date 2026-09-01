@@ -41,6 +41,23 @@ DIAG(err_builtin_proc_as_value, Error, "built-in procedure '%0' cannot be used a
 DIAG(err_type_name_as_value, Error, "type name '%0' cannot be used as a value")
 DIAG(err_label_as_value, Error, "label '%0' cannot be used as a value")
 DIAG(err_subscript_non_array, Error, "subscript operator applied to non-array type '%0'")
+// Issue #685: EP §6.8.7's structured-value-constructor is an EXPRESSION, not
+// a variable-access -- §6.4.3's field-designator and indexed-variable
+// productions both select from a variable-access, and a constructed value
+// was never one.  `rec[a:1;b:2].b` and `arr[1:2;3:4][1]` select a component
+// of a value that has no storage of its own for CodeGen to select through,
+// which (before this diagnostic existed to catch it first) reached two
+// different crashes instead of a clean rejection: field access ICE'd
+// ("field access on a non-record operand", CGFieldAccess.cpp) because
+// emitLValue has no StructuredValueExpr case to find an address through,
+// and indexing recursed without bound.  Checked once, here, rather than
+// giving both emitFieldGEP and emitIndexGEP their own address-of-a-
+// constructor special case for syntax EP never made legal in the first
+// place.
+DIAG(err_selector_on_structured_value, Error,
+     "cannot select a component of a structured-value-constructor result -- "
+     "EP §6.4.3 selectors require a variable-access; assign the constructed "
+     "value to a variable first")
 DIAG(err_index_not_ordinal, Error, "array index must be ordinal, got '%0'")
 DIAG(err_index_type_mismatch, Error, "array index type mismatch: index type is '%0' but array expects '%1'")
 // A global (or module-level) variable is emitted as a single object in the

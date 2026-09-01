@@ -417,6 +417,17 @@ std::shared_ptr<Type> Sema::checkIndex(const IndexExpr& E) {
     auto ArrTy = checkExpr(*E.Array);
     auto IdxTy = checkExpr(*E.Index);
     if (ArrTy->isError()) return TyErr;
+    // Issue #685: see err_selector_on_structured_value's own comment
+    // (DiagnosticSemaKinds.def) -- a structured-value-constructor is not a
+    // variable-access, so EP has no `Ctor[...][i]` selector syntax at all.
+    // Checked on the IMMEDIATE operand only: a nested case like
+    // `Ctor[...].f[i]` has already been caught (and returned TyErr) by
+    // checkField's identical check on its own inner FieldExpr, so ArrTy's
+    // own isError() just above already short-circuits it before this point.
+    if (llvm::isa<StructuredValueExpr>(E.Array.get())) {
+        error(E.Loc, diag::err_selector_on_structured_value);
+        return TyErr;
+    }
     if (rejectRestrictedComponent(E, *ArrTy)) return TyErr;
     // EP §6.4.7: a schema is indexed through its body.  An undiscriminated one
     // gives the element type but not the bounds — those come from the
@@ -516,6 +527,18 @@ std::shared_ptr<Type> Sema::checkIndex(const IndexExpr& E) {
 std::shared_ptr<Type> Sema::checkField(const FieldExpr& E) {
     auto RecTy = checkExpr(*E.Record);
     if (RecTy->isError()) return TyErr;
+    // Issue #685: see err_selector_on_structured_value's own comment
+    // (DiagnosticSemaKinds.def) -- a structured-value-constructor is not a
+    // variable-access, so EP has no `Ctor[...].field` selector syntax at
+    // all.  Before this, `rec[a:1;b:2].b` reached CodeGen's emitFieldGEP,
+    // which calls EmitLValue on the constructor looking for an address to
+    // GEP through; emitLValue has no StructuredValueExpr case, returns
+    // null, and the whole compile aborted with a CodeGen ICE ("field
+    // access on a non-record operand") instead of a clean diagnostic here.
+    if (llvm::isa<StructuredValueExpr>(E.Record.get())) {
+        error(E.Loc, diag::err_selector_on_structured_value);
+        return TyErr;
+    }
     if (rejectRestrictedComponent(E, *RecTy)) return TyErr;
 
     // EP §6.8.4: `v.d` on a schematic variable is a schema-discriminant, so it

@@ -157,4 +157,25 @@ private:
     /// The EP string(N) type \p T denotes, or null, looking through a
     /// schema whose body is a string -- likewise trivial and stateless.
     static const plang::Type* varStrTypeOf(const plang::Type* T);
+    /// Issue #684: the Turbo string[N] (ShortString) type \p T denotes, or
+    /// null -- ClosureAndCallABI's own copy of Codegen::Impl::shortStrTypeOf
+    /// (CodeGenImpl.h's Type* overload), trivial and stateless the same way
+    /// varStrTypeOf just above already is duplicated here rather than
+    /// bridged.
+    static const plang::Type* shortStrTypeOf(const plang::Type* T);
+    /// True when \p T is a struct-returning string kind (EP string(N), a
+    /// schema wrapping one, or Turbo's ShortString) whose call result needs
+    /// spilling to a temporary -- the one predicate emitProcParamCall and
+    /// emitProcVarCall both consult below, mirroring CGCallMarshal::
+    /// spillStructReturnIfNeeded's identical pair of checks on the DIRECT
+    /// call path (CGCallMarshal.cpp).  Before this, only varStrTypeOf was
+    /// consulted here, so a ShortString function's result reached an
+    /// indirect call (through a procedural parameter or a procedural
+    /// variable) still shaped as the raw struct value every consumer of a
+    /// string expression expects an ADDRESS for instead -- an LLVM IR
+    /// verifier failure the direct-call path never had, because
+    /// spillStructReturnIfNeeded already checked both kinds.
+    static bool needsStructReturnSpill(const plang::Type* T) {
+        return varStrTypeOf(T) != nullptr || shortStrTypeOf(T) != nullptr;
+    }
 };
