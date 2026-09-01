@@ -17,6 +17,33 @@
 
 using namespace plang;
 
+namespace {
+/// Turbo Abs/Sqr's own single-operand integer-width promotion floor --
+/// mirrors Sema::checkCallExpr's identical table (SemaExpr.cpp's "abs/sqr
+/// are polymorphic" arm, issue #609's own follow-up comment there has the
+/// full derivation and the real-`fpc -Mtp` field-practice confirmation
+/// behind it) EXACTLY, and for the same "the two must stay in lockstep"
+/// reason CGBinaryOps::emitBinary's own copy of Sema::commonIntType's
+/// table does for issues #629/630: any integer rung NARROWER than 32 bits
+/// (ShortInt/Byte/Integer/Word) computes and returns at 32-bit SIGNED
+/// (LongInt) regardless of its own original signedness -- LongInt's own
+/// range already holds every value an 8- or 16-bit rung, signed or not,
+/// can produce.  Cardinal/LongWord's native 32-bit UNSIGNED rung is the
+/// one exception: its own full range does NOT fit inside a same-width
+/// SIGNED LongInt (2^32-1 > 2^31-1), so it promotes to 64-bit UNSIGNED
+/// (QWord) instead, preserving its sign rather than discarding it the way
+/// Byte/Word do.  Every other rung (LongInt itself, Int64, QWord, and
+/// ISO 7185/Extended Pascal's single 64-bit signed Integer) is already at
+/// or above that 32-bit floor with no representability problem, so it
+/// keeps its own width -- a true no-op for ISO/EP, whose one Integer type
+/// is always 64 bits.
+llvm::IntegerType* absSqrTargetIntTy(llvm::LLVMContext& Ctx, unsigned Width, bool IsSigned) {
+    if (Width < 32) return llvm::IntegerType::get(Ctx, 32);
+    if (Width == 32 && !IsSigned) return llvm::IntegerType::get(Ctx, 64);
+    return llvm::IntegerType::get(Ctx, Width);
+}
+} // namespace
+
 llvm::Value* CGFuncCall::emitCallExpr(const CallExpr& e) {
     // ISO §6.2.2.10: a required function identifier may be redeclared, and
     // then it denotes what the program declared and not the required one.  The
@@ -64,26 +91,65 @@ llvm::Value* CGFuncCall::emitBuiltinCall(const std::string& Name,
         // used throughout for Single (see e.g. BuiltinIO::emitWriteValue).
         // Without this, a Single argument fell through to the INTEGER path
         // below, which called ToI64 on a float value.
-        if (v->getType()->isFloatingPointTy())
-            return B.CreateCall(RtFns.getRTMathRR("plang_abs_real"), {ToDouble(v)}, "abs");
-        // Args[0]'s own signedness, not a guess from v's LLVM width: Abs on
-        // a negative signed narrow (ShortInt) or unsigned wide (Word/
-        // Cardinal) Turbo-ordinal argument otherwise widened with the wrong
-        // sign before plang_abs_int ever saw it (issue #177's sibling
-        // audit).
-        return B.CreateCall(RtFns.getRTMathII("plang_abs_int"),
-                             {ToI64(v, exprIsSigned(*Args[0]))}, "abs");
+        //
+        // The runtime helper below always computes at double/i64 precision
+        // (`plang_abs_real`/`plang_sqr_real` are double(double),
+        // `plang_abs_int`/`plang_sqr_int` are i64(i64)), regardless of the
+        // argument's own narrower width -- returning that AS-IS silently
+        // exposed the HELPER's own width instead of the semantically
+        // correct one Sema now computes (issue #609).  For a floating
+        // argument that correct width is simply v's own type -- Real
+        // (double) and Single (float) are the only two floating types this
+        // reaches, and Single is genuinely narrower than the helper's own
+        // double, e.g. `Sqr(Single(4097))` must round through binary32
+        // precision (16785408.0), not stay at the helper's full double
+        // precision (16785409.0) -- so a Single argument needs an
+        // `fptrunc` back down and a Real one (already double) does not.
+        if (v->getType()->isFloatingPointTy()) {
+            auto* r = B.CreateCall(RtFns.getRTMathRR("plang_abs_real"), {ToDouble(v)}, "abs");
+            return r->getType() == v->getType()
+                       ? r : B.CreateFPTrunc(r, v->getType(), "abs.trunc");
+        }
+        // For an INTEGER argument, though, that correct width is NOT
+        // always v's own -- absSqrTargetIntTy (this file's own top-of-file
+        // comment has the full derivation, confirmed against real
+        // `fpc -Mtp`) mirrors Sema's identical table exactly, e.g.
+        // `Abs(ShortInt)`/`Sqr(Word)` compute and return at 32-bit SIGNED
+        // (LongInt), not at their own 8-/16-bit width, while
+        // `Sqr(Cardinal)` promotes to 64-bit UNSIGNED (QWord) rather than
+        // staying at its own 32 bits.  Args[0]'s own Sema-resolved
+        // signedness, not a guess from v's LLVM width, decides how
+        // ToI64 sign- vs. zero-extends it before the helper ever sees it:
+        // Abs on a negative signed narrow (ShortInt) or unsigned wide
+        // (Word/Cardinal) Turbo-ordinal argument was otherwise widened
+        // with the wrong sign (issue #177's sibling audit).
+        {
+            auto* r  = B.CreateCall(RtFns.getRTMathII("plang_abs_int"),
+                                     {ToI64(v, exprIsSigned(*Args[0]))}, "abs");
+            auto* ty = absSqrTargetIntTy(Ctx, Args[0]->ResolvedType->Width,
+                                          exprIsSigned(*Args[0]));
+            return ty == r->getType() ? r : B.CreateTrunc(r, ty, "abs.trunc");
+        }
     }
     if (lo == "sqr") {
         auto* v = EmitExpr(*Args[0]);
         // EP §6.7.6.2: sqr(complex) → complex = z * z
         if (v->getType() == Complex.complexTy())
             return Complex.emitComplexMul(v, v);
-        // See abs's identical comment just above.
-        if (v->getType()->isFloatingPointTy())
-            return B.CreateCall(RtFns.getRTMathRR("plang_sqr_real"), {ToDouble(v)}, "sqr");
-        return B.CreateCall(RtFns.getRTMathII("plang_sqr_int"),
-                             {ToI64(v, exprIsSigned(*Args[0]))}, "sqr");
+        // See abs's identical comments just above (issue #609): narrow the
+        // helper's own double/i64 result back down to the correct width --
+        // v's own type for a floating argument, absSqrTargetIntTy's answer
+        // (matching Sema's identical table) for an integer one.
+        if (v->getType()->isFloatingPointTy()) {
+            auto* r = B.CreateCall(RtFns.getRTMathRR("plang_sqr_real"), {ToDouble(v)}, "sqr");
+            return r->getType() == v->getType()
+                       ? r : B.CreateFPTrunc(r, v->getType(), "sqr.trunc");
+        }
+        auto* r  = B.CreateCall(RtFns.getRTMathII("plang_sqr_int"),
+                                 {ToI64(v, exprIsSigned(*Args[0]))}, "sqr");
+        auto* ty = absSqrTargetIntTy(Ctx, Args[0]->ResolvedType->Width,
+                                      exprIsSigned(*Args[0]));
+        return ty == r->getType() ? r : B.CreateTrunc(r, ty, "sqr.trunc");
     }
     // EP §6.7.6.3: cmplx(x, y) constructor
     if (lo == "cmplx") {
