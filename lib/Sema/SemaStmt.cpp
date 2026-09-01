@@ -1467,26 +1467,30 @@ void Sema::checkCallStmt(const CallStmt& S) {
             return;
         }
 
-        // TP-only: Assign(f, name) / Append(f).  Both take a file-variable
-        // first argument the same way eof/eoln/position/lastposition/empty
-        // do (SemaExpr.cpp's identical check) -- without this,
-        // FileVarHelpers::fileVarPtr's IdentExpr fast path (its own comment)
-        // hands back ANY variable's storage address with no type check of
-        // its own, so `Assign(i, 'x')` for a plain integer i reached the
-        // runtime with that address reinterpreted as a PascalFile*,
-        // corrupting memory with no diagnostic -- the exact bug class issue
-        // #417 closed for position/lastposition/empty.
-        if ((Lo == "assign" || Lo == "append") && !S.Args.empty()) {
+        // TP-only: Assign(f, name).  f is a file-variable first argument the
+        // same way eof/eoln/position/lastposition/empty are (SemaExpr.cpp's
+        // identical check) -- without this, FileVarHelpers::fileVarPtr's
+        // IdentExpr fast path (its own comment) hands back ANY variable's
+        // storage address with no type check of its own, so `Assign(i, 'x')`
+        // for a plain integer i reached the runtime with that address
+        // reinterpreted as a PascalFile*, corrupting memory with no
+        // diagnostic -- the exact bug class issue #417 closed for
+        // position/lastposition/empty.  Stays hand-written rather than
+        // moving to Builtins.def's AK_File (issue #306's fourth slice):
+        // arg1 (name) is a DIFFERENT kind (string-like) from arg0's File,
+        // and checkBuiltinArgKinds applies one tag to the whole call
+        // uniformly -- see Builtins.def's own comment on Assign's row.
+        if (Lo == "assign" && !S.Args.empty()) {
             auto FTy = checkExpr(*S.Args[0]);
             if (!FTy->isError() && FTy->Kind != TypeKind::File)
                 error(S.Args[0]->Loc, diag::err_file_argument, {Lo, FTy->Name});
-            // Assign's second argument is the filename -- any of Turbo's
+            // The second argument is the filename -- any of Turbo's
             // string-shaped types (ShortString, PChar's pointee-Char
             // exemption aside, a plain literal, EP's own string(n) reached
             // under -std=turbo through a type alias) or a single Char, the
             // same "string-like" set length/index already check just above
             // in checkCallExpr (SemaExpr.cpp) for the identical reason.
-            if (Lo == "assign" && S.Args.size() > 1) {
+            if (S.Args.size() > 1) {
                 auto NTy = checkExpr(*S.Args[1]);
                 const bool StringLike = isVarStringLike(NTy.get())
                     || isCharStringType(*NTy) || isShortStringLike(NTy.get())
@@ -1496,13 +1500,26 @@ void Sema::checkCallStmt(const CallStmt& S) {
             }
             return;
         }
+        // TP-only: Append(f) -- unlike Assign just above, takes ONLY the
+        // file (Builtins.def's own MaxArgs = 1), so its File-kind check is
+        // genuinely uniform and is generic now (Builtins.def's AK_File row,
+        // issue #306's fourth slice) -- split out of the arm it used to
+        // share with Assign into its own, same "check once, no extra
+        // restriction" shape Erase/Flush's own migrated arms below have.
+        if (Lo == "append" && !S.Args.empty()) {
+            (void)checkBuiltinArgKinds(Sym->BuiltinKind, Lo, S.Args);
+            return;
+        }
 
-        // TP-only: Seek(f, n) / Truncate(f) -- position f at record n
-        // (Seek) or truncate f at the current position (Truncate); both
-        // take a typed or untyped BINARY file the same way FilePos/
-        // FileSize (checkCallExpr, SemaExpr.cpp) do, and refuse a Text
-        // argument (err_binary_file_required) for the identical reason.
-        if ((Lo == "seek" || Lo == "truncate") && !S.Args.empty()) {
+        // TP-only: Seek(f, n) -- position f at record n (0-relative, in
+        // units of RecSize); takes a typed or untyped BINARY file the same
+        // way FilePos/FileSize (checkCallExpr, SemaExpr.cpp) do, and refuses
+        // a Text argument (err_binary_file_required) for the identical
+        // reason.  Stays hand-written rather than moving to AK_File: arg1
+        // (n) is a DIFFERENT kind (Integer) from arg0's File, the same
+        // multi-kind shape Assign's own arm just above stays hand-written
+        // for.
+        if (Lo == "seek" && !S.Args.empty()) {
             auto FTy = checkExpr(*S.Args[0]);
             if (!FTy->isError()) {
                 if (FTy->Kind != TypeKind::File)
@@ -1511,11 +1528,25 @@ void Sema::checkCallStmt(const CallStmt& S) {
                     error(S.Args[0]->Loc, diag::err_binary_file_required,
                           {Lo, FTy->Name});
             }
-            if (Lo == "seek" && S.Args.size() > 1) {
+            if (S.Args.size() > 1) {
                 auto NTy = checkExpr(*S.Args[1]);
                 if (!NTy->isError() && !NTy->isIntegral())
                     error(S.Args[1]->Loc, diag::err_numeric_argument, {Lo, NTy->Name});
             }
+            return;
+        }
+        // TP-only: Truncate(f) -- truncate f at the current position; unlike
+        // Seek just above, takes ONLY the file, so its File-kind and
+        // binary-only checks are the same "base check generic, extra
+        // restriction hand-written" shape FilePos/FileSize/SeekEof/SeekEoln
+        // already have (SemaExpr.cpp) -- split out of the arm it used to
+        // share with Seek into its own.
+        if (Lo == "truncate" && !S.Args.empty()) {
+            auto Types = checkBuiltinArgKinds(Sym->BuiltinKind, Lo, S.Args);
+            auto& FTy = Types[0];
+            if (!FTy->isError() && FTy->Kind == TypeKind::File && isTextFile(*FTy, Opts))
+                error(S.Args[0]->Loc, diag::err_binary_file_required,
+                      {Lo, FTy->Name});
             return;
         }
         // TP-only: BlockRead(f, var buf; count[; var result]) /
@@ -1553,19 +1584,23 @@ void Sema::checkCallStmt(const CallStmt& S) {
             }
             return;
         }
-        // TP-only: Erase(f) / Rename(f, newname) -- delete/rename the file
-        // f is bound to.  Both take any file kind (Text included -- real
-        // Turbo Pascal's Erase/Rename work on Text files too, unlike Seek/
-        // Truncate/BlockRead/BlockWrite/FilePos/FileSize above); the
-        // fmClosed requirement (Builtins.def's own comment) is a RUNTIME
-        // check (runtime/plang_file.cpp), not a Sema one -- f's Mode is not
-        // known statically.
+        // TP-only: Erase(f) -- delete the file f is bound to.  Takes any
+        // file kind (Text included -- real Turbo Pascal's Erase works on
+        // Text files too, unlike Seek/Truncate/BlockRead/BlockWrite/
+        // FilePos/FileSize above); the fmClosed requirement (Builtins.def's
+        // own comment) is a RUNTIME check (runtime/plang_file.cpp), not a
+        // Sema one -- f's Mode is not known statically.  One argument, one
+        // kind: generic now (Builtins.def's AK_File row, issue #306's
+        // fourth slice).
         if (Lo == "erase" && !S.Args.empty()) {
-            auto FTy = checkExpr(*S.Args[0]);
-            if (!FTy->isError() && FTy->Kind != TypeKind::File)
-                error(S.Args[0]->Loc, diag::err_file_argument, {Lo, FTy->Name});
+            (void)checkBuiltinArgKinds(Sym->BuiltinKind, Lo, S.Args);
             return;
         }
+        // TP-only: Rename(f, newname) -- same fmClosed requirement as Erase
+        // just above.  Stays hand-written rather than AK_File: arg1
+        // (newname) is a DIFFERENT kind (string-like) from arg0's File, the
+        // same multi-kind shape Assign's own filename argument keeps
+        // hand-written for.
         if (Lo == "rename" && S.Args.size() > 1) {
             auto FTy = checkExpr(*S.Args[0]);
             if (!FTy->isError() && FTy->Kind != TypeKind::File)
@@ -1581,11 +1616,10 @@ void Sema::checkCallStmt(const CallStmt& S) {
             return;
         }
         // TP-only: Flush(f) -- flush f's buffered output.  No Text/binary
-        // restriction (confirmed against `fpc -Mtp`: both accept it).
+        // restriction (confirmed against `fpc -Mtp`: both accept it).  One
+        // argument, one kind: generic now (Builtins.def's AK_File row).
         if (Lo == "flush" && !S.Args.empty()) {
-            auto FTy = checkExpr(*S.Args[0]);
-            if (!FTy->isError() && FTy->Kind != TypeKind::File)
-                error(S.Args[0]->Loc, diag::err_file_argument, {Lo, FTy->Name});
+            (void)checkBuiltinArgKinds(Sym->BuiltinKind, Lo, S.Args);
             return;
         }
         // TP-only: SetTextBuf(var f: Text; var buf[; size]).  f must be
