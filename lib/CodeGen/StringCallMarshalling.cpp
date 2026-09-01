@@ -46,9 +46,24 @@ llvm::Value* StringCallMarshalling::emitCallArg(const ExprNode& arg,
     // emitSstrStore each know how to widen one, so the test is on the
     // parameter, not the argument -- argIsStrLike below now also admits
     // ShortString for that same reason.
+    //
+    // ExprIsVarStr(arg), not a direct Kind==VarString check: EP §6.4.3.3
+    // makes `string` itself a schema, so a schema-backed string actual --
+    // `type s(n: integer) = string(n); var a: s(8); ...; Q(a)` for a plain
+    // `procedure Q(s: string)` -- has ResolvedType->Kind ==
+    // TypeKind::SchemaInstance, not VarString directly.  Kind alone said
+    // this was not a string at all, so it fell all the way to the
+    // catch-all EmitExpr(arg)/EmitLValue(arg) below, which for a struct
+    // paramTy handed the callee the argument's OWN ADDRESS where it
+    // expected a copied-by-value struct -- an LLVM IR verifier failure
+    // ("Call parameter type does not match function signature") on every
+    // such call (issue #607).  ExprIsVarStr is exprIsVarStr's schema-aware
+    // varStrTypeOf walk (bound in through the constructor), the same
+    // predicate emitStrStore's own ExprIsVarStr(src) arm below already
+    // relies on for the destination side.
     const bool argIsStrLike =
         arg.ResolvedType
-        && (arg.ResolvedType->Kind == TypeKind::VarString
+        && (ExprIsVarStr(arg)
             || arg.ResolvedType->Kind == TypeKind::ShortString
             || arg.ResolvedType->Kind == TypeKind::String
             || arg.ResolvedType->Kind == TypeKind::Char);
