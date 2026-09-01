@@ -1315,6 +1315,21 @@ int frontendPC1Main(int Argc, char *Argv[]) {
         } else if (Arg == "-h" || Arg == "--help") {
             usagePC1();
             return 0;
+        } else if (Arg == "--help-warnings") {
+            // Issue #181: Options.def has always listed this as Consumer::Both,
+            // but this parser -- separate from the driver's own -- never grew
+            // an arm for it, so "plang -pc1 --help-warnings" fell through to
+            // "unrecognized argument" even though the driver already
+            // implements it (see Driver.cpp's own arm, which this mirrors) and
+            // never reaches here for a driver-mediated compile, since the
+            // driver's own --help-warnings arm returns before spawning -pc1 at
+            // all.  Only matters to someone invoking -pc1 directly.
+            std::println("Warnings, all enabled by default.  Turn one off with");
+            std::println("-Wno-<name>, or all of them with -w.\n");
+            forEachWarningName([](const std::string &N) {
+                std::println("  -Wno-{}", N);
+            });
+            return 0;
         } else if (Arg.starts_with("-o") && Arg.size() > 2) {
             // Joined form (issue #244): "-ofile.ll".  Options.def has always
             // declared -o JoinedOrSeparate, but this parser -- entirely

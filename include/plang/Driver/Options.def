@@ -25,7 +25,14 @@
 //
 // Adding an option here is enough for the driver to recognize it, to hand it to
 // the front end if that is where it belongs, and for both help texts to
-// mention it.  What the option then *does* is still written where it acts.
+// mention it.  It is NOT enough for -pc1 itself to accept the option: unlike
+// the driver, frontendPC1Main() (Frontend.cpp) has its own hand-written
+// argument loop that does not consult this table, so a Frontend/Both entry
+// here still needs its own arm added there, or -pc1 will reject it as an
+// unrecognized argument even though the driver forwards it and --help
+// mentions it (issue #181).  test/unittests/Driver's option-table
+// completeness test catches exactly this drift.  What the option then
+// *does* is still written where it acts.
 //
 //===----------------------------------------------------------------------===//
 
@@ -44,6 +51,7 @@ OPTION("-emit-llvm", "-emit-llvm",        Flag,             Driver,   "Emit LLVM
 OPTION("-dump-ast",  "-dump-ast",         Flag,             Both,     "Print the typed AST and stop (default: stdout)")
 OPTION("-dump-tokens", "-dump-tokens",         Flag,        Both,     "Print the token stream and stop (default: stdout)")
 OPTION("-dump-parse-tree", "-dump-parse-tree", Flag,        Both,     "Print the pre-Sema parse tree and stop (default: stdout)")
+OPTION("-dump-vmt", "-dump-vmt",             Flag,          Both,     "Print each object type's virtual method table and stop (default: stdout)")
 
 //===----------------------------------------------------------------------===//
 // Code generation

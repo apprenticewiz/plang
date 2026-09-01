@@ -6,5 +6,16 @@
 add_executable(driver_test driver_test.cpp)
 target_link_libraries(driver_test PRIVATE PlangDriver GTest::GTest GTest::Main)
 
+# Issue #181: guards against Options.def listing a Frontend/Both option that
+# frontendPC1Main's own hand-written -pc1 parser never grew an arm for -- see
+# options_table_test.cpp's own header comment.  Links plang_frontend (the
+# shared library frontendPC1Main is compiled into, same as the other
+# unittests that call into the front end -- see test/unittests/Basic and
+# test/unittests/Sema's own CMakeLists.txt) rather than PlangDriver, since
+# Options.h itself is header-only and this test never touches the driver.
+add_executable(options_table_test options_table_test.cpp)
+target_link_libraries(options_table_test PRIVATE plang_frontend GTest::GTest GTest::Main)
+
 include(GoogleTest)
 gtest_discover_tests(driver_test)
+gtest_discover_tests(options_table_test)
