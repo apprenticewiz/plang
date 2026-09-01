@@ -83,6 +83,16 @@ jobs:
       - name: Install build dependencies
         run: sudo apt-get install -y ninja-build libgtest-dev
 
+      - name: Install psutil (test/, issue #189)
+        # CMake's own find_program(HINTS LLVM_TOOLS_BINARY_DIR) resolves lit
+        # to apt.llvm.org's own bundled copy for every ctest-mediated
+        # invocation in this job -- and that copy's per-test timeout support
+        # (test/CMakeLists.txt's `--timeout 120`, added for #189) hard-
+        # requires psutil, which apt.llvm.org's package does not bring in.
+        # Without this, every lit-* ctest entry fails immediately with
+        # "Setting a timeout per test not supported."
+        run: pip3 install --user --break-system-packages psutil
+
       - name: Select the compiler
         # C++23 is required.  The clang the LLVM install already brought in is
         # new enough on its own; the GCCs come from the toolchain PPA, since a
@@ -538,7 +548,7 @@ jobs:
       - name: Test schema/variant/pointer/string subset under guardheap (lit)
         run: |
           cd build/test
-          lit -sv --skip-test-time-recording --filter='Schema|VariantRecord|VariantPart|ConformantArray|Shadowing|Storage|String|Substr|Pointer' CodeGen EP Module Driver
+          lit -sv --skip-test-time-recording --timeout 120 --filter='Schema|VariantRecord|VariantPart|ConformantArray|Shadowing|Storage|String|Substr|Pointer' CodeGen EP Module Driver
         env:
           PLANG_TEST_RUN_WRAPPER: "bash ${{ github.workspace }}/test/tools/run-under-guardheap.sh"
 
@@ -583,6 +593,12 @@ jobs:
 
       - name: Install build dependencies
         run: sudo apt-get install -y ninja-build libgtest-dev
+
+      - name: Install psutil (test/, issue #189)
+        # Same need as the build job's identical step: ctest-mediated lit
+        # invocations here resolve to apt.llvm.org's bundled lit, whose
+        # per-test timeout support requires psutil.
+        run: pip3 install --user --break-system-packages psutil
 
       - name: Configure
         # vptr is disabled inside the build itself: the libraries are built

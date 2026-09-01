@@ -63,7 +63,13 @@ configure_file(
 # try historically-slow tests first -- has no value in CI anyway, since the
 # build tree is fresh every run; skipping the write side removes the race
 # entirely rather than just narrowing its window.
-set(LIT_ARGS -sv --skip-test-time-recording)
+# --timeout 120: per-test wall-clock cap (issue #189), set here rather than
+# via a config.py attribute assignment -- see test/lit.cfg.py's own comment
+# for why (the config-file attribute for this isn't stable across lit
+# versions; the CLI flag is). Requires psutil to actually enforce (CI's
+# "Install psutil" steps); without it lit fails fast with a clear error
+# rather than silently not enforcing the cap.
+set(LIT_ARGS -sv --skip-test-time-recording --timeout 120)
 
 # One CTest entry and one `ninja check-lit-<category>` target per top-level
 # lit directory (LLVM-idiomatic granularity, not one per test file -- see
