@@ -960,39 +960,12 @@ llvm::Value* CGFuncCall::emitMethodCallExpr(const MethodCallExpr& e) {
     std::vector<llvm::Value*> args;
     args.push_back(selfPtr);
 
-    // Same per-argument marshalling loop emitUserFuncCall uses just below --
-    // conformant/schema/proc-param/plain-value argument shapes apply
-    // identically to a method's own parameters -- just starting pi/args
-    // after Self instead of after a static-link frame.
-    size_t pi = args.size();
-    for (size_t astArgIdx = 0; astArgIdx < e.Args.size(); ++astArgIdx) {
-        const auto& arg = e.Args[astArgIdx];
-
-        if (const auto* pt = ProcParamArg(mangledName, astArgIdx)) {
-            ClosureAbi.pushProcParamArgs(args, *arg, *pt);
-            pi = args.size();
-            continue;
-        }
-        if (unsigned nd = Schema.schemaArgDiscs(mangledName, astArgIdx); nd > 0) {
-            Schema.pushSchemaArgs(args, *arg, nd);
-            pi = args.size();
-            continue;
-        }
-        const size_t dims = ConformantDimsOf(mangledName, astArgIdx);
-        if (dims > 0) {
-            ClosureAbi.pushConformantArgs(args, *arg, dims);
-            pi += 1 + 2 * dims;
-        } else {
-            std::optional<int64_t> destSetBase = ParamSetBaseOf(mangledName, astArgIdx);
-            args.push_back(Sets.alignSetArg(
-                StrCall.emitCallArg(*arg,
-                    pi < callee->arg_size()
-                        ? callee->getFunctionType()->getParamType(pi) : nullptr,
-                    ParamIsByRef(mangledName, astArgIdx)),
-                *arg, destSetBase));
-            ++pi;
-        }
-    }
+    // Issue #299 Phase 1: the per-argument marshalling loop shared with
+    // CGProcCall::emitUserProcCall/CGFuncCall::emitUserFuncCall -- see
+    // CGCallMarshal.h.  conformant/schema/proc-param/plain-value argument
+    // shapes apply identically to a method's own parameters -- just
+    // starting pi/args after Self instead of after a static-link frame.
+    Marshal.marshalArgs(mangledName, callee, e.Args, args);
     // Turbo Tier 5, Cluster A item 5: a virtual method is called INDIRECTLY,
     // through the receiver's own `_vptr` and Owner's own VmtSlot index --
     // never the direct call to Owner's mangled symbol every OTHER call still
@@ -1036,21 +1009,9 @@ llvm::Value* CGFuncCall::emitMethodCallExpr(const MethodCallExpr& e) {
     } else {
         ret = B.CreateCall(callee, args, "mcall");
     }
-    // Same string/ShortString return-value spill emitUserFuncCall performs
-    // just below, for the identical reason: a struct-shaped result comes
-    // back by value, and every consumer of a string expression expects an
-    // address instead.
-    if (ExprIsVarStr(e) && ret->getType()->isStructTy()) {
-        auto* tmp = CreateEntryAlloca(ret->getType(), "str.ret");
-        B.CreateStore(ret, tmp);
-        return tmp;
-    }
-    if (ExprIsShortStr(e) && ret->getType()->isStructTy()) {
-        auto* tmp = CreateEntryAlloca(ret->getType(), "sstr.ret");
-        B.CreateStore(ret, tmp);
-        return tmp;
-    }
-    return ret;
+    // Issue #299 Phase 1: the struct-return spill shared with
+    // emitUserFuncCall -- see CGCallMarshal.h.
+    return Marshal.spillStructReturnIfNeeded(e, ret);
 }
 
 // Turbo Tier 5, issue #509: see this method's own declaration (CGFuncCall.h)
@@ -1231,65 +1192,14 @@ llvm::Value* CGFuncCall::emitUserFuncCall(const CallExpr& e) {
     // recorded outer variable list, so the slot order matches the definition.
     if (auto* frame = BuildStaticLinkFrame(mangledName)) args.push_back(frame);
 
-    // EP §6.7.3.7: look up conformant param dimensions for this callee.
-    // ConformantDimsOf(mangledName, astArgIdx) is the dimension count for the
-    // i-th AST argument position.  0 means the param is not conformant.
-    size_t pi = args.size();
-    for (size_t astArgIdx = 0; astArgIdx < e.Args.size(); ++astArgIdx) {
-        const auto& arg = e.Args[astArgIdx];
-
-        // ISO §6.6.3.1: procedural param — entry point plus its frame.
-        if (const auto* pt = ProcParamArg(mangledName, astArgIdx)) {
-            ClosureAbi.pushProcParamArgs(args, *arg, *pt);
-            pi = args.size();
-            continue;
-        }
-
-        // EP §6.4.7: schema param — body pointer plus its discriminants.
-        if (unsigned nd = Schema.schemaArgDiscs(mangledName, astArgIdx); nd > 0) {
-            Schema.pushSchemaArgs(args, *arg, nd);
-            pi = args.size();
-            continue;
-        }
-
-        const size_t dims = ConformantDimsOf(mangledName, astArgIdx);
-        if (dims > 0) {
-            ClosureAbi.pushConformantArgs(args, *arg, dims);
-            pi += 1 + 2 * dims;
-        } else {
-            std::optional<int64_t> destSetBase = ParamSetBaseOf(mangledName, astArgIdx);
-            args.push_back(Sets.alignSetArg(
-                StrCall.emitCallArg(*arg,
-                    pi < callee->arg_size()
-                        ? callee->getFunctionType()->getParamType(pi) : nullptr,
-                    ParamIsByRef(mangledName, astArgIdx)),
-                *arg, destSetBase));
-            ++pi;
-        }
-    }
+    // Issue #299 Phase 1: the per-argument marshalling loop shared with
+    // CGProcCall::emitUserProcCall/CGFuncCall::emitMethodCallExpr -- see
+    // CGCallMarshal.h.
+    Marshal.marshalArgs(mangledName, callee, e.Args, args);
     auto* ret = B.CreateCall(callee, args, "call");
-    // A string result comes back as the whole { length, bytes } struct, but
-    // every consumer of a string expression expects its address.  Spill the
-    // returned value so the result of f reads like any other string.
-    if (ExprIsVarStr(e) && ret->getType()->isStructTy()) {
-        auto* tmp = CreateEntryAlloca(ret->getType(), "str.ret");
-        B.CreateStore(ret, tmp);
-        return tmp;
-    }
-    // Turbo string[N]: a ShortString RESULT comes back the same way -- the
-    // whole packed <{i8,[N]}> struct by value -- and needs the identical
-    // spill-to-a-temporary treatment so its consumers see an address the
-    // way every other string expression does (see exprIsShortStr's own doc
-    // comment, CodeGenImpl.h).  A SEPARATE branch rather than widening the
-    // VarString check just above with an `||`: spilling any struct return
-    // to an addressable temporary happens to be identical plumbing for
-    // both dialects, but the two runtimes it feeds into downstream are not,
-    // and this file's whole ShortString policy is to never let one
-    // condition quietly serve both.
-    if (ExprIsShortStr(e) && ret->getType()->isStructTy()) {
-        auto* tmp = CreateEntryAlloca(ret->getType(), "sstr.ret");
-        B.CreateStore(ret, tmp);
-        return tmp;
-    }
-    return ret;
+    // A string/ShortString result comes back as the whole struct-shaped
+    // value, but every consumer of a string expression expects its address.
+    // Spill the returned value so the result of f reads like any other
+    // string -- shared with emitMethodCallExpr, see CGCallMarshal.h.
+    return Marshal.spillStructReturnIfNeeded(e, ret);
 }

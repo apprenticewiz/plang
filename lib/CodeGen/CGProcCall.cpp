@@ -1500,44 +1500,8 @@ void CGProcCall::emitUserProcCall(const CallStmt& s) {
     // number of nesting levels.
     if (auto* frame = BuildStaticLinkFrame(mangledName)) args.push_back(frame);
 
-    // EP §6.7.3.7: look up conformant param dimensions for this callee.
-    // ConformantDimsOf(mangledName, astArgIdx) is the dimension count for the
-    // i-th AST argument position.  0 means the param is not conformant (emit
-    // normally).
-    size_t pi = args.size(); // LLVM arg index (after static link)
-    for (size_t astArgIdx = 0; astArgIdx < s.Args.size(); ++astArgIdx) {
-        const auto& arg = s.Args[astArgIdx];
-
-        // ISO §6.6.3.1: procedural param — entry point plus its frame.
-        if (const auto* pt = ProcParamArg(mangledName, astArgIdx)) {
-            ClosureAbi.pushProcParamArgs(args, *arg, *pt);
-            pi = args.size();
-            continue;
-        }
-
-        // Check if this AST arg position is conformant.
-        // EP §6.4.7: schema param — body pointer plus its discriminants.
-        if (unsigned nd = Schema.schemaArgDiscs(mangledName, astArgIdx); nd > 0) {
-            Schema.pushSchemaArgs(args, *arg, nd);
-            pi = args.size();
-            continue;
-        }
-
-        const size_t dims = ConformantDimsOf(mangledName, astArgIdx);
-        if (dims > 0) {
-            ClosureAbi.pushConformantArgs(args, *arg, dims);
-            pi += 1 + 2 * dims;
-        } else {
-            // Regular param (var or value).
-            std::optional<int64_t> destSetBase = ParamSetBaseOf(mangledName, astArgIdx);
-            args.push_back(Sets.alignSetArg(
-                StrCall.emitCallArg(*arg,
-                    pi < callee->arg_size()
-                        ? callee->getFunctionType()->getParamType(pi) : nullptr,
-                    ParamIsByRef(mangledName, astArgIdx)),
-                *arg, destSetBase));
-            ++pi;
-        }
-    }
+    // Issue #299 Phase 1: the per-argument marshalling loop shared with
+    // CGFuncCall::emitUserFuncCall/emitMethodCallExpr -- see CGCallMarshal.h.
+    Marshal.marshalArgs(mangledName, callee, s.Args, args);
     B.CreateCall(callee, args);
 }

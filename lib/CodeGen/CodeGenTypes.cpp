@@ -320,6 +320,36 @@ void Codegen::Impl::init(const std::string& progName) {
         [this](const ExprNode& e){ return emitLValue(e); },
         [this](llvm::Value* v){ return toI64(v); },
         [](const TypeNode* tn){ return peelPackedNode(tn); });
+    // Issue #299 Phase 1: the per-argument marshalling loop shared by
+    // procCall_/funcCall_'s direct-call-shaped sites (emitUserProcCall/
+    // emitUserFuncCall/emitMethodCallExpr) -- built here, before either, so
+    // both can hold a plain reference to it.  ProcParamArg/ParamIsByRef/
+    // ConformantDimsOf/ParamSetBaseOf/ExprIsVarStr/ExprIsShortStr are the
+    // same narrow closures procCall_/funcCall_ themselves already bridge
+    // (see their own construction, just below) -- CGCallMarshal needs its
+    // own independent copies for the same "no shared-mutable-closure-state"
+    // reason every other multiply-bridged accessor in this file already
+    // gets (ConformantDimsOf/ParamSetBaseOf's own comment on procCall_,
+    // just below, is the precedent).
+    callMarshal_ = std::make_unique<CGCallMarshal>(builder,
+        *closureAbi_, *schemaAccess_, *setOps_, *strCallMarshal_,
+        [this](llvm::Type* t, const std::string& n){ return createEntryAlloca(t, n); },
+        [this](const std::string& mangledName, size_t astArgIdx){
+            return procParamArg(mangledName, astArgIdx); },
+        [this](const std::string& mangledName, size_t astArgIdx){
+            return paramIsByRef(mangledName, astArgIdx); },
+        [this](const std::string& mangledName, size_t astArgIdx) -> size_t {
+            auto it = paramMeta_.find(mangledName);
+            if (it == paramMeta_.end() || astArgIdx >= it->second.size()) return 0;
+            return it->second[astArgIdx].conformantDims.size();
+        },
+        [this](const std::string& mangledName, size_t astArgIdx) -> std::optional<int64_t> {
+            auto it = paramMeta_.find(mangledName);
+            if (it == paramMeta_.end() || astArgIdx >= it->second.size()) return std::nullopt;
+            return it->second[astArgIdx].setBase;
+        },
+        [](const ExprNode& e){ return exprIsVarStr(e); },
+        [](const ExprNode& e){ return exprIsShortStr(e); });
     // The required-procedure dispatch chain and user-declared procedure
     // calls.  EmitExpr/EmitLValue/ToI64/EnsureI1/InitialStateShapeOf/
     // HasInitialState/EmitInitialState/BuildStaticLinkFrame/ProcParamArg/
@@ -336,6 +366,7 @@ void Codegen::Impl::init(const std::string& progName) {
         *fileVarHelpers_, *runtimeFns_, *builtinIO_, *closureAbi_,
         *schemaAccess_, *cgTypes_, *symTab_, *linkage_, *setOps_,
         *strCallMarshal_, *packUnpack_, *rangeGuards_, *assign_, *strings_,
+        *callMarshal_,
         i8Ty, i64Ty, ptrTy, dblTy,
         [this](const ExprNode& e){ return emitExpr(e); },
         [this](const ExprNode& e){ return emitLValue(e); },
@@ -477,6 +508,7 @@ void Codegen::Impl::init(const std::string& progName) {
         *runtimeFns_, *setOps_, *complexOps_, *fileVarHelpers_, *cgTypes_,
         *schemaAccess_, *strings_, *strCallMarshal_, *linkage_, *symTab_,
         *closureAbi_, *rangeGuards_,
+        *callMarshal_,
         i64Ty, i8Ty, dblTy, ptrTy,
         [this](const ExprNode& e){ return emitExpr(e); },
         [this](const ExprNode& e){ return emitLValue(e); },
