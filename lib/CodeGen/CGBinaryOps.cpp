@@ -601,20 +601,79 @@ llvm::Value* CGBinaryOps::emitBinary(const BinaryExpr& e) {
     // SIGNED rung at i8 (ShortInt) -- e.g. `QWord + Cardinal` sign-extending
     // the Cardinal here instead of zero-extending it silently subtracted
     // 2^32 from the result.
-    if (!needFP && lv->getType()->isIntegerTy() && rv->getType()->isIntegerTy()
-        && lv->getType() != rv->getType()) {
-        llvm::Type* const wide = lv->getType()->getIntegerBitWidth()
-                                         >= rv->getType()->getIntegerBitWidth()
-                                     ? lv->getType()
-                                     : rv->getType();
-        lv = CoerceToType(lv, wide, operandIsSigned(*e.Left));
-        rv = CoerceToType(rv, wide, operandIsSigned(*e.Right));
+    //
+    // Unlike a plain width mismatch, though, a SIGNEDNESS mismatch at the
+    // SAME width is not safe to leave alone even when lv/rv's LLVM types
+    // already agree: a same-width signed type can never hold an unsigned
+    // operand's own full range (2^(w-1)-1 is always < 2^w-1), so comparing
+    // or computing at that shared width forces one side's true value to be
+    // silently reinterpreted -- issue #629's repro (`Integer(-1) = Word
+    // (65535)`, both 16 bits) compared as UNSIGNED at 16 bits purely
+    // because Word's own OrdinalIsUnsigned outvoted Integer's, reading -1's
+    // bit pattern as 65535 and calling the two equal.  This mirrors Sema::
+    // commonIntType's own promotion table EXACTLY (SemaExpr.cpp's comment
+    // there has the full derivation and the real-`fpc -Mtp` confirmations)
+    // -- comparison and arithmetic genuinely share one table, confirmed
+    // even at the one rung that looked at first like it might not (the
+    // capped top rung, Unsigned.Width == 64: `Int64 < QWord` compares
+    // SIGNED, matching `Int64 + QWord`'s SIGNED result type, while
+    // `ShortInt < QWord` compares UNSIGNED, matching `ShortInt + QWord`'s
+    // UNSIGNED result type -- both checked directly against real
+    // `fpc -Mtp`, not assumed from the arithmetic case alone).  It has to
+    // be reimplemented here rather than called, because a COMPARISON's own
+    // e.ResolvedType is always plain Boolean, never the promoted operand
+    // type commonIntType computes for arithmetic, so there is no
+    // ResolvedType-based width to widen to the way Div/Mod/Shl/Shr below
+    // use e.ResolvedType->Width.  Any change to one table must stay in
+    // lockstep with the other.
+    //
+    // Defaults to unsigned, matching the pre-fix behavior's OR-of-both-
+    // operands rule whenever this block does not run at all (needFP, or
+    // either side is somehow not an integer type) -- every switch arm below
+    // that reads `uns` only does so inside a `!needFP` branch, so a stale
+    // default here is never actually read in the needFP case, but a real
+    // value beats an uninitialized read if that ever stops being true.
+    bool uns = true;
+    if (!needFP && lv->getType()->isIntegerTy() && rv->getType()->isIntegerTy()) {
+        const unsigned lw = lv->getType()->getIntegerBitWidth();
+        const unsigned rw = rv->getType()->getIntegerBitWidth();
+        const bool lSigned = operandIsSigned(*e.Left);
+        const bool rSigned = operandIsSigned(*e.Right);
+        unsigned targetWidth;
+        bool targetSigned;
+        if (lSigned == rSigned) {
+            targetWidth = std::max(lw, rw);
+            targetSigned = lSigned;
+        } else {
+            const unsigned uw = lSigned ? rw : lw; // the unsigned operand's width
+            const unsigned sw = lSigned ? lw : rw; // the signed operand's width
+            if (sw > uw) {
+                targetWidth = sw;
+                targetSigned = true;
+            } else {
+                const unsigned promoted = uw * 2;
+                if (promoted <= 64) {
+                    targetWidth = promoted;
+                    targetSigned = true;
+                } else {
+                    // uw == 64: no wider integer type exists to double
+                    // into.  A tied rank (sw == uw, e.g. Int64 vs QWord)
+                    // still resolves SIGNED despite the cap; a strictly
+                    // narrower signed operand (e.g. ShortInt vs QWord)
+                    // falls back to the unsigned operand's own type --
+                    // both confirmed against real `fpc -Mtp` (see Sema::
+                    // commonIntType's identical branch for the full
+                    // derivation).
+                    targetWidth = uw;
+                    targetSigned = (sw == uw);
+                }
+            }
+        }
+        llvm::Type* const wide = llvm::IntegerType::get(Ctx, targetWidth);
+        lv = CoerceToType(lv, wide, lSigned);
+        rv = CoerceToType(rv, wide, rSigned);
+        uns = !targetSigned;
     }
-
-    // Either side answers this, the two being compatible by now; the right one
-    // is the fallback for an untyped left literal.
-    bool uns = OrdinalIsUnsigned(e.Left->ResolvedType.get())
-               || OrdinalIsUnsigned(e.Right->ResolvedType.get());
 
     switch (e.Op) {
         case TokenKind::Plus:

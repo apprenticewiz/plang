@@ -1588,6 +1588,45 @@ std::shared_ptr<Type> Sema::checkCallExpr(const CallExpr& E) {
             // rejecting it.  checkBuiltinArgKinds above already reported the
             // non-numeric case (issue #261); this only decides the result.
             if (ArgTy->isError() || !ArgTy->isNumeric()) return TyErr;
+            // Real/Single (and, above, Complex) genuinely do keep the
+            // argument's own type verbatim -- but a Turbo sized INTEGER
+            // rung does not, contrary to what "abs/sqr are polymorphic:
+            // return the argument's type" claimed above (issue #609's own
+            // follow-up: the ORIGINAL fix here just made this `return
+            // ArgTy` narrow the runtime helper's i64 result back down to
+            // ArgTy's own width unconditionally, which seemed right from
+            // the issue's own worked example but does NOT match real
+            // `fpc -Mtp` -- `Sqr(ByteVar)`/`Sqr(WordVar)` etc. print a
+            // value that does not fit back into their own narrow type at
+            // all, e.g. `Sqr(Word(60000))` prints a NEGATIVE 32-bit
+            // result, not a Word-shaped positive wraparound).  Real fpc's
+            // actual rule, confirmed empirically: any integer rung
+            // NARROWER than 32 bits (ShortInt/Byte/Integer/Word) computes
+            // and returns at 32-bit SIGNED (LongInt) regardless of its own
+            // original signedness -- LongInt's own range already holds
+            // every value an 8- or 16-bit rung, signed or not, can
+            // produce, so fpc discards the narrower sign entirely rather
+            // than preserve it.  The one rung this does NOT cover is
+            // Cardinal/LongWord (32-bit UNSIGNED): its own full range does
+            // NOT fit inside a same-width SIGNED LongInt (2^32-1 >
+            // 2^31-1), so it promotes to 64-bit UNSIGNED (QWord) instead,
+            // preserving its sign rather than discarding it the way
+            // Byte/Word do.  Every other rung (LongInt itself, Int64,
+            // QWord, and ISO/EP's single 64-bit signed Integer) is already
+            // at or above that 32-bit floor with no representability
+            // problem, so it keeps its own (Width, IsSigned) unchanged --
+            // a true no-op for ISO 7185/Extended Pascal, whose one Integer
+            // type is always Width 64.  CGFuncCall::emitBuiltinCall's
+            // abs/sqr codegen mirrors this exact table when it narrows
+            // plang_abs_int/plang_sqr_int's own always-i64 result back
+            // down -- the two must stay in lockstep, the same dependency
+            // Sema::commonIntType and CGBinaryOps::emitBinary already
+            // share for the two-operand mixed-sign case (issues #629/630).
+            if (ArgTy->isIntegral()) {
+                if (ArgTy->Width < 32) return Ctx_.getInt(32, /*IsSigned=*/true);
+                if (ArgTy->Width == 32 && !ArgTy->IsSigned)
+                    return Ctx_.getInt(64, /*IsSigned=*/false);
+            }
             return ArgTy;
         }
         // ISO §6.6.6.4: succ and pred stay in the argument's type, so
@@ -3882,15 +3921,68 @@ std::shared_ptr<Type> Sema::numericResult(const Type& L, const Type& R) {
 // Only Turbo's sized-integer ladder, where two Integer-kind operands can
 // genuinely differ in Width and/or IsSigned, ever takes the non-trivial
 // branch below.  The tie-break rules are checked against real `fpc -Mtp`
-// field practice, not assumed: the WIDER operand's own sign wins when
-// widths differ (`LongInt + Word` stays signed even though Word is
-// unsigned -- the signed 32-bit result can represent every Word value, so
-// nothing is lost going that way), and when widths are equal but signs
-// differ the result is unsigned (`Word + ShortInt` comes back unsigned),
-// matching C's/Delphi's usual-arithmetic-conversion rule.
+// field practice (and real Turbo Pascal 7 -- issue #630's own repro,
+// `Integer * Word`, promotes to LongInt there too), NOT the C usual-
+// arithmetic-conversion rule a prior version of this function's comment
+// claimed to follow: C promotes any sub-`int` operand to `int` (a SIGNED
+// type) before its own equal-rank tie-break ever runs, so the "equal width,
+// different sign -> unsigned" case C's tie-break actually describes is
+// never reached by two sub-`int` operands in C at all -- only by two
+// already-`int`-or-wider ones, which this ladder has no equivalent of
+// (every Turbo rung, 8 through 64 bits, is a "sub-int" by that standard).
+//
+//   - Same signedness: the WIDER operand's own width wins, at that shared
+//     sign (`LongInt + LongWord`-shaped equal-sign pairs never need to grow
+//     past the wider one's own width).
+//   - Different signedness, and the SIGNED operand is already strictly
+//     wider than the unsigned one: the signed operand's own width and sign
+//     win outright (`LongInt + Word` stays 32-bit signed) -- a strictly
+//     wider signed type's positive range already exceeds a narrower
+//     unsigned type's whole range (2^(w-1)-1 for signed width w vs 2^u-1
+//     for a strictly narrower unsigned width u), so nothing is lost going
+//     that way.
+//   - Different signedness, and the unsigned operand is AT LEAST as wide as
+//     the signed one (this covers the equal-width mixed-sign case too): a
+//     signed type at that SAME width can never hold the unsigned operand's
+//     own full range (2^(w-1)-1 is always < 2^w-1), so the result promotes
+//     to a SIGNED type at DOUBLE the unsigned operand's own width --
+//     `Integer * Word` (both 16 bits) promotes to 32-bit signed,
+//     `ShortInt + Byte` (both 8 bits) promotes to 16-bit signed, and
+//     `Cardinal + ShortInt` (32 vs 8 bits, unsigned wider) promotes all the
+//     way to 64-bit signed (the UNSIGNED side's own width doubled, NOT the
+//     signed side's) -- all three confirmed against real `fpc -Mtp`.  At
+//     the top rung (Unsigned.Width == 64, e.g. QWord) there is no wider
+//     integer type to double into, so the doubling step itself is
+//     impossible -- but the result's SIGN still depends on whether the two
+//     operands were actually TIED in rank or not, confirmed against real
+//     `fpc -Mtp` for both: `Int64 + QWord` (Signed.Width == Unsigned.Width,
+//     a genuine tie at the top rung) stays SIGNED at 64 bits despite the
+//     cap, while `ShortInt + QWord` or `LongInt + QWord` (Signed.Width
+//     strictly LESS than Unsigned.Width) falls back to UNSIGNED at 64 bits
+//     instead -- a prior version of this function conflated the two,
+//     capping to unsigned unconditionally, which happened to match the
+//     tied case it was actually tested against (`fpc -Mtp`'s Int64/QWord
+//     mix agreeing with the OLD "equal widths differ in sign -> unsigned"
+//     rule this replaces, just for the wrong general reason) but got the
+//     untied case backwards.  CGBinaryOps::emitBinary's own operand-
+//     widening block (issue #629, comparisons) mirrors this exact table --
+//     it cannot simply call back into this function, since a comparison's
+//     own ResolvedType is always plain Boolean, never the promoted operand
+//     type this function computes for arithmetic -- so any change here
+//     must stay in lockstep with that copy.
 std::shared_ptr<Type> Sema::commonIntType(const Type& L, const Type& R) {
-    if (L.Width == R.Width)
-        return Ctx_.getInt(L.Width, L.IsSigned && R.IsSigned);
-    return L.Width > R.Width ? Ctx_.getInt(L.Width, L.IsSigned)
-                              : Ctx_.getInt(R.Width, R.IsSigned);
+    if (L.IsSigned == R.IsSigned)
+        return Ctx_.getInt(std::max(L.Width, R.Width), L.IsSigned);
+    const Type& Signed   = L.IsSigned ? L : R;
+    const Type& Unsigned = L.IsSigned ? R : L;
+    if (Signed.Width > Unsigned.Width)
+        return Ctx_.getInt(Signed.Width, /*IsSigned=*/true);
+    const unsigned Promoted = Unsigned.Width * 2;
+    if (Promoted <= 64)
+        return Ctx_.getInt(Promoted, /*IsSigned=*/true);
+    // Unsigned.Width == 64: no wider integer type exists to double into.
+    // A tied rank (Signed.Width == Unsigned.Width) still resolves SIGNED
+    // despite the cap; a strictly narrower signed operand falls back to
+    // the unsigned operand's own (unsigned) type instead.
+    return Ctx_.getInt(64, /*IsSigned=*/Signed.Width == Unsigned.Width);
 }
