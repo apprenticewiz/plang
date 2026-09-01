@@ -28,12 +28,13 @@
 # --show-leak-kinds=none specifically is not optional. Turned up for real
 # while wiring this in: the ISO 7185 acceptance program
 # (test/Acceptance/iso7185pat.pas), a large, carefully-constructed
-# conformance test nobody has ever audited for dispose-everything
-# cleanliness, definitely-leaks 25 bytes in 4 blocks (filed as issue #560,
-# not fixed here). That is not a corruption bug and fixing decades-old
-# acceptance-test hygiene is a separate piece of work from standing up this
-# gate -- see docs/technical_info.md's "Valgrind memcheck (scheduled)"
-# section for the full reasoning.
+# conformance test nobody had ever audited for dispose-everything
+# cleanliness, definitely-leaked 25 bytes in 4 blocks (filed and fixed as
+# issue #560 -- the leak-suppression flags above stay regardless, since this
+# gate's own policy is corruption detection, not leak hygiene enforcement,
+# not a reaction to this one now-fixed instance) -- see docs/
+# technical_info.md's "Valgrind memcheck (scheduled)" section for the full
+# reasoning.
 #
 # -q/--quiet: valgrind's own startup banner normally goes to stderr
 # UNCONDITIONALLY, on every run, clean or not. A handful of tests in this

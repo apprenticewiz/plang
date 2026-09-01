@@ -722,11 +722,12 @@ this in, not by inspection of the manual alone:
   — so memcheck still performs the leak search, but a leak alone never flips
   the exit code. Found for real while wiring this in: the ISO 7185
   acceptance program (`test/Acceptance/iso7185pat.pas`), a large,
-  carefully-constructed conformance test nobody has ever audited for
-  dispose-everything cleanliness, definitely-leaks 25 bytes in 4 blocks (filed
-  as issue #560, not fixed here). That is not a corruption bug, and auditing
-  decades-old acceptance-test hygiene for leak-freedom is a separate piece of
-  work from standing up this gate.
+  carefully-constructed conformance test nobody had ever audited for
+  dispose-everything cleanliness, definitely-leaked 25 bytes in 4 blocks
+  (filed and fixed as issue #560). That was never a corruption bug, and this
+  gate's policy of not flipping the exit code on a leak alone is a standing
+  choice about what this tier is *for*, independent of any one instance —
+  it stays even now that #560 itself is closed.
 - **`--show-leak-kinds=none`**: `--errors-for-leak-kinds=none` alone controls
   what counts as an *error*, not what gets *printed* — `--leak-check=full`
   still prints each individual "N bytes ... definitely lost in loss record
