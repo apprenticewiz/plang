@@ -191,9 +191,23 @@ void plang_module_final_push(void (*Fn)(void)) {
         auto *Grown = static_cast<void (**)(void)>(
             std::realloc(ModuleFinalisers, NewCap * sizeof(void (*)(void))));
         if (!Grown) {
+            // issue #301: this used to be std::abort() -- the ONLY one of
+            // this file's own OOM/error paths that did not already follow
+            // the fflush/report/exit(70) convention every other one here
+            // uses (ConfArrStack's own OOM branch just above being the
+            // closest example).  exit() is strictly more robust than abort()
+            // for a condition like this one: it flushes every open C
+            // stream, not just the stdout this already flushed by hand, and
+            // still runs any registered atexit handler, where abort() does
+            // neither -- and there is no corresponding benefit to keeping
+            // abort() here, since an allocation failure in the module-
+            // finaliser registry is not an internal-invariant violation a
+            // core dump would help debug, just an ordinary resource
+            // exhaustion this file already reports the same way everywhere
+            // else.
             std::fflush(stdout);
             std::fputs("plang runtime: out of memory\n", stderr);
-            std::abort();
+            std::exit(PlangRuntimeErrorStatus);
         }
         ModuleFinalisers   = Grown;
         ModuleFinaliserCap = NewCap;
@@ -697,6 +711,61 @@ static void escapeCC(const char *S, std::FILE *Stream) {
     else
         std::fprintf(stderr, "plang runtime: Runtime error 227: Assertion "
                               "failed\n");
+    std::exit(PlangRuntimeErrorStatus);
+}
+
+/// EP §6.7.5.6: applying ANY file operation -- read, write, eof, the buffer
+/// variable, all 40 of plang_file.cpp's ISO/EP entry points -- to a file
+/// variable that is not currently open (F->Fp still null: never set until
+/// reset/rewrite/extend/update succeeds) is a dynamic-violation exactly like
+/// plang_err_file_wrong_mode/plang_err_cannot_open above, not an
+/// internal-invariant abort()/SIGABRT.  Before issue #301, plang_file.cpp's
+/// own abortIfClosed -- the single choke point every one of those 40 entry
+/// points funnels through -- reported this one itself, directly, with
+/// std::abort(): the one dynamic-violation in the whole runtime that had not
+/// yet been brought onto the fflush/report/exit(70) convention every other
+/// one here already follows.  That was a deliberate, tested call at the
+/// time (ISO/EP "program error" status was read as calling for a hard
+/// SIGABRT), but issue #301 concluded exit(70) is strictly more robust with
+/// no offsetting benefit: exit() flushes EVERY open C stream (this call's
+/// own explicit fflush(stdout) only ever covered the one stream this
+/// function knows about by name) and still runs any registered atexit
+/// handler, where abort() does neither -- and a SIGABRT/core dump buys
+/// nothing here, since an unopened file variable is an expected, documented
+/// condition a conforming program can trigger, not an internal plang
+/// consistency violation a core dump would help debug.  Exported (rather
+/// than open-coded in plang_file.cpp) for the same reason every other
+/// plang_err_* file check already is: this constant, PlangRuntimeErrorStatus,
+/// lives in this file's own anonymous namespace, and every caller outside it
+/// reaches the shared "flush stdout, report, exit(70)" convention through a
+/// named reporter like this one rather than re-deriving the status value.
+[[noreturn]] void plang_err_file_not_open(const char *Op) {
+    std::fflush(stdout);
+    std::fprintf(stderr, "plang runtime: file not open in '%s'\n", Op);
+    std::exit(PlangRuntimeErrorStatus);
+}
+
+/// Shared out-of-memory reporter for the runtime's own small internal
+/// allocations that are not already covered by an existing plang_err_*
+/// (plang_new's own OOM branch, just above in this file, reports a Pascal
+/// program's \c new/dispose allocation failure directly since it already
+/// has PlangRuntimeErrorStatus in scope; ConfArrStack's and
+/// ModuleFinalisers's own OOM branches, further above still, do the same
+/// for the same reason).  This one exists for callers OUTSIDE this
+/// translation unit -- plang_file.cpp's per-component file buffer
+/// (aligned_alloc) being the one today -- that have no direct access to
+/// that constant.  \p Context names what could not be allocated, e.g. "a
+/// file buffer", so the message stays specific despite the reporter being
+/// shared.  Before issue #301 that one call site used std::abort(); the
+/// reasoning for exit(PlangRuntimeErrorStatus) instead is the same as
+/// plang_err_file_not_open's, just above: exit() flushes every open C
+/// stream and runs atexit handlers, abort() does neither, and there is no
+/// internal-invariant violation here a core dump would help debug -- just
+/// ordinary resource exhaustion.
+[[noreturn]] void plang_err_out_of_memory(const char *Context) {
+    std::fflush(stdout);
+    std::fprintf(stderr, "plang runtime: out of memory for %s\n",
+                 Context ? Context : "the runtime");
     std::exit(PlangRuntimeErrorStatus);
 }
 
