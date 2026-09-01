@@ -67,19 +67,32 @@ to the same-terminator rule above.
 
 ## Test timeouts
 
-`test/lit.cfg.py` sets `lit_config.maxIndividualTestTime = 120` (issue
-#189): any single test that runs past 120s is killed and reported as a
-failure rather than left to hang a CI job indefinitely. That is a global
-cap, not a per-test one — there is currently no override mechanism, and
-none of today's tests need one (the slowest observed is 6.62s).
+Every lit invocation in this project (`test/CMakeLists.txt`'s `LIT_ARGS`,
+and the guardheap step in CI) passes `--timeout 300` (issue #189): any
+single test that runs past 300s is killed and reported as a failure
+rather than left to hang a CI job indefinitely.
 
-If a genuinely slow test is ever added and needs more than 120s, the
-pattern to follow is a `lit.local.cfg` in that test's subdirectory,
-setting `config.maxIndividualTestTime = <N>` there — lit applies the
-most specific `lit.local.cfg` along a test's directory path, so this
-overrides the suite-wide value for just that subdirectory without
-touching everything else. This escape hatch does not exist yet; add it
-only when a real test needs it.
+This is a genuinely global, process-wide cap — **there is no working
+per-test or per-directory override** in the lit version this project
+targets. `lit`'s own `main.py` reads a single `lit_config.
+maxIndividualTestTime` value at startup, and explicitly makes the
+`--timeout` command-line flag win over anything a `lit.cfg.py`/
+`lit.local.cfg` sets (confirmed by reading `lit/main.py`'s own "Command
+line overrides configuration for maxIndividualTestTime" logic, and by
+reproducing it directly). A `lit.local.cfg` setting `config.
+maxIndividualTestTime` in some subdirectory looks plausible from lit's
+docs but has no effect once a `--timeout` flag is present on the command
+line, which every invocation in this project always has. Don't add one
+expecting it to work.
+
+300s was sized off the slowest test observed in this suite under the
+*heaviest* real instrumentation: the deliberate O(n) layout stress test
+(`test/CodeGen/CodegenRecord/laying-out-tens-of-thousands-of-fields-is-
+not-quadratic.pas`) legitimately takes longer than the original 120s
+budget under the `asan + ubsan` CI job's sanitizer overhead. If a future
+test needs still more headroom, the only real lever is raising this one
+global number (in both places it's set) — there is no cheaper, more
+targeted mechanism available today.
 
 `REQUIRES: fpc-binary` (not bare `fpc` — `include/plang/Basic/Dialects.def`
 already reserves that name for a future, unrelated `-std=fpc` plang

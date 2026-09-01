@@ -87,7 +87,7 @@ jobs:
         # CMake's own find_program(HINTS LLVM_TOOLS_BINARY_DIR) resolves lit
         # to apt.llvm.org's own bundled copy for every ctest-mediated
         # invocation in this job -- and that copy's per-test timeout support
-        # (test/CMakeLists.txt's `--timeout 120`, added for #189) hard-
+        # (test/CMakeLists.txt's `--timeout 300`, added for #189) hard-
         # requires psutil, which apt.llvm.org's package does not bring in.
         # Without this, every lit-* ctest entry fails immediately with
         # "Setting a timeout per test not supported."
@@ -272,7 +272,7 @@ jobs:
         # A pure Python package, so `pip install` unconditionally resolves it
         # regardless of what a given Homebrew formula bundles.
         run: |
-          pip3 install --user --break-system-packages lit
+          pip3 install --user --break-system-packages lit psutil
           echo "$(python3 -m site --user-base)/bin" >> "$GITHUB_PATH"
 
       - name: Build FileCheck, not, split-file from LLVM source (test/, issue #34)
@@ -501,7 +501,7 @@ jobs:
         # pip install unconditionally resolves it regardless of what a given
         # LLVM package bundles.
         run: |
-          pip3 install --user --break-system-packages lit
+          pip3 install --user --break-system-packages lit psutil
           echo "$(python3 -m site --user-base)/bin" >> "$GITHUB_PATH"
 
       - name: Configure
@@ -548,7 +548,7 @@ jobs:
       - name: Test schema/variant/pointer/string subset under guardheap (lit)
         run: |
           cd build/test
-          lit -sv --skip-test-time-recording --timeout 120 --filter='Schema|VariantRecord|VariantPart|ConformantArray|Shadowing|Storage|String|Substr|Pointer' CodeGen EP Module Driver
+          lit -sv --skip-test-time-recording --timeout 300 --filter='Schema|VariantRecord|VariantPart|ConformantArray|Shadowing|Storage|String|Substr|Pointer' CodeGen EP Module Driver
         env:
           PLANG_TEST_RUN_WRAPPER: "bash ${{ github.workspace }}/test/tools/run-under-guardheap.sh"
 
