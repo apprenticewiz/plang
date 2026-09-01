@@ -14,6 +14,7 @@
 //                                  ^ returned                ^ first fault
 #define _GNU_SOURCE
 #include <dlfcn.h>
+#include <errno.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
@@ -113,19 +114,53 @@ void *calloc(size_t nmemb, size_t size) {
     return p;                                      /* mmap memory is zeroed */
 }
 
+/* free() must not have a side effect the real free() never does: gh_head_of's
+ * own gh_mapped check below calls msync() to ask (without risking a fault)
+ * whether a FOREIGN pointer's header page is even mapped, and msync() sets
+ * errno to ENOMEM when it is not. For a pointer this allocator did not hand
+ * out, that happens on essentially every call -- and free() runs on plenty
+ * of pointers this allocator never touched, because it intercepts ALL frees,
+ * not just guardheap ones (see gh_alloc's own comment: only calloc is
+ * interposed, so anything a system library mallocs -- glibc's fopen(3)
+ * allocates its FILE struct with a plain malloc(), for one -- still gets
+ * freed through here).
+ *
+ * That silently clobbered a caller's errno after a completely unrelated
+ * free(): fopen(3), on a failing open(2), frees the FILE struct it had
+ * tentatively allocated as part of its own cleanup, BEFORE returning to the
+ * caller -- so a caller capturing errno immediately after a NULL fopen()
+ * return was actually reading msync's ENOMEM, not open(2)'s real EACCES/
+ * ENOENT/whatever. Confirmed with a standalone repro: plain fopen() of a
+ * permission-denied path reports errno 13 (EACCES); the identical call under
+ * this LD_PRELOAD reported errno 12 (ENOMEM) instead, with no allocator bug
+ * anywhere in the program being tested -- purely this function's own
+ * bookkeeping leaking into caller-visible state, the same class of
+ * self-inflicted false positive gh_head_of's own comment already documents
+ * once (SIGSEGV on a valid free of a foreign pointer). So errno is saved and
+ * restored around the whole body, exactly like the real free() (which never
+ * touches it) appears to the caller. */
 void free(void *p) {
-    if (!p) return;
-    if (gh_is_boot(p)) return;
+    int saved_errno = errno;
+    if (!p) { errno = saved_errno; return; }
+    if (gh_is_boot(p)) { errno = saved_errno; return; }
     gh_init();
     struct gh_head *h = gh_head_of(p);
-    if (h) { munmap((void *)h, h->total); return; }
+    if (h) { munmap((void *)h, h->total); errno = saved_errno; return; }
     real_free(p);
+    errno = saved_errno;
 }
 
 void *realloc(void *p, size_t n) {
     gh_init();
     if (!p) return real_malloc ? real_malloc(n) : NULL;
+    // Same errno-clobber risk gh_head_of's own caller in free() has to guard
+    // against (see that function's comment): the "is this ours" probe below
+    // can set errno via msync on a foreign pointer, before the real
+    // operation this call is actually for has had any chance to fail on its
+    // own terms.
+    int saved_errno = errno;
     struct gh_head *h = gh_head_of(p);
+    errno = saved_errno;
     if (!h) return real_realloc(p, n);
     void *q = gh_alloc(n);
     if (!q) return NULL;
