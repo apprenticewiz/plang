@@ -137,6 +137,33 @@ interface at `find_package(plang)` time.
 Only the frontend library is exported this way; the `plang` driver
 executable itself is not.
 
+The entry point an embedder actually calls is `plang::compile()`
+(`include/plang/Frontend/Compilation.h`): a `CompilationRequest` in (source,
+either a file path or an in-memory buffer, plus `LangOptions`/
+`DiagnosticOptions`), a `CompilationResult` out (`Success`, an optional
+`Output` string, and a `Diagnostics` vector) -- entirely in-process, no
+subprocess and no stdout/stderr/exit-code protocol to parse back apart:
+
+```cpp
+#include "plang/Frontend/Compilation.h"
+
+plang::CompilationRequest Request;
+Request.SourceName = "hello.pas";
+Request.Buffer = "program hello; begin writeln('hi') end.";
+
+plang::CompilationResult Result = plang::compile(Request);
+if (!Result.Success) {
+    for (const plang::Diagnostic& D : Result.Diagnostics)
+        std::cerr << D.Message << "\n";
+    return 1;
+}
+// Result.Output holds the compiled LLVM IR text.
+```
+
+See `Compilation.h`'s own comments for the two constraints an embedder has
+to design around (process-global locale selection, and `.pmi`/`.tui`
+interface-file publishing as a side effect of compiling a module or unit).
+
 ## Usage
 
 ```bash

@@ -262,7 +262,17 @@ jobs:
           cat > "$consumer_dir/CMakeLists.txt" <<'EOF'
           cmake_minimum_required(VERSION 3.16)
           project(plang_consumer_smoke LANGUAGES C CXX)
-          set(CMAKE_CXX_STANDARD 17)
+          # Issue #179: plang/Frontend/Compilation.h (compile()'s own public
+          # header) transitively includes plang/Basic/LangOptions.h and
+          # plang/Basic/Diagnostic.h, both C++20 already (a spaceship
+          # operator, std::string_view::starts_with) -- plang::plang_frontend
+          # itself now records this as a cxx_std_20 usage requirement
+          # (lib/CMakeLists.txt), but an explicit, higher-than-the-minimum
+          # standard here is what a real embedder's own CMakeLists.txt would
+          # actually set, matching plang's own C++23 (top-level
+          # CMakeLists.txt) rather than just the floor find_package(plang)
+          # enforces.
+          set(CMAKE_CXX_STANDARD 23)
           set(CMAKE_CXX_STANDARD_REQUIRED ON)
           find_package(plang REQUIRED)
           add_executable(consumer_smoke src/main.cpp)
@@ -270,9 +280,33 @@ jobs:
           EOF
           cat > "$consumer_dir/src/main.cpp" <<'EOF'
           #include <plang/Frontend/Frontend.h>
+          #include <plang/Frontend/Compilation.h>
+          #include <cstdio>
+          #include <string>
           int main() {
               const char *argv[] = {"plang", "-pc1", "--version"};
-              return plang::frontendPC1Main(3, const_cast<char **>(argv));
+              if (plang::frontendPC1Main(3, const_cast<char **>(argv)) != 0)
+                  return 1;
+              // Issue #179: the library-shaped alternative to frontendPC1Main
+              // above -- an embedder compiling an in-memory buffer with no
+              // subprocess, no argv, and structured CompilationResult data
+              // back instead of an exit code to parse stderr against.
+              plang::CompilationRequest req;
+              req.SourceName = "<consumer-smoke>";
+              req.Buffer = "program p(output);\nbegin writeln('hi') end.\n";
+              const plang::CompilationResult res = plang::compile(req);
+              if (!res.Success || !res.Diagnostics.empty()) return 1;
+              if (!res.Output || res.Output->find("ModuleID") == std::string::npos)
+                  return 1;
+              // And the failure path: a bad buffer must fail with a
+              // structured diagnostic, not silently succeed.
+              plang::CompilationRequest bad;
+              bad.SourceName = "<consumer-smoke-bad>";
+              bad.Buffer = "program p(output);\nbegin writeln(nosuchvar) end.\n";
+              const plang::CompilationResult badRes = plang::compile(bad);
+              if (badRes.Success || badRes.Diagnostics.empty()) return 1;
+              std::puts("compile() smoke test passed");
+              return 0;
           }
           EOF
           cmake -S "$consumer_dir" -B "$consumer_dir/build" -G Ninja
@@ -501,7 +535,17 @@ jobs:
           cat > "$consumer_dir/CMakeLists.txt" <<'EOF'
           cmake_minimum_required(VERSION 3.16)
           project(plang_consumer_smoke LANGUAGES C CXX)
-          set(CMAKE_CXX_STANDARD 17)
+          # Issue #179: plang/Frontend/Compilation.h (compile()'s own public
+          # header) transitively includes plang/Basic/LangOptions.h and
+          # plang/Basic/Diagnostic.h, both C++20 already (a spaceship
+          # operator, std::string_view::starts_with) -- plang::plang_frontend
+          # itself now records this as a cxx_std_20 usage requirement
+          # (lib/CMakeLists.txt), but an explicit, higher-than-the-minimum
+          # standard here is what a real embedder's own CMakeLists.txt would
+          # actually set, matching plang's own C++23 (top-level
+          # CMakeLists.txt) rather than just the floor find_package(plang)
+          # enforces.
+          set(CMAKE_CXX_STANDARD 23)
           set(CMAKE_CXX_STANDARD_REQUIRED ON)
           find_package(plang REQUIRED)
           add_executable(consumer_smoke src/main.cpp)
@@ -509,9 +553,33 @@ jobs:
           EOF
           cat > "$consumer_dir/src/main.cpp" <<'EOF'
           #include <plang/Frontend/Frontend.h>
+          #include <plang/Frontend/Compilation.h>
+          #include <cstdio>
+          #include <string>
           int main() {
               const char *argv[] = {"plang", "-pc1", "--version"};
-              return plang::frontendPC1Main(3, const_cast<char **>(argv));
+              if (plang::frontendPC1Main(3, const_cast<char **>(argv)) != 0)
+                  return 1;
+              // Issue #179: the library-shaped alternative to frontendPC1Main
+              // above -- an embedder compiling an in-memory buffer with no
+              // subprocess, no argv, and structured CompilationResult data
+              // back instead of an exit code to parse stderr against.
+              plang::CompilationRequest req;
+              req.SourceName = "<consumer-smoke>";
+              req.Buffer = "program p(output);\nbegin writeln('hi') end.\n";
+              const plang::CompilationResult res = plang::compile(req);
+              if (!res.Success || !res.Diagnostics.empty()) return 1;
+              if (!res.Output || res.Output->find("ModuleID") == std::string::npos)
+                  return 1;
+              // And the failure path: a bad buffer must fail with a
+              // structured diagnostic, not silently succeed.
+              plang::CompilationRequest bad;
+              bad.SourceName = "<consumer-smoke-bad>";
+              bad.Buffer = "program p(output);\nbegin writeln(nosuchvar) end.\n";
+              const plang::CompilationResult badRes = plang::compile(bad);
+              if (badRes.Success || badRes.Diagnostics.empty()) return 1;
+              std::puts("compile() smoke test passed");
+              return 0;
           }
           EOF
           cmake -S "$consumer_dir" -B "$consumer_dir/build" -G Ninja \

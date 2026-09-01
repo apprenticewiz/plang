@@ -3,6 +3,11 @@ find_package(GTest REQUIRED)
 add_subdirectory(Basic)
 add_subdirectory(Sema)
 add_subdirectory(CodeGen)
+# Issue #179: exercises plang::compile() (plang/Frontend/Compilation.h)
+# directly -- structured CompilationResult data with no CLI-observable
+# proxy, the same kind of permanent GoogleTest exception Sema/CodeGen's own
+# two directories above already are for their own subsystems.
+add_subdirectory(Frontend)
 # The GoogleTest tier's black-box Driver tests migrated to test/Driver/ --
 # see issue #34. Driver/ here is not a reversal of that: it holds two
 # narrow, permanent exceptions for Driver properties with no CLI-observable

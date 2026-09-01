@@ -7,6 +7,13 @@ namespace plang {
 /// Invoked directly when the plang driver re-invokes itself with \c -pc1, or
 /// called by embedders that link against \c libplang-frontend.
 ///
+/// An embedder that wants to compile in-process -- a CompilationRequest in,
+/// a CompilationResult (structured diagnostics, no argv/stdout/stderr/exit
+/// code to parse back apart) out -- should reach for plang::compile()
+/// (plang/Frontend/Compilation.h) instead; this function is layered on top
+/// of the same internal pipeline, for the CLI's own use and for an embedder
+/// that specifically wants argv-in-exit-code-out semantics.
+///
 /// \p Argc and \p Argv are the full argument vector passed to \c main() —
 /// \c Argv[0] is the binary name, \c Argv[1] is \c "-pc1", and option
 /// parsing begins at \c Argv[2].

@@ -52,6 +52,19 @@ target_include_directories(plang_frontend PUBLIC
     $<BUILD_INTERFACE:${CMAKE_BINARY_DIR}/include>
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
 )
+# Issue #179: plang/Frontend/Compilation.h (compile()'s own public header)
+# pulls in plang/Basic/LangOptions.h and plang/Basic/Diagnostic.h, both of
+# which already use C++20 (SourceLocation's own spaceship operator,
+# std::string_view::starts_with) regardless of this refactor -- they were
+# simply unreachable from a consumer before, since Frontend.h (the only
+# other public header) never included either. CMAKE_CXX_STANDARD alone
+# (top-level CMakeLists.txt) only governs how *this* target itself is
+# built, not what an external find_package(plang) consumer's own project
+# is required to build against -- a usage requirement is what makes that a
+# find_package()-time property of plang::plang_frontend, the way
+# target_include_directories's own INTERFACE entries just above already
+# are, rather than a fact only this header's own comments state.
+target_compile_features(plang_frontend PUBLIC cxx_std_20)
 if(TARGET LLVM)
     target_link_libraries(plang_frontend PRIVATE LLVM)
 else()

@@ -110,6 +110,24 @@ DIAG(err_pmi_cannot_serialize_export, Error,
      "exported %0 '%1' of module '%2' cannot be represented in its module "
      "interface (.pmi) file")
 
+// writePMIFiles/writeTUIFile (lib/Frontend/Frontend.cpp) publish a module's
+// .pmi or a Turbo unit's .tui next to the source that declared it, through
+// the same write-temp-then-rename dance for both -- three things can go
+// wrong along that path, one diagnostic apiece below, %0 always "module" or
+// "unit" so these three catalog entries cover both writers rather than
+// needing a duplicate set apiece.  These used to
+// be direct std::cerr writes, bypassing -w/-Werror/-Wno-<name> entirely and,
+// more importantly for issue #179's library-shaped compile() API, never
+// reaching CompilationResult::Diagnostics at all -- an embedder had no way
+// to learn a module's interface failed to publish short of noticing the
+// file was missing afterward.
+DIAG(err_cannot_create_interface_file, Error,
+     "cannot create %0 interface file '%1': %2")
+DIAG(err_cannot_write_interface_file, Error,
+     "cannot write %0 interface '%1' to '%2': %3")
+DIAG(err_cannot_publish_interface_file, Error,
+     "cannot publish %0 interface '%1' to '%2': %3")
+
 // An argument beginning with '-' that no option in Options.def matches.  A
 // warning rather than an error because it costs nothing to carry on without
 // it, and because a build system passing a flag plang does not know is a

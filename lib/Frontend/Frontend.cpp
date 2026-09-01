@@ -11,6 +11,7 @@
 ///   argv[2…] = front-end options and the source file
 
 #include "plang/Frontend/Frontend.h"
+#include "plang/Frontend/Compilation.h"
 #include "plang/Basic/MessageCatalog.h"
 #include "plang/Basic/Version.h"
 
@@ -36,6 +37,7 @@
 #include <optional>
 #include <print>
 #include <set>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <unistd.h>
@@ -943,8 +945,13 @@ static bool writePMIFiles(const ProgramNode& Program,
         int TmpFd = -1;
         if (auto EC = llvm::sys::fs::createUniqueFile(PmiPath + "-%%%%%%.tmp",
                                                         TmpFd, TmpPath)) {
-            std::cerr << "plang -pc1: cannot create module interface file '"
-                       << PmiPath << "': " << EC.message() << "\n";
+            // Issue #179: reported through Diags, not a direct std::cerr
+            // write, so this failure is both policy-aware (-w/-Werror/
+            // -Wno-<name>, same as every other diagnostic) and visible to a
+            // compile() caller through CompilationResult::Diagnostics --
+            // not just to frontendPC1Main's own stderr.
+            Diags.report(SourceLocation(), diag::err_cannot_create_interface_file,
+                         {"module", PmiPath, EC.message()});
             cleanupPublished();
             return false;
         }
@@ -956,9 +963,8 @@ static bool writePMIFiles(const ProgramNode& Program,
             if (OS.has_error()) {
                 std::error_code EC = OS.error();
                 OS.clear_error();
-                std::cerr << "plang -pc1: cannot write module interface '"
-                           << Mod->Name << "' to '" << PmiPath << "': "
-                           << EC.message() << "\n";
+                Diags.report(SourceLocation(), diag::err_cannot_write_interface_file,
+                             {"module", Mod->Name, PmiPath, EC.message()});
                 llvm::sys::fs::remove(TmpPath);
                 cleanupPublished();
                 return false;
@@ -966,9 +972,8 @@ static bool writePMIFiles(const ProgramNode& Program,
         }
 
         if (auto EC = llvm::sys::fs::rename(TmpPath, PmiPath)) {
-            std::cerr << "plang -pc1: cannot publish module interface '"
-                       << Mod->Name << "' to '" << PmiPath << "': "
-                       << EC.message() << "\n";
+            Diags.report(SourceLocation(), diag::err_cannot_publish_interface_file,
+                         {"module", Mod->Name, PmiPath, EC.message()});
             llvm::sys::fs::remove(TmpPath);
             cleanupPublished();
             return false;
@@ -1131,9 +1136,11 @@ static std::string buildTUIContent(const UnitNode& Unit) {
 /// write failure partway through must never leave a corrupt or truncated
 /// interface file for a later, unrelated compile to load and trust), but is
 /// its own, Turbo-specific function -- writePMIFiles itself is untouched,
-/// and this never calls it.  Returns false (after reporting to stderr) on
-/// any I/O failure.
-static bool writeTUIFile(const UnitNode& Unit, const std::string& InputFile) {
+/// and this never calls it.  Returns false on any I/O failure, reported
+/// through \p Diags (issue #179) rather than a direct std::cerr write, the
+/// same reasoning as writePMIFiles' own matching sites above.
+static bool writeTUIFile(const UnitNode& Unit, const std::string& InputFile,
+                         DiagnosticsEngine& Diags) {
     std::string TuiDir = ".";
     if (auto Slash = InputFile.rfind('/'); Slash != std::string::npos)
         TuiDir = InputFile.substr(0, Slash);
@@ -1151,8 +1158,8 @@ static bool writeTUIFile(const UnitNode& Unit, const std::string& InputFile) {
     int TmpFd = -1;
     if (auto EC = llvm::sys::fs::createUniqueFile(TuiPath + "-%%%%%%.tmp",
                                                     TmpFd, TmpPath)) {
-        std::cerr << "plang -pc1: cannot create unit interface file '"
-                   << TuiPath << "': " << EC.message() << "\n";
+        Diags.report(SourceLocation(), diag::err_cannot_create_interface_file,
+                     {"unit", TuiPath, EC.message()});
         return false;
     }
     {
@@ -1162,17 +1169,15 @@ static bool writeTUIFile(const UnitNode& Unit, const std::string& InputFile) {
         if (OS.has_error()) {
             std::error_code EC = OS.error();
             OS.clear_error();
-            std::cerr << "plang -pc1: cannot write unit interface '"
-                       << Unit.Name << "' to '" << TuiPath << "': "
-                       << EC.message() << "\n";
+            Diags.report(SourceLocation(), diag::err_cannot_write_interface_file,
+                         {"unit", Unit.Name, TuiPath, EC.message()});
             llvm::sys::fs::remove(TmpPath);
             return false;
         }
     }
     if (auto EC = llvm::sys::fs::rename(TmpPath, TuiPath)) {
-        std::cerr << "plang -pc1: cannot publish unit interface '"
-                   << Unit.Name << "' to '" << TuiPath << "': "
-                   << EC.message() << "\n";
+        Diags.report(SourceLocation(), diag::err_cannot_publish_interface_file,
+                     {"unit", Unit.Name, TuiPath, EC.message()});
         llvm::sys::fs::remove(TmpPath);
         return false;
     }
@@ -1194,6 +1199,210 @@ static bool reportIfWriteFailed(std::ostream& Os, const std::string& Name) {
               << (Name.empty() ? "to standard output" : "output file '" + Name + "'")
               << "\n";
     return true;
+}
+
+// ---------------------------------------------------------------------------
+// Issue #179: compileRequest() -- the pipeline itself, shared by
+// frontendPC1Main (which builds a CompilationRequest from argv and formats
+// the CompilationResult back out to stdout/stderr/an exit code) and the
+// public plang::compile() (Compilation.h), which just returns it. Neither
+// touches an output file or stdout/stderr directly here: every dump mode
+// and Codegen::emit/emitUnit write into an in-memory buffer instead, and
+// Result.Output ends up holding exactly what frontendPC1Main used to hand
+// its own withOutput lambda -- std::nullopt when the original code never
+// reached that lambda at all (a Scanner/Parser/Sema/interface-publish
+// failure, every one of which frontendPC1Main used to return 1 from
+// without ever opening -o), a real string otherwise, regardless of whether
+// the action that produced it (Codegen's own module verification, chiefly)
+// itself succeeded -- exactly mirroring withOutput's old "open, write,
+// THEN check for failure" order, just with the open/write of the real
+// destination now the wrapper's job, not this function's.
+//
+// \p SrcMgr is the caller's own SourceManager, passed by reference rather
+// than owned here, so a caller that wants to format Result.Diagnostics with
+// real source snippets (DiagnosticPrinter.h, exactly what frontendPC1Main's
+// own Printer does) still can once this returns -- Diagnostic::Loc is
+// meaningless without the SourceManager the Scanner constructed inside
+// here actually populated.
+//
+// \p Diags is likewise the caller's own DiagnosticsEngine, not a fresh one
+// constructed from Request.DiagOpts in here: frontendPC1Main's own argv
+// parser can already have recorded an error on its Diags before ever
+// building a CompilationRequest at all (a -Werror-elevated
+// warn_invalid_define_symbol from a bad -dSYMBOL, say) -- exactly the same
+// engine Scanner/Parser/Sema/Codegen below go on to accumulate into, the
+// same way it always has been.  A fresh engine in here would silently
+// forget that a compile was already doomed to fail, and frontendPC1Main
+// would have to re-derive "was there already an error" some other way to
+// avoid reporting success for a request that never had a chance. A caller
+// that has no such pre-existing state -- plang::compile() -- just hands in
+// a freshly constructed one.
+static CompilationResult compileRequest(const CompilationRequest& Request,
+                                        DiagnosticsEngine& Diags,
+                                        SourceManager& SrcMgr) {
+    CompilationResult Result;
+    LangOptions Opts = Request.Opts;
+
+    // finish() is the one place every return in this function goes through,
+    // so Result.Diagnostics always reflects everything Diags accumulated up
+    // to that point, in report order -- matching frontendPC1Main's own
+    // multiple emitAll() calls at each of these same points, just collected
+    // instead of printed immediately (see plang::compile's own header
+    // comment: nothing here prints anything).
+    auto finish = [&](std::optional<std::string> Output, bool Success) {
+        Result.Output      = std::move(Output);
+        Result.Success     = Success;
+        Result.Diagnostics = Diags.diagnostics();
+        return Result;
+    };
+
+    // A path that exists but names a directory reads back empty through
+    // std::ifstream (issue #275 -- the front end's own entry point never got
+    // the guard issue #125/#134 added to the driver's): without this, Scanner
+    // below would construct successfully with no tokens at all, and every
+    // stage past it would report nothing but "expected 'program', got end of
+    // file" and the cascade that follows, instead of one diagnostic naming
+    // the real problem.  Meaningless -- and skipped -- for a Request.Buffer
+    // compile: there is no real filesystem path to check, and SourceName may
+    // not even resolve to one at all.
+    if (!Request.Buffer && llvm::sys::fs::is_directory(Request.SourceName)) {
+        Diags.report(SourceLocation(), diag::err_is_a_directory,
+                     {Request.SourceName});
+        return finish(std::nullopt, false);
+    }
+
+    // Scanner has two constructors -- a real file path, or an in-memory
+    // buffer (see its own header comment) -- and CompilationRequest mirrors
+    // both rather than picking one, so std::optional<Scanner> stands in for
+    // whichever constructor overload resolution would otherwise have to
+    // choose between at compile time.
+    std::optional<Scanner> ScannerStorage;
+    if (Request.Buffer)
+        ScannerStorage.emplace(SrcMgr, Request.SourceName, *Request.Buffer,
+                               Diags, Opts);
+    else
+        ScannerStorage.emplace(SrcMgr, Request.SourceName, Diags, Opts);
+    Scanner& Sc = *ScannerStorage;
+    if (Diags.hasErrors()) return finish(std::nullopt, false);
+    // Captured before the move below takes Sc apart; -g's DIFile/DICompileUnit
+    // need it and have no other way to ask which buffer was the main one.
+    const FileID MainFileID = Sc.fileID();
+
+    if (Request.DumpTokens) {
+        std::ostringstream OSS;
+        for (;;) {
+            const Token T = Sc.next();
+            const PresumedLoc PL = SrcMgr.getPresumedLoc(T.Loc);
+            OSS << PL.Line << ':' << PL.Column << ": " << kindName(T.Kind)
+               << " \"" << T.Lexeme << "\"\n";
+            if (T.Kind == TokenKind::Eof) break;
+        }
+        return finish(OSS.str(), !Diags.hasErrors());
+    }
+
+    Parser P(std::move(Sc), Diags, Opts);
+    auto Program = P.parse();
+    if (!Program) return finish(std::nullopt, false);
+
+    // Parser::switches() forwards to the Scanner it moved Sc into, which has
+    // now read the whole token stream (every `{$I file}`/`{$INCLUDE file}`
+    // it spliced in along the way included) and so has seen every `{$R+}`-
+    // style switch directive there is to see.  See Scanner::switches()'s own
+    // comment for why this has to be attached back onto Opts explicitly.
+    Opts.Switches = P.switches();
+
+    if (Request.DumpParseTree) {
+        std::ostringstream OSS;
+        printAst(*Program, OSS);
+        return finish(OSS.str(), true);
+    }
+
+    // Turbo Tier 4, Cluster A item 2: a standalone unit file runs through
+    // Sema::checkUnit and its own separate-compilation codegen path, quite
+    // apart from a program's (see frontendPC1Main's history for the fuller
+    // story -- this is an unmodified port of that same branch).
+    if (Program->BareUnit) {
+        const UnitNode& Unit = *Program->BareUnit;
+        Sema UnitSem(Diags, Opts);
+        const bool UnitOk = UnitSem.checkUnit(Unit);
+        if (!UnitOk) return finish(std::nullopt, false);
+        if (Request.DumpAst) {
+            std::ostringstream OSS;
+            printAst(*Program, OSS);
+            return finish(OSS.str(), true);
+        }
+        if (Request.DumpVmt) {
+            std::ostringstream OSS;
+            printVmt(*Program, OSS);
+            return finish(OSS.str(), true);
+        }
+
+        // Publish this unit's own .tui before codegen -- see writeTUIFile's
+        // own comment for why a compile that is about to fail must not have
+        // left a stale-looking interface file behind.
+        if (!writeTUIFile(Unit, Request.SourceName, Diags))
+            return finish(std::nullopt, false);
+
+        Codegen Cg(Opts);
+        Cg.setImportOwners(UnitSem.importOwners());
+        std::vector<const UnitNode*> UsedUnits;
+        for (const auto& U : Unit.InterfaceUses)
+            if (const UnitNode* UN = UnitSem.loadedUnit(toLower(U.Name)))
+                UsedUnits.push_back(UN);
+        for (const auto& U : Unit.ImplementationUses)
+            if (const UnitNode* UN = UnitSem.loadedUnit(toLower(U.Name)))
+                UsedUnits.push_back(UN);
+        if (!UsedUnits.empty()) Cg.setUsedUnits(std::move(UsedUnits));
+        if (Opts.Debug) Cg.setSourceManager(SrcMgr, MainFileID);
+
+        std::ostringstream OSS;
+        const bool EmitOk = Cg.emitUnit(Unit, OSS);
+        return finish(OSS.str(), EmitOk);
+    }
+
+    Sema Sem(Diags, Opts);
+    const bool Ok = Sem.check(*Program);
+    if (!Ok) return finish(std::nullopt, false);
+
+    // -dump-ast/-dump-vmt are read-only inspection modes that must return
+    // before any side effect (.pmi writing, codegen) normal compilation
+    // needs -- see frontendPC1Main's own history for the fuller reasoning
+    // (unchanged by this refactor).
+    if (Request.DumpAst) {
+        std::ostringstream OSS;
+        printAst(*Program, OSS);
+        return finish(OSS.str(), true);
+    }
+    if (Request.DumpVmt) {
+        std::ostringstream OSS;
+        printVmt(*Program, OSS);
+        return finish(OSS.str(), true);
+    }
+
+    // Write .pmi files for any module bodies found in this compilation unit.
+    // A no-op for pure-program files (no OwnedModules).
+    if (!Program->OwnedModules.empty()) {
+        const bool PmiOk = writePMIFiles(*Program, Request.SourceName, Diags);
+        if (!PmiOk) return finish(std::nullopt, false);
+    }
+
+    Codegen Cg(Opts);
+    Cg.setImportOwners(Sem.importOwners());
+    Cg.setLoadedInterfaces(Sem.loadedInterfaces());
+    // Turbo Tier 4, Cluster A item 1: hand CodeGen the already-loaded unit
+    // ASTs Sema parsed for this program's own 'uses', in the same order.
+    if (Opts.turbo() && !Program->Uses.empty()) {
+        std::vector<const UnitNode*> UsedUnits;
+        for (const auto& U : Program->Uses)
+            if (const UnitNode* UN = Sem.loadedUnit(toLower(U.Name)))
+                UsedUnits.push_back(UN);
+        Cg.setUsedUnits(std::move(UsedUnits));
+    }
+    if (Opts.Debug) Cg.setSourceManager(SrcMgr, MainFileID);
+
+    std::ostringstream OSS;
+    const bool EmitOk = Cg.emit(*Program, OSS);
+    return finish(OSS.str(), EmitOk);
 }
 
 } // namespace
@@ -1550,221 +1759,108 @@ int frontendPC1Main(int Argc, char *Argv[]) {
         }
     }
 
-    // Route output: a dump mode or LLVM IR, to stdout or a named file.  Moved
-    // above the Scanner/Parser/Sema pipeline so -dump-tokens (Scanner-only)
-    // and -dump-parse-tree (Scanner+Parser, no Sema) can both use it to stop
-    // the pipeline early, the same way -dump-ast already does further down.
-    auto withOutput = [&](auto action) -> int {
-        if (OutputFile.empty()) {
-            action(std::cout);
-            std::cout.flush();
-            return reportIfWriteFailed(std::cout, "") ? 1 : 0;
-        }
-        std::ofstream F(OutputFile);
-        if (!F) {
-            report(diag::err_cannot_open_output_file, {OutputFile});
-            return 1;
-        }
-        action(F);
-        F.close();
-        return reportIfWriteFailed(F, OutputFile) ? 1 : 0;
-    };
+    // Issue #179: everything from here down used to BE the pipeline --
+    // Scanner through Codegen, dump modes, .pmi/.tui publishing, and the
+    // final write to -o or stdout, all interleaved with report()/emitAll()
+    // calls as it went.  It is now compileRequest() (just above), shared
+    // with the public plang::compile(); this is "parse argv into a
+    // CompilationRequest, call compileRequest, format the CompilationResult
+    // back out" -- everything above this comment is unchanged, and every
+    // check compileRequest itself makes (the is-a-directory guard, Scanner/
+    // Parser/Sema failures, dump modes, .pmi/.tui publishing, Codegen's own
+    // emit/emitUnit) is unchanged in substance, just relocated.
+    //
+    // One disclosed, deliberate difference: the OLD -dump-tokens/
+    // -dump-parse-tree paths returned straight out of the withOutput(...)
+    // lambda without ever reaching an emitAll() call on a path that had no
+    // hasErrors() (i.e. Diags held only non-fatal diagnostics -- a Scanner/
+    // Parser warning, {$HINT}/{$WARNING} included), so such a diagnostic was
+    // silently never printed.  The single emitAll() call below now runs
+    // unconditionally for every path compileRequest can return through, so
+    // that previously-swallowed diagnostic is now printed on a dump-mode
+    // request just like it always was on a normal compile.  Argv parsing,
+    // exit codes, and the content of any diagnostic that was already being
+    // printed are unchanged; see
+    // test/Driver/PC1/dump-mode-no-longer-silently-drops-a-non-fatal-diagnostic.pas
+    // for the regression coverage this pins down.
+    CompilationRequest Request;
+    Request.Opts          = std::move(Opts);
+    Request.DiagOpts      = Diags.options();
+    Request.SourceName    = std::move(InputFile);
+    Request.DumpTokens    = DumpTokens;
+    Request.DumpParseTree = DumpParseTree;
+    Request.DumpAst       = DumpAst;
+    Request.DumpVmt       = DumpVmt;
 
-    // A path that exists but names a directory reads back empty through
-    // std::ifstream (issue #275 -- the front end's own entry point never got
-    // the guard issue #125/#134 added to the driver's): without this, Scanner
-    // below would construct successfully with no tokens at all, and every
-    // stage past it would report nothing but "expected 'program', got end of
-    // file" and the cascade that follows, instead of one diagnostic naming
-    // the real problem.
-    if (llvm::sys::fs::is_directory(InputFile)) {
-        report(diag::err_is_a_directory, {InputFile});
-        return 1;
-    }
+    const CompilationResult Result = compileRequest(Request, Diags, SrcMgr);
 
-    Scanner Sc(SrcMgr, InputFile, Diags, Opts);
-    if (Diags.hasErrors()) { emitAll(); return 1; }
-    // Captured before the move below takes Sc apart; -g's DIFile/DICompileUnit
-    // need it and have no other way to ask which buffer was the main one.
-    const FileID MainFileID = Sc.fileID();
-
-    if (DumpTokens) {
-        const int Rc = withOutput([&](std::ostream& Os) {
-            for (;;) {
-                const Token T = Sc.next();
-                const PresumedLoc PL = SrcMgr.getPresumedLoc(T.Loc);
-                Os << PL.Line << ':' << PL.Column << ": " << kindName(T.Kind)
-                   << " \"" << T.Lexeme << "\"\n";
-                if (T.Kind == TokenKind::Eof) break;
-            }
-        });
-        if (Diags.hasErrors()) { emitAll(); return 1; }
-        return Rc;
-    }
-
-    Parser P(std::move(Sc), Diags, Opts);
-    auto Program = P.parse();
-    if (!Program) { emitAll(); return 1; }
-
-    // Parser::switches() forwards to the Scanner it moved Sc into, which has
-    // now read the whole token stream (every `{$I file}`/`{$INCLUDE file}`
-    // it spliced in along the way included) and so has seen every `{$R+}`-
-    // style switch directive there is to see.  Opts itself is a plain value
-    // copied into Sc/P at their own construction above (see Scanner::Opts's
-    // own comment for why), so nothing below sees what Sc recorded unless
-    // this attaches it back on -- null for every ISO 7185/Extended Pascal
-    // compile, and for a Turbo one that never wrote a switch directive,
-    // which is exactly what keeps LangOptions::switchOn on its no-table fast
-    // path for both (SwitchTable.h's own "null means none" contract).
-    Opts.Switches = P.switches();
-
-    if (DumpParseTree)
-        return withOutput([&](std::ostream& Os) { printAst(*Program, Os); });
-
-    // Turbo Tier 4, Cluster A item 1 taught a standalone unit file to run
-    // through Sema for real (Sema::checkUnit).  Cluster A item 2 replaces
-    // item 1's own "type-checks, but stops there" placeholder
-    // (err_unit_compilation_not_yet_supported, since removed -- issue #308
-    // part (b): a diagnostic with no emit site is dead weight, not a useful
-    // historical record) with real separate-compilation codegen: publish
-    // this unit's own .tui (its
-    // INTERFACE, written back out as Pascal text -- buildTUIContent/
-    // writeTUIFile just above) and emit its object code (Codegen::emitUnit)
-    // exactly the way a program does just below, minus the parts (a `main`,
-    // .pmi writing) that only apply to one.
-    if (Program->BareUnit) {
-        const UnitNode& Unit = *Program->BareUnit;
-        Sema UnitSem(Diags, Opts);
-        bool UnitOk = UnitSem.checkUnit(Unit);
-        emitAll();
-        if (!UnitOk) return 1;
-        if (DumpAst)
-            return withOutput([&](std::ostream& Os) { printAst(*Program, Os); });
-        if (DumpVmt)
-            return withOutput([&](std::ostream& Os) { printVmt(*Program, Os); });
-
-        // Publish this unit's own .tui before codegen, mirroring the
-        // program path's own "publish interfaces, then emit" order just
-        // below -- a compile that is about to fail (codegen verification,
-        // an I/O error opening -o) must not have left a stale-looking but
-        // untrustworthy interface file behind, but writeTUIFile's own
-        // atomic write-temp-then-rename already makes ITS OWN publish
-        // failure impossible to observe as a corrupt file, so there is
-        // nothing further to roll back here the way writePMIFiles' own
-        // multi-module cleanup has to.
-        if (!writeTUIFile(Unit, InputFile)) return 1;
-
-        Codegen Cg(Opts);
-        // What this unit's own 'uses' clauses import, for CGLinkage's own
-        // mangling (importOwner/importLinkName) to resolve a call/reference
-        // to a used unit's export to the right pas_<unit>$<name> symbol --
-        // Sema::pushUnitUsesScopes now fills this in for a Turbo 'uses'
-        // exactly as Sema::processImports already does for EP's own
-        // 'import', see that function's own comment.
-        Cg.setImportOwners(UnitSem.importOwners());
-        // A unit may itself 'uses' other units, in both its interface and
-        // implementation sections (UnitNode::InterfaceUses/
-        // ImplementationUses) -- registered the same way a program's own
-        // top-level 'uses' is, just below, so this unit's own declarations
-        // can read a used unit's constants/variables and call its
-        // procedures exactly as a program compiled against it can.
-        std::vector<const UnitNode*> UsedUnits;
-        for (const auto& U : Unit.InterfaceUses)
-            if (const UnitNode* UN = UnitSem.loadedUnit(toLower(U.Name)))
-                UsedUnits.push_back(UN);
-        for (const auto& U : Unit.ImplementationUses)
-            if (const UnitNode* UN = UnitSem.loadedUnit(toLower(U.Name)))
-                UsedUnits.push_back(UN);
-        if (!UsedUnits.empty()) Cg.setUsedUnits(std::move(UsedUnits));
-        if (Opts.Debug) Cg.setSourceManager(SrcMgr, MainFileID);
-
-        if (OutputFile.empty()) {
-            const bool EmitOk = Cg.emitUnit(Unit, std::cout);
-            std::cout.flush();
-            if (EmitOk && reportIfWriteFailed(std::cout, "")) return 1;
-            return EmitOk ? 0 : 1;
-        }
-        std::ofstream F(OutputFile);
-        if (!F) {
-            report(diag::err_cannot_open_output_file, {OutputFile});
-            return 1;
-        }
-        const bool EmitOk = Cg.emitUnit(Unit, F);
-        F.close();
-        if (EmitOk && reportIfWriteFailed(F, OutputFile)) return 1;
-        return EmitOk ? 0 : 1;
-    }
-
-    Sema Sem(Diags, Opts);
-    bool Ok = Sem.check(*Program);
+    // emitAll() (defined above, alongside report()) already tracks how much
+    // of Diags has been printed so far via Flushed -- everything the argv
+    // parser itself already reported is already flushed, so this prints
+    // exactly what compileRequest just added, in report order, without
+    // reprinting anything.  Result.Diagnostics is not read here at all: it
+    // is Diags.diagnostics() as of when compileRequest returned, the same
+    // Diags this emitAll() already knows how to print incrementally from.
     emitAll();
-    if (!Ok) return 1;
 
-    // -dump-ast is a read-only inspection mode -- like -dump-tokens and
-    // -dump-parse-tree above, it must return before anything that writes to
-    // the source tree.  Checked before writePMIFiles below, not after: Sema
-    // has already run by this point (the AST dump reflects its results), but
-    // the .pmi side effect that normal compilation needs for later separate
-    // compilation must not happen just because someone asked to look at the
-    // AST.
-    if (DumpAst)
-        return withOutput([&](std::ostream& Os) { printAst(*Program, Os); });
-    // -dump-vmt: same read-only-inspection placement as -dump-ast just
-    // above, and for the identical reason -- Sema has already run (the VMT
-    // dump reflects its results), but must return before any side effect
-    // (.pmi writing, ...) that normal compilation needs.
-    if (DumpVmt)
-        return withOutput([&](std::ostream& Os) { printVmt(*Program, Os); });
+    // std::nullopt means compileRequest never reached an output-producing
+    // action at all (a Scanner/Parser/Sema/interface-publish failure) --
+    // frontendPC1Main's own -o, if any, must stay untouched, exactly as the
+    // original code's own early "return 1"s (before ever constructing an
+    // std::ofstream) always left it.
+    if (!Result.Output) return Result.Success ? 0 : 1;
 
-    // Write .pmi files for any module bodies found in this compilation unit.
-    // This is a no-op for pure-program files (no OwnedModules). A failure
-    // here has either already been diagnosed to stderr directly (an I/O
-    // failure) or reported through Diags (a declaration that could not be
-    // serialized into the interface, issue #397 -- emitAll below prints it);
-    // either way, let it fail the compile rather than report success for a
-    // module nothing can now import, or that some later, unrelated compile
-    // will fail importing with no clue why.
-    if (!Program->OwnedModules.empty()) {
-        const bool PmiOk = writePMIFiles(*Program, InputFile, Diags);
-        emitAll();
-        if (!PmiOk) return 1;
-    }
-
-    // withOutput opens the file then calls the action; we need emit's bool result.
-    Codegen Cg(Opts);
-    Cg.setImportOwners(Sem.importOwners());
-    Cg.setLoadedInterfaces(Sem.loadedInterfaces());
-    // Turbo Tier 4, Cluster A item 1: the narrow codegen support this item's
-    // own runtime shadowing test needs -- see Codegen::setUsedUnits's own
-    // comment for exactly what it does and does not cover.  Sem already
-    // parsed and checked every unit this program's own 'uses' clause named
-    // (Sema::loadUnitInterfaceExports); this just hands CodeGen the same
-    // already-loaded ASTs back, in the same 'uses' order, rather than having
-    // CodeGen re-find and re-parse the files itself.
-    if (Opts.turbo() && !Program->Uses.empty()) {
-        std::vector<const UnitNode*> UsedUnits;
-        for (const auto& U : Program->Uses)
-            if (const UnitNode* UN = Sem.loadedUnit(toLower(U.Name)))
-                UsedUnits.push_back(UN);
-        Cg.setUsedUnits(std::move(UsedUnits));
-    }
-    if (Opts.Debug) Cg.setSourceManager(SrcMgr, MainFileID);
+    // Write Result.Output to stdout or -o, exactly what withOutput used to
+    // do with its own action(Os) callback -- open-failure and write-failure
+    // are both still checked and reported the same two ways they always
+    // were (err_cannot_open_output_file through report(); a write failure
+    // through reportIfWriteFailed's own direct stderr write), just against
+    // a string already in hand instead of a callback invoked mid-pipeline.
+    //
+    // reportIfWriteFailed below now runs unconditionally, where the old code
+    // only called it when EmitOk was true. This is unobservable given
+    // Codegen::emit/emitUnit's own invariant (CodeGen.cpp): both write to
+    // their ostream argument exactly once, in the final few lines, strictly
+    // after their own llvm::verifyModule call succeeds -- every failure path
+    // (dbgInfo_->finalize(), verifyModule) returns false before that write,
+    // so a false EmitOk always means the destination stream was never
+    // touched at all, `F << *Result.Output` below writes an empty string
+    // (Result.Output is "" for that case, not std::nullopt -- see
+    // compileRequest's own finish() calls), and writing "" cannot itself set
+    // a stream's failbit. reportIfWriteFailed can therefore only ever return
+    // true here for a real I/O failure, on either path, old or new.
     if (OutputFile.empty()) {
-        const bool EmitOk = Cg.emit(*Program, std::cout);
+        std::cout << *Result.Output;
         std::cout.flush();
-        if (EmitOk && reportIfWriteFailed(std::cout, "")) return 1;
-        return EmitOk ? 0 : 1;
+        if (reportIfWriteFailed(std::cout, "")) return 1;
+        return Result.Success ? 0 : 1;
     }
-
     std::ofstream F(OutputFile);
     if (!F) {
         report(diag::err_cannot_open_output_file, {OutputFile});
         return 1;
     }
-    const bool EmitOk = Cg.emit(*Program, F);
+    F << *Result.Output;
     F.close();
-    if (EmitOk && reportIfWriteFailed(F, OutputFile)) return 1;
-    return EmitOk ? 0 : 1;
+    if (reportIfWriteFailed(F, OutputFile)) return 1;
+    return Result.Success ? 0 : 1;
+}
+
+CompilationResult compile(const CompilationRequest& Request) {
+    // A fresh SourceManager and DiagnosticsEngine per call -- unlike
+    // frontendPC1Main's own (kept alive across the call, and, for Diags,
+    // already possibly non-empty from its own argv parsing before
+    // compileRequest ever runs -- see compileRequest's own comment on why
+    // it takes Diags by reference rather than building one from
+    // Request.DiagOpts itself). compile() hands back plain Diagnostic
+    // structs with no SourceManager of their own to resolve Loc against
+    // (see CompilationResult::Diagnostics' own comment), so there is
+    // nothing for this call's own SourceManager to do once compileRequest
+    // returns; Request.DiagOpts is exactly the policy this fresh Diags
+    // starts from, with nothing already recorded on it.
+    SourceManager SrcMgr;
+    DiagnosticsEngine Diags(Request.DiagOpts);
+    return compileRequest(Request, Diags, SrcMgr);
 }
 
 } // namespace plang
