@@ -640,7 +640,7 @@ void Sema::checkDefiniteAssignment(const BlockNode& Block) {
             // storage was assigned, so it does not try, exactly the way it
             // already declines to for a bindable variable just above.
             if (Vg.AbsoluteExpr) continue;
-            if (!isSimpleValue(Sym->Ty.get())) continue;
+            if (!isSimpleValue(Sym->declaredType().get())) continue;
             FlowTracked_.insert(Key);
             if (HasInit) PreAssigned.insert(Key);
         }

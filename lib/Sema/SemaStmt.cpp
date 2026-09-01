@@ -466,9 +466,9 @@ void Sema::checkFor(const ForStmt& S) {
             // to fail below -- codegen never reaches a program Sema rejected,
             // and the field existing unconditionally here is simpler than
             // threading the same condition through twice.
-            S.VarType = Sym->Ty;
-            if (!Sym->Ty->isOrdinal())
-                error(S.Loc, diag::err_for_var_not_ordinal, {S.Var, Sym->Ty->Name});
+            S.VarType = Sym->declaredType();
+            if (!Sym->declaredType()->isOrdinal())
+                error(S.Loc, diag::err_for_var_not_ordinal, {S.Var, Sym->declaredType()->Name});
 
             // ISO §6.8.3.9: the control variable must be local to the block
             // containing the for-statement.  A with-statement and a `for ... in`
@@ -494,24 +494,25 @@ void Sema::checkFor(const ForStmt& S) {
     // agreeing with the variable both are being assigned into.  Skipped once
     // the variable itself is not ordinal (or unresolved): that is already
     // err_for_var_not_ordinal's diagnostic to give, not a second one here.
-    // Sym->Ty is only meaningful (and only non-null) for a Var/VarParam
-    // symbol -- see the comment above IsVar's declaration.  A Builtin/Proc
-    // control variable already got err_for_var_not_variable above and has
-    // a null Ty (isOrdinal() would null-deref); a Const/TypeAlias/EnumValue
-    // one already got the same diagnostic and has a non-null Ty describing
-    // the wrong thing.  Both are excluded here the same way IsVar excludes
-    // them above, so this block never dereferences a null Ty and never
-    // piles a second diagnostic onto err_for_var_not_variable.
+    // Sym->declaredType() is only meaningful (and only non-null) for a
+    // Var/VarParam symbol -- see the comment above IsVar's declaration.  A
+    // Builtin/Proc control variable already got err_for_var_not_variable
+    // above and has a null declared type (isOrdinal() would null-deref); a
+    // Const/TypeAlias/EnumValue one already got the same diagnostic and has
+    // a non-null declared type describing the wrong thing.  Both are
+    // excluded here the same way IsVar excludes them above, so this block
+    // never dereferences a null declared type and never piles a second
+    // diagnostic onto err_for_var_not_variable.
     const bool BoundsCheckApplies = Sym
         && (Sym->Kind == SymbolKind::Var || Sym->Kind == SymbolKind::VarParam)
-        && Sym->Ty->isOrdinal();
+        && Sym->declaredType()->isOrdinal();
     if (BoundsCheckApplies) {
-        if (!From->isError() && !isAssignCompatible(*Sym->Ty, *From))
+        if (!From->isError() && !isAssignCompatible(*Sym->declaredType(), *From))
             error(S.From->Loc, diag::err_for_bound_wrong_type,
-                  {From->Name, S.Var, Sym->Ty->Name});
-        if (!Limit->isError() && !isAssignCompatible(*Sym->Ty, *Limit))
+                  {From->Name, S.Var, Sym->declaredType()->Name});
+        if (!Limit->isError() && !isAssignCompatible(*Sym->declaredType(), *Limit))
             error(S.Limit->Loc, diag::err_for_bound_wrong_type,
-                  {Limit->Name, S.Var, Sym->Ty->Name});
+                  {Limit->Name, S.Var, Sym->declaredType()->Name});
     }
 
     // ISO §6.8.3.9: the body must not threaten the control variable (assign to it).
@@ -564,7 +565,7 @@ void Sema::checkProcForThreats(
 std::shared_ptr<Type> Sema::quietWithRecordType(const ExprNode* E) {
     if (auto* Id = llvm::dyn_cast<IdentExpr>(E)) {
         Symbol* Sym = Symtab.lookup(Id->Name);
-        return Sym ? Sym->Ty : nullptr;
+        return Sym ? Sym->declaredType() : nullptr;
     }
     if (auto* F = llvm::dyn_cast<FieldExpr>(E)) {
         auto RecTy = quietWithRecordType(F->Record.get());
