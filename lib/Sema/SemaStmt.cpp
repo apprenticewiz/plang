@@ -780,6 +780,18 @@ Symbol* Sema::protectedBaseOf(const ExprNode& Target) {
     for (;;) {
         if (auto* Ix = llvm::dyn_cast<IndexExpr>(Base)) { Base = Ix->Array.get(); continue; }
         if (auto* Fe = llvm::dyn_cast<FieldExpr>(Base)) { Base = Fe->Record.get(); continue; }
+        // TP-only, issue #711: TypeName(expr) used as a variable does not
+        // convert anything -- it reinterprets the OPERAND's own storage in
+        // place (isLValue's own comment, above in SemaExpr.cpp, has the full
+        // rule and the same-size requirement that makes it an lvalue at
+        // all). A write through the cast is therefore a write through
+        // whatever the operand itself traces back to, exactly the way a
+        // FieldExpr or IndexExpr reaches the same storage by a different
+        // spelling just above -- `rec2(r).c := 0` on a `const r: rec` was
+        // walking off the end of this loop at the TypeCastExpr node (it
+        // matched neither arm) and returning null, so the const/protected
+        // check below was skipped entirely rather than asked about `r`.
+        if (auto* Tc = llvm::dyn_cast<TypeCastExpr>(Base)) { Base = Tc->Operand.get(); continue; }
         break;
     }
     auto* Id = llvm::dyn_cast<IdentExpr>(Base);
@@ -1837,6 +1849,14 @@ void Sema::checkCallStmt(const CallStmt& S) {
                     error(S.Args[1]->Loc, diag::err_assign_mismatch,
                           {ElemTy->Name, SetTy->ElemType->Name});
                 }
+                // Issue #710: Include/Exclude mutate their first argument in
+                // place (SetOps::emitSetSingleton/emitSetBinary writes
+                // straight into its storage), the same untyped-target shape
+                // FillChar/Move's own X/Dest have below -- a `const`
+                // parameter's set is passed by reference (isStructuredForConstByRef),
+                // so this reached the caller's own storage with no diagnostic
+                // at all before this check existed.
+                checkNotProtected(*S.Args[0], S.Args[0]->Loc);
             }
             return;
         }
@@ -1865,6 +1885,14 @@ void Sema::checkCallStmt(const CallStmt& S) {
                     error(S.Args[0]->Loc, diag::err_var_param_needs_lvalue,
                           {std::string_view("1"), std::string_view(Lo)});
                 }
+                // Issue #710: Inc/Dec write x back in place.  A scalar const
+                // parameter is passed BY VALUE, so this only ever mutates the
+                // callee's own copy -- but the const contract still promises
+                // the parameter is read-only inside the body, and `fpc -Mtp`
+                // refuses it too, so the diagnostic belongs here regardless
+                // of whether the underlying storage happens to be shared
+                // with the caller's.
+                checkNotProtected(*S.Args[0], S.Args[0]->Loc);
             }
             // Inc/Dec are TP-only to begin with (Builtins.def's own
             // Dialects mask, already checked above via checkEPOnly), so --
@@ -1887,6 +1915,12 @@ void Sema::checkCallStmt(const CallStmt& S) {
             if (!XTy->isError() && !isLValue(*S.Args[0]))
                 error(S.Args[0]->Loc, diag::err_var_param_needs_lvalue,
                       {std::string_view("1"), std::string_view(Lo)});
+            // Issue #710: X is written directly (CGProcCall lowers this to
+            // llvm.memset over X's own address) -- a structured `const`
+            // parameter is passed by reference, so this reached and
+            // overwrote the CALLER's storage with no diagnostic at all
+            // before this check existed.
+            if (!XTy->isError()) checkNotProtected(*S.Args[0], S.Args[0]->Loc);
             if (!CountTy->isError() && !CountTy->isIntegral())
                 error(S.Args[1]->Loc, diag::err_numeric_argument, {Lo, CountTy->Name});
             // Value is a byte or a char in real Turbo Pascal -- both
@@ -1910,9 +1944,19 @@ void Sema::checkCallStmt(const CallStmt& S) {
             if (!SrcTy->isError() && !isLValue(*S.Args[0]))
                 error(S.Args[0]->Loc, diag::err_var_param_needs_lvalue,
                       {std::string_view("1"), std::string_view(Lo)});
+            // Source is only ever READ (llvm.memmove's source operand), so
+            // unlike Dest just below it needs no protected-ness check --
+            // reading through a const/protected parameter is exactly what
+            // it is for.
             if (!DstTy->isError() && !isLValue(*S.Args[1]))
                 error(S.Args[1]->Loc, diag::err_var_param_needs_lvalue,
                       {std::string_view("2"), std::string_view(Lo)});
+            // Issue #710: Dest is written directly (llvm.memmove's
+            // destination operand) -- a structured `const` parameter is
+            // passed by reference, so this reached and overwrote the
+            // CALLER's storage with no diagnostic at all before this check
+            // existed.
+            if (!DstTy->isError()) checkNotProtected(*S.Args[1], S.Args[1]->Loc);
             if (!CountTy->isError() && !CountTy->isIntegral())
                 error(S.Args[2]->Loc, diag::err_numeric_argument, {Lo, CountTy->Name});
             return;
@@ -1941,6 +1985,10 @@ void Sema::checkCallStmt(const CallStmt& S) {
                 else if (!isLValue(*S.Args[0]))
                     error(S.Args[0]->Loc, diag::err_var_param_needs_lvalue,
                           {std::string_view("1"), std::string_view(Lo)});
+                // Issue #710: s is mutated in place -- same untyped-target
+                // shape FillChar/Move have above, and the same missing
+                // check.
+                checkNotProtected(*S.Args[0], S.Args[0]->Loc);
             }
             if (!IT->isError() && !IT->isIntegral())
                 error(S.Args[1]->Loc, diag::err_numeric_argument, {Lo, IT->Name});
@@ -1962,6 +2010,10 @@ void Sema::checkCallStmt(const CallStmt& S) {
                 else if (!isLValue(*S.Args[1]))
                     error(S.Args[1]->Loc, diag::err_var_param_needs_lvalue,
                           {std::string_view("2"), std::string_view(Lo)});
+                // Issue #710: s is mutated in place; source (arg 0) is only
+                // ever read, so it needs no check of its own -- Move's own
+                // Source/Dest split above is the same asymmetry.
+                checkNotProtected(*S.Args[1], S.Args[1]->Loc);
             }
             if (!IT->isError() && !IT->isIntegral())
                 error(S.Args[2]->Loc, diag::err_numeric_argument, {Lo, IT->Name});
@@ -1978,6 +2030,8 @@ void Sema::checkCallStmt(const CallStmt& S) {
                 else if (!isLValue(*S.Args[0]))
                     error(S.Args[0]->Loc, diag::err_var_param_needs_lvalue,
                           {std::string_view("1"), std::string_view(Lo)});
+                // Issue #710: s's length byte is mutated in place.
+                checkNotProtected(*S.Args[0], S.Args[0]->Loc);
             }
             if (!LT->isError() && !LT->isIntegral())
                 error(S.Args[1]->Loc, diag::err_numeric_argument, {Lo, LT->Name});
@@ -2010,6 +2064,9 @@ void Sema::checkCallStmt(const CallStmt& S) {
                 else if (!isLValue(*S.Args[1]))
                     error(S.Args[1]->Loc, diag::err_var_param_needs_lvalue,
                           {std::string_view("2"), std::string_view(Lo)});
+                // Issue #710: s is the formatted-output destination, written
+                // in place.
+                checkNotProtected(*S.Args[1], S.Args[1]->Loc);
             }
             return;
         }
