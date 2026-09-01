@@ -2933,7 +2933,13 @@ std::shared_ptr<Type> Sema::checkInheritedCall(
         // of parameters" experimentally confirms it rejects too) reaches
         // CodeGen, which forwards the wrong-shaped LLVM value into the
         // ancestor's own parameter slot -- an LLVM IR verifier failure, not
-        // a clean diagnostic.
+        // a clean diagnostic.  Issue #723 (a gap in #616's own fix): IsConst
+        // has to be compared too, not just IsVar/IsUntyped/type -- for a
+        // structured (record/array/set) parameter it changes the LLVM ABI
+        // shape (isStructuredForConstByRef, CodeGenProcs.cpp), so a static
+        // hide differing only in a structured parameter's const-ness passed
+        // this check before and reached CodeGen as a struct-vs-pointer
+        // verifier failure instead of this same clean diagnostic.
         const Symbol* OwnSym = Symtab.lookup(objectMethodKey(OwnerTy.Name, CurrentProc->Name));
         bool SignatureOk = OwnSym != nullptr
             && OwnSym->IsFunction == Indirect.IsFunction
@@ -2941,7 +2947,8 @@ std::shared_ptr<Type> Sema::checkInheritedCall(
         for (size_t I = 0; SignatureOk && I < OwnSym->Params.size(); ++I) {
             const auto& P = OwnSym->Params[I];
             const auto& Q = Indirect.Params[I];
-            if (P.IsVar != Q.IsVar || P.IsUntyped != Q.IsUntyped) { SignatureOk = false; break; }
+            if (P.IsVar != Q.IsVar || P.IsUntyped != Q.IsUntyped
+                    || P.IsConst != Q.IsConst) { SignatureOk = false; break; }
             if (P.IsUntyped) continue;
             if (!P.Ty || !Q.Ty || !sameParamType(P.Ty, Q.Ty)) SignatureOk = false;
         }
