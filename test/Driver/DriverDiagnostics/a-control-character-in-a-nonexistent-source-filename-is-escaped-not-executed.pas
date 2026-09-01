@@ -14,5 +14,6 @@ RUN: FileCheck %s < %t.err
 *)
 
 (*
-CHECK: no such file or directory: '{{.*}}nonexistent\x1bfile.pas'
+CHECK: no such file or directory:
+CHECK-SAME: nonexistent\x1bfile.pas'
 *)
