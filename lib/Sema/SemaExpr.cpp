@@ -2705,21 +2705,96 @@ std::shared_ptr<Type> Sema::checkInheritedCallExpr(const InheritedCallExpr& E) {
                               E.ResolvedMethod, E.ImplementingType, E.ImplementingModule);
 }
 
+/// The ordinal index type of \p T's outermost dimension, for an actual that
+/// may conform to a conformant-array schema: a plain Array's IndexType, or
+/// (when relaying an already-conformant parameter to another one) a
+/// ConformantArray's own first bound's declared type.  Null for anything
+/// else, or when that dimension's type never resolved.  Shared by
+/// conformantStructuralWalk and its caller's diagnostic, so the two cannot
+/// disagree on what "the actual's index type" means.
+static std::shared_ptr<Type> outerIndexTypeOf(const Type& T) {
+    if (T.Kind == TypeKind::Array) return T.IndexType;
+    if (T.Kind == TypeKind::ConformantArray && !T.ConformantBounds.empty())
+        return T.ConformantBounds[0].OrdType;
+    return nullptr;
+}
+
+/// Issue #307: the shared structural walk behind both isConformable and
+/// congruousConformant -- see this method's own declaration (Sema.h) for the
+/// full account of what \p Strict changes and why the two relations must
+/// stay distinct rather than collapse into one predicate.  \p L is always a
+/// ConformantArray (the schema, in either relation); \p R is the same for
+/// congruity, or the candidate Array/ConformantArray actual for conformance.
+/// Callers are responsible for the entry-guard Kind checks -- this only
+/// walks the recursive shape once inside a matching pair.
+bool Sema::conformantStructuralWalk(const Type& L, const Type& R, bool Strict) const {
+    // ISO §6.7.3.8 d): a packed conformant-array-form requires a packed
+    // actual, and an unpacked one requires an unpacked actual.  Congruity has
+    // no such rule -- two schema headings denote the same type regardless of
+    // packedness -- so this only applies to conformance.
+    if (!Strict && L.Packed != R.Packed) return false;
+
+    if (Strict) {
+        // EP §6.7.3.7: the bound variable names are local to each heading,
+        // exactly as parameter names are, so only the index ordinal types
+        // (and how many of them there are) count.
+        if (L.ConformantBounds.size() != R.ConformantBounds.size()) return false;
+        for (size_t I = 0; I < L.ConformantBounds.size(); ++I)
+            if (!isIdenticalType(L.ConformantBounds[I].OrdType,
+                                 R.ConformantBounds[I].OrdType))
+                return false;
+    } else if (!L.ConformantBounds.empty()) {
+        // ISO §6.7.3.8 a): the index-type of the actual has to be
+        // *compatible* with the ordinal-type-name of this dimension's
+        // index-type-specification -- e.g. a `char` schema does not conform
+        // to an `integer`-indexed actual even when the element types agree.
+        // isAssignCompatible, asked with the schema's ordinal type as Dst, is
+        // this codebase's stand-in for §6.4.5 "compatible types" between two
+        // ordinal types (same type, or subranges sharing a host type) -- the
+        // plain-Array index check elsewhere relies on the same equivalence.
+        const auto& FormalOrdTy = L.ConformantBounds[0].OrdType;
+        auto ActualIdxTy = outerIndexTypeOf(R);
+        if (FormalOrdTy && !FormalOrdTy->isError()
+                && ActualIdxTy && !ActualIdxTy->isError()
+                && !isAssignCompatible(*FormalOrdTy, *ActualIdxTy))
+            return false;
+    }
+
+    // An unresolved element type is an error-recovery state: conformance
+    // treats it permissively (true, same as every other suppress-cascades
+    // shortcut in this file), congruity treats it as a mismatch (false).
+    if (!L.ElemType || !R.ElemType) return !Strict;
+    // EP §6.7.3.7: congruity requires the SAME kind of element on both
+    // sides (checked up front, same as the original hand-written walk);
+    // conformance has no such blanket requirement -- isAssignCompatible
+    // below judges that on its own terms -- except when about to recurse
+    // into another dimension, where the recursive guard just below stands
+    // in for it.
+    if (Strict && L.ElemType->Kind != R.ElemType->Kind) return false;
+    // ISO §6.6.3.8 / EP §6.7.3.7: the element type of the other side agrees
+    // in its turn when this side's is itself another schema, which is how a
+    // parameter or heading of more than one dimension is written.
+    if (L.ElemType->Kind == TypeKind::ConformantArray) {
+        // Congruity already knows R.ElemType has the same Kind as
+        // L.ElemType (checked just above); conformance does not, so the
+        // recursive call needs its own entry guard -- the same one
+        // isConformable's top-level wrapper applies to its own Actual --
+        // to reject an actual with fewer dimensions than the schema.
+        if (!Strict && R.ElemType->Kind != TypeKind::Array
+                && R.ElemType->Kind != TypeKind::ConformantArray)
+            return false;
+        return conformantStructuralWalk(*L.ElemType, *R.ElemType, Strict);
+    }
+    return Strict ? isIdenticalType(L.ElemType, R.ElemType)
+                  : isAssignCompatible(*L.ElemType, *R.ElemType);
+}
+
 /// EP §6.7.3.7: are two conformant array schemas the same one?
 ///
 /// The bound variable names are local to each heading, exactly as parameter
 /// names are, so only the index ordinal types and the element type count.
 bool Sema::congruousConformant(const Type& A, const Type& B) const {
-    if (A.ConformantBounds.size() != B.ConformantBounds.size()) return false;
-    for (size_t I = 0; I < A.ConformantBounds.size(); ++I)
-        if (!isIdenticalType(A.ConformantBounds[I].OrdType,
-                             B.ConformantBounds[I].OrdType))
-            return false;
-    if (!A.ElemType || !B.ElemType) return false;
-    if (A.ElemType->Kind != B.ElemType->Kind) return false;
-    if (A.ElemType->Kind == TypeKind::ConformantArray)
-        return congruousConformant(*A.ElemType, *B.ElemType);
-    return isIdenticalType(A.ElemType, B.ElemType);
+    return conformantStructuralWalk(A, B, /*Strict=*/true);
 }
 
 /// Do two formal parameters, written in two different headings, denote the
@@ -2884,20 +2959,6 @@ std::shared_ptr<Type> Sema::checkRoutineValue(const IdentExpr& Id) {
     T->RetType = Sym->ReturnType;
     T->Name    = describeCallable(*T);
     return T;
-}
-
-/// The ordinal index type of \p T's outermost dimension, for an actual that
-/// may conform to a conformant-array schema: a plain Array's IndexType, or
-/// (when relaying an already-conformant parameter to another one) a
-/// ConformantArray's own first bound's declared type.  Null for anything
-/// else, or when that dimension's type never resolved.  Shared by
-/// isConformable and its caller's diagnostic, so the two cannot disagree on
-/// what "the actual's index type" means.
-static std::shared_ptr<Type> outerIndexTypeOf(const Type& T) {
-    if (T.Kind == TypeKind::Array) return T.IndexType;
-    if (T.Kind == TypeKind::ConformantArray && !T.ConformantBounds.empty())
-        return T.ConformantBounds[0].OrdType;
-    return nullptr;
 }
 
 void Sema::checkCallArgs(const Symbol& Sym, SourceLocation CallLoc,
@@ -3184,33 +3245,7 @@ bool Sema::isConformable(const Type& Formal, const Type& Actual) const {
     if (Actual.Kind != TypeKind::Array
             && Actual.Kind != TypeKind::ConformantArray)
         return false;
-    // ISO §6.7.3.8 d): a packed conformant-array-form requires a packed
-    // actual, and an unpacked one requires an unpacked actual -- checked at
-    // every nesting level this function recurses into, same as a) below.
-    if (Formal.Packed != Actual.Packed) return false;
-    // ISO §6.7.3.8 a): the index-type of the actual has to be *compatible*
-    // with the ordinal-type-name of this dimension's index-type-specification
-    // -- e.g. a `char` schema does not conform to an `integer`-indexed actual
-    // even when the element types agree.  isAssignCompatible, asked with the
-    // schema's ordinal type as Dst, is this codebase's stand-in for §6.4.5
-    // "compatible types" between two ordinal types (same type, or subranges
-    // sharing a host type) -- the plain-Array index check above relies on the
-    // same equivalence.
-    if (!Formal.ConformantBounds.empty()) {
-        const auto& FormalOrdTy = Formal.ConformantBounds[0].OrdType;
-        auto ActualIdxTy = outerIndexTypeOf(Actual);
-        if (FormalOrdTy && !FormalOrdTy->isError()
-                && ActualIdxTy && !ActualIdxTy->isError()
-                && !isAssignCompatible(*FormalOrdTy, *ActualIdxTy))
-            return false;
-    }
-    if (!Formal.ElemType || !Actual.ElemType) return true;
-    // ISO §6.6.3.8: the element type of the actual conforms in its turn when
-    // the formal's is another schema, which is how a parameter of more than
-    // one dimension is written.
-    if (Formal.ElemType->Kind == TypeKind::ConformantArray)
-        return isConformable(*Formal.ElemType, *Actual.ElemType);
-    return isAssignCompatible(*Formal.ElemType, *Actual.ElemType);
+    return conformantStructuralWalk(Formal, Actual, /*Strict=*/false);
 }
 
 // Issue #406: this walks Formal/Actual in lock-step with isConformable above
