@@ -1502,6 +1502,6 @@ void CGProcCall::emitUserProcCall(const CallStmt& s) {
 
     // Issue #299 Phase 1: the per-argument marshalling loop shared with
     // CGFuncCall::emitUserFuncCall/emitMethodCallExpr -- see CGCallMarshal.h.
-    Marshal.marshalArgs(mangledName, callee, s.Args, args);
+    Marshal.marshalArgs(mangledName, callee->getFunctionType(), s.Args, args);
     B.CreateCall(callee, args);
 }

@@ -10,6 +10,7 @@
 #include "plang/Basic/StringUtil.h"
 #include "plang/Sema/Type.h"
 
+#include "CGCallMarshal.h"
 #include "CodegenICE.h"
 
 using namespace plang;
@@ -304,6 +305,54 @@ void ClosureAndCallABI::pushProcParamArgs(std::vector<llvm::Value*>& args,
     args.push_back(frame ? frame : llvm::Constant::getNullValue(PtrTy));
 }
 
+namespace {
+// Issue #299 Phase 2: everything CGCallMarshal::marshalArgs needs to know
+// about one flat AST argument position, computed directly from a
+// ProcedureTypeNode's own ParamGroup list instead of looked up from
+// Codegen::Impl's paramMeta_ by mangled name -- there is no mangled name
+// here, only the procedural-parameter/-variable's own declared signature,
+// already in hand.  Same five facts ParamMeta (CodeGenImpl.h) records for a
+// real callee, just computed on the spot rather than read back.
+struct FlatProcParamMeta {
+    const ProcedureTypeNode* procType{nullptr};
+    unsigned                 schemaDiscCount{0};
+    size_t                   conformantDims{0};
+    int64_t                  setBase{0};
+    bool                     byRef{false};
+};
+
+/// Flattens \p params (a procedural type's own parameter groups) into one
+/// FlatProcParamMeta per formal name, in declaration order -- so index i
+/// answers exactly the same question paramMeta_[mangledName][i] would for a
+/// real callee's i-th AST argument position.
+std::vector<FlatProcParamMeta> flattenProcParams(
+        const std::vector<ParamGroup>& params,
+        std::function<size_t(const TypeNode*)> ConformantDimCount,
+        std::function<unsigned(const TypeNode*)> SchemaParamDiscCount) {
+    std::vector<FlatProcParamMeta> meta;
+    for (const auto& pg : params) {
+        // Turbo untyped parameter: pg.Type is deliberately null; dyn_cast
+        // must be the null-safe _or_null form (ParamGroup::Type's own
+        // comment).
+        auto*          inner = llvm::dyn_cast_or_null<ProcedureTypeNode>(pg.Type.get());
+        const size_t   cdims = ConformantDimCount(pg.Type.get());
+        const unsigned discs = SchemaParamDiscCount(pg.Type.get());
+        // Same rule CodeGenProcs.cpp's own plain-parameter arm uses to fill
+        // paramMeta_'s setBase for a real callee (0 for anything that is not
+        // itself a Set-typed parameter -- alignSetArg's own type guard makes
+        // that value inert whenever the actual isn't a set anyway, so this
+        // is safe to compute unconditionally rather than only for the
+        // plain-value arm below).
+        const int64_t sb = (pg.Type && pg.Type->ResolvedType
+                             && pg.Type->ResolvedType->Kind == TypeKind::Set)
+                                ? setOffsetOf(*pg.Type->ResolvedType) : 0;
+        for (size_t k = 0; k < pg.Names.size(); ++k)
+            meta.push_back(FlatProcParamMeta{inner, discs, cdims, sb, pg.IsVar});
+    }
+    return meta;
+}
+} // namespace
+
 llvm::Value*
 ClosureAndCallABI::emitProcParamCall(const VarEntry& ve,
                                       std::span<const std::unique_ptr<ExprNode>> argExprs) {
@@ -316,53 +365,45 @@ ClosureAndCallABI::emitProcParamCall(const VarEntry& ve,
     std::vector<llvm::Value*> args;
     args.push_back(frame);
 
-    size_t flat = 0;
-    for (const auto& pg : ve.procType->Params) {
-        // Turbo untyped parameter: pg.Type is deliberately null; dyn_cast
-        // must be the null-safe _or_null form (ParamGroup::Type's own
-        // comment).
-        auto*          inner = llvm::dyn_cast_or_null<ProcedureTypeNode>(pg.Type.get());
-        const size_t   cdims = conformantDimCount(pg.Type.get());
-        const unsigned discs = schemaParamDiscCount(pg.Type.get());
+    // Issue #299 Phase 2: build this call's own transient ParamMeta-shaped
+    // vector (flattenProcParams, just above) and feed CGCallMarshal's shared
+    // per-argument marshalling core with it -- the same core
+    // CGProcCall::emitUserProcCall/CGFuncCall::emitUserFuncCall/
+    // emitMethodCallExpr already share (Phase 1) -- instead of maintaining a
+    // second, independent copy of the same cdims/discs/inner/IsVar dispatch
+    // chain here.  The five lookup callbacks below all close over `meta` and
+    // ignore the mangledName argument marshalArgs passes them (there is none
+    // to give); ExprIsVarStr/ExprIsShortStr are unused stubs -- this call
+    // never invokes CGCallMarshal::spillStructReturnIfNeeded (the return
+    // spill just below still uses its own pre-existing check, which is about
+    // ve.procType->ReturnType, not an ExprNode's), so nothing ever reads
+    // them.
+    const std::vector<FlatProcParamMeta> meta = flattenProcParams(
+        ve.procType->Params,
+        [](const TypeNode* t){ return conformantDimCount(t); },
+        [this](const TypeNode* t){ return schemaParamDiscCount(t); });
 
-        for (size_t k = 0; k < pg.Names.size(); ++k, ++flat) {
-            if (flat >= argExprs.size()) break;
-            const auto& a = *argExprs[flat];
-            if (cdims)          pushConformantArgs(args, a, cdims);
-            else if (discs)     Schema.pushSchemaArgs(args, a, discs);
-            else if (inner)     pushProcParamArgs(args, a, *inner);
-            else if (pg.IsVar)  args.push_back(EmitLValue(a));
-            else {
-                // The two direct call paths (CGProcCall.cpp, CGFuncCall.cpp)
-                // look the callee's own declared set base up by mangled name
-                // through ParamSetBaseOf/paramMeta_ and route a plain-value
-                // set argument through Sets.alignSetArg with it, so the
-                // argument lands in the callee's own window rather than
-                // arriving with its bits carried across unmoved.  This path
-                // has no mangled callee to look paramMeta_ up by -- the
-                // formal is *this* ProcedureTypeNode's own pg.Type, already
-                // in hand -- but it is exactly the same declared type
-                // paramMeta_ would have been recorded from (CodeGenProcs.cpp),
-                // so deriving the base from it directly is equivalent, not a
-                // separate rule to keep in sync.
-                std::optional<int64_t> destSetBase;
-                // pg.Type is null only for a Turbo untyped parameter, which
-                // is always IsVar (checked against fpc -Mtp) and so never
-                // reaches this plain-value 'else' branch at all -- guarded
-                // anyway rather than relying on that invariant silently.
-                if (pg.Type && pg.Type->ResolvedType
-                    && pg.Type->ResolvedType->Kind == TypeKind::Set)
-                    destSetBase = setOffsetOf(*pg.Type->ResolvedType);
-                args.push_back(Sets.alignSetArg(
-                    EmitCallArg(a,
-                        args.size() < fnTy->getNumParams()
-                            ? fnTy->getParamType(args.size())
-                            : nullptr,
-                        /*byRef=*/false),
-                    a, destSetBase));
-            }
-        }
-    }
+    CGCallMarshal marshal(B, *this, Schema, Sets, StrCall,
+        CreateEntryAlloca,
+        [&meta](const std::string&, size_t i) -> const ProcedureTypeNode* {
+            return i < meta.size() ? meta[i].procType : nullptr;
+        },
+        [&meta](const std::string&, size_t i) {
+            return i < meta.size() && meta[i].byRef;
+        },
+        [&meta](const std::string&, size_t i) -> size_t {
+            return i < meta.size() ? meta[i].conformantDims : 0;
+        },
+        [&meta](const std::string&, size_t i) -> std::optional<int64_t> {
+            return i < meta.size() ? std::optional<int64_t>(meta[i].setBase)
+                                    : std::nullopt;
+        },
+        [&meta](const std::string&, size_t i) -> unsigned {
+            return i < meta.size() ? meta[i].schemaDiscCount : 0;
+        },
+        [](const ExprNode&){ return false; },
+        [](const ExprNode&){ return false; });
+    marshal.marshalArgs(/*mangledName=*/"", fnTy, argExprs, args);
 
     auto* call = B.CreateCall(fnTy, fn, args);
     if (fnTy->getReturnType()->isVoidTy()) return nullptr;

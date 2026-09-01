@@ -205,7 +205,7 @@ void Codegen::Impl::init(const std::string& progName) {
     // CodeGenTypes.cpp).
     closureAbi_ = std::make_unique<ClosureAndCallABI>(ctx, *mod, builder,
         *schemaAccess_, *schemaLayout_, *cgTypes_, *symTab_, *linkage_, *dbgInfo_,
-        *setOps_,
+        *setOps_, *strCallMarshal_,
         i32Ty, i64Ty, ptrTy,
         [this](const ExprNode& e){ return emitLValue(e); },
         [this](const ExprNode& e, llvm::Type* t, bool byRef){
@@ -324,13 +324,19 @@ void Codegen::Impl::init(const std::string& progName) {
     // procCall_/funcCall_'s direct-call-shaped sites (emitUserProcCall/
     // emitUserFuncCall/emitMethodCallExpr) -- built here, before either, so
     // both can hold a plain reference to it.  ProcParamArg/ParamIsByRef/
-    // ConformantDimsOf/ParamSetBaseOf/ExprIsVarStr/ExprIsShortStr are the
-    // same narrow closures procCall_/funcCall_ themselves already bridge
-    // (see their own construction, just below) -- CGCallMarshal needs its
-    // own independent copies for the same "no shared-mutable-closure-state"
-    // reason every other multiply-bridged accessor in this file already
-    // gets (ConformantDimsOf/ParamSetBaseOf's own comment on procCall_,
-    // just below, is the precedent).
+    // ConformantDimsOf/ParamSetBaseOf/SchemaArgDiscsOf/ExprIsVarStr/
+    // ExprIsShortStr are the same narrow closures procCall_/funcCall_
+    // themselves already bridge (see their own construction, just below) --
+    // CGCallMarshal needs its own independent copies for the same "no
+    // shared-mutable-closure-state" reason every other multiply-bridged
+    // accessor in this file already gets (ConformantDimsOf/ParamSetBaseOf's
+    // own comment on procCall_, just below, is the precedent).  This
+    // instance's five lookup callbacks are all paramMeta_-backed, keyed by a
+    // real mangled callee name; issue #299 Phase 2 gives
+    // ClosureAndCallABI::emitProcParamCall its OWN separate CGCallMarshal
+    // instance (built fresh per call, in ClosureAndCallABI.cpp) with the
+    // same five callbacks instead bound to a transient, per-call vector --
+    // this one is unaffected by that reuse.
     callMarshal_ = std::make_unique<CGCallMarshal>(builder,
         *closureAbi_, *schemaAccess_, *setOps_, *strCallMarshal_,
         [this](llvm::Type* t, const std::string& n){ return createEntryAlloca(t, n); },
@@ -348,6 +354,8 @@ void Codegen::Impl::init(const std::string& progName) {
             if (it == paramMeta_.end() || astArgIdx >= it->second.size()) return std::nullopt;
             return it->second[astArgIdx].setBase;
         },
+        [this](const std::string& mangledName, size_t astArgIdx){
+            return schemaAccess_->schemaArgDiscs(mangledName, astArgIdx); },
         [](const ExprNode& e){ return exprIsVarStr(e); },
         [](const ExprNode& e){ return exprIsShortStr(e); });
     // The required-procedure dispatch chain and user-declared procedure

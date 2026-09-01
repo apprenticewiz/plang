@@ -41,6 +41,8 @@ class Function;
 class AllocaInst;
 }
 
+class StringCallMarshalling;
+
 namespace plang {
 struct ExprNode;
 struct ProcedureTypeNode;
@@ -54,7 +56,7 @@ public:
         llvm::LLVMContext& Ctx, llvm::Module& Mod, llvm::IRBuilder<>& B,
         SchemaAccess& Schema, SchemaLayoutEngine& SchemaLayout, CGTypes& Types,
         CGSymbolTable& SymTab, CGLinkage& Linkage, CGDebugInfo& DbgInfo,
-        SetOps& Sets,
+        SetOps& Sets, StringCallMarshalling& StrCall,
         llvm::IntegerType* I32Ty, llvm::IntegerType* I64Ty, llvm::PointerType* PtrTy,
         std::function<llvm::Value*(const plang::ExprNode&)> EmitLValue,
         std::function<llvm::Value*(const plang::ExprNode&, llvm::Type*, bool)> EmitCallArg,
@@ -63,7 +65,7 @@ public:
         std::function<bool(const std::string&)> IsNestedFunction)
         : Ctx(Ctx), Mod(Mod), B(B), Schema(Schema), SchemaLayout(SchemaLayout),
           Types(Types), SymTab(SymTab), Linkage(Linkage), DbgInfo(DbgInfo),
-          Sets(Sets),
+          Sets(Sets), StrCall(StrCall),
           I32Ty(I32Ty), I64Ty(I64Ty), PtrTy(PtrTy),
           EmitLValue(std::move(EmitLValue)), EmitCallArg(std::move(EmitCallArg)),
           CreateEntryAlloca(std::move(CreateEntryAlloca)),
@@ -123,6 +125,12 @@ private:
     CGLinkage& Linkage;
     CGDebugInfo& DbgInfo;
     SetOps& Sets;
+    /// Issue #299 Phase 2: emitProcParamCall builds its own transient
+    /// CGCallMarshal per call (see its own comment) rather than sharing
+    /// Codegen::Impl's callMarshal_, so it needs this reference directly,
+    /// the same way it already holds Schema/Sets rather than going through
+    /// a closure for them.
+    StringCallMarshalling& StrCall;
     llvm::IntegerType* I32Ty;
     llvm::IntegerType* I64Ty;
     llvm::PointerType* PtrTy;
