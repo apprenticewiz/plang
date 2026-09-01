@@ -1666,8 +1666,22 @@ std::optional<Type::ExtentForm> Sema::buildExtentForm(
     // checkExpr's own "nested too deeply" has already fired by the time this
     // could ever hit the ceiling.  Declining quietly here is what stops the
     // second, unguarded walk from being the one that exhausts the stack.
-    if (ExprDepth >= MaxExprDepth) return std::nullopt;
+    //
+    // Issue #556: also shares checkExpr's stackNearlyExhausted headroom check
+    // (StackBaseline, Sema.h) for the same reason checkExpr itself needs one
+    // -- a real stack can run out before ExprDepth reaches MaxExprDepth under
+    // a small platform budget. Unlike the count check, headroom can be
+    // exhausted on the very first activation, so DepthGuard is constructed
+    // unconditionally, before either check, exactly as checkExpr's own call
+    // site (SemaExpr.cpp) does and its comment explains; this still declines
+    // quietly rather than diagnosing (checkExpr already reported, if this
+    // expression is the one that reached checkExpr's own ceiling first --
+    // and if some caller ever reaches this deep WITHOUT going through
+    // checkExpr first, declining quietly is still safe: every constBound
+    // caller already handles "could not fold" as a legitimate outcome).
     ExprDepthScope DepthGuard(ExprDepth, ExprDepthLimitHit);
+    if (ExprDepth > MaxExprDepth || stackNearlyExhausted(StackBaseline))
+        return std::nullopt;
 
     // A discriminant becomes its INDEX.  Checked before folding, because the
     // body is resolved with the discriminants bound to a probe value and
@@ -1726,8 +1740,14 @@ std::optional<int64_t> Sema::constBound(const ExprNode& E) const {
     // diagnostic of its own, is enough -- every caller of constBound on an
     // expression this deep has already run it through checkExpr first,
     // which is where "nested too deeply" is reported.
-    if (ExprDepth >= MaxExprDepth) return std::nullopt;
+    //
+    // Issue #556: also shares checkExpr's stackNearlyExhausted headroom
+    // check; see buildExtentForm's own comment just above (identical
+    // reasoning, including why DepthGuard must be constructed
+    // unconditionally here too).
     ExprDepthScope DepthGuard(ExprDepth, ExprDepthLimitHit);
+    if (ExprDepth > MaxExprDepth || stackNearlyExhausted(StackBaseline))
+        return std::nullopt;
 
     // Whether THIS fold read a schema discriminant, not whether anything
     // earlier did.

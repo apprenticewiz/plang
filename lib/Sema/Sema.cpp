@@ -35,7 +35,16 @@ using namespace plang;
 
 Sema::Sema(DiagnosticsEngine& Diags, LangOptions Opts)
     : Opts  (Opts),
-      Diags (Diags)
+      Diags (Diags),
+      // Reference point checkExpr/constBound/buildExtentForm's own stack-
+      // headroom check (SemaExpr.cpp/SemaType.cpp, issue #556) measures
+      // usage from -- see StackBaseline's own comment (Sema.h) for why this
+      // needs to be a live measurement rather than a term-count constant,
+      // the same reasoning Parser::StackBaseline is captured for. Captured
+      // here, at construction, rather than lazily on checkExpr's first call,
+      // so it reflects the shallowest point this Sema instance is ever
+      // active at.
+      StackBaseline(captureStackBaseline())
     // TyInt, TyReal, etc. are reference members bound to Ctx_ singletons;
     // Ctx_ is default-constructed above, so the singletons are already live.
 {}

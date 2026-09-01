@@ -5,6 +5,7 @@
 #include "plang/Basic/Diagnostic.h"
 #include "plang/Basic/LangOptions.h"
 #include "plang/Basic/ModuleImports.h"
+#include "plang/Basic/StackHeadroom.h"
 #include "plang/Sema/SymbolTable.h"
 #include "plang/Sema/Type.h"
 
@@ -99,6 +100,15 @@ private:
     SymbolTable              Symtab;
     DiagnosticsEngine&       Diags; // shared with Scanner and Parser
 
+    // Reference point the stack-headroom check just below (StackBaseline's
+    // own use, paired with ExprDepth's ceiling) measures usage from -- the
+    // same role Parser::StackBaseline plays for Parser::parsePower's own
+    // guard (Parser.h/Parser.cpp, issue #550/#551/PR #555). Captured once,
+    // here conceptually (see the constructor, Sema.cpp) at Sema construction,
+    // rather than lazily on checkExpr's first call, so it reflects the
+    // shallowest point this Sema instance is ever active at.
+    std::uintptr_t            StackBaseline;
+
     // Live activations of checkExpr.  Every recursive re-entry into expression
     // checking -- a binary/unary operand, a call argument, an index/field/
     // deref base -- funnels through checkExpr, so bounding activations there
@@ -136,14 +146,33 @@ private:
     // crashing a few thousand terms in), while no legitimate Pascal
     // expression -- handwritten or reasonably generated -- nests anywhere
     // close to this deep.
+    //
+    // That threshold assumes a normal-sized (multi-MiB) stack, though: under
+    // an unusually small but real budget (a constrained container, a
+    // hardened deployment, a fuzzing worker -- getrlimit(RLIMIT_STACK) well
+    // below the 8MB default), 1000 live checkExpr/checkBinary/constBound/
+    // buildExtentForm activations can overflow the REAL C++ stack before
+    // this counter ever reaches MaxExprDepth (issue #556 -- confirmed via
+    // gdb: a 1000-term flat `+` chain crashes inside checkBinary/checkExpr's
+    // mutual recursion under `ulimit -s 1024`, nowhere near this ceiling).
+    // So every call site below also checks plang::stackNearlyExhausted
+    // (Basic/StackHeadroom.h, generalized from Parser::parsePower's own
+    // guard) alongside the term count, exactly the way MaxExprDepth alone
+    // was never sufficient for parsePower's '**' chain either.  Unlike the
+    // term-count check, which can only ever fire once MaxExprDepth-1 other
+    // ExprDepthScope guards are already alive on the stack, the headroom
+    // check can fire on the very first activation -- so every call site
+    // constructs its ExprDepthScope Guard unconditionally, before running
+    // either check, exactly the same ordering plang::RecursionGuard's own
+    // comment documents and Parser::parsePower's call site already
+    // established; see checkExpr's own call site (SemaExpr.cpp) for why.
     static constexpr unsigned MaxExprDepth = 1000;
-    struct ExprDepthScope {
-        unsigned& N;
-        bool&     LimitHit;
-        explicit ExprDepthScope(unsigned& Counter, bool& LimitHitFlag)
-            : N(Counter), LimitHit(LimitHitFlag) { ++N; }
-        ~ExprDepthScope() { if (--N == 0) LimitHit = false; }
-    };
+    // Was its own copy of this exact RAII shape; now the shared one every
+    // stackNearlyExhausted-based guard uses (issue #556) -- see that type's
+    // own comment (Basic/StackHeadroom.h) for why every call site below
+    // constructs it unconditionally rather than only once the term-count
+    // check has already decided not to reject.
+    using ExprDepthScope = RecursionGuard;
 
     /// Canonical type store — owns built-in singletons and interns structural
     /// types.  Built from Opts, which is why Opts is declared above it: what an

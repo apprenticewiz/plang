@@ -27,9 +27,11 @@ target_link_libraries(PlangLocale PRIVATE plang_warnings)
 target_compile_definitions(PlangLocale PRIVATE
     PLANG_CATALOG_DIR="${CMAKE_BINARY_DIR}/share/plang/locale")
 
-# Language-independent support: source buffers and positions, and (Tier 4,
-# Cluster B item 4) where an installed plang finds its shipped RTL units.
-add_library(PlangBasic OBJECT SourceManager.cpp UnitSearchPath.cpp)
+# Language-independent support: source buffers and positions, (Tier 4,
+# Cluster B item 4) where an installed plang finds its shipped RTL units, and
+# (issue #556) the shared stack-headroom-check utility every deeply-recursive
+# AST walk (Parser, Sema, CodeGen) guards its own recursion with.
+add_library(PlangBasic OBJECT SourceManager.cpp UnitSearchPath.cpp StackHeadroom.cpp)
 target_compile_options(PlangBasic PRIVATE -fno-rtti -fno-exceptions -fPIC)
 target_link_libraries(PlangBasic PRIVATE plang_warnings)
 # Where the shipped RTL units are in the build tree.  Same two-step
