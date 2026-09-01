@@ -938,55 +938,103 @@ void Sema::checkCallStmt(const CallStmt& S) {
             return;
         }
 
-        // EP §6.7.5.2: reset/rewrite/extend/update's optional second argument
-        // names the external file, and CodeGen's marshalling
-        // (StringCallMarshalling::emitCStrArg) only has cases for a char
-        // value, an EP string(n), and a plain ISO 7185 String -- every one of
-        // those turns into a `const char *` cleanly.  Nothing checked the
-        // argument's type before it reached codegen, so `reset(f, 42)` (or a
-        // Boolean, a record, an array, ...) arrived at emitCStrArg shaped
-        // nothing like a string and made LLVM's own IR verifier abort the
-        // whole compiler with an internal error instead of plang ever
-        // refusing the program.  isCharStringType (a declared `packed
-        // array[1..n] of char`) and Turbo's ShortString/PChar are
-        // deliberately NOT accepted here even though they read as
-        // string-like: emitCStrArg has no marshalling case for any of them
-        // either (confirmed empirically -- a ShortString actual compiles but
-        // silently opens the wrong file, no diagnostic), so admitting them
-        // would just move the crash/silent-corruption to a different actual
-        // rather than remove it.  Widening this accept-list is separate,
-        // larger work (teaching emitCStrArg the missing cases), not this fix.
-        // -std=turbo: real Turbo Pascal's Reset/Rewrite second argument is an
-        // INTEGER RecSize for an untyped file (confirmed against `fpc -Mtp`:
-        // `reset(f, 'x.txt')` is REJECTED there with an incompatible-type
-        // error), the mirror image of EP's own reset(f, name) external-file-
-        // name form just below.  This project used to accept a string here
-        // under Turbo too (PR #475/#478, kept as an implicit Assign, purely a
-        // plang-only convenience) -- now that Assign exists as its own
-        // explicit builtin, that convenience contradicts real field practice
-        // and is retired: a genuine Turbo program writes
-        // `Assign(f, 'name'); Reset(f);`, never `Reset(f, 'name')`.  Extend/
-        // Update are EP-only builtins (Builtins.def), so they never reach
-        // this arm under Turbo and keep taking a filename unconditionally.
-        if (Opts.turbo() && (Lo == "reset" || Lo == "rewrite")
-                && S.Args.size() == 2) {
-            (void)checkExpr(*S.Args[0]);
-            auto SizeTy = checkExpr(*S.Args[1]);
-            if (!SizeTy->isError() && SizeTy->Kind != TypeKind::Integer)
-                error(S.Args[1]->Loc, diag::err_turbo_reset_rewrite_recsize_type,
-                      {Lo, SizeTy->Name});
+        // EP §6.7.5.2: reset/rewrite/extend/update's FIRST argument is
+        // always the file variable to (re)open, the same arg0-must-be-a-
+        // file requirement Assign's and Seek's own arms below already
+        // enforce.  Until now nothing checked it at all -- both arms below
+        // used to do a bare `(void)checkExpr(*S.Args[0])`, discarding the
+        // type -- so CodeGen's FileVarHelpers::fileVarPtr's IdentExpr fast
+        // path (its own comment) handed back ANY variable's storage address
+        // with no type check of its own: `reset(i)` for a plain integer i
+        // reached the runtime with i's own storage reinterpreted as a
+        // PascalFile*, corrupting memory / segfaulting with no diagnostic --
+        // the same bug class issue #417 closed for
+        // position/lastposition/empty and issue #306's fourth slice closed
+        // for get/put/close (issue #557).  Checked once here, ahead of the
+        // optional second-argument arms below, so `reset(f)`/`rewrite(f)`/
+        // `extend(f)`/`update(f)` (arg1 omitted -- legal per Builtins.def's
+        // MinArgs = 1) get the same check a second argument's presence used
+        // to gate entirely.
+        if ((Lo == "reset" || Lo == "rewrite" || Lo == "extend" || Lo == "update")
+                && !S.Args.empty()) {
+            auto FTy = checkExpr(*S.Args[0]);
+            if (!FTy->isError() && FTy->Kind != TypeKind::File)
+                error(S.Args[0]->Loc, diag::err_file_argument, {Lo, FTy->Name});
+
+            // reset/rewrite/extend/update's optional second argument names
+            // the external file, and CodeGen's marshalling
+            // (StringCallMarshalling::emitCStrArg) only has cases for a char
+            // value, an EP string(n), and a plain ISO 7185 String -- every
+            // one of those turns into a `const char *` cleanly.  Nothing
+            // checked the argument's type before it reached codegen, so
+            // `reset(f, 42)` (or a Boolean, a record, an array, ...) arrived
+            // at emitCStrArg shaped nothing like a string and made LLVM's
+            // own IR verifier abort the whole compiler with an internal
+            // error instead of plang ever refusing the program.
+            // isCharStringType (a declared `packed array[1..n] of char`) and
+            // Turbo's ShortString/PChar are deliberately NOT accepted here
+            // even though they read as string-like: emitCStrArg has no
+            // marshalling case for any of them either (confirmed
+            // empirically -- a ShortString actual compiles but silently
+            // opens the wrong file, no diagnostic), so admitting them would
+            // just move the crash/silent-corruption to a different actual
+            // rather than remove it.  Widening this accept-list is separate,
+            // larger work (teaching emitCStrArg the missing cases), not this
+            // fix.
+            // -std=turbo: real Turbo Pascal's Reset/Rewrite second argument
+            // is an INTEGER RecSize for an untyped file (confirmed against
+            // `fpc -Mtp`: `reset(f, 'x.txt')` is REJECTED there with an
+            // incompatible-type error), the mirror image of EP's own
+            // reset(f, name) external-file-name form just below.  This
+            // project used to accept a string here under Turbo too (PR
+            // #475/#478, kept as an implicit Assign, purely a plang-only
+            // convenience) -- now that Assign exists as its own explicit
+            // builtin, that convenience contradicts real field practice and
+            // is retired: a genuine Turbo program writes `Assign(f,
+            // 'name'); Reset(f);`, never `Reset(f, 'name')`.  Extend/Update
+            // are EP-only builtins (Builtins.def), so they never reach this
+            // arm under Turbo and keep taking a filename unconditionally.
+            if (Opts.turbo() && (Lo == "reset" || Lo == "rewrite")
+                    && S.Args.size() == 2) {
+                auto SizeTy = checkExpr(*S.Args[1]);
+                if (!SizeTy->isError() && SizeTy->Kind != TypeKind::Integer)
+                    error(S.Args[1]->Loc, diag::err_turbo_reset_rewrite_recsize_type,
+                          {Lo, SizeTy->Name});
+                return;
+            }
+
+            if (S.Args.size() == 2) {
+                auto NameTy = checkExpr(*S.Args[1]);
+                if (!NameTy->isError() && NameTy->Kind != TypeKind::Char
+                        && NameTy->Kind != TypeKind::String
+                        && !isVarStringLike(NameTy.get()))
+                    error(S.Args[1]->Loc, diag::err_reset_rewrite_arg_type,
+                          {Lo, NameTy->Name});
+            }
             return;
         }
 
-        if ((Lo == "reset" || Lo == "rewrite" || Lo == "extend" || Lo == "update")
+        // EP §6.7.5.2: SeekRead(f, n) / SeekWrite(f, n) / SeekUpdate(f, n)
+        // -- f is a direct-access file the same arg0-must-be-a-file shape
+        // Seek's own arm below already enforces, and n is a value of f's
+        // declared index type (CGProcCall::emitCallStmt's own comment on
+        // this identical shape).  Until now these three had NO Sema arm at
+        // all, hand-written or generic -- Builtins.def's AK_Any left them
+        // falling through checkCallStmt's generic per-argument checkExpr
+        // fallback with no file-kind check, so `seekread(i, 1)` for a plain
+        // integer i reached CodeGen's FileVarHelpers::fileVarPtr the same
+        // unchecked way reset/rewrite/extend/update above did (issue #557).
+        // Stays hand-written rather than moving to AK_File: arg1 (n) is a
+        // DIFFERENT kind (Integer) from arg0's File, the same multi-kind
+        // shape Seek's own arm keeps hand-written for.
+        if ((Lo == "seekread" || Lo == "seekwrite" || Lo == "seekupdate")
                 && S.Args.size() == 2) {
-            (void)checkExpr(*S.Args[0]);
-            auto NameTy = checkExpr(*S.Args[1]);
-            if (!NameTy->isError() && NameTy->Kind != TypeKind::Char
-                    && NameTy->Kind != TypeKind::String
-                    && !isVarStringLike(NameTy.get()))
-                error(S.Args[1]->Loc, diag::err_reset_rewrite_arg_type,
-                      {Lo, NameTy->Name});
+            auto FTy = checkExpr(*S.Args[0]);
+            if (!FTy->isError() && FTy->Kind != TypeKind::File)
+                error(S.Args[0]->Loc, diag::err_file_argument, {Lo, FTy->Name});
+            auto NTy = checkExpr(*S.Args[1]);
+            if (!NTy->isError() && !NTy->isIntegral())
+                error(S.Args[1]->Loc, diag::err_numeric_argument, {Lo, NTy->Name});
             return;
         }
 
