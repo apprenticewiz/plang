@@ -298,9 +298,12 @@ TEST(RuntimeSanitizedFileDeathTest, OperatingOnAClosedFileTrapsCleanlyInsteadOfC
     // A "use-after-close" call sequence -- the file-handle-error-path analog
     // of use-after-free this item's own checklist asks for. abortIfClosed
     // (runtime/plang_file.cpp) is the trap: every ISO/EP entry point calls it
-    // first and aborts immediately on a null F->Fp, rather than dereferencing
-    // it. Confirmed here that the abort itself is clean under ASan -- no
-    // heap-corruption report masks the intended, documented trap.
+    // first and terminates the process immediately on a null F->Fp, rather
+    // than dereferencing it -- via exit(70) (issue #301) as of this test,
+    // not the std::abort() this used to be; EXPECT_DEATH below is agnostic
+    // to which of the two actually ends the process. Confirmed here that
+    // the trap itself is clean under ASan -- no heap-corruption report masks
+    // the intended, documented trap.
     auto F = std::make_unique<PascalFile>();
     plang_rewrite(F.get(), nullptr, /*IsText=*/0);
     plang_close(F.get(), /*IsText=*/0);

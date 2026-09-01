@@ -93,7 +93,9 @@ static bool seekOffset(int64_t N, int64_t ElemSize, int64_t IndexLow,
 [[noreturn]] void plang_err_binding_table_full(void);
 [[noreturn]] void plang_err_cannot_open(const char *Msg);
 [[noreturn]] void plang_err_field_width(int64_t W);
+[[noreturn]] void plang_err_file_not_open(const char *Op);
 [[noreturn]] void plang_err_file_wrong_mode(const char *Op);
+[[noreturn]] void plang_err_out_of_memory(const char *Context);
 [[noreturn]] void plang_err_seek_failed(const char *Op, int64_t N);
 [[noreturn]] void plang_err_read_format(const char *Op);
 [[noreturn]] void plang_err_read_int_range(const char *Op, const char *Tok);
@@ -271,18 +273,29 @@ static void unloadComponent(PascalFile *F) { F->CompLoaded = 0; }
 /// earlier one left behind cannot survive to be misread as this one's own.
 static void abortIfClosed(PascalFile *F, const char *Op) {
     if (!F || !F->Fp) {
-        std::fflush(stdout);
-        std::fprintf(stderr, "plang runtime: file not open in '%s'\n", Op);
-        std::abort();
+        // issue #301: reports and terminates through plang_sys.cpp's shared
+        // plang_err_file_not_open (fflush stdout, report, exit(70)) rather
+        // than fflush(stdout) + std::abort() here directly -- see that
+        // function's own comment for the reasoning (exit() flushes every
+        // open C stream and runs atexit handlers, abort() does neither, and
+        // an unopened file variable is an expected ISO/EP "program error"
+        // condition, not an internal-invariant violation a SIGABRT/core
+        // dump would help debug).  The function keeps its name -- it still
+        // terminates the process unconditionally on a closed file, exactly
+        // as before, just through a different, more robust mechanism.
+        plang_err_file_not_open(Op);
     }
     std::clearerr(F->Fp);
 }
 
 /// -std=turbo only: the non-aborting counterpart to abortIfClosed just
 /// above, for every file-I/O entry point Turbo-generated code can actually
-/// reach.  abortIfClosed itself is UNCHANGED -- see its own comment -- and
-/// still aborts unconditionally at every ISO/EP call site, which is correct
-/// ISO/EP behavior a later {$I+}/InOutRes item does not get to relax.  This
+/// reach.  abortIfClosed's own BEHAVIOR is unchanged -- it still terminates
+/// the process unconditionally at every ISO/EP call site, which is correct
+/// ISO/EP behavior a later {$I+}/InOutRes item does not get to relax -- only
+/// its termination MECHANISM changed (issue #301: exit(70) via
+/// plang_sys.cpp's plang_err_file_not_open, not std::abort(); see
+/// abortIfClosed's own comment).  This
 /// project's P7 rule (see e.g. plang_tp_reset/plang_tp_rewrite/
 /// plang_tp_append/plang_tp_close's own top comment, and
 /// plang_sys.cpp's "-std=turbo run-time error reporting" section) is that
@@ -1239,9 +1252,12 @@ void *plang_file_buffer(PascalFile *F, int64_t ElemSize, int8_t IsText) {
             / PlangFileBufferAlign * PlangFileBufferAlign;
         F->Comp = std::aligned_alloc(PlangFileBufferAlign, AllocSize);
         if (!F->Comp) {
-            std::fflush(stdout);
-            std::fprintf(stderr, "plang runtime: out of memory for a file buffer\n");
-            std::abort();
+            // issue #301: reports and terminates through plang_sys.cpp's
+            // shared plang_err_out_of_memory (fflush stdout, report,
+            // exit(70)) rather than fflush(stdout) + std::abort() here
+            // directly -- see that function's own comment, and
+            // abortIfClosed's just above, for the reasoning.
+            plang_err_out_of_memory("a file buffer");
         }
         F->CompSize   = ElemSize;
         F->CompLoaded = 0;
