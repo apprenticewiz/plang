@@ -1904,6 +1904,7 @@ begin
    ptb^ := true;
    writeln(ptb^:5, ' s/b  true');
    write('Pointer3:   ');
+   dispose(ptb); { free the block from Pointer2's new(ptb) before it is lost }
    new(ptb);
    ptb^ := false;
    writeln(ptb^:5, ' s/b false');
@@ -1954,6 +1955,7 @@ begin
 
    { equality/inequality, nil }
    write('Pointer14:  ');
+   dispose(pti); { free the block from Pointer1's new(pti) before it is lost }
    pti := nil;
    writeln(pti = nil:5, ' s/b  true');
    write('Pointer15:  ');
@@ -2495,6 +2497,7 @@ begin
    for ci := 'a' to 'j' do if ci in arec.stc then write(ci) else write('_');
    writeln;
    writeln(arec.p^:1);
+   dispose(arec.p); { free before ProcedureFunction7 below overwrites it with a new one }
    writeln('s/b:');
    writeln('64 false j 1 3 12  4.54512000e-29 what ? who');
    writeln('21 22 23 24 25 26 27 28 29 30');
@@ -2524,6 +2527,7 @@ begin
    for ci := 'a' to 'j' do if ci in parec.stc then write(ci) else write('_');
    writeln;
    writeln(parec.p^:1);
+   dispose(parec.p); { free the block from Record2's new(parec.p) before it is lost }
    writeln('s/b:');
    writeln('64 false j 1 3 12  4.54512000e-29 what ? who');
    writeln('21 22 23 24 25 26 27 28 29 30');
