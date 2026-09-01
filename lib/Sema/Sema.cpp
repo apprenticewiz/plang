@@ -194,7 +194,7 @@ void Sema::registerBuiltins() {
         return nullptr;
     };
 
-#define BUILTIN(Id_, Spelling_, Kind_, Dialects_, Min_, Max_, Result_)         \
+#define BUILTIN(Id_, Spelling_, Kind_, Dialects_, Min_, Max_, Result_, ArgKind_) \
     {                                                                          \
         Symbol S;                                                              \
         S.Kind        = SymbolKind::Builtin;                                   \

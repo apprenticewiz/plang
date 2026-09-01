@@ -1188,6 +1188,45 @@ bool Sema::checkBuiltinArity(BuiltinID ID, const std::string& LowerName,
     return false;
 }
 
+std::vector<std::shared_ptr<Type>> Sema::checkBuiltinArgKinds(
+        BuiltinID ID, const std::string& LowerName,
+        const std::vector<std::unique_ptr<ExprNode>>& Args) {
+    const BuiltinArgKind AK = builtinArgKind(ID);
+    std::vector<std::shared_ptr<Type>> Types;
+    Types.reserve(Args.size());
+    for (const auto& Arg : Args) {
+        auto T = checkExpr(*Arg);
+        Types.push_back(T);
+        if (T->isError()) continue;
+        switch (AK) {
+        case BuiltinArgKind::Any:
+            break;
+        // ISO §6.6.6.2 / EP §6.7.6.2: the six required functions EP widens
+        // to complex.  isNumeric() already answers yes for integer-, real-
+        // and complex-type, which is exactly this kind's whole point.
+        case BuiltinArgKind::Numeric:
+            if (!T->isNumeric())
+                error(Arg->Loc, diag::err_numeric_argument, {LowerName, T->Name});
+            break;
+        // trunc/round/int/frac and cmplx/polar's two components: a real- or
+        // integer-type argument, with no complex alternative the way the
+        // widened six above have one.
+        case BuiltinArgKind::NumericNonComplex:
+            if (!T->isNumeric() || T->Kind == TypeKind::Complex)
+                error(Arg->Loc, diag::err_numeric_argument, {LowerName, T->Name});
+            break;
+        // re/im/arg: EP §6.7.6.2's own component extractors, complex-type
+        // only -- ISO 10206 Table 2 footnote (4), narrower than footnote
+        // (1) the Numeric case above enforces.
+        case BuiltinArgKind::Complex:
+            if (T->Kind != TypeKind::Complex)
+                error(Arg->Loc, diag::err_complex_argument, {LowerName, T->Name});
+            break;
+        }
+    }
+    return Types;
+}
+
 namespace {
 /// Turbo Pascal 7's real-mode DOS surface: segment/offset pointer
 /// manipulation, raw memory/port access, heap-internals variables, and
@@ -1457,10 +1496,14 @@ std::shared_ptr<Type> Sema::checkCallExpr(const CallExpr& E) {
             }
             return TyBool;
         }
-        // abs/sqr are polymorphic: return the argument's type.
+        // abs/sqr are polymorphic: return the argument's type.  Argument-kind
+        // checking itself is generic now (Builtins.def's AK_Numeric row for
+        // both, issue #306) -- isNumeric() already says yes for integer-,
+        // real- and complex-type, exactly the set abs/sqr's own polymorphic
+        // return switches on below, so nothing here duplicates it.
         if ((Lo == "abs" || Lo == "sqr") && !E.Args.empty()) {
-            auto ArgTy = checkExpr(*E.Args[0]);
-            for (size_t I = 1; I < E.Args.size(); ++I) (void)checkExpr(*E.Args[I]);
+            auto Types = checkBuiltinArgKinds(Sym->BuiltinKind, Lo, E.Args);
+            auto& ArgTy = Types[0];
             // EP §6.7.6.2: abs(complex) → real; sqr(complex) → complex.
             if (ArgTy->Kind == TypeKind::Complex)
                 return (Lo == "abs") ? TyReal : TyComplex;
@@ -1469,15 +1512,9 @@ std::shared_ptr<Type> Sema::checkCallExpr(const CallExpr& E) {
             // enumerations -- ordinal but not numeric -- so this accepted
             // `abs(true)` and typed it as boolean (abs of an ordinal
             // returned the argument's own type unexamined) instead of
-            // rejecting it.  The rejecting branch also reported nothing at
-            // all: an argument that failed both checks (a string, record,
-            // or set) produced TyErr with no diagnostic, so Sema recorded no
-            // error and the driver went on to CodeGen with a call it cannot
-            // lower (issue #261).
-            if (!ArgTy->isError() && !ArgTy->isNumeric()) {
-                error(E.Args[0]->Loc, diag::err_numeric_argument, {Lo, ArgTy->Name});
-                return TyErr;
-            }
+            // rejecting it.  checkBuiltinArgKinds above already reported the
+            // non-numeric case (issue #261); this only decides the result.
+            if (ArgTy->isError() || !ArgTy->isNumeric()) return TyErr;
             return ArgTy;
         }
         // ISO §6.6.6.4: succ and pred stay in the argument's type, so
@@ -1535,9 +1572,11 @@ std::shared_ptr<Type> Sema::checkCallExpr(const CallExpr& E) {
         // ISO §6.6.6.3: trunc and round convert a real value to an integer,
         // so the argument has to be numeric the same way sqrt/sin/... below
         // require -- and, unlike those, there is no complex extension for
-        // either (EP does not give trunc/round a complex form).  Neither was
-        // special-cased here, so they fell through with nothing to stop a
-        // non-numeric argument: CodeGen's lowering (ToDouble, an
+        // either (EP does not give trunc/round a complex form).  Argument-kind
+        // checking is generic now (Builtins.def's AK_NumericNonComplex row
+        // for both, issue #306); before that existed, neither was
+        // special-cased here at all, so they fell through with nothing to
+        // stop a non-numeric argument: CodeGen's lowering (ToDouble, an
         // unconditional signed-int-to-double conversion) has no case for a
         // non-scalar type such as a string or record, and turns a char or
         // boolean's raw ordinal value into a number nobody asked for instead
@@ -1551,12 +1590,11 @@ std::shared_ptr<Type> Sema::checkCallExpr(const CallExpr& E) {
         // does above.
         if ((Lo == "trunc" || Lo == "round" || Lo == "int" || Lo == "frac")
                 && !E.Args.empty()) {
-            auto ArgTy = checkExpr(*E.Args[0]);
-            if (ArgTy->isError()) return TyErr;
-            if (!ArgTy->isNumeric() || ArgTy->Kind == TypeKind::Complex) {
-                error(E.Args[0]->Loc, diag::err_numeric_argument, {Lo, ArgTy->Name});
+            auto Types = checkBuiltinArgKinds(Sym->BuiltinKind, Lo, E.Args);
+            auto& ArgTy = Types[0];
+            if (ArgTy->isError() || !ArgTy->isNumeric()
+                    || ArgTy->Kind == TypeKind::Complex)
                 return TyErr;
-            }
             return Sym->ReturnType ? Sym->ReturnType : TyErr;
         }
         // EP §6.7.6.7: substr/trim return the same string capacity as their
@@ -1752,20 +1790,20 @@ std::shared_ptr<Type> Sema::checkCallExpr(const CallExpr& E) {
             return ArgTy;
         }
         // EP §6.7.6.2: math functions extended to complex — return complex when
-        // the argument is complex, real otherwise.
+        // the argument is complex, real otherwise.  Argument-kind checking is
+        // generic now (Builtins.def's AK_Numeric row for all six, issue
+        // #306) -- isNumeric() covers integer-, real- AND complex-type, so
+        // the same check that used to live here inline already matches this
+        // arm's own "which is it" switch below.
         if (!E.Args.empty() && (Lo == "sqrt" || Lo == "sin" || Lo == "cos"
                 || Lo == "exp" || Lo == "ln" || Lo == "arctan")) {
-            auto ArgTy = checkExpr(*E.Args[0]);
-            for (size_t I = 1; I < E.Args.size(); ++I) (void)checkExpr(*E.Args[I]);
+            auto Types = checkBuiltinArgKinds(Sym->BuiltinKind, Lo, E.Args);
+            auto& ArgTy = Types[0];
             if (ArgTy->Kind == TypeKind::Complex) return TyComplex;
-            // ISO §6.6.6.2: these take an integer-type or real-type argument
-            // (isNumeric() covers both, plus a subrange of either) -- this
-            // was never checked, so `sqrt('a')` compiled with no diagnostic
-            // at all and was always typed real (issue #261).
-            if (!ArgTy->isError() && !ArgTy->isNumeric()) {
-                error(E.Args[0]->Loc, diag::err_numeric_argument, {Lo, ArgTy->Name});
-                return TyErr;
-            }
+            // ISO §6.6.6.2: these take an integer-type or real-type
+            // argument.  checkBuiltinArgKinds above already reported a
+            // non-numeric one (issue #261); this only decides the result.
+            if (ArgTy->isError() || !ArgTy->isNumeric()) return TyErr;
             return Sym->ReturnType ? Sym->ReturnType : TyErr; // TyReal
         }
         // EP §6.7.6.3: complex constructors -- cmplx(x,y) and polar(r,t) each
@@ -1777,18 +1815,12 @@ std::shared_ptr<Type> Sema::checkCallExpr(const CallExpr& E) {
         // for sqrt/sin/...).  A complex argument here has no lowering
         // either: CodeGen's cmplx/polar (CGFuncCall.cpp) run each argument
         // through ToDouble, which has no case for the {double,double}
-        // aggregate a complex value actually is.  Neither argument was
-        // checked at all before this, so `cmplx(true, 'x')` type-checked
-        // with nothing to reject it (issue #306) -- the same
-        // numeric-but-not-complex shape trunc/round/int/frac already
-        // require above, for the identical reason.
+        // aggregate a complex value actually is.  Argument-kind checking is
+        // generic now (Builtins.def's AK_NumericNonComplex row for both,
+        // issue #306) -- the same numeric-but-not-complex shape trunc/round/
+        // int/frac already require above, for the identical reason.
         if (Lo == "cmplx" || Lo == "polar") {
-            for (const auto& Arg : E.Args) {
-                auto ArgTy = checkExpr(*Arg);
-                if (ArgTy->isError()) continue;
-                if (!ArgTy->isNumeric() || ArgTy->Kind == TypeKind::Complex)
-                    error(Arg->Loc, diag::err_numeric_argument, {Lo, ArgTy->Name});
-            }
+            (void)checkBuiltinArgKinds(Sym->BuiltinKind, Lo, E.Args);
             return TyComplex;
         }
         // EP §6.7.6.2: component extraction functions -- unlike sqrt/sin/
@@ -1800,19 +1832,18 @@ std::shared_ptr<Type> Sema::checkCallExpr(const CallExpr& E) {
         // standard's own mechanism for saying a required function accepts
         // more than one operand type, used deliberately for the six and
         // deliberately not for these three. So a plain numeric argument is
-        // rejected here, not silently widened. This had no check at all, so
+        // rejected here, not silently widened.  Argument-kind checking is
+        // generic now (Builtins.def's AK_Complex row for all three, issue
+        // #306) -- before that existed this had no check at all, so
         // `re(SomeInteger)` type-checked and CodeGen's non-complex fallback
         // (a ToDouble passthrough for re, a constant 0 for im, an
         // origin-embedding plang_arg call for arg) fabricated a
         // plausible-looking but non-conforming result instead of a
         // diagnostic (issue #306).
         if ((Lo == "re" || Lo == "im" || Lo == "arg") && !E.Args.empty()) {
-            auto ArgTy = checkExpr(*E.Args[0]);
-            if (ArgTy->isError()) return TyErr;
-            if (ArgTy->Kind != TypeKind::Complex) {
-                error(E.Args[0]->Loc, diag::err_complex_argument, {Lo, ArgTy->Name});
-                return TyErr;
-            }
+            auto Types = checkBuiltinArgKinds(Sym->BuiltinKind, Lo, E.Args);
+            auto& ArgTy = Types[0];
+            if (ArgTy->isError() || ArgTy->Kind != TypeKind::Complex) return TyErr;
             return TyReal;
         }
         // EP §6.7.6.8: binding names the variable whose binding it reports,

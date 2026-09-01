@@ -1,6 +1,6 @@
 //===- Builtins.def - The one list of required procedures and functions -*- C++ -*-===//
 //
-//   BUILTIN(Id, Spelling, Kind, Dialects, MinArgs, MaxArgs, Result)
+//   BUILTIN(Id, Spelling, Kind, Dialects, MinArgs, MaxArgs, Result, ArgKind)
 //
 //     Id        The BuiltinID enumerator.
 //     Spelling  The name in the source, lower case.  Pascal is case
@@ -11,6 +11,17 @@
 //     MaxArgs   Most accepted; -1 for no upper bound, and also for the ones
 //               whose shape is checked where they are lowered rather than here.
 //     Result    What a Func returns, as an R_* tag; R_None for a Proc.
+//     ArgKind   What EVERY argument must be, as an AK_* tag Sema::
+//               checkBuiltinArgKinds enforces generically right after the
+//               arity check above -- AK_Any (the default for every row below
+//               that has not been migrated yet) means "not checked here",
+//               the same as before this column existed.  A builtin whose
+//               arguments do not all share one required kind (succ/pred's
+//               separate step-count rule, write's per-position textfile
+//               rules, ...) stays AK_Any and keeps its check hand-written in
+//               checkCallExpr/checkCallStmt, same as a builtin nobody has
+//               migrated yet -- this column only ever ADDS a check, it does
+//               not take one away from a builtin still on the old path.
 //
 // This was three lists.  Sema::registerBuiltins declared the names, a static
 // table in SemaExpr checked their arity, and codegen dispatched on the spelling
@@ -26,10 +37,40 @@
 // the rest of the Extended Pascal block -- came back as "undefined function".
 // That split was not deliberate, and it is gone.
 //
+// ArgKind's vocabulary (issue #306's own proposed list, cross-checked against
+// what SemaExpr.cpp/SemaStmt.cpp's hand-written arms actually test today
+// before any of it was wired up):
+//
+//   AK_Any              No generic check (the default; see above).
+//   AK_Numeric          Type::isNumeric(): integer-, real- or complex-type.
+//                       Used where a complex argument is accepted too, e.g.
+//                       sqrt/sin/cos/exp/ln/arctan (EP §6.7.6.2 widens the
+//                       six ISO required functions to complex) and abs/sqr
+//                       (whose complex case is a separate return type, not a
+//                       separate argument check -- isNumeric() already says
+//                       yes for complex either way).
+//   AK_NumericNonComplex  isNumeric() with TypeKind::Complex refused --
+//                       needed because isNumeric() alone admits complex
+//                       (Type.h's own comment on why: the binary-operator
+//                       gates want it to).  trunc/round/int/frac and cmplx/
+//                       polar's two components all want a real- or
+//                       integer-type argument with no complex alternative
+//                       (ISO 10206 Table 2 gives the widened six their own
+//                       footnote (1) and does not extend it to these).
+//   AK_Complex          TypeKind::Complex alone: re/im/arg (ISO 10206 Table
+//                       2 footnote (4), narrower than footnote (1) above).
+//
+// Only the numeric family (including EP's complex functions) has been
+// migrated to ArgKind so far -- the rest of AK_Any's ~60 special-cased
+// builtins are exactly as before.  A later slice widening this to the
+// ordinal/string/file families should extend this vocabulary the same way:
+// cross-check against the predicate a hand-written arm already calls before
+// adding a new AK_* tag for it, rather than inventing one no arm needed.
+//
 //===----------------------------------------------------------------------===//
 
 #ifndef BUILTIN
-#define BUILTIN(Id, Spelling, Kind, Dialects, MinArgs, MaxArgs, Result)
+#define BUILTIN(Id, Spelling, Kind, Dialects, MinArgs, MaxArgs, Result, ArgKind)
 #endif
 
 // The required procedures of ISO 7185 §6.6.5.  Their arguments are variadic
@@ -44,53 +85,53 @@
 // Turbo program using `get` told what it is rather than that it is undefined.
 #define ALL (ISO | TP)
 
-BUILTIN(Write,     "write",     Proc, ALL, 0, -1, R_None)
-BUILTIN(Writeln,   "writeln",   Proc, ALL, 0, -1, R_None)
-BUILTIN(Read,      "read",      Proc, ALL, 0, -1, R_None)
-BUILTIN(Readln,    "readln",    Proc, ALL, 0, -1, R_None)
-BUILTIN(New,       "new",       Proc, ALL, 1, -1, R_None)
-BUILTIN(Dispose,   "dispose",   Proc, ALL, 1, -1, R_None)
-BUILTIN(Page,      "page",      Proc, ISO, 0, -1, R_None)
+BUILTIN(Write,     "write",     Proc, ALL, 0, -1, R_None, AK_Any)
+BUILTIN(Writeln,   "writeln",   Proc, ALL, 0, -1, R_None, AK_Any)
+BUILTIN(Read,      "read",      Proc, ALL, 0, -1, R_None, AK_Any)
+BUILTIN(Readln,    "readln",    Proc, ALL, 0, -1, R_None, AK_Any)
+BUILTIN(New,       "new",       Proc, ALL, 1, -1, R_None, AK_Any)
+BUILTIN(Dispose,   "dispose",   Proc, ALL, 1, -1, R_None, AK_Any)
+BUILTIN(Page,      "page",      Proc, ISO, 0, -1, R_None, AK_Any)
 // reset/rewrite take the file and, at most, an external filename (EP
 // §6.7.5.2 / Turbo's record-size overload) -- CodeGen's lowering (CGProcCall,
 // the reset/rewrite arm) only ever reads args[0] and args[1], so -1 here
 // let a third argument through unexamined into a runtime call already typed
 // for two.
-BUILTIN(Reset,     "reset",     Proc, ALL, 1,  2, R_None)
-BUILTIN(Rewrite,   "rewrite",   Proc, ALL, 1,  2, R_None)
-BUILTIN(Get,       "get",       Proc, ISO, 1, -1, R_None)
-BUILTIN(Put,       "put",       Proc, ISO, 1, -1, R_None)
-BUILTIN(Close,     "close",     Proc, ALL, 1, -1, R_None)
-BUILTIN(Pack,      "pack",      Proc, ISO, 3,  3, R_None)
-BUILTIN(Unpack,    "unpack",    Proc, ISO, 3,  3, R_None)
+BUILTIN(Reset,     "reset",     Proc, ALL, 1,  2, R_None, AK_Any)
+BUILTIN(Rewrite,   "rewrite",   Proc, ALL, 1,  2, R_None, AK_Any)
+BUILTIN(Get,       "get",       Proc, ISO, 1, -1, R_None, AK_Any)
+BUILTIN(Put,       "put",       Proc, ISO, 1, -1, R_None, AK_Any)
+BUILTIN(Close,     "close",     Proc, ALL, 1, -1, R_None, AK_Any)
+BUILTIN(Pack,      "pack",      Proc, ISO, 3,  3, R_None, AK_Any)
+BUILTIN(Unpack,    "unpack",    Proc, ISO, 3,  3, R_None, AK_Any)
 
 // The required functions of ISO 7185 §6.6.6.
-BUILTIN(Sqrt,      "sqrt",      Func, ALL, 1,  1, R_Real)
-BUILTIN(Sin,       "sin",       Func, ALL, 1,  1, R_Real)
-BUILTIN(Cos,       "cos",       Func, ALL, 1,  1, R_Real)
-BUILTIN(Exp,       "exp",       Func, ALL, 1,  1, R_Real)
-BUILTIN(Ln,        "ln",        Func, ALL, 1,  1, R_Real)
-BUILTIN(Arctan,    "arctan",    Func, ALL, 1,  1, R_Real)
-BUILTIN(Trunc,     "trunc",     Func, ALL, 1,  1, R_Int)
-BUILTIN(Round,     "round",     Func, ALL, 1,  1, R_Int)
-BUILTIN(Ord,       "ord",       Func, ALL, 1,  1, R_Int)
+BUILTIN(Sqrt,      "sqrt",      Func, ALL, 1,  1, R_Real, AK_Numeric)
+BUILTIN(Sin,       "sin",       Func, ALL, 1,  1, R_Real, AK_Numeric)
+BUILTIN(Cos,       "cos",       Func, ALL, 1,  1, R_Real, AK_Numeric)
+BUILTIN(Exp,       "exp",       Func, ALL, 1,  1, R_Real, AK_Numeric)
+BUILTIN(Ln,        "ln",        Func, ALL, 1,  1, R_Real, AK_Numeric)
+BUILTIN(Arctan,    "arctan",    Func, ALL, 1,  1, R_Real, AK_Numeric)
+BUILTIN(Trunc,     "trunc",     Func, ALL, 1,  1, R_Int, AK_NumericNonComplex)
+BUILTIN(Round,     "round",     Func, ALL, 1,  1, R_Int, AK_NumericNonComplex)
+BUILTIN(Ord,       "ord",       Func, ALL, 1,  1, R_Int, AK_Any)
 // abs and sqr take the type of their argument; R_Int is the placeholder the
 // symbol carries, and the real result is worked out in checkCallExpr.
-BUILTIN(Abs,       "abs",       Func, ALL, 1,  1, R_Int)
-BUILTIN(Sqr,       "sqr",       Func, ALL, 1,  1, R_Int)
+BUILTIN(Abs,       "abs",       Func, ALL, 1,  1, R_Int, AK_Numeric)
+BUILTIN(Sqr,       "sqr",       Func, ALL, 1,  1, R_Int, AK_Numeric)
 // EP §6.7.6.5 adds the second argument; ISO 7185 takes only the first, and the
 // extra one is refused in checkCallExpr rather than by the arity here.
-BUILTIN(Succ,      "succ",      Func, ALL, 1,  2, R_Int)
-BUILTIN(Pred,      "pred",      Func, ALL, 1,  2, R_Int)
-BUILTIN(Chr,       "chr",       Func, ALL, 1,  1, R_Char)
-BUILTIN(Odd,       "odd",       Func, ALL, 1,  1, R_Bool)
-BUILTIN(Eof,       "eof",       Func, ALL, 0,  1, R_Bool)
-BUILTIN(Eoln,      "eoln",      Func, ALL, 0,  1, R_Bool)
+BUILTIN(Succ,      "succ",      Func, ALL, 1,  2, R_Int, AK_Any)
+BUILTIN(Pred,      "pred",      Func, ALL, 1,  2, R_Int, AK_Any)
+BUILTIN(Chr,       "chr",       Func, ALL, 1,  1, R_Char, AK_Any)
+BUILTIN(Odd,       "odd",       Func, ALL, 1,  1, R_Bool, AK_Any)
+BUILTIN(Eof,       "eof",       Func, ALL, 0,  1, R_Bool, AK_Any)
+BUILTIN(Eoln,      "eoln",      Func, ALL, 0,  1, R_Bool, AK_Any)
 
 // ISO 10206 §6.7.5.7
-BUILTIN(Halt,      "halt",      Proc, EP | TP, 0, 1, R_None)
+BUILTIN(Halt,      "halt",      Proc, EP | TP, 0, 1, R_None, AK_Any)
 // EP §6.7.6.3
-BUILTIN(Card,      "card",      Func, EP,  1,  1, R_Int)
+BUILTIN(Card,      "card",      Func, EP,  1,  1, R_Int, AK_Any)
 // EP §6.7.6.7: strings
 // Length is also Turbo's: real TP7/FPC's own System.Length(s) is a
 // ShortString's length byte read back as an Integer -- discovered as a
@@ -99,45 +140,45 @@ BUILTIN(Card,      "card",      Func, EP,  1,  1, R_Int)
 // ShortString its own length), not a pre-existing, deliberate Turbo
 // omission: no prior Turbo work landed a "length" of any kind, and nothing
 // under -std=turbo could ask a ShortString's length at all before this.
-BUILTIN(Length,    "length",    Func, EP | TP,  1,  1, R_Int)
-BUILTIN(Index,     "index",     Func, EP,  2,  2, R_Int)
-BUILTIN(Substr,    "substr",    Func, EP,  2,  3, R_Str)
-BUILTIN(Trim,      "trim",      Func, EP,  1,  1, R_Str)
+BUILTIN(Length,    "length",    Func, EP | TP,  1,  1, R_Int, AK_Any)
+BUILTIN(Index,     "index",     Func, EP,  2,  2, R_Int, AK_Any)
+BUILTIN(Substr,    "substr",    Func, EP,  2,  3, R_Str, AK_Any)
+BUILTIN(Trim,      "trim",      Func, EP,  1,  1, R_Str, AK_Any)
 // EP §6.7.6.7: string comparison, which differs from the relational operators
-BUILTIN(StrEQ,     "eq",        Func, EP,  2,  2, R_Bool)
-BUILTIN(StrNE,     "ne",        Func, EP,  2,  2, R_Bool)
-BUILTIN(StrLT,     "lt",        Func, EP,  2,  2, R_Bool)
-BUILTIN(StrGT,     "gt",        Func, EP,  2,  2, R_Bool)
-BUILTIN(StrLE,     "le",        Func, EP,  2,  2, R_Bool)
-BUILTIN(StrGE,     "ge",        Func, EP,  2,  2, R_Bool)
+BUILTIN(StrEQ,     "eq",        Func, EP,  2,  2, R_Bool, AK_Any)
+BUILTIN(StrNE,     "ne",        Func, EP,  2,  2, R_Bool, AK_Any)
+BUILTIN(StrLT,     "lt",        Func, EP,  2,  2, R_Bool, AK_Any)
+BUILTIN(StrGT,     "gt",        Func, EP,  2,  2, R_Bool, AK_Any)
+BUILTIN(StrLE,     "le",        Func, EP,  2,  2, R_Bool, AK_Any)
+BUILTIN(StrGE,     "ge",        Func, EP,  2,  2, R_Bool, AK_Any)
 // EP §6.7.5.5
-BUILTIN(Readstr,   "readstr",   Proc, EP,  2, -1, R_None)
-BUILTIN(Writestr,  "writestr",  Proc, EP,  2, -1, R_None)
+BUILTIN(Readstr,   "readstr",   Proc, EP,  2, -1, R_None, AK_Any)
+BUILTIN(Writestr,  "writestr",  Proc, EP,  2, -1, R_None, AK_Any)
 // EP §6.7.6.3 / §6.7.6.2: complex
-BUILTIN(Cmplx,     "cmplx",     Func, EP,  2,  2, R_Complex)
-BUILTIN(Polar,     "polar",     Func, EP,  2,  2, R_Complex)
-BUILTIN(Re,        "re",        Func, EP,  1,  1, R_Real)
-BUILTIN(Im,        "im",        Func, EP,  1,  1, R_Real)
-BUILTIN(Arg,       "arg",       Func, EP,  1,  1, R_Real)
+BUILTIN(Cmplx,     "cmplx",     Func, EP,  2,  2, R_Complex, AK_NumericNonComplex)
+BUILTIN(Polar,     "polar",     Func, EP,  2,  2, R_Complex, AK_NumericNonComplex)
+BUILTIN(Re,        "re",        Func, EP,  1,  1, R_Real, AK_Complex)
+BUILTIN(Im,        "im",        Func, EP,  1,  1, R_Real, AK_Complex)
+BUILTIN(Arg,       "arg",       Func, EP,  1,  1, R_Real, AK_Complex)
 // EP §6.7.5.2: direct-access files.  Same two-argument shape as reset/rewrite
 // above, and the same reason it is 2 rather than -1.
-BUILTIN(Extend,    "extend",    Proc, EP,  1,  2, R_None)
-BUILTIN(Update,    "update",    Proc, EP,  1,  2, R_None)
-BUILTIN(SeekRead,  "seekread",  Proc, EP,  2,  2, R_None)
-BUILTIN(SeekWrite, "seekwrite", Proc, EP,  2,  2, R_None)
-BUILTIN(SeekUpdate,"seekupdate",Proc, EP,  2,  2, R_None)
+BUILTIN(Extend,    "extend",    Proc, EP,  1,  2, R_None, AK_Any)
+BUILTIN(Update,    "update",    Proc, EP,  1,  2, R_None, AK_Any)
+BUILTIN(SeekRead,  "seekread",  Proc, EP,  2,  2, R_None, AK_Any)
+BUILTIN(SeekWrite, "seekwrite", Proc, EP,  2,  2, R_None, AK_Any)
+BUILTIN(SeekUpdate,"seekupdate",Proc, EP,  2,  2, R_None, AK_Any)
 // EP §6.7.6.6 / §6.7.6.5
-BUILTIN(Position,     "position",     Func, EP, 1, 1, R_Int)
-BUILTIN(LastPosition, "lastposition", Func, EP, 1, 1, R_Int)
-BUILTIN(Empty,        "empty",        Func, EP, 1, 1, R_Bool)
+BUILTIN(Position,     "position",     Func, EP, 1, 1, R_Int, AK_Any)
+BUILTIN(LastPosition, "lastposition", Func, EP, 1, 1, R_Int, AK_Any)
+BUILTIN(Empty,        "empty",        Func, EP, 1, 1, R_Bool, AK_Any)
 // EP §6.7.5.8 / §6.7.6.9: date and time
-BUILTIN(GetTimeStamp, "gettimestamp", Proc, EP, 1, 1, R_None)
-BUILTIN(Date,         "date",         Func, EP, 1, 1, R_Str)
-BUILTIN(Time,         "time",         Func, EP, 1, 1, R_Str)
+BUILTIN(GetTimeStamp, "gettimestamp", Proc, EP, 1, 1, R_None, AK_Any)
+BUILTIN(Date,         "date",         Func, EP, 1, 1, R_Str, AK_Any)
+BUILTIN(Time,         "time",         Func, EP, 1, 1, R_Str, AK_Any)
 // EP §6.7.5.6 / §6.7.6.8: binding
-BUILTIN(Bind,         "bind",         Proc, EP, 2, 2, R_None)
-BUILTIN(Unbind,       "unbind",       Proc, EP, 1, 1, R_None)
-BUILTIN(Binding,      "binding",      Func, EP, 1, 1, R_BindingType)
+BUILTIN(Bind,         "bind",         Proc, EP, 2, 2, R_None, AK_Any)
+BUILTIN(Unbind,       "unbind",       Proc, EP, 1, 1, R_None, AK_Any)
+BUILTIN(Binding,      "binding",      Func, EP, 1, 1, R_BindingType, AK_Any)
 
 // -std=turbo only: this file's first genuinely TP-only entry -- everything
 // above either serves every dialect (ALL) or, like Halt, is EP|TP.  Real
@@ -149,7 +190,7 @@ BUILTIN(Binding,      "binding",      Func, EP, 1, 1, R_BindingType)
 // condition with an observable side effect never runs it once assertions are
 // off), which the arity/dialect gate every OTHER builtin gets from this table
 // alone cannot express.
-BUILTIN(Assert,       "assert",       Proc, TP, 1, 2, R_None)
+BUILTIN(Assert,       "assert",       Proc, TP, 1, 2, R_None, AK_Any)
 // TP RunError([errorcode: Integer]) -- aborts the program the same way one
 // of the numbered runtime checks (RangeCheckGuards.cpp/plang_tp_runerror)
 // would, printing "Runtime error <n> at $<addr>" and exiting with status n
@@ -162,7 +203,7 @@ BUILTIN(Assert,       "assert",       Proc, TP, 1, 2, R_None)
 // codegen" path every other builtin without a special shape already takes
 // (Halt(n) is the closest precedent: same 0-or-1 Integer argument shape)
 // is all this needs.
-BUILTIN(RunError,     "runerror",     Proc, TP, 0, 1, R_None)
+BUILTIN(RunError,     "runerror",     Proc, TP, 0, 1, R_None, AK_Any)
 
 // -std=turbo only: Exit/Break/Continue, TP's three statement-level
 // control-transfer builtins -- no ISO 7185/EP §6.6.5 or §6.7.5 equivalent.
@@ -179,22 +220,22 @@ BUILTIN(RunError,     "runerror",     Proc, TP, 0, 1, R_None)
 // Both restrictions are new diagnostics (err_break_outside_loop /
 // err_continue_outside_loop / err_exit_value_outside_function,
 // DiagnosticSemaKinds.def), not Builtins.def's arity/dialect gate alone.
-BUILTIN(Exit,         "exit",         Proc, TP, 0, 1, R_None)
+BUILTIN(Exit,         "exit",         Proc, TP, 0, 1, R_None, AK_Any)
 // Turbo Tier 5, Cluster A item 6: 'Fail' inside a constructor -- see
 // Sema::checkCallStmt's own 'fail' arm (SemaStmt.cpp) and
 // err_fail_outside_constructor for the context restriction Builtins.def
 // alone cannot express (confirmed against a local fpc -Mtp build that
 // 'Fail' is not even a recognized identifier outside a constructor).
-BUILTIN(Fail,          "fail",         Proc, TP, 0, 0, R_None)
-BUILTIN(Break,        "break",        Proc, TP, 0, 0, R_None)
-BUILTIN(Continue,     "continue",     Proc, TP, 0, 0, R_None)
+BUILTIN(Fail,          "fail",         Proc, TP, 0, 0, R_None, AK_Any)
+BUILTIN(Break,        "break",        Proc, TP, 0, 0, R_None, AK_Any)
+BUILTIN(Continue,     "continue",     Proc, TP, 0, 0, R_None, AK_Any)
 
 // -std=turbo only: Assigned(p) -- true iff p, a pointer or a procedural
 // value, is not nil.  Real Borland/FPC's own Assigned; plang's checkCallExpr/
 // checkCallStmt each have a dedicated arm restricting the argument to a
 // pointer or procedural (Procedure/Function) type, matching the shape check
 // every other single-typed-argument builtin above (Card, Odd, ...) gets.
-BUILTIN(Assigned,     "assigned",     Func, TP, 1, 1, R_Bool)
+BUILTIN(Assigned,     "assigned",     Func, TP, 1, 1, R_Bool, AK_Any)
 
 // Turbo Tier 5, Cluster A item 7: TypeOf(anObjectValueOrVar) -- the address
 // of the object's own VMT (Codegen::Impl::getOrCreateVmt's existing global),
@@ -206,7 +247,7 @@ BUILTIN(Assigned,     "assigned",     Func, TP, 1, 1, R_Bool)
 // checkUserDefinedCall's dedicated arm returns TypeContext::
 // getGenericPointer() directly, the same generic 'Pointer' type real
 // TypeOf's own FPC declaration ('function TypeOf(...): Pointer') has.
-BUILTIN(TypeOf,       "typeof",       Func, TP, 1, 1, R_None)
+BUILTIN(TypeOf,       "typeof",       Func, TP, 1, 1, R_None, AK_Any)
 
 // -std=turbo only: SizeOf/High/Low take a TYPE NAME as well as (like real
 // FPC) an ordinary value expression -- the one argument SHAPE in this whole
@@ -215,9 +256,9 @@ BUILTIN(TypeOf,       "typeof",       Func, TP, 1, 1, R_None)
 // placeholder the same way Abs/Sqr's is just above: SizeOf is always an
 // integer, but High/Low answer in the ARGUMENT's own type (High(Byte) is a
 // Byte), which only checkCallExpr's dedicated arm can work out.
-BUILTIN(SizeOf,       "sizeof",       Func, TP, 1, 1, R_Int)
-BUILTIN(High,         "high",         Func, TP, 1, 1, R_Int)
-BUILTIN(Low,          "low",          Func, TP, 1, 1, R_Int)
+BUILTIN(SizeOf,       "sizeof",       Func, TP, 1, 1, R_Int, AK_Any)
+BUILTIN(High,         "high",         Func, TP, 1, 1, R_Int, AK_Any)
+BUILTIN(Low,          "low",          Func, TP, 1, 1, R_Int, AK_Any)
 // -std=turbo only: FPC's size-aware Hi/Lo/Swap -- deliberately NOT literal
 // Turbo Pascal 7's, which only ever worked on a 16-bit value; see
 // CGFuncCall::emitBuiltinCall's own comment for the field-practice
@@ -225,9 +266,9 @@ BUILTIN(Low,          "low",          Func, TP, 1, 1, R_Int)
 // itself.  R_Int is a placeholder for the same reason High/Low's is: Hi and
 // Lo answer in half of the argument's own width, and Swap in the argument's
 // own type, none of which this table alone can express.
-BUILTIN(Hi,           "hi",           Func, TP, 1, 1, R_Int)
-BUILTIN(Lo,           "lo",           Func, TP, 1, 1, R_Int)
-BUILTIN(Swap,         "swap",         Func, TP, 1, 1, R_Int)
+BUILTIN(Hi,           "hi",           Func, TP, 1, 1, R_Int, AK_Any)
+BUILTIN(Lo,           "lo",           Func, TP, 1, 1, R_Int, AK_Any)
+BUILTIN(Swap,         "swap",         Func, TP, 1, 1, R_Int, AK_Any)
 
 // -std=turbo only: Random()/Random(Range) -- the RTL's pseudo-random number
 // generator, sharing one name across TWO call shapes the way Hi/Lo/Swap just
@@ -245,12 +286,12 @@ BUILTIN(Swap,         "swap",         Func, TP, 1, 1, R_Int)
 // sequence matches real Borland Turbo Pascal 7's (its own 32-bit LCG) or
 // Free Pascal's (a Mersenne Twister) -- the two do not match each other
 // either, and neither is worth chasing bit-for-bit.
-BUILTIN(Random,       "random",       Func, TP, 0,  1, R_Real)
+BUILTIN(Random,       "random",       Func, TP, 0,  1, R_Real, AK_Any)
 // Randomize -- reseeds RandSeed from a real source of entropy (wall-clock
 // time via clock_gettime(CLOCK_REALTIME)), so successive RUNS of the same
 // program get a different Random sequence; runtime/plang_math.cpp's
 // plang_tp_randomize.
-BUILTIN(Randomize,    "randomize",    Proc, TP, 0,  0, R_None)
+BUILTIN(Randomize,    "randomize",    Proc, TP, 0,  0, R_None, AK_Any)
 // Int(x)/Frac(x) -- x's integer part, toward zero like Trunc, but a REAL
 // result rather than an ordinal one, so -- unlike Trunc/Round -- there is no
 // int64 range to respect: Int(1e30) is simply 1e30, not the runtime error
@@ -258,25 +299,25 @@ BUILTIN(Randomize,    "randomize",    Proc, TP, 0,  0, R_None)
 // x's own sign (Frac(-3.7) is -0.7, not 0.3 -- there is no floor here).  See
 // runtime/plang_math.cpp's plang_tp_int/plang_tp_frac for why these are NOT
 // built on top of the existing, range-checked plang_trunc/plang_round.
-BUILTIN(Int,          "int",          Func, TP, 1,  1, R_Real)
-BUILTIN(Frac,         "frac",         Func, TP, 1,  1, R_Real)
+BUILTIN(Int,          "int",          Func, TP, 1,  1, R_Real, AK_NumericNonComplex)
+BUILTIN(Frac,         "frac",         Func, TP, 1,  1, R_Real, AK_NumericNonComplex)
 
 // -std=turbo only: Include(s, x) / Exclude(s, x) -- `s := s + [x]` and
 // `s := s - [x]` by another name, mutating the set variable in place.
-BUILTIN(Include,      "include",      Proc, TP, 2, 2, R_None)
-BUILTIN(Exclude,      "exclude",      Proc, TP, 2, 2, R_None)
+BUILTIN(Include,      "include",      Proc, TP, 2, 2, R_None, AK_Any)
+BUILTIN(Exclude,      "exclude",      Proc, TP, 2, 2, R_None, AK_Any)
 // -std=turbo only: Inc(x[, n]) / Dec(x[, n]) -- mutate an ordinal variable
 // (or, for a PChar-like typed pointer, advance/retreat it the same way
 // `p + n`/`p - n` already do) in place by n, defaulting to 1.
-BUILTIN(Inc,          "inc",          Proc, TP, 1, 2, R_None)
-BUILTIN(Dec,          "dec",          Proc, TP, 1, 2, R_None)
+BUILTIN(Inc,          "inc",          Proc, TP, 1, 2, R_None, AK_Any)
+BUILTIN(Dec,          "dec",          Proc, TP, 1, 2, R_None, AK_Any)
 // -std=turbo only: FillChar(var X; Count: Integer; Value) and
 // Move(const Source; var Dest; Count: Integer) -- X/Source/Dest are
 // "untyped" the way real Turbo Pascal's are: any variable, addressed
 // directly, its own declared type not otherwise examined.  Count is a BYTE
 // count in both, matching FPC field practice.
-BUILTIN(FillChar,     "fillchar",     Proc, TP, 3, 3, R_None)
-BUILTIN(Move,         "move",         Proc, TP, 3, 3, R_None)
+BUILTIN(FillChar,     "fillchar",     Proc, TP, 3, 3, R_None, AK_Any)
+BUILTIN(Move,         "move",         Proc, TP, 3, 3, R_None, AK_Any)
 
 // -std=turbo only: the System-unit ShortString routines and Str/Val.
 // Deliberately NOT LowerCase/UpperCase (confirmed absent from real TP7's
@@ -292,32 +333,32 @@ BUILTIN(Move,         "move",         Proc, TP, 3, 3, R_None)
 // own declared (possibly narrower) string[N] capacity -- confirmed against
 // `fpc -Mtp` (Copy/Concat of two string[5] operands is still a full
 // string[255] until truncated by a later assignment, not string[10]).
-BUILTIN(Copy,         "copy",         Func, TP, 3, 3, R_Str)
+BUILTIN(Copy,         "copy",         Func, TP, 3, 3, R_Str, AK_Any)
 // Pos(substr, s) -- 1-based index of the first occurrence of substr in s, or
 // 0 if not found.  EP's `index` returns 1 for an EMPTY pattern (ISO 10206's
 // own rule); Pos does NOT share that rule -- confirmed against `fpc -Mtp`:
 // Pos('', s) is 0 for every s, empty or not.  A completely separate runtime
 // entry point (plang_sstr_pos) from EP's plang_str_index for exactly this
 // reason, even though the search algorithm is otherwise the same shape.
-BUILTIN(Pos,          "pos",          Func, TP, 2, 2, R_Int)
+BUILTIN(Pos,          "pos",          Func, TP, 2, 2, R_Int, AK_Any)
 // Concat(s1 [, s2, ..., sn]) -- variadic concatenation, same capacity-255
 // result and same clamping the `+` operator's own ShortString arm already
 // implements (CGBinaryOps.cpp); MaxArgs -1 since real Turbo/FPC's Concat
 // takes one or more strings, not exactly two.
-BUILTIN(Concat,       "concat",       Func, TP, 1, -1, R_Str)
+BUILTIN(Concat,       "concat",       Func, TP, 1, -1, R_Str, AK_Any)
 // Delete(var s: string; index, count: Integer) -- removes count characters
 // from s starting at index, MUTATING s in place.  Unlike Copy's index/count
 // clamping, an out-of-range index (< 1 or > Length(s)) is a silent NO-OP,
 // not clamped to the nearest valid position -- confirmed against `fpc -Mtp`
 // (Delete(s, 0, 2) and Delete(s, 100, 3) both leave s completely unchanged).
-BUILTIN(Delete,       "delete",       Proc, TP, 3, 3, R_None)
+BUILTIN(Delete,       "delete",       Proc, TP, 3, 3, R_None, AK_Any)
 // Insert(source: string; var s: string; index: Integer) -- inserts source
 // into s before position index, MUTATING s in place, clamped at s's own
 // declared capacity.  Unlike Delete, an out-of-range index IS clamped (to 1
 // or to Length(s)+1) rather than making the call a no-op -- confirmed
 // against `fpc -Mtp`; see CGProcCall.cpp's own comment for the full
 // empirically-derived clamp table.
-BUILTIN(Insert,       "insert",       Proc, TP, 3, 3, R_None)
+BUILTIN(Insert,       "insert",       Proc, TP, 3, 3, R_None, AK_Any)
 // SetLength(var s: string; newLength: Integer) -- sets s's own length byte
 // directly, clamped to s's declared capacity (0 if newLength < 0).  Bytes
 // exposed by growing are left whatever they already held -- confirmed
@@ -330,24 +371,24 @@ BUILTIN(Insert,       "insert",       Proc, TP, 3, 3, R_None)
 // actual buffer overrun in real Turbo/FPC's implementation, not a rule worth
 // matching; plang clamps to the declared capacity here the same way every
 // other plang_sstr_* function already does.
-BUILTIN(SetLength,    "setlength",    Proc, TP, 2, 2, R_None)
+BUILTIN(SetLength,    "setlength",    Proc, TP, 2, 2, R_None, AK_Any)
 // StringOfChar(ch: Char; count: Integer) -- a capacity-255 ShortString of
 // count copies of ch, clamped at 255 (StringOfChar('x', 300) is 255 x's, not
 // a runtime error) the same way every other ShortString-producing routine
 // here clamps rather than errors.
-BUILTIN(StringOfChar, "stringofchar", Func, TP, 2, 2, R_Str)
+BUILTIN(StringOfChar, "stringofchar", Func, TP, 2, 2, R_Str, AK_Any)
 // UpCase(ch: Char): Char -- real Turbo Pascal 7's UpCase takes and returns a
 // CHAR, not a string (that two-argument-shape confusion is a later Delphi/
 // SysUtils-era overload this milestone excludes, matching the Lower/
 // UpperCase exclusion above).  Only 'a'..'z' change; every other character,
 // ASCII or not, passes through unchanged.
-BUILTIN(UpCase,       "upcase",       Func, TP, 1, 1, R_Char)
+BUILTIN(UpCase,       "upcase",       Func, TP, 1, 1, R_Char, AK_Any)
 // Str(x [: width [: decimals]]; var s: string) -- formats x the same way
 // write(x [: width [: decimals]]) already does (reusing the writestr capture
 // machinery, BuiltinIO.cpp), into ShortString destination s.  x's optional
 // width/decimals are parsed the same way write's own are (ParseStmt.cpp adds
 // "str" to the write-parameter spelling set for exactly this).
-BUILTIN(Str,          "str",          Proc, TP, 2, 2, R_None)
+BUILTIN(Str,          "str",          Proc, TP, 2, 2, R_None, AK_Any)
 // Val(s: string; var v; var code: Integer) -- parses s as v's own type
 // (integer or real) into v, and sets code to 0 on success or to the 1-based
 // index of the first character that does not fit Val's grammar on failure.
@@ -356,7 +397,7 @@ BUILTIN(Str,          "str",          Proc, TP, 2, 2, R_None)
 // Val's entire reason for being a separate, new, non-fatal parsing primitive
 // (runtime/plang_val.cpp) rather than a thin reuse of readstr's existing
 // abort-on-malformed-input machinery.
-BUILTIN(Val,          "val",          Proc, TP, 3, 3, R_None)
+BUILTIN(Val,          "val",          Proc, TP, 3, 3, R_None, AK_Any)
 
 // -std=turbo only: GetMem(var P: Pointer; Size: Int64) / FreeMem(P: Pointer
 // [, Size: Int64]) -- runtime/plang_sys.cpp's plang_tp_getmem/
@@ -368,15 +409,15 @@ BUILTIN(Val,          "val",          Proc, TP, 3, 3, R_None)
 // even in TP-compat mode) and HeapError's own Size parameter
 // (Sema::registerBuiltins), for the same reason a mismatched pair would be
 // worse than either alone.
-BUILTIN(GetMem,       "getmem",       Proc, TP, 2, 2, R_None)
-BUILTIN(FreeMem,      "freemem",      Proc, TP, 1, 2, R_None)
+BUILTIN(GetMem,       "getmem",       Proc, TP, 2, 2, R_None, AK_Any)
+BUILTIN(FreeMem,      "freemem",      Proc, TP, 1, 2, R_None, AK_Any)
 
 // -std=turbo only: ParamCount/ParamStr(n) -- read back the argc/argv every
 // compiled program's own C main now receives (CodeGenProcs.cpp's emitMain,
 // runtime/plang_sys.cpp's plang_set_args).  ParamStr returns a capacity-255
 // ShortString, the same result type Copy/Concat/StringOfChar above do.
-BUILTIN(ParamCount,   "paramcount",   Func, TP, 0, 0, R_Int)
-BUILTIN(ParamStr,     "paramstr",     Func, TP, 1, 1, R_Str)
+BUILTIN(ParamCount,   "paramcount",   Func, TP, 0, 0, R_Int, AK_Any)
+BUILTIN(ParamStr,     "paramstr",     Func, TP, 1, 1, R_Str, AK_Any)
 
 // -std=turbo only: IOResult -- reads InOutRes (Sema::registerBuiltins'
 // InOutRes Symbol, runtime/plang_sys.cpp's plang_tp_inoutres) and CLEARS IT
@@ -391,7 +432,7 @@ BUILTIN(ParamStr,     "paramstr",     Func, TP, 1, 1, R_Str)
 // ParamCount/Random's own arrival there required) -- confirmed for
 // IOResult specifically, not just assumed to transfer, by this item's own
 // dialect-gating lit test.
-BUILTIN(IOResult,     "ioresult",     Func, TP, 0, 0, R_Int)
+BUILTIN(IOResult,     "ioresult",     Func, TP, 0, 0, R_Int, AK_Any)
 
 // -std=turbo only: Assign(var f; const name: string) / Append(var f: Text).
 // TP's own file model, which replaces (not extends) ISO/EP's reset/rewrite/
@@ -404,8 +445,8 @@ BUILTIN(IOResult,     "ioresult",     Func, TP, 0, 0, R_Int)
 // family from the ISO ones just above, per this project's P7 rule that
 // dialect selection happens at the CALL SITE, never inside one runtime
 // function branching on a passed-in "which dialect" flag.
-BUILTIN(Assign,       "assign",       Proc, TP, 2, 2, R_None)
-BUILTIN(Append,       "append",       Proc, TP, 1, 1, R_None)
+BUILTIN(Assign,       "assign",       Proc, TP, 2, 2, R_None, AK_Any)
+BUILTIN(Append,       "append",       Proc, TP, 1, 1, R_None, AK_Any)
 
 // -std=turbo only: FilePos(f) / FileSize(f) -- current / total record
 // position, in units of f's own RecSize (Cluster A item 4's RecSize
@@ -418,23 +459,23 @@ BUILTIN(Append,       "append",       Proc, TP, 1, 1, R_None)
 // way Turbo's own 32-bit LongInt eventually would.  Both refuse a Text
 // argument (err_binary_file_required) -- confirmed against `fpc -Mtp`,
 // which refuses to call either with one at all.
-BUILTIN(FilePos,      "filepos",      Func, TP, 1, 1, R_Int)
-BUILTIN(FileSize,     "filesize",     Func, TP, 1, 1, R_Int)
+BUILTIN(FilePos,      "filepos",      Func, TP, 1, 1, R_Int, AK_Any)
+BUILTIN(FileSize,     "filesize",     Func, TP, 1, 1, R_Int, AK_Any)
 // -std=turbo only: SeekEof(f) / SeekEoln(f) -- the CONSUMING counterparts
 // of Eof/Eoln: SeekEof skips past any blanks, tabs and line markers ahead
 // of the current position before testing; SeekEoln skips only blanks and
 // tabs (a line marker is itself what Eoln tests for, so SeekEoln does not
 // cross one).  Text-only, the same restriction Eoln itself already has
 // (err_line_proc_not_text) -- confirmed against `fpc -Mtp`.
-BUILTIN(SeekEof,      "seekeof",      Func, TP, 1, 1, R_Bool)
-BUILTIN(SeekEoln,     "seekeoln",     Func, TP, 1, 1, R_Bool)
+BUILTIN(SeekEof,      "seekeof",      Func, TP, 1, 1, R_Bool, AK_Any)
+BUILTIN(SeekEoln,     "seekeoln",     Func, TP, 1, 1, R_Bool, AK_Any)
 
 // -std=turbo only: Seek(f, n) / Truncate(f) -- position f at record n
 // (0-relative, in units of RecSize) / truncate f at the current position.
 // Both refuse a Text argument (err_binary_file_required), the same as
 // FilePos/FileSize above.
-BUILTIN(Seek,         "seek",         Proc, TP, 2, 2, R_None)
-BUILTIN(Truncate,     "truncate",     Proc, TP, 1, 1, R_None)
+BUILTIN(Seek,         "seek",         Proc, TP, 2, 2, R_None, AK_Any)
+BUILTIN(Truncate,     "truncate",     Proc, TP, 1, 1, R_None, AK_Any)
 // -std=turbo only: BlockRead(f, var buf; count[; var result]) /
 // BlockWrite(f, var buf; count[; var result]) -- transfer count
 // RecSize-sized records between f and buf, an UNTYPED var parameter (any
@@ -445,20 +486,20 @@ BUILTIN(Truncate,     "truncate",     Proc, TP, 1, 1, R_None)
 // sets InOutRes to 100 (BlockRead)/101 (BlockWrite) -- Borland's own
 // documented distinction, confirmed against `fpc -Mtp`.  See
 // CGProcCall.cpp's own dispatch for exactly where that arity reads.
-BUILTIN(BlockRead,    "blockread",    Proc, TP, 3, 4, R_None)
-BUILTIN(BlockWrite,   "blockwrite",   Proc, TP, 3, 4, R_None)
+BUILTIN(BlockRead,    "blockread",    Proc, TP, 3, 4, R_None, AK_Any)
+BUILTIN(BlockWrite,   "blockwrite",   Proc, TP, 3, 4, R_None, AK_Any)
 // -std=turbo only: Erase(f) / Rename(f, newname) -- delete / rename the
 // file f is bound to (by Assign), and (Rename only) update f's own bound
 // name to match.  Both require f to be fmClosed first -- confirmed against
 // `fpc -Mtp`: either call against a still-open f sets InOutRes to 102
 // ("file not assigned" -- FPC's own field practice reuses that code here
 // rather than a dedicated one) and performs nothing.
-BUILTIN(Erase,        "erase",        Proc, TP, 1, 1, R_None)
-BUILTIN(Rename,       "rename",       Proc, TP, 2, 2, R_None)
+BUILTIN(Erase,        "erase",        Proc, TP, 1, 1, R_None, AK_Any)
+BUILTIN(Rename,       "rename",       Proc, TP, 2, 2, R_None, AK_Any)
 // -std=turbo only: Flush(f) -- flush f's buffered output without closing
 // it.  No Text/binary restriction of its own (confirmed against
 // `fpc -Mtp`: both accept it).
-BUILTIN(Flush,        "flush",        Proc, TP, 1, 1, R_None)
+BUILTIN(Flush,        "flush",        Proc, TP, 1, 1, R_None, AK_Any)
 // -std=turbo only: SetTextBuf(var f: Text; var buf[; size]) -- overrides
 // f's own internal I/O buffer with caller-supplied storage.  buf is an
 // UNTYPED var parameter like BlockRead/BlockWrite's own above; size
@@ -467,7 +508,7 @@ BUILTIN(Flush,        "flush",        Proc, TP, 1, 1, R_None)
 // further help -- see CGProcCall.cpp's own comment for why a fixed default
 // is used instead).  Text-only (err_line_proc_not_text), the same
 // restriction Eoln/SeekEoln already have.
-BUILTIN(SetTextBuf,   "settextbuf",   Proc, TP, 2, 3, R_None)
+BUILTIN(SetTextBuf,   "settextbuf",   Proc, TP, 2, 3, R_None, AK_Any)
 
 // Turbo Tier 4, Cluster C item 5: real TP's own Crt unit's three routines
 // that genuinely need OS support (a real wait; raw, unbuffered keyboard
@@ -486,9 +527,9 @@ BUILTIN(SetTextBuf,   "settextbuf",   Proc, TP, 2, 3, R_None)
 // ReadKey follow that exact, already-established precedent rather than
 // inventing a new one. A documented, deliberate simplification -- not an
 // oversight -- see this item's own report for the full reasoning.
-BUILTIN(Delay,        "delay",        Proc, TP, 1, 1, R_None)
-BUILTIN(KeyPressed,   "keypressed",   Func, TP, 0, 0, R_Bool)
-BUILTIN(ReadKey,      "readkey",      Func, TP, 0, 0, R_Char)
+BUILTIN(Delay,        "delay",        Proc, TP, 1, 1, R_None, AK_Any)
+BUILTIN(KeyPressed,   "keypressed",   Func, TP, 0, 0, R_Bool, AK_Any)
+BUILTIN(ReadKey,      "readkey",      Func, TP, 0, 0, R_Char, AK_Any)
 
 #undef ALL
 #undef TP

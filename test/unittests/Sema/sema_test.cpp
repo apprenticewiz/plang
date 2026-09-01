@@ -58,7 +58,7 @@ TEST(Builtins, ANameOfAnotherDialectIsDeclaredRatherThanUndefined) {
     // alone and stays true whichever of the OTHER dialects asks -- unlike
     // the wording each replaced, which hardcoded "not available under
     // -std=iso7185" and so was simply wrong once -std=turbo could ask too.
-#define BUILTIN(Id_, Spelling_, Kind_, Dialects_, Min_, Max_, Result_)         \
+#define BUILTIN(Id_, Spelling_, Kind_, Dialects_, Min_, Max_, Result_, ArgKind_) \
     if (!LangOptions{}.inDialect(Dialects_)) {                                 \
         ++Probed;                                                              \
         const auto R = probe(Spelling_, builtinIsFunction(BuiltinID::Id_));    \
@@ -86,7 +86,7 @@ TEST(Builtins, ANameOfThisDialectIsNotRefusedForBeingOne) {
     // dialect must not start refusing the ones that belong to the dialect in
     // force.  A wrong dialect mask in the .def would fail exactly here.
     std::size_t Probed = 0;
-#define BUILTIN(Id_, Spelling_, Kind_, Dialects_, Min_, Max_, Result_)         \
+#define BUILTIN(Id_, Spelling_, Kind_, Dialects_, Min_, Max_, Result_, ArgKind_) \
     if (LangOptions{}.inDialect(Dialects_)) {                                  \
         ++Probed;                                                              \
         std::string Src = "program p(output);\nvar r: real;\nbegin ";          \
@@ -102,7 +102,7 @@ TEST(Builtins, ANameOfThisDialectIsNotRefusedForBeingOne) {
     // over it rather than over an empty selection.
     EXPECT_GT(Probed, 0u);
     std::size_t EPOnly = 0;
-#define BUILTIN(Id_, Spelling_, Kind_, Dialects_, Min_, Max_, Result_)         \
+#define BUILTIN(Id_, Spelling_, Kind_, Dialects_, Min_, Max_, Result_, ArgKind_) \
     if (!LangOptions{}.inDialect(Dialects_)) ++EPOnly;
 #include "plang/Basic/Builtins.def"
     EXPECT_EQ(Probed + EPOnly, NumBuiltins);
