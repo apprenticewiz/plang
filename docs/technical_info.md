@@ -469,3 +469,66 @@ compiler error.
 UBSan's `vptr` check is switched off with it, because the libraries are built
 `-fno-rtti` by LLVM convention and that check needs RTTI; left on, it reports
 every `shared_ptr` control block as having an invalid vptr.
+
+### Fuzzing (issue #183 Phase 1)
+
+`-DPLANG_ENABLE_FUZZERS=ON` builds three libFuzzer targets under `fuzz/`:
+`scanner-fuzzer` and `parser-fuzzer` feed raw, arbitrary bytes straight
+through `Scanner`'s and `Parser`'s existing in-memory-buffer constructors (no
+filesystem I/O involved); `pmi-fuzzer` exercises EP separate-compilation
+`.pmi` interface loading through `Sema::loadPMIFromBuffer`, the buffer-taking
+core `Sema::loadPMI` (private, file-path-only, used by every real caller) was
+split into for exactly this reason — see `fuzz/pmi-fuzzer.cpp`'s own header
+comment for the two designs considered and why the split was chosen over a
+`friend` declaration.
+
+Requires Clang (`-fsanitize=fuzzer` is a Clang/compiler-rt feature with no
+GCC equivalent); configure fails immediately with a clear error under GCC
+rather than failing later at the first fuzz-target compile.
+
+```bash
+cmake -S . -B build-fuzz -G Ninja -DCMAKE_BUILD_TYPE=Debug \
+  -DPLANG_ENABLE_FUZZERS=ON \
+  -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
+cmake --build build-fuzz -j$(getconf _NPROCESSORS_ONLN)
+```
+
+Turning the option on applies `-fsanitize=fuzzer-no-link,address` to the
+*whole* build, not just the three `fuzz/*.cpp` files — ASan and
+SanitizerCoverage have to instrument `Scanner`/`Parser`/`Sema` themselves
+(built into `plang_frontend`, which the fuzz targets link against) for a
+fuzz run to catch a memory bug in the code actually being fuzzed. Each fuzz
+target then adds plain `-fsanitize=fuzzer` (link-only) on top, which is what
+pulls in libFuzzer's own `main()`/driver — scoped to just those three
+targets so the `plang` driver and every test binary a `PLANG_ENABLE_TESTS=ON`
+build alongside this still link.
+
+Each target ships a seed corpus under `fuzz/corpus/<target>/`: a random
+sample of real `.pas` files already in `test/` (not the full ~2,900-file
+suite — a few hundred spanning every `test/` category is enough to seed
+useful coverage without a disproportionate repo diff) for `scanner`/`parser`,
+and one hand-written `.pmi`-shaped module interface for `pmi`. Run a target
+against its own corpus for longer than CI's short per-PR smoke budget (see
+below) by pointing it at a **copy** of that directory, not the tracked one
+directly — libFuzzer writes newly-interesting inputs back into whatever
+corpus directory it's given, which is exactly what you want for a real,
+ongoing fuzzing session but not for `fuzz/corpus/` as checked into git:
+
+```bash
+cp -r fuzz/corpus/scanner /tmp/scanner-corpus
+ASAN_OPTIONS=alloc_dealloc_mismatch=0 \
+  ./build-fuzz/bin/scanner-fuzzer -max_total_time=600 /tmp/scanner-corpus
+```
+
+`ASAN_OPTIONS=alloc_dealloc_mismatch=0` works around a known ASan false
+positive in LLVM's own `DenseMap`/`MemAlloc.cpp` bucket allocator (pairs
+`operator new(nothrow)` with a plain `free()`, deliberately, in a way ASan's
+stricter check flags even though it is safe on this platform) — not a plang
+bug, and not specific to any one of the three targets.
+
+CI (`fuzz-smoke` in `.github/workflows/ci.yml`) runs each target for a short,
+fixed 60-second wall-clock budget on every PR against its checked-in seed
+corpus, as a crash-regression smoke check — not deep fuzzing, and
+deliberately not scheduled/long-running fuzzing infrastructure with its own
+corpus-persistence and crash-triage story (that is Phase 2 of issue #183,
+explicitly deferred).
