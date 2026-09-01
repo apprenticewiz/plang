@@ -16,13 +16,17 @@
 using namespace plang;
 
 llvm::Value* CGExprCore::emitExpr(const ExprNode& e) {
-    // See MaxExprDepth in CGExprCore.h. Checked before the RAII bump: a caller
-    // already sitting at the ceiling must abort without recursing again.
-    if (ExprDepth_ >= MaxExprDepth)
-        codegenICE("expression nesting exceeds CodeGen's depth ceiling; "
-                    "this is a hard recursion limit of this build's "
-                    "expression emitter, not a diagnostic on the input "
-                    "program");
+    // See MaxExprDepth/StackBaseline_ in CGExprCore.h (issue #556). Checked
+    // before the RAII bump: a caller already sitting at the ceiling must
+    // abort without recursing again. codegenICE never returns, so -- unlike
+    // Parser::parsePower's or Sema::checkExpr's own guards -- there is no
+    // "already reported" latch here for DepthGuard's construction order to
+    // matter for; either ceiling firing ends the process on this statement.
+    if (ExprDepth_ >= MaxExprDepth || stackNearlyExhausted(StackBaseline_))
+        codegenICE("expression nesting exceeds CodeGen's depth ceiling, or "
+                    "the real C++ stack is nearly exhausted; this is a hard "
+                    "recursion limit of this build's expression emitter, "
+                    "not a diagnostic on the input program");
     ExprDepthScope DepthGuard(ExprDepth_);
 
     if (auto* n = llvm::dyn_cast<IntLitExpr>(&e))

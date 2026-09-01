@@ -13,6 +13,8 @@
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/LLVMContext.h"
 
+#include "plang/Basic/StackHeadroom.h"
+
 #include "CGBinaryOps.h"
 #include "CGFieldAccess.h"
 #include "CGFuncCall.h"
@@ -107,6 +109,18 @@ private:
     /// (numeric conversion vs. bit-for-bit reinterpretation) applies.
     llvm::Value* emitTypeCastValue(const plang::TypeCastExpr& e);
 
+    // Reference point the stack-headroom check below (see MaxExprDepth's own
+    // comment) measures usage from -- the same role Parser::StackBaseline and
+    // Sema::StackBaseline play for their own guards (issue #556). An in-class
+    // default member initializer, rather than a constructor parameter, is
+    // enough here (unlike Parser's/Sema's own StackBaseline, threaded through
+    // an explicit constructor for documentation's sake) since it is still
+    // evaluated fresh at every CGExprCore construction -- this class has
+    // exactly one constructor, so there is no risk of a second one leaving it
+    // stale -- and this avoids adding yet another parameter to the already
+    // very long parameter list just below.
+    std::uintptr_t             StackBaseline_ = plang::captureStackBaseline();
+
     // Live activations of emitExpr.  Every recursive re-entry into expression
     // emission -- a binary/unary operand, a call argument, an index/field/
     // deref base -- funnels through emitExpr (directly, or indirectly via the
@@ -141,6 +155,21 @@ private:
     // recursion raw-SIGSEGV" -- turning the crash into the same clean,
     // diagnosable failure (codegenICE, CodegenICE.h) every other invariant
     // violation in codegen produces.
+    //
+    // Neither of those defenses is a live stack-headroom check, though: both
+    // are term-count ceilings, tuned against a NORMAL-sized (multi-MiB, or
+    // ASan-inflated-but-still-multi-MiB) stack. Under a small but real
+    // platform stack budget instead (a constrained container, a hardened
+    // deployment, a fuzzing worker -- issue #556), a `**` chain in the
+    // 500-1000 term range crashes CodeGen with a raw SIGSEGV in emitBinary/
+    // emitExpr's mutual recursion well under BOTH ceilings above -- confirmed
+    // via gdb, `ulimit -s 1024`. So plang::stackNearlyExhausted (Basic/
+    // StackHeadroom.h, generalized from Parser::parsePower's own guard) is
+    // checked alongside the term count below, the same way Sema's own
+    // checkExpr needs one for the identical reason (SemaExpr.cpp).
+    // codegenICE never returns, so unlike Parser's/Sema's own guards there is
+    // no "already reported" latch to worry about ordering a Guard around --
+    // the process exits on the very statement that detects either ceiling.
 #if defined(__SANITIZE_ADDRESS__) \
     || (defined(__has_feature) && __has_feature(address_sanitizer))
     static constexpr unsigned MaxExprDepth = 200;
