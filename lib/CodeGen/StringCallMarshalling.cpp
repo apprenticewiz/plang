@@ -146,6 +146,22 @@ llvm::Value* StringCallMarshalling::emitCallArg(const ExprNode& arg,
     // hand over is read from there.
     if (paramTy && paramTy->isArrayTy() && v && v->getType() == PtrTy)
         v = B.CreateLoad(paramTy, v, "arr.arg");
+    // Issue #685: a record structured-value-constructor (EP §6.8.7) is built
+    // into its own stack temporary and hands back that temporary's ADDRESS
+    // (CGStructuredValue::emitStructuredValue's record arm returns its
+    // `alloca`, documented there as "caller uses memcpy or memcpy-like
+    // assign") -- the identical address-returning shape the array case just
+    // above already loads from, but record had no matching case.  A record
+    // value PARAMETER is a genuine LLVM struct-by-value argument, not a
+    // pointer, so `show(rec[a:1;b:2])` handed the constructor's alloca
+    // straight to a callee declared over the loaded struct type: "Call
+    // parameter type does not match function signature!"  An ordinary
+    // record variable or field never reaches this arm, because EmitExpr
+    // already loads those (CGExprCore's IdentExpr case, CGFieldAccess::
+    // emitFieldLoad) -- this is specifically for the constructor's own
+    // address-returning contract, the same way the array fix just above is.
+    if (paramTy && paramTy->isStructTy() && v && v->getType() == PtrTy)
+        v = B.CreateLoad(paramTy, v, "rec.arg");
     // §6.6.3.2 makes a value parameter a variable of its own that the actual is
     // *assigned* to, so §6.4.6's assignment compatibility applies and an
     // integer actual for a real formal widens.  Every other destination in the

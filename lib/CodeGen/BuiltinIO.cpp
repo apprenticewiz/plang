@@ -132,18 +132,29 @@ void BuiltinIO::emitWriteArgs(
             // be IDENTICAL to the file's component type, not just assignment
             // compatible -- Sema (SemaStmt.cpp's read/write arms,
             // err_turbo_typed_file_exact_type) already refuses a mismatched
-            // Turbo program before it reaches codegen, so this call is
-            // reachable under Turbo only when val's LLVM type already equals
-            // compTy and CoerceToType would be a no-op -- but skipping it
-            // outright here, rather than relying on that invariant, is what
-            // actually keeps codegen from EVER performing ISO's implicit
-            // widening for Turbo, matching real Turbo Pascal (no `writeln`-
-            // style numeric promotion on a typed file the way ISO's f^ := e
-            // assignment-compatibility rule allows).
-            if (!Opts.turbo())
-                if (auto* compTy = FileVars.getFileElemType(*args[0]))
-                    if (compTy->isSingleValueType() && val->getType()->isSingleValueType())
-                        val = CoerceToType(val, compTy);
+            // Turbo program before it reaches codegen.  Issue #683: that
+            // guarantee is about the LOGICAL (Sema) type, not about what
+            // CodeGen actually emits for it -- an IntLitExpr always lowers to
+            // an i64 constant regardless of context (CGExprCore.cpp), and a
+            // mixed-width binary expression widens to its WIDEST operand
+            // (CGBinaryOps.cpp), so `write(f, 42)` and `write(f, v+0)` on a
+            // `file of Integer` (16-bit under Turbo) reached here as an i64
+            // value against an i16 component even though Sema's exact-type
+            // check had already passed them.  Skipping CoerceToType
+            // altogether -- the previous fix for not wanting ISO's KIND-
+            // changing promotion (int-to-real and the like) under Turbo --
+            // threw out the WIDTH fixup along with it.  It does not need to:
+            // Sema's exact-type check already guarantees val and compTy are
+            // the same declared Pascal type, so whenever they are also both
+            // single-value LLVM types, CoerceToType can only ever perform a
+            // same-KIND zext/sext/trunc here under Turbo (see its own ordinal
+            // width branch) -- never the cross-kind int<->float widening
+            // ISO's assignment-compatibility rule allows and Turbo's
+            // err_turbo_typed_file_exact_type check already forbids from
+            // reaching this far in the first place.
+            if (auto* compTy = FileVars.getFileElemType(*args[0]))
+                if (compTy->isSingleValueType() && val->getType()->isSingleValueType())
+                    val = CoerceToType(val, compTy);
             // Store the value to a temporary alloca so we can pass its address.
             auto* tmp = CreateEntryAlloca(val->getType(), "bin.wr.tmp");
             B.CreateStore(val, tmp);

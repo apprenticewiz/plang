@@ -416,15 +416,20 @@ ClosureAndCallABI::emitProcParamCall(const VarEntry& ve,
 
     auto* call = B.CreateCall(fnTy, fn, args);
     if (fnTy->getReturnType()->isVoidTy()) return nullptr;
-    // A string result comes back as the whole { length, bytes } struct, but
-    // every consumer of a string expression expects its address -- the same
-    // spill the direct-call path already does (CodeGenExprs.cpp).  Missing
-    // here, a functional parameter returning string(N) handed the raw struct
-    // to plang_str_assign, which wants a pointer: "Call parameter type does
-    // not match function signature!", an LLVM IR verifier abort.
+    // A string/ShortString result comes back as the whole struct-shaped
+    // value, but every consumer of a string expression expects its address
+    // -- the same spill the direct-call path already does
+    // (CGCallMarshal::spillStructReturnIfNeeded).  Missing here, a
+    // functional parameter returning string(N) or Turbo's string[N] handed
+    // the raw struct to plang_str_assign/plang_sstr_assign, which wants a
+    // pointer: "Call parameter type does not match function signature!", an
+    // LLVM IR verifier abort.  Issue #684: needsStructReturnSpill (unlike
+    // this arm's own former bare varStrTypeOf check) also covers
+    // ShortString, so a ShortString function called THROUGH a procedural
+    // parameter spills exactly like a direct call to it already did.
     const Type* retTy = ve.procType->ReturnType
                        ? ve.procType->ReturnType->ResolvedType.get() : nullptr;
-    if (varStrTypeOf(retTy) && call->getType()->isStructTy()) {
+    if (needsStructReturnSpill(retTy) && call->getType()->isStructTy()) {
         auto* tmp = CreateEntryAlloca(call->getType(), "str.ret");
         B.CreateStore(call, tmp);
         return tmp;
@@ -530,12 +535,14 @@ ClosureAndCallABI::emitProcVarCall(const VarEntry& ve,
 
     auto* call = B.CreateCall(fnTy, callee, args);
     if (fnTy->getReturnType()->isVoidTy()) return nullptr;
-    // A string result comes back as the whole { length, bytes } struct; see
-    // emitProcParamCall's identical spill for why every consumer of a string
-    // expression instead expects its address.
+    // A string/ShortString result comes back as the whole struct-shaped
+    // value; see emitProcParamCall's identical spill (issue #684) for why
+    // every consumer of a string expression instead expects its address,
+    // and why needsStructReturnSpill -- not a bare varStrTypeOf check --
+    // is what has to gate it.
     const Type* retTy = ve.procType->ReturnType
                        ? ve.procType->ReturnType->ResolvedType.get() : nullptr;
-    if (varStrTypeOf(retTy) && call->getType()->isStructTy()) {
+    if (needsStructReturnSpill(retTy) && call->getType()->isStructTy()) {
         auto* tmp = CreateEntryAlloca(call->getType(), "str.ret");
         B.CreateStore(call, tmp);
         return tmp;
@@ -564,4 +571,12 @@ const Type* ClosureAndCallABI::varStrTypeOf(const Type* T) {
         if (U->Kind == TypeKind::VarString) return U;
     }
     return nullptr;
+}
+
+/// Issue #684: see this method's own declaration (ClosureAndCallABI.h) --
+/// ShortString is a completely separate TypeKind, never reached by looking
+/// through a schema (Turbo has no schema mechanism at all), so unlike
+/// varStrTypeOf just above there is no EP wrapper case to unwrap.
+const Type* ClosureAndCallABI::shortStrTypeOf(const Type* T) {
+    return (T && T->Kind == TypeKind::ShortString) ? T : nullptr;
 }
