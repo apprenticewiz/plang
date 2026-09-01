@@ -24,6 +24,20 @@ using namespace plang;
 // program nests statements anywhere close to this deep.  Without a ceiling
 // here, a source file built specifically to nest deeply (or a generated/
 // fuzzed one) drives the real call stack instead of a diagnostic.
+//
+// Like every sibling term-count ceiling elsewhere in this codebase
+// (ExprDepth, TypeDepth, ...), this alone bounds a *count*, not the real C++
+// stack: a small-but-real platform stack budget (a constrained container, a
+// hardened deployment, a fuzzer worker) can exhaust the actual stack before
+// MaxStmtDepth live parseStatement activations ever accumulate -- confirmed
+// via `ulimit -s 256`, Debug: 499 levels of nested 'if' (safely under this
+// 500 ceiling) segfaults inside parseStatement's own recursion with no
+// diagnostic at all (issue #562, the same architectural gap issue #556 and
+// its own follow-up already closed for Sema's checkExpr/walkExprs/walkStmts
+// and CodeGen's emitBinary/emitExpr, and issue #550/#551 closed for
+// Parser::parsePower). So parseStatement below also checks
+// plang::stackNearlyExhausted (Basic/StackHeadroom.h), measured from the
+// same Parser::StackBaseline parsePower's own guard already uses.
 static constexpr unsigned MaxStmtDepth = 500;
 
 // ---------------------------------------------------------------------------
@@ -38,10 +52,24 @@ std::unique_ptr<StmtNode> Parser::parseStatement() {
     // statement's members, an if/while/for/repeat/with statement's body, a
     // case arm, a labeled statement's target -- funnels through this
     // activation, so this is the one place a ceiling bounds the whole cycle.
-    // Checked before the RAII bump a few lines down: a caller already sitting
-    // at the ceiling must return without recursing again, not recurse once
-    // more and only then stop.
-    if (StmtDepth >= MaxStmtDepth) {
+    //
+    // Unlike the pure term-count check alone, plang::stackNearlyExhausted
+    // (issue #562, Basic/StackHeadroom.h) can fire on the very first
+    // activation, before any Guard for StmtDepth has ever been constructed --
+    // so DepthGuard is constructed unconditionally here, before either check
+    // runs, rather than only once both have already decided not to reject.
+    // Otherwise a first-call exhaustion would latch StmtDepthLimitHit with no
+    // Guard ever created to reset it, silently poisoning every later,
+    // unrelated deeply-nested statement elsewhere in the same file (see
+    // plang::RecursionGuard's own comment for the general rule, and
+    // Sema::checkExpr's call site, SemaExpr.cpp, for the identical fix
+    // applied to that sibling recursive entry point -- itself modelled on
+    // Parser::parsePower's call site, ParseExpr.cpp, where this ordering bug
+    // was first found, in PR #555's own review). Checking
+    // `StmtDepth > MaxStmtDepth` rather than `>=` accounts for DepthGuard's
+    // constructor having already bumped StmtDepth by one before this runs.
+    StmtDepthScope DepthGuard(StmtDepth, StmtDepthLimitHit);
+    if (StmtDepth > MaxStmtDepth || plang::stackNearlyExhausted(StackBaseline)) {
         if (!StmtDepthLimitHit) {
             StmtDepthLimitHit = true;
             emitError(Current.toLoc(), diag::err_stmt_too_deeply_nested);
@@ -53,7 +81,6 @@ std::unique_ptr<StmtNode> Parser::parseStatement() {
         // once it sees the same token still there.
         return nullptr;
     }
-    StmtDepthScope DepthGuard(StmtDepth, StmtDepthLimitHit);
 
     switch (Current.Kind) {
         case TokenKind::Begin:
