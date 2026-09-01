@@ -1,4 +1,5 @@
 add_library(PlangParse OBJECT
+    AstExprDestroy.cpp
     Parser.cpp
     ParseDecl.cpp
     ParseExpr.cpp

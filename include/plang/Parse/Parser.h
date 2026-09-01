@@ -7,6 +7,7 @@
 #include "plang/Lex/Scanner.h"
 #include "plang/Basic/Token.h"
 
+#include <cstdint>
 #include <initializer_list>
 #include <memory>
 #include <set>
@@ -78,6 +79,44 @@ private:
         explicit ExprDepthScope(unsigned& Counter, bool& LimitHitFlag)
             : N(Counter), LimitHit(LimitHitFlag) { ++N; }
         ~ExprDepthScope() { if (--N == 0) LimitHit = false; }
+    };
+
+    // parsePower's own right-associative recursion (Node->Right =
+    // parsePower(), ParseExpr.cpp) for a '**'/'pow' chain is the one
+    // exception to the "every recursive re-entry funnels through parseFactor"
+    // claim above (issue #550): it calls parsePower() directly, so
+    // ExprDepth/MaxExprDepth never bounds it, and it genuinely deepens the
+    // real C++ call stack one frame per chain element with no ceiling at
+    // all. Unlike ExprDepth/TypeDepth/StmtDepth/BlockDepth, which each bound
+    // a *count* of live activations against a fixed constant, this one is
+    // bounded by comparing actual stack-pointer headroom against the
+    // platform's real stack budget (see powerStackNearlyExhausted in
+    // ParseExpr.cpp) -- a term-count ceiling was tried and reverted (see
+    // PR #553/issue #300's reopening comment) because the "right" count is
+    // not a fixed number, it depends on how much stack a single parsePower
+    // frame actually costs, which varies by build (Debug vs Release) and
+    // platform in a way a hardcoded constant cannot track but a live
+    // headroom check naturally does.  StackBaseline is captured once, here,
+    // at Parser construction (Parser.cpp) as the reference point headroom is
+    // measured from; PowerDepth/PowerDepthLimitHit/PowerDepthScope exist only
+    // to reset the "already reported" flag between one deep '**' chain and
+    // the next in the same file, the same way ExprDepthLimitHit resets above.
+    // Unlike ExprDepthScope, whose ceiling can only fire once MaxExprDepth
+    // other DepthGuards are already alive on the stack, the headroom check
+    // this Guard wraps can fire on the very first activation (PowerDepth ==
+    // 0) -- so parsePower constructs its PowerDepthScope unconditionally,
+    // before running the check, rather than only when it decides to recurse
+    // further; otherwise a first-call exhaustion would latch
+    // PowerDepthLimitHit with no Guard ever created to reset it.
+    std::uintptr_t            StackBaseline;
+    unsigned                  PowerDepth{};
+    bool                      PowerDepthLimitHit{};
+    struct PowerDepthScope {
+        unsigned& N;
+        bool&     LimitHit;
+        explicit PowerDepthScope(unsigned& Counter, bool& LimitHitFlag)
+            : N(Counter), LimitHit(LimitHitFlag) { ++N; }
+        ~PowerDepthScope() { if (--N == 0) LimitHit = false; }
     };
 
     // Live activations of parseTypeExpr.  Every recursive re-entry into type

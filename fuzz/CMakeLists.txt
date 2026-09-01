@@ -84,6 +84,22 @@ target_link_libraries(scanner-fuzzer PRIVATE
 add_executable(parser-fuzzer parser-fuzzer.cpp)
 target_link_libraries(parser-fuzzer PRIVATE
     PlangParseFuzz PlangLexFuzz PlangBasicFuzz PlangLocaleFuzz)
+# Parser.cpp/ParseExpr.cpp call two out-of-line LLVM Support functions
+# directly (llvm::getStackPointer()/getDefaultStackSize(),
+# llvm/Support/ProgramStack.h -- parsePower's own stack-headroom check,
+# issue #550) since PR #555. The real PlangParse never links LLVM itself
+# either (lib/Parse/CMakeLists.txt has no such edge) -- it relies on
+# plang_frontend's own final link supplying libLLVM.so, which parser-fuzzer
+# has no equivalent of, so it needs this edge directly. Same TARGET-then-
+# find_library fallback pmi-fuzzer's own identical need (just below, for
+# Sema.cpp's out-of-line LLVM calls) and lib/Driver/CMakeLists.txt already
+# use.
+if(TARGET LLVM)
+    target_link_libraries(parser-fuzzer PRIVATE LLVM)
+else()
+    find_library(LLVM_SHARED_LIB NAMES LLVM LLVM-${LLVM_PACKAGE_VERSION} REQUIRED)
+    target_link_libraries(parser-fuzzer PRIVATE ${LLVM_SHARED_LIB})
+endif()
 
 add_executable(pmi-fuzzer pmi-fuzzer.cpp)
 target_link_libraries(pmi-fuzzer PRIVATE

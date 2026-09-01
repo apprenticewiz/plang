@@ -133,9 +133,49 @@ struct IdentExpr : ExprNode {
     mutable IdentResolution Resolution{IdentResolution::Ordinary};
 };
 
+// IndexExpr/FieldExpr/DerefExpr/BinaryExpr/SubstringExpr/MethodCallExpr below
+// each declare (rather than implicitly default) their own destructor -- see
+// AstExprDestroy.cpp for why and for the shared iterative teardown routine
+// all six of them call into.
+//
+// Short version: each of these owns another ExprNode through exactly the
+// field a long, flat chain of the same construct threads through --
+// IndexExpr::Array for 'x[1][1]...[1]', FieldExpr::Record for
+// 'x.a.a.a...a', DerefExpr::Pointer for 'x^^^...^' (all three built by
+// Parser::parsePostfix's iterative loop), BinaryExpr::Left for
+// 'x := 1+1+...+1' (parseSimpleExpr/parseTerm's addop/mulop loops) and
+// BinaryExpr::Right for a '**' chain (parsePower's own right recursion --
+// see issue #550 and StackBaseline's comment in Parser.h for that half of
+// this), SubstringExpr::Str and MethodCallExpr::Receiver (also
+// parsePostfix). None of that parsing is itself recursive C++ call depth
+// (the loops are iterative, or -- parsePower's case -- separately bounded),
+// but the AST it builds is exactly as deep as the input asked for, and the
+// COMPILER-GENERATED destructor these six would otherwise get is
+// unavoidably recursive: destroying the outer node destroys its owned
+// child, which (being the same node kind, one link further down the chain)
+// destroys ITS owned child, and so on -- one real C++ stack frame per link,
+// with no guard anywhere in that path, because there is no per-activation
+// RAII scope to hang a depth counter on the way ExprDepth/TypeDepth/
+// StmtDepth/BlockDepth hang one on a recursive *function*.  A chain long
+// enough to build (parsePostfix and the addop/mulop loops accept input of
+// any length) is exactly long enough to blow the stack tearing back down,
+// regardless of whether Sema went on to accept or correctly reject the
+// expression -- issue #551's own repro crashes on teardown even after
+// Sema's MaxExprDepth=1000 has already cleanly rejected it. UnaryExpr and
+// TypeCastExpr were checked too (Operand is the same single-child shape)
+// but do NOT need this: both recurse only through parseFactor, which
+// Parser::ExprDepth already caps at 500 activations, so neither can ever be
+// built more than 500 deep in the first place -- nowhere near a real
+// concern for the compiler-generated destructor.  CallExpr/SetLiteralExpr/
+// StructuredValueExpr and the like are not chain-shaped at all: they hold a
+// std::vector of children, whose own destructor is already an ordinary loop
+// (not per-element recursion) over each element, and any one element that
+// were itself one of the six iterative types below is already made safe by
+// that type's own fix.
 struct IndexExpr : ExprNode {
     static bool classof(const Node* n) { return n->Kind == NodeKind::IndexExpr; }
     IndexExpr() : ExprNode(NodeKind::IndexExpr) {}
+    ~IndexExpr();
     std::unique_ptr<ExprNode> Array;  /// the array being subscripted
     std::unique_ptr<ExprNode> Index;  /// the subscript expression
 };
@@ -143,6 +183,7 @@ struct IndexExpr : ExprNode {
 struct FieldExpr : ExprNode {
     static bool classof(const Node* n) { return n->Kind == NodeKind::FieldExpr; }
     FieldExpr() : ExprNode(NodeKind::FieldExpr) {}
+    ~FieldExpr();
     std::unique_ptr<ExprNode> Record;  /// the record being accessed
     std::string               Field;   /// name of the field
 };
@@ -150,12 +191,14 @@ struct FieldExpr : ExprNode {
 struct DerefExpr : ExprNode {
     static bool classof(const Node* n) { return n->Kind == NodeKind::DerefExpr; }
     DerefExpr() : ExprNode(NodeKind::DerefExpr) {}
+    ~DerefExpr();
     std::unique_ptr<ExprNode> Pointer;  /// the pointer being dereferenced (p^)
 };
 
 struct BinaryExpr : ExprNode {
     static bool classof(const Node* n) { return n->Kind == NodeKind::BinaryExpr; }
     BinaryExpr() : ExprNode(NodeKind::BinaryExpr) {}
+    ~BinaryExpr();
     TokenKind                 Op{TokenKind::Eof};  /// operator token
     std::unique_ptr<ExprNode> Left, Right;         /// operands
 };
@@ -205,6 +248,7 @@ struct SetLiteralExpr : ExprNode {
 struct SubstringExpr : ExprNode {
     static bool classof(const Node* n) { return n->Kind == NodeKind::SubstringExpr; }
     SubstringExpr() : ExprNode(NodeKind::SubstringExpr) {}
+    ~SubstringExpr();
     std::unique_ptr<ExprNode> Str;   /// the string variable
     std::unique_ptr<ExprNode> Low;   /// 1-based start index (inclusive)
     std::unique_ptr<ExprNode> High;  /// 1-based end index (inclusive)
@@ -299,6 +343,7 @@ struct WriteParam : ExprNode {
 struct MethodCallExpr : ExprNode {
     static bool classof(const Node* n) { return n->Kind == NodeKind::MethodCallExpr; }
     MethodCallExpr() : ExprNode(NodeKind::MethodCallExpr) {}
+    ~MethodCallExpr();
     std::unique_ptr<ExprNode>              Receiver;  /// object-typed expression (or P^ deref of one)
     std::string                            Method;    /// method name, as written
     std::vector<std::unique_ptr<ExprNode>> Args;       /// actual arguments, in order
