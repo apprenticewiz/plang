@@ -191,6 +191,7 @@ void plang_module_final_push(void (*Fn)(void)) {
         auto *Grown = static_cast<void (**)(void)>(
             std::realloc(ModuleFinalisers, NewCap * sizeof(void (*)(void))));
         if (!Grown) {
+            std::fflush(stdout);
             std::fputs("plang runtime: out of memory\n", stderr);
             std::abort();
         }
