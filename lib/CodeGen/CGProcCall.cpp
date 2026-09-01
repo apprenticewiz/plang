@@ -1351,29 +1351,41 @@ void CGProcCall::emitInheritedCallStmt(const InheritedCallStmt& s) {
                                             llvm::GlobalValue::ExternalLinkage,
                                             mangledName, &Mod);
         } else {
-            // Explicit 'inherited Method(args)': same args-derived signature
-            // heuristic emitMethodCallStmt's own identical fallback uses
-            // just above (this function's own written argument list, plus
-            // s.ResolvedType for a function's result) -- adequate for the
-            // same reason it is there: internal self-consistency between
-            // this declaration and the marshalling loop just below, not
-            // byte-for-byte agreement with some other translation unit's
-            // richer ABI knowledge (constByRef, conformant/schema params, an
-            // object method never has).
-            llvm::Type* retTy = llvm::Type::getVoidTy(Ctx);
-            if (s.ResolvedType && !s.ResolvedType->isError())
-                retTy = Types.llvmTypeOfSemaType(*s.ResolvedType);
-            std::vector<llvm::Type*> paramTys;
-            paramTys.push_back(PtrTy); // Self
-            for (const auto& Arg : s.Args) {
-                if (Arg && Arg->ResolvedType && !Arg->ResolvedType->isError())
-                    paramTys.push_back(Types.llvmTypeOfSemaType(*Arg->ResolvedType));
-                else
-                    paramTys.push_back(I64Ty);
-            }
-            auto* fnTy = llvm::FunctionType::get(retTy, paramTys, false);
-            callee = llvm::Function::Create(fnTy, llvm::GlobalValue::ExternalLinkage,
-                                            mangledName, &Mod);
+            // Issue #682: this declaration's own shape -- and the
+            // marshalling metadata DeclareForeignInheritedCallee also
+            // registers -- must come from the ANCESTOR METHOD'S OWN
+            // RESOLVED SIGNATURE (s.ImplementingOwnerType, filled in by
+            // Sema::checkInheritedCallStmt as the real Type object
+            // MethodSym was found on), read off through methodEntryOf
+            // exactly the way an ordinary cross-unit method call already
+            // builds ITS OWN foreign declaration (declareForeignMethod,
+            // just above in this file) -- NEVER from this call's own
+            // written argument expressions (s.Args' ResolvedType), which
+            // was the bug: a `var`/const-by-reference/set-typed formal's
+            // real shape is invisible from the actual's own static type (an
+            // Integer actual passed to a `var x: Integer` formal looks
+            // identical, at the call site, to one passed to a plain
+            // `x: Integer` formal), so the guessed declaration passed
+            // ordinary values where the real (separately-compiled) callee
+            // expects pointers -- a caller/callee ABI mismatch invisible to
+            // LLVM's own verifier (both sides individually well-typed) and
+            // only surfacing as a segfault, or silently unrebased set bits,
+            // at run time (confirmed via disassembly: the caller passed a
+            // 16-bit value where the callee, compiled separately with the
+            // real `var` parameter, expected a pointer, and dereferenced it).
+            if (!s.ImplementingOwnerType)
+                codegenICE("'inherited " + s.Method + "' reached CodeGen with "
+                           "no resolved ancestor Type -- Sema::checkInheritedCallStmt "
+                           "should have refused this already or filled in "
+                           "ImplementingOwnerType");
+            const Type::Method* MEntry =
+                methodEntryOf(*s.ImplementingOwnerType, s.ResolvedMethod);
+            if (!MEntry)
+                codegenICE("'inherited " + s.Method + "' resolved to '"
+                           + mangledName + "', which cannot be found on its "
+                             "own ImplementingOwnerType -- Sema should have "
+                             "refused this already");
+            callee = DeclareForeignInheritedCallee(*MEntry, mangledName);
         }
     }
 

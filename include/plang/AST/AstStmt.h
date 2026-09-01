@@ -198,6 +198,19 @@ struct InheritedCallStmt : StmtNode {
     /// function according to whatever the ENCLOSING method already is, and
     /// its result -- if any -- is unused here regardless).
     mutable std::shared_ptr<Type> ResolvedType;
+    /// Turbo Tier 5 issue #682: the ACTUAL ancestor object Type (not just
+    /// its name, ImplementingType above) that declares ResolvedMethod --
+    /// the same Type object Sema's own ancestor-chain walk
+    /// (Sema::checkInheritedCall) already found MethodSym on, retained here
+    /// so CodeGen can read ITS RESOLVED Type::Method (real Params, IsVar
+    /// included) when this call's own mangled callee is not yet declared in
+    /// this translation unit (the ancestor lives in a different one) --
+    /// see CGProcCall::emitInheritedCallStmt's own comment for why that
+    /// fallback used to guess this shape from the call site's own argument
+    /// expressions instead, and why that was wrong for a var/const-by-
+    /// reference/set-typed formal.  Null exactly when ResolvedMethod is
+    /// empty (an already-refused call Sema stopped before finding one).
+    mutable std::shared_ptr<Type> ImplementingOwnerType;
 };
 
 struct WithStmt : StmtNode {

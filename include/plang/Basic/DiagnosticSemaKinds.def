@@ -634,6 +634,19 @@ DIAG(err_inherited_no_ancestor, Error,
 // err_object_method_not_found just above.
 DIAG(err_inherited_method_not_found, Error,
      "ancestor of object type '%0' has no method '%1' for 'inherited' to reach")
+// Issue #616: a bare 'inherited;' forwards THIS activation's own actual
+// parameter values, by position, straight into the resolved ancestor
+// method's own parameter list -- well-typed only when the two signatures
+// are IDENTICAL.  A true virtual override already guarantees that
+// (err_object_virtual_override_signature_mismatch), but a static hide of an
+// inherited method (legal here), or two same-named methods that merely
+// coincide across levels, do not.  Confirmed against a local fpc -Mtp
+// build ("Wrong number of parameters specified for call to ...") that even
+// an ordinarily call-compatible widening conversion is rejected for the
+// bare form -- it requires an exact match, not merely a compatible one.
+DIAG(err_inherited_bare_signature_mismatch, Error,
+     "bare 'inherited' in '%0' cannot forward its own parameters to "
+     "ancestor method '%1.%2': the signatures do not match")
 // Turbo Tier 5, Cluster A item 7: 'Obj.Field'/'P^.Field' for an object type
 // -- err_no_such_field's Object-kind sibling (kept distinct so its wording
 // says "object type" rather than "record type", matching

@@ -1017,13 +1017,26 @@ bool sameMethodSignature(const Type::Method& A, const Type::Method& B) {
 ///      runtime type: every descendant's VMT has the ancestor's own methods
 ///      at the same fixed offsets.
 ///   2. For each VIRTUAL method this type declares, in declaration order:
-///      if a slot of the SAME NAME already exists (inherited from an
-///      ancestor, or -- impossible here, since within-type duplicates are
-///      rejected below -- from earlier in this same type), it is an
-///      OVERRIDE: the slot's ImplementingType is updated in place (same
-///      index), after checking the two signatures match exactly
-///      (err_object_virtual_override_signature_mismatch if not).  If no
-///      slot of that name exists, a NEW slot is appended.
+///      if the NEAREST ANCESTOR DECLARATION of this name (findMethodInChain,
+///      walking ObjectMethods -- a level's own redeclaration, virtual or
+///      not, never a stale VmtSlots entry several levels further up) is
+///      ITSELF STILL VIRTUAL, this is an OVERRIDE: the slot ITS OWN
+///      Type::Method::VmtSlot names is updated in place (same index), after
+///      checking the two signatures match exactly
+///      (err_object_virtual_override_signature_mismatch if not).  Otherwise
+///      (no ancestor declaration of this name at all, OR the nearest one is
+///      a static, non-virtual hide -- issue #620) a NEW slot is appended.
+///      Matching against the nearest ancestor DECLARATION rather than
+///      against any slot of the same name found anywhere in the inherited
+///      VmtSlots table matters exactly when a hide sits between two virtual
+///      declarations of the same name (TA.X virtual, TB.X a static hide,
+///      TC.X virtual again): TB's hide leaves TA's own VmtSlots entry
+///      untouched (rule 3 below), so a same-name search over VmtSlots would
+///      find and silently take over THAT stale entry for TC.X instead of
+///      allocating the fresh slot real Borland/FPC gives it (confirmed
+///      against a local fpc -Mtp build: dispatch through a TA-typed pointer
+///      to a TC instance reaches TA.X, not TC.X -- the hide really does
+///      break the virtual chain).
 ///   3. A method redeclaring an inherited name WITHOUT 'virtual' gets no
 ///      slot at all (VmtSlot stays -1) and does not touch VmtSlots -- it
 ///      statically HIDES the ancestor's method rather than overriding it
@@ -1031,8 +1044,8 @@ bool sameMethodSignature(const Type::Method& A, const Type::Method& B) {
 ///      "An inherited method is hidden by ..." warning for the identical
 ///      program.  A NEW virtual method whose name only coincidentally
 ///      matches a NON-virtual ancestor method (which therefore has no slot
-///      of its own to find) is handled by the same "no slot of that name
-///      exists" branch as any other new virtual method -- confirmed
+///      of its own to find) is handled by the same "nearest declaration is
+///      not virtual" branch rule 2 gives an explicit static hide -- confirmed
 ///      against fpc: this compiles clean, with TWO independent identities
 ///      (the ancestor's own non-virtual TA.X, and the descendant's own
 ///      virtual, VMT-dispatched TB.X), not an error.
@@ -1160,21 +1173,46 @@ std::shared_ptr<Type> Sema::resolveObjectType(const ObjectTypeNode& Node,
         if (PD.IsFunction && PD.ReturnType) Meth.RetType = resolveType(*PD.ReturnType);
 
         if (PD.IsVirtual) {
-            auto SlotIt = std::find_if(T->VmtSlots.begin(), T->VmtSlots.end(),
-                [&](const Type::VmtSlotEntry& E) { return toLower(E.MethodName) == Lower; });
-            if (SlotIt != T->VmtSlots.end()) {
+            // Issue #620: whether this is a real OVERRIDE (reusing the
+            // ancestor's own slot) or a fresh RE-VIRTUALIZATION (a new
+            // slot) depends on whether the NEAREST ancestor declaration of
+            // this name is itself still virtual -- never on whether some
+            // name-alike slot merely EXISTS anywhere in the inherited
+            // VmtSlots table.  findMethodInChain(ParentTy, Lower) is
+            // exactly that nearest declaration (it walks ObjectMethods,
+            // which -- unlike VmtSlots -- only ever holds a level's own
+            // redeclaration, virtual or not, of a name; see its own
+            // comment above).  A static hide sits between two virtual
+            // declarations of the same name without removing or renaming
+            // the ancestor's own VmtSlots entry (rule 3's own comment,
+            // above), so searching VmtSlots BY NAME -- this function's own
+            // original approach -- found that stale, unrelated entry
+            // through the hide and silently took over ITS slot instead of
+            // allocating a fresh one: confirmed against a local fpc -Mtp
+            // build that a hide breaks the virtual chain, and the
+            // re-virtualization below it is a genuinely NEW slot, dispatch
+            // through an ancestor-typed pointer reaching the ORIGINAL
+            // (pre-hide) implementation rather than the re-virtualized one.
+            const Type::Method* Inherited =
+                ParentTy ? findMethodInChain(ParentTy.get(), Lower) : nullptr;
+            if (Inherited && Inherited->IsVirtual && Inherited->VmtSlot >= 0
+                    && static_cast<size_t>(Inherited->VmtSlot) < T->VmtSlots.size()) {
                 // Override: signature must match the inherited method
                 // exactly (rule 2 above).
-                if (const Type::Method* Inherited =
-                        ParentTy ? findMethodInChain(ParentTy.get(), Lower) : nullptr) {
-                    if (!sameMethodSignature(Meth, *Inherited))
-                        error(PD.Loc, diag::err_object_virtual_override_signature_mismatch,
-                              {PD.Name});
-                }
-                SlotIt->ImplementingType = DeclName;
-                SlotIt->DeclaringModule  = CurrentUnit_;
-                Meth.VmtSlot = static_cast<int>(SlotIt - T->VmtSlots.begin());
+                if (!sameMethodSignature(Meth, *Inherited))
+                    error(PD.Loc, diag::err_object_virtual_override_signature_mismatch,
+                          {PD.Name});
+                Type::VmtSlotEntry& Slot = T->VmtSlots[static_cast<size_t>(Inherited->VmtSlot)];
+                Slot.ImplementingType = DeclName;
+                Slot.DeclaringModule  = CurrentUnit_;
+                Meth.VmtSlot = Inherited->VmtSlot;
             } else {
+                // Either no inherited declaration of this name exists yet,
+                // or the nearest one is a static (non-virtual) hide -- both
+                // give this virtual method a brand-new slot, exactly like a
+                // new virtual method whose name only coincidentally matches
+                // a non-virtual ancestor method (rule 3's own comment,
+                // above): two independent identities, not an override.
                 T->VmtSlots.push_back({.MethodName = PD.Name,
                                         .ImplementingType = DeclName,
                                         .DeclaringModule = CurrentUnit_});

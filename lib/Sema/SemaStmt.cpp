@@ -2214,7 +2214,8 @@ void Sema::checkMethodCallStmt(const MethodCallStmt& S) {
 // legal or already refused.
 void Sema::checkInheritedCallStmt(const InheritedCallStmt& S) {
     auto RetTy = checkInheritedCall(S.Method, S.Loc, S.Args, /*ExpectFunction=*/false,
-                                    S.ResolvedMethod, S.ImplementingType, S.ImplementingModule);
+                                    S.ResolvedMethod, S.ImplementingType, S.ImplementingModule,
+                                    S.ImplementingOwnerType);
     S.ResolvedType = (RetTy && !RetTy->isError()) ? RetTy : nullptr;
 }
 

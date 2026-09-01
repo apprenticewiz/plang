@@ -1119,24 +1119,39 @@ llvm::Value* CGFuncCall::emitInheritedCallExpr(const InheritedCallExpr& e) {
                                             llvm::GlobalValue::ExternalLinkage,
                                             mangledName, &Mod);
         } else {
-            // Explicit 'inherited Method(args)': same args-derived signature
-            // heuristic emitInheritedCallStmt's own identical fallback uses
-            // (this call's own written argument list, plus e.ResolvedType
-            // for the function's result).
-            llvm::Type* retTy = llvm::Type::getVoidTy(Ctx);
-            if (e.ResolvedType && !e.ResolvedType->isError())
-                retTy = Types.llvmTypeOfSemaType(*e.ResolvedType);
-            std::vector<llvm::Type*> paramTys;
-            paramTys.push_back(PtrTy); // Self
-            for (const auto& Arg : e.Args) {
-                if (Arg && Arg->ResolvedType && !Arg->ResolvedType->isError())
-                    paramTys.push_back(Types.llvmTypeOfSemaType(*Arg->ResolvedType));
-                else
-                    paramTys.push_back(I64Ty);
-            }
-            auto* fnTy = llvm::FunctionType::get(retTy, paramTys, false);
-            callee = llvm::Function::Create(fnTy, llvm::GlobalValue::ExternalLinkage,
-                                            mangledName, &Mod);
+            // Issue #682: this declaration's own shape -- and the
+            // marshalling metadata DeclareForeignInheritedCallee also
+            // registers -- must come from the ANCESTOR METHOD'S OWN
+            // RESOLVED SIGNATURE (e.ImplementingOwnerType, filled in by
+            // Sema::checkInheritedCall as the real Type object MethodSym
+            // was found on), read off through methodEntryOf exactly the
+            // way an ordinary cross-unit method call already builds ITS
+            // OWN foreign declaration (declareForeignMethod, just above in
+            // this file) -- NEVER from this call site's own written
+            // argument expressions (e.Args' ResolvedType), which was the
+            // bug: a `var`/const-by-reference/set-typed formal's real
+            // shape is invisible from the actual's own static type (an
+            // Integer actual passed to a `var x: Integer` formal looks
+            // identical, at the call site, to one passed to a plain
+            // `x: Integer` formal), so the guessed declaration passed
+            // ordinary values where the real (separately-compiled) callee
+            // expects pointers -- a caller/callee ABI mismatch invisible to
+            // LLVM's own verifier (both sides individually well-typed) and
+            // only surfacing as a segfault, or silently unrebased set bits,
+            // at run time.
+            if (!e.ImplementingOwnerType)
+                codegenICE("'inherited " + e.Method + "' reached CodeGen with "
+                           "no resolved ancestor Type -- Sema::checkInheritedCall "
+                           "should have refused this already or filled in "
+                           "ImplementingOwnerType");
+            const Type::Method* MEntry =
+                methodEntryOf(*e.ImplementingOwnerType, e.ResolvedMethod);
+            if (!MEntry)
+                codegenICE("'inherited " + e.Method + "' resolved to '"
+                           + mangledName + "', which cannot be found on its "
+                             "own ImplementingOwnerType -- Sema should have "
+                             "refused this already");
+            callee = DeclareForeignInheritedCallee(*MEntry, mangledName);
         }
     }
 

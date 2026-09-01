@@ -420,7 +420,12 @@ void Codegen::Impl::init(const std::string& progName) {
         [this](llvm::Value* ptr, const plang::Type& t){ stampVptr(ptr, t); },
         // Issue #511: New(P, Init(...))'s own nested-member vptr stamp --
         // see CGProcCall.h's StampFieldVptrs field for the whole design.
-        [this](llvm::Value* ptr, const plang::Type& t){ stampFieldVptrs(ptr, t); });
+        [this](llvm::Value* ptr, const plang::Type& t){ stampFieldVptrs(ptr, t); },
+        // Issue #682: emitInheritedCallStmt's own explicit-form "ancestor
+        // not yet declared in this translation unit" fallback -- see
+        // Impl::declareForeignInheritedCallee's own comment (CodeGenImpl.h).
+        [this](const plang::Type::Method& m, const std::string& n){
+            return declareForeignInheritedCallee(m, n); });
     // Record field access and pointer dereference.  EmitLValue/EmitExpr
     // are narrow closures into methods not yet extracted (both still in
     // CodeGenExprs.cpp -- emitExpr/emitLValue themselves).
@@ -527,7 +532,12 @@ void Codegen::Impl::init(const std::string& progName) {
         [](const ExprNode& e){ return exprStrCapForTempAlloc(e); },
         [](const ExprNode& e){ return exprIsShortStr(e); },
         [](const ExprNode& e){ return exprShortStrCap(e); },
-        [this](const Type& t){ return getOrCreateVmt(t); });
+        [this](const Type& t){ return getOrCreateVmt(t); },
+        // Issue #682: emitInheritedCallExpr's own explicit-form "ancestor
+        // not yet declared in this translation unit" fallback -- see
+        // Impl::declareForeignInheritedCallee's own comment (CodeGenImpl.h).
+        [this](const plang::Type::Method& m, const std::string& n){
+            return declareForeignInheritedCallee(m, n); });
     // ISO §6.7.1 expression emission -- the central recursive-descent
     // dispatcher every other extracted unit already reaches via its own
     // EmitExpr/EmitLValue closure (unaffected by this move, since those

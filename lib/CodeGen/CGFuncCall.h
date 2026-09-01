@@ -29,7 +29,7 @@
 #include "StringCallMarshalling.h"
 #include "StringRuntime.h"
 
-namespace llvm { class Module; class Value; class GlobalVariable; }
+namespace llvm { class Module; class Value; class GlobalVariable; class Function; }
 namespace plang {
 struct CallExpr; struct ExprNode; struct ProcedureTypeNode; struct MethodCallExpr;
 struct InheritedCallExpr;
@@ -61,7 +61,9 @@ public:
                std::function<int64_t(const plang::ExprNode&)> ExprStrCapStatic,
                std::function<bool(const plang::ExprNode&)> ExprIsShortStr,
                std::function<int64_t(const plang::ExprNode&)> ExprShortStrCap,
-               std::function<llvm::GlobalVariable*(const plang::Type&)> GetOrCreateVmt)
+               std::function<llvm::GlobalVariable*(const plang::Type&)> GetOrCreateVmt,
+               std::function<llvm::Function*(const plang::Type::Method&,
+                                             const std::string&)> DeclareForeignInheritedCallee)
         : Ctx(Ctx), Mod(Mod), B(B), RtFns(RtFns), Sets(Sets), Complex(Complex),
           FileVars(FileVars), Types(Types), Schema(Schema), Strings(Strings),
           StrCall(StrCall), Linkage(Linkage), SymTab(SymTab), ClosureAbi(ClosureAbi),
@@ -75,7 +77,8 @@ public:
           ExprIsVarStr(std::move(ExprIsVarStr)), ExprIsCharStr(std::move(ExprIsCharStr)),
           ExprCharStrLen(std::move(ExprCharStrLen)), ExprStrCapStatic(std::move(ExprStrCapStatic)),
           ExprIsShortStr(std::move(ExprIsShortStr)), ExprShortStrCap(std::move(ExprShortStrCap)),
-          GetOrCreateVmt(std::move(GetOrCreateVmt)) {}
+          GetOrCreateVmt(std::move(GetOrCreateVmt)),
+          DeclareForeignInheritedCallee(std::move(DeclareForeignInheritedCallee)) {}
 
     llvm::Value* emitCallExpr(const plang::CallExpr& e);
     llvm::Value* emitUserFuncCall(const plang::CallExpr& e);
@@ -203,6 +206,13 @@ private:
     /// TypeOf(x) for a value expression now reads x's own runtime `_vptr`
     /// instead (CGFuncCall.cpp's "typeof.vptr.addr"/"typeof.vmt").
     std::function<llvm::GlobalVariable*(const plang::Type&)> GetOrCreateVmt;
+    /// Issue #682: see Codegen::Impl::declareForeignInheritedCallee's own
+    /// comment (CodeGenImpl.h) -- emitInheritedCallExpr's explicit-form
+    /// "not yet declared in this translation unit" fallback bridges
+    /// through here rather than reaching Impl::paramMeta_ directly (which
+    /// this class, unlike Impl itself, has no access to).
+    std::function<llvm::Function*(const plang::Type::Method&,
+                                  const std::string&)> DeclareForeignInheritedCallee;
 
     llvm::Constant* i64c(int64_t v) const {
         return llvm::ConstantInt::get(I64Ty, v, true);
