@@ -1202,6 +1202,21 @@ private:
     [[nodiscard]] bool checkBuiltinArity(BuiltinID ID,
                                          const std::string& LowerName,
                                          SourceLocation Loc, size_t NumArgs);
+    /// Checks every argument of a builtin call against the ArgKind
+    /// Builtins.def's own column requires for \p ID (issue #306's generic
+    /// mechanism), using the same isNumeric()/isOrdinal()/... predicates the
+    /// hand-written per-builtin arms already use by hand -- see
+    /// BuiltinIDs.h's BuiltinArgKind and Builtins.def's header comment for
+    /// the vocabulary.  Calls checkExpr on each argument EXACTLY ONCE (like
+    /// every hand-written arm this replaces) and returns the resolved types
+    /// so a caller needing more than the generic check -- a polymorphic
+    /// return type, an extra shape restriction -- can read them back rather
+    /// than checking the expression a second time (which would re-emit any
+    /// diagnostic already inside it, issue #272).  A no-op (emits nothing) for
+    /// AK_Any, which is every builtin this column has not migrated yet.
+    std::vector<std::shared_ptr<Type>> checkBuiltinArgKinds(
+        BuiltinID ID, const std::string& LowerName,
+        const std::vector<std::unique_ptr<ExprNode>>& Args);
     /// Diagnoses use of a built-in name the active dialect does not declare
     /// (Sym.NotInDialect, set at registration from Builtins.def's own
     /// Dialects mask -- see registerBuiltins).  Named checkEPOnly from when

@@ -16,7 +16,7 @@ namespace plang {
 
 enum class BuiltinID {
     None,
-#define BUILTIN(Id, Spelling, Kind, Dialects, MinArgs, MaxArgs, Result) Id,
+#define BUILTIN(Id, Spelling, Kind, Dialects, MinArgs, MaxArgs, Result, ArgKind) Id,
 #include "plang/Basic/Builtins.def"
 };
 
@@ -25,7 +25,7 @@ enum class BuiltinID {
 /// this is for a caller that walks the list and has to show it walked all of
 /// it, which a loop written over a .def cannot otherwise demonstrate.
 inline constexpr std::size_t NumBuiltins = 0
-#define BUILTIN(Id, Spelling, Kind, Dialects, MinArgs, MaxArgs, Result) + 1
+#define BUILTIN(Id, Spelling, Kind, Dialects, MinArgs, MaxArgs, Result, ArgKind) + 1
 #include "plang/Basic/Builtins.def"
     ;
 
@@ -33,7 +33,7 @@ inline constexpr std::size_t NumBuiltins = 0
 [[nodiscard]] constexpr std::string_view builtinSpelling(BuiltinID ID) {
     switch (ID) {
     case BuiltinID::None: return "";
-#define BUILTIN(Id, Spelling, Kind, Dialects, MinArgs, MaxArgs, Result) \
+#define BUILTIN(Id, Spelling, Kind, Dialects, MinArgs, MaxArgs, Result, ArgKind) \
     case BuiltinID::Id: return Spelling;
 #include "plang/Basic/Builtins.def"
     }
@@ -46,7 +46,7 @@ inline constexpr std::size_t NumBuiltins = 0
 [[nodiscard]] constexpr unsigned builtinDialects(BuiltinID ID) {
     switch (ID) {
     case BuiltinID::None: return 0;
-#define BUILTIN(Id, Spelling, Kind, Dialects, MinArgs, MaxArgs, Result) \
+#define BUILTIN(Id, Spelling, Kind, Dialects, MinArgs, MaxArgs, Result, ArgKind) \
     case BuiltinID::Id: return (Dialects);
 #include "plang/Basic/Builtins.def"
     }
@@ -60,7 +60,7 @@ struct BuiltinArity { int Min, Max; };
 [[nodiscard]] constexpr BuiltinArity builtinArity(BuiltinID ID) {
     switch (ID) {
     case BuiltinID::None: return {0, -1};
-#define BUILTIN(Id, Spelling, Kind, Dialects, MinArgs, MaxArgs, Result) \
+#define BUILTIN(Id, Spelling, Kind, Dialects, MinArgs, MaxArgs, Result, ArgKind) \
     case BuiltinID::Id: return {MinArgs, MaxArgs};
 #include "plang/Basic/Builtins.def"
     }
@@ -70,11 +70,37 @@ struct BuiltinArity { int Min, Max; };
 [[nodiscard]] constexpr bool builtinIsFunction(BuiltinID ID) {
     switch (ID) {
     case BuiltinID::None: return false;
-#define BUILTIN(Id, Spelling, Kind, Dialects, MinArgs, MaxArgs, Result) \
+#define BUILTIN(Id, Spelling, Kind, Dialects, MinArgs, MaxArgs, Result, ArgKind) \
     case BuiltinID::Id: return std::string_view(#Kind) == "Func";
 #include "plang/Basic/Builtins.def"
     }
     return false;
+}
+
+/// What every argument of a builtin call must be, enforced generically by
+/// Sema::checkBuiltinArgKinds right after the arity check -- see Builtins.def's
+/// own header comment for the full vocabulary and why each tag exists.  Any
+/// is the default: it means "no generic check", not "no arguments" -- a
+/// builtin not yet migrated to this column keeps whatever hand-written check
+/// (or lack of one) it already had in checkCallExpr/checkCallStmt.
+enum class BuiltinArgKind { Any, Numeric, NumericNonComplex, Complex };
+
+[[nodiscard]] constexpr BuiltinArgKind builtinArgKind(BuiltinID ID) {
+#define AK_Any               BuiltinArgKind::Any
+#define AK_Numeric            BuiltinArgKind::Numeric
+#define AK_NumericNonComplex  BuiltinArgKind::NumericNonComplex
+#define AK_Complex            BuiltinArgKind::Complex
+    switch (ID) {
+    case BuiltinID::None: return BuiltinArgKind::Any;
+#define BUILTIN(Id, Spelling, Kind, Dialects, MinArgs, MaxArgs, Result, ArgKind) \
+    case BuiltinID::Id: return (ArgKind);
+#include "plang/Basic/Builtins.def"
+    }
+    return BuiltinArgKind::Any;
+#undef AK_Complex
+#undef AK_NumericNonComplex
+#undef AK_Numeric
+#undef AK_Any
 }
 
 /// Whether a call to this builtin unconditionally leaves the statement
@@ -124,7 +150,7 @@ enum class BuiltinResult { None, Int, Real, Char, Bool, Str, Complex, BindingTyp
 #define R_BindingType BuiltinResult::BindingType
     switch (ID) {
     case BuiltinID::None: return BuiltinResult::None;
-#define BUILTIN(Id, Spelling, Kind, Dialects, MinArgs, MaxArgs, Result) \
+#define BUILTIN(Id, Spelling, Kind, Dialects, MinArgs, MaxArgs, Result, ArgKind) \
     case BuiltinID::Id: return (Result);
 #include "plang/Basic/Builtins.def"
     }
