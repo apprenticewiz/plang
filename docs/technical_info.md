@@ -660,12 +660,60 @@ in:
 
 ```
 valgrind -q --error-exitcode=1 --leak-check=full \
-  --show-leak-kinds=none --errors-for-leak-kinds=none <program> [args...]
+  --show-leak-kinds=none --errors-for-leak-kinds=none --log-file=<tmp> <program> [args...]
 ```
 
-Three flags are load-bearing beyond the obvious `--error-exitcode=1`, and
-each was chosen after a real false positive/negative found while wiring this
-in, not by inspection of the manual alone:
+**`--error-exitcode=1` alone is not enough**, and shipping it without the
+`--log-file` scan described below was a real, since-fixed gap (found by
+adversarial review of the PR that introduced this workflow, before it
+merged): `--error-exitcode=1` only overrides the wrapped program's own exit
+code, and a large, high-value slice of this suite's own RUN lines —
+`RUN: not %run %t ... | FileCheck ...`, the idiom every test of plang's own
+runtime-error/trap behavior uses (concentrated in `EP7Schema`,
+`Module/Schema`, `EP6ConformantArray`, `StringCapacity`/`StringIndex`,
+`Substr`/`Substring`, and `Storage` — precisely the schema/pointer/
+allocation-heavy paths this workflow exists to check) — already expects and
+inverts a nonzero exit via `not`. Confirmed for real: a synthetic program
+combining a genuine use-after-free with a legitimate `return 201;`-style
+trap and its own expected stderr text passed its `not %run %t` RUN line and
+its stderr `FileCheck` match cleanly (the match still found its substring,
+merely buried in extra Valgrind noise), with Valgrind's own "Invalid read"
+finding completely invisible — `not` cannot tell "the program's own
+intentional nonzero trap" from "Valgrind forced a nonzero exit" apart, since
+both are just "nonzero" to it, and lit only ever prints a test's captured
+output when the test *fails*.
+
+The fix: `run-under-valgrind.sh` never relies on the wrapped program's own
+exit code to decide whether *Valgrind* found something. It always passes
+`--log-file=<tmp>` (a fresh, unique file per invocation), so Valgrind's own
+diagnostic output is captured completely independent of the wrapped
+program's own stdout/stderr — and, given the flag set above, that log file
+is empty unless Valgrind reported a real, non-leak error (`-q` suppresses
+the banner and, confirmed empirically, even the closing "ERROR SUMMARY"
+line; `--show-leak-kinds=none`/`--errors-for-leak-kinds=none` mean a leak
+alone never writes anything there either). After the wrapped program exits,
+the wrapper unconditionally checks that log file. If it is non-empty, the
+wrapper prints it (to its own stderr, so it lands wherever the RUN line's
+own redirection already sends it, and is visible in lit's captured output
+for the now-failing test) and kills *itself* with `SIGABRT`, regardless of
+whatever the wrapped program's own exit code was. A self-inflicted crash is
+the one outcome LLVM's `not` does **not** invert: `not` treats a crash as an
+unconditional failure regardless of its own negation, unless invoked with
+`not --crash` (which none of these RUN lines use) — confirmed empirically
+against the real `not` binary. lit's own internal shell (used for every RUN
+line here, `not`-negated or not) independently treats a signal-terminated
+command's exit status as a failure too, so the identical self-`SIGABRT`
+correctly fails a bare, non-`not` `%run %t` RUN line exactly as
+`--error-exitcode=1` alone already did. Net effect: a real Valgrind finding
+now fails the RUN line the same way regardless of which of the two RUN-line
+shapes wraps it, closing the gap above — the "`not %run %t`-style tests are
+equally protected" claim this section made before the fix is now backed by
+an end-to-end proof against the real `not` binary in
+`run-under-valgrind.sh --self-test` itself, not just asserted.
+
+Three more flags are load-bearing beyond `--error-exitcode=1`/`--log-file`,
+and each was chosen after a real false positive/negative found while wiring
+this in, not by inspection of the manual alone:
 
 - **`--errors-for-leak-kinds=none`**: this gate targets memory *corruption*
   (invalid reads/writes, use-after-free, double-free, uninitialized-value
@@ -701,9 +749,21 @@ in, not by inspection of the manual alone:
 trusting the gate on the real suite, the same self-test discipline
 `run-under-guardheap.sh --self-test` already established: a valid program
 must stay silent AND exit 0, a 1-byte heap overflow and a use-after-free must
-both still be caught, and a plain leak must exit 0 while ALSO staying silent
+both still be caught, a plain leak must exit 0 while ALSO staying silent
 (regression coverage for the exact `--show-leak-kinds`/`iso7185pat.pas`
-interaction above).
+interaction above), a program with its own legitimate nonzero trap and NO
+memory bug must exit with that SAME code unchanged and stay silent, and —
+the regression coverage for the `not %run %t` gap described above — a
+program combining a genuine use-after-free with its own legitimate nonzero
+trap must still be caught (reported via the self-`SIGABRT`, not silently
+absorbed by the trap's own exit code). Each of these is invoked as a fresh
+subprocess of the real script, exactly how lit's own `%run` substitution
+invokes it, rather than calling the wrapper's internal shell function
+in-process — self-`SIGABRT` is only safe to test from a separate child.
+When the real `not` binary is resolvable on `PATH`, the self-test also
+proves the exact end-to-end scenario above against it directly: `not
+run-under-valgrind.sh` on the use-after-free+trap program must report
+FAILURE, and on the trap-only program must still report PASS.
 
 **Scope** (this option's own "explicit, bounded scope, not 'run Valgrind
 over everything'" framing from the issue #190 re-triage comment):
@@ -761,3 +821,18 @@ the workflow YAML. What could **not** be verified locally: a real
 `actions/upload-artifact` is real GitHub-hosted storage, neither reproducible
 in a one-off local run — the same honest limitation `fuzz-scheduled.yml`'s
 own verification already carried.
+
+What was additionally verified for the `--log-file`/self-`SIGABRT` fix
+above (same real local build): the reviewer's own synthetic use-after-free +
+`return 201;`-trap program, run through the *pre-fix* wrapper under the real
+`not` binary with a `FileCheck` of stderr, reproduced the gap exactly as
+described — `not` reported PASS, `FileCheck` still matched — before this fix
+existed; the identical scenario against the *post-fix* wrapper now correctly
+reports FAILURE via `not`, with Valgrind's own finding printed in the
+captured output; a plain `%run %t` (no `not`) program with a genuine
+use-after-free and no trap still fails, unchanged; a `not %run %t` program
+with a legitimate trap and no memory bug still passes, with stderr containing
+only the program's own text and no Valgrind noise; and a clean, bug-free
+program under a bare `%run %t` still passes silently. All four are now
+permanent `run-under-valgrind.sh --self-test` cases, not just one-off manual
+checks.
