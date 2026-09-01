@@ -1769,6 +1769,20 @@ int frontendPC1Main(int Argc, char *Argv[]) {
     // check compileRequest itself makes (the is-a-directory guard, Scanner/
     // Parser/Sema failures, dump modes, .pmi/.tui publishing, Codegen's own
     // emit/emitUnit) is unchanged in substance, just relocated.
+    //
+    // One disclosed, deliberate difference: the OLD -dump-tokens/
+    // -dump-parse-tree paths returned straight out of the withOutput(...)
+    // lambda without ever reaching an emitAll() call on a path that had no
+    // hasErrors() (i.e. Diags held only non-fatal diagnostics -- a Scanner/
+    // Parser warning, {$HINT}/{$WARNING} included), so such a diagnostic was
+    // silently never printed.  The single emitAll() call below now runs
+    // unconditionally for every path compileRequest can return through, so
+    // that previously-swallowed diagnostic is now printed on a dump-mode
+    // request just like it always was on a normal compile.  Argv parsing,
+    // exit codes, and the content of any diagnostic that was already being
+    // printed are unchanged; see
+    // test/Driver/PC1/dump-mode-no-longer-silently-drops-a-non-fatal-diagnostic.pas
+    // for the regression coverage this pins down.
     CompilationRequest Request;
     Request.Opts          = std::move(Opts);
     Request.DiagOpts      = Diags.options();
@@ -1802,6 +1816,19 @@ int frontendPC1Main(int Argc, char *Argv[]) {
     // were (err_cannot_open_output_file through report(); a write failure
     // through reportIfWriteFailed's own direct stderr write), just against
     // a string already in hand instead of a callback invoked mid-pipeline.
+    //
+    // reportIfWriteFailed below now runs unconditionally, where the old code
+    // only called it when EmitOk was true. This is unobservable given
+    // Codegen::emit/emitUnit's own invariant (CodeGen.cpp): both write to
+    // their ostream argument exactly once, in the final few lines, strictly
+    // after their own llvm::verifyModule call succeeds -- every failure path
+    // (dbgInfo_->finalize(), verifyModule) returns false before that write,
+    // so a false EmitOk always means the destination stream was never
+    // touched at all, `F << *Result.Output` below writes an empty string
+    // (Result.Output is "" for that case, not std::nullopt -- see
+    // compileRequest's own finish() calls), and writing "" cannot itself set
+    // a stream's failbit. reportIfWriteFailed can therefore only ever return
+    // true here for a real I/O failure, on either path, old or new.
     if (OutputFile.empty()) {
         std::cout << *Result.Output;
         std::cout.flush();
