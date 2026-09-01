@@ -1587,7 +1587,7 @@ std::shared_ptr<Type> Sema::resolveUndiscriminatedSchema(Symbol& Sym,
 // width check does not run for it -- which is the silent mask-truncation this
 // function exists to report.  A new non-ordinal kind belongs in the default
 // and needs nothing; only the count moves.
-static_assert(NumSemaTypeKinds == 23,
+static_assert(NumSemaTypeKinds == 24,
               "a new ordinal type kind needs a case in checkSetBaseRange");
 
 /// A set stores one bit per ordinal of its base type, so the base type's

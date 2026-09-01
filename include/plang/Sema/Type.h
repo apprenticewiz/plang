@@ -41,6 +41,24 @@ inline constexpr int PlangMaxStringCapacity = 255;
 enum class TypeKind {
     Error,      // placeholder for unresolvable types; compatible with everything
                 // to suppress error cascades
+    Unresolved, // forward-reference placeholder: Phase 3a (Sema.cpp) stamps one
+                // of these, Name set to the type's own name, for every type name
+                // before any type body in the block is resolved, so a POINTER
+                // may name a domain type declared later in the same
+                // type-definition-part (ISO §6.2.2.9).  Phase 3b replaces it
+                // with the real resolved type; Phase 3c (fixForwardPtrs) walks
+                // the resolved types and patches any PointeeType still holding
+                // one.  Distinct from Error/TyErr on purpose (issue #302 Phase
+                // 1): before this kind existed, a stub WAS Kind=Error with a
+                // non-empty Name, and telling "still-pending stub" apart from
+                // "this type's own definition failed to resolve" (also
+                // Kind=Error) needed an identity comparison against the TyErr
+                // singleton (issue #269) -- fragile, because any two
+                // Kind=Error values with a name looked alike otherwise.  A
+                // stub reached anywhere Phase 3a's forward-reference
+                // allowance does not apply means the name was used before its
+                // declaration; treated as compatible with everything (like
+                // Error) so a use like that does not cascade further errors.
     Nil,        // type of the 'nil' pointer constant
     Integer,
     Real,
@@ -519,6 +537,10 @@ struct Type {
 
     /// Returns true if this is the error sentinel type.
     bool isError()  const { return Kind == TypeKind::Error; }
+    /// Returns true if this is a forward-reference stub -- a not-yet-resolved
+    /// type name, still pending Phase 3b/3c (Sema.cpp) -- rather than a
+    /// genuine type error.  See TypeKind::Unresolved's own comment.
+    bool isUnresolved() const { return Kind == TypeKind::Unresolved; }
     /// Returns true if this is the nil pointer constant type.
     bool isNil()    const { return Kind == TypeKind::Nil;   }
 
