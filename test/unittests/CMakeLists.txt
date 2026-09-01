@@ -14,3 +14,13 @@ add_subdirectory(Driver)
 # Acceptance migrated to test/Acceptance/ -- see issue #34.
 # Lex migrated to test/Lex/ -- see issue #43.
 # Parse migrated to test/Parse/ -- see issue #43.
+
+# Issue #190 part B option 1: only added when PLANG_ENABLE_RUNTIME_SANITIZER_TESTS
+# is ON, since it links plang_runtime_sanitized (runtime/CMakeLists.txt),
+# which only exists under that same option -- the top-level CMakeLists.txt's
+# own configure-time check already guarantees PLANG_ENABLE_TESTS is ON
+# whenever PLANG_ENABLE_RUNTIME_SANITIZER_TESTS is, so this line is always
+# reached in that case.
+if(PLANG_ENABLE_RUNTIME_SANITIZER_TESTS)
+    add_subdirectory(RuntimeSanitized)
+endif()
