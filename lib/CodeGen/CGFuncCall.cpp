@@ -551,7 +551,7 @@ llvm::Value* CGFuncCall::emitBuiltinCall(const std::string& Name,
         }
         return {nullptr, nullptr};
     };
-    // For sizing a temporary, which needs a constant; see exprStrCapStatic.
+    // For sizing a temporary, which needs a constant; see exprStrCapForTempAlloc.
     auto strArgCapStatic = [&](int idx) -> int64_t {
         if (Args.size() <= (size_t)idx) return 0;
         const auto& arg = *Args[idx];
@@ -564,7 +564,7 @@ llvm::Value* CGFuncCall::emitBuiltinCall(const std::string& Name,
     };
     /// A result temporary as wide as the argument it is derived from.  Where a
     /// discriminant fixes that argument's capacity the width is not a constant,
-    /// and exprStrCapStatic's 255 is the answer for a capacity nobody knows --
+    /// and exprStrCapForTempAlloc's 255 is the answer for a capacity nobody knows --
     /// so sizing by it cut substr and trim of a 400-capacity string to 255.
     auto strResultTemp = [&](int idx, llvm::Value* capV, const char* name)
             -> std::pair<llvm::Value*, llvm::Value*> {

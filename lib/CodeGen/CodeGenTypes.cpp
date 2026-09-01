@@ -161,7 +161,11 @@ void Codegen::Impl::init(const std::string& progName) {
         [this](llvm::Value* v){ return toI64(v); },
         [](const ExprNode& e){ return exprIsVarStr(e); },
         [](const ExprNode& e){ return exprIsCharStr(e); },
-        [](const ExprNode& e){ return exprStrCap(e); },
+        // exprStrCapV's own ExtentVaries-false branch falls back to exactly
+        // this compile-time answer, so it can't itself be exprStrCapV
+        // (that would recurse); strAddrAndCap needs an addressable object,
+        // which this non-varying-capacity query doesn't require.
+        [](const ExprNode& e){ return exprStrCapDeclared(e); },
         [](const ExprNode& e){ return exprCharStrLen(e); },
         [this](const std::string& mangledName, size_t astArgIdx) -> unsigned {
             auto it = paramMeta_.find(mangledName);
@@ -185,7 +189,11 @@ void Codegen::Impl::init(const std::string& progName) {
         [](const ExprNode& e){ return exprIsCharStr(e); },
         [](const ExprNode& e){ return exprIsVarStr(e); },
         [](const ExprNode& e){ return exprCharStrLen(e); },
-        [](const ExprNode& e){ return exprStrCapStatic(e); },
+        // The C-string temporary's array TYPE has to be sized at compile
+        // time; exprStrCapV's llvm::Value* can't size a static alloca, and
+        // strAddrAndCap answers for an existing string, not a not-yet-built
+        // temporary.
+        [](const ExprNode& e){ return exprStrCapForTempAlloc(e); },
         [](const ExprNode& e){ return exprIsShortStr(e); },
         [](const ExprNode& e){ return exprShortStrCap(e); });
     // Procedural-parameter ABI + conformant-array marshalling.
@@ -248,7 +256,11 @@ void Codegen::Impl::init(const std::string& progName) {
         [](const ExprNode& e){ return exprIsVarStr(e); },
         [](const ExprNode& e){ return exprIsCharStr(e); },
         [](const ExprNode& e){ return exprCharStrLen(e); },
-        [](const ExprNode& e){ return exprStrCapStatic(e); },
+        // Substring-assignment's source temporary is sized by its array
+        // TYPE, a compile-time constant; strAddrAndCap (used just above,
+        // for the destination) answers a runtime capacity for an existing
+        // string, which an alloca's element type can't take.
+        [](const ExprNode& e){ return exprStrCapForTempAlloc(e); },
         [](const ExprNode& e){ return exprIsShortStr(e); },
         [](const ExprNode& e){ return exprShortStrCap(e); });
     // Structured-statement emission.  EmitExpr/EmitStmt/EnsureI1/ToI64/
@@ -447,7 +459,11 @@ void Codegen::Impl::init(const std::string& progName) {
         [](const ExprNode& e){ return exprIsVarStr(e); },
         [](const ExprNode& e){ return exprIsCharStr(e); },
         [](const ExprNode& e){ return exprCharStrLen(e); },
-        [](const ExprNode& e){ return exprStrCapStatic(e); },
+        // Sizes the result temporary's entry alloca, which needs a
+        // compile-time constant array type; exprStrCapV's runtime
+        // llvm::Value* and strAddrAndCap's existing-string address both
+        // answer the wrong kind of question for a temporary not yet built.
+        [](const ExprNode& e){ return exprStrCapForTempAlloc(e); },
         [](const Type* t){ return ordinalIsUnsigned(t); },
         [](const ExprNode& e){ return exprIsShortStr(e); },
         [](const ExprNode& e){ return exprShortStrCap(e); });
@@ -487,7 +503,11 @@ void Codegen::Impl::init(const std::string& progName) {
         [](const ExprNode& e){ return exprIsVarStr(e); },
         [](const ExprNode& e){ return exprIsCharStr(e); },
         [](const ExprNode& e){ return exprCharStrLen(e); },
-        [](const ExprNode& e){ return exprStrCapStatic(e); },
+        // Result/argument temporaries here are sized by array TYPE at
+        // compile time (strArgCapStatic); exprStrCapV's runtime value has
+        // nothing to size a static alloca with, and strAddrAndCap is for an
+        // already-addressable string, not a temporary being built.
+        [](const ExprNode& e){ return exprStrCapForTempAlloc(e); },
         [](const ExprNode& e){ return exprIsShortStr(e); },
         [](const ExprNode& e){ return exprShortStrCap(e); },
         [this](const Type& t){ return getOrCreateVmt(t); });
@@ -511,7 +531,12 @@ void Codegen::Impl::init(const std::string& progName) {
         [this](llvm::Value* v){ return ensureI1(v); },
         [this](llvm::Value* v, bool s){ return toI64(v, s); },
         [](const ExprNode& e){ return exprIsVarStr(e); },
-        [](const ExprNode& e){ return exprStrCapStatic(e); },
+        // Substring-as-rvalue's result temporary is sized by array TYPE at
+        // compile time; exprStrCapV (used separately for the SOURCE
+        // capacity the runtime call is told) and strAddrAndCap both answer
+        // for an existing string's address/capacity, not this new
+        // temporary's size.
+        [](const ExprNode& e){ return exprStrCapForTempAlloc(e); },
         [this](llvm::Value* v, llvm::Type* t, bool s){ return coerceToType(v, t, s); },
         [](const ExprNode& e){ return exprIsShortStr(e); });
     // DefineBuf/LookupBuf are narrow closures into defVar/findVar

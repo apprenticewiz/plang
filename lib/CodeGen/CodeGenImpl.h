@@ -1147,7 +1147,7 @@ struct Codegen::Impl {
     static bool exprIsVarStr(const ExprNode& e) { return varStrTypeOf(e); }
 
     /// Capacity of the expression's VarString type; 0 if not VarString.
-    static int64_t exprStrCap(const ExprNode& e) {
+    static int64_t exprStrCapDeclared(const ExprNode& e) {
         const Type* T = varStrTypeOf(e);
         return T ? T->StrCapacity : 0;
     }
@@ -1170,7 +1170,7 @@ struct Codegen::Impl {
     /// the temporary to a single character, so such a string gets the widest
     /// capacity plang has -- every real capacity fits in it.  Use exprStrCapV
     /// wherever the capacity is a value the runtime is told, not a size.
-    static int64_t exprStrCapStatic(const ExprNode& e) {
+    static int64_t exprStrCapForTempAlloc(const ExprNode& e) {
         const Type* T = varStrTypeOf(e);
         if (!T) return 0;
         const bool varies = T->ExtentVaries
@@ -1181,7 +1181,8 @@ struct Codegen::Impl {
     // ====================================================================
     // Turbo ShortString helpers -- the string[N] siblings of the EP string
     // helpers just above, kept in their own section rather than folded into
-    // varStrTypeOf/exprIsVarStr/exprStrCap*: ShortString is a completely
+    // varStrTypeOf/exprIsVarStr/exprStrCapDeclared/exprStrCapV/
+    // exprStrCapForTempAlloc: ShortString is a completely
     // separate TypeKind with its own runtime layout (see TypeKind::
     // ShortString's own comment), never reached by looking through a schema
     // (Turbo has no schema mechanism at all -- EP §6.4.7 is EP-only) and
@@ -1201,7 +1202,7 @@ struct Codegen::Impl {
     static bool exprIsShortStr(const ExprNode& e) { return shortStrTypeOf(e) != nullptr; }
     /// Capacity of the expression's ShortString type; 0 if not ShortString.
     /// Always a real compile-time constant -- see this section's own
-    /// comment for why, unlike exprStrCapStatic, there is no ExtentVaries
+    /// comment for why, unlike exprStrCapForTempAlloc, there is no ExtentVaries
     /// case to widen for.
     static int64_t exprShortStrCap(const ExprNode& e) {
         const Type* T = shortStrTypeOf(e);

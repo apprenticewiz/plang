@@ -218,7 +218,7 @@ llvm::Value* StringCallMarshalling::emitCStrArg(const ExprNode& e) {
     auto* data = Strings.strDataPtr(addr);
     auto* i8Ty = llvm::Type::getInt8Ty(Ctx);
     llvm::Value* buf;
-    // ExprStrCap is exprStrCapStatic: a discriminant-fixed capacity is not a
+    // ExprStrCap is exprStrCapForTempAlloc: a discriminant-fixed capacity is not a
     // compile-time constant (that's the whole point of a discriminant), so it
     // widens to PlangMaxStringCapacity there.  string(300) is legal, and its
     // 300 was new()'s runtime discriminant, never a compile-time probe --
