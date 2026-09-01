@@ -1168,35 +1168,11 @@ void CGProcCall::emitMethodCallStmt(const MethodCallStmt& s) {
     std::vector<llvm::Value*> args;
     args.push_back(selfPtr);
 
-    size_t pi = args.size();
-    for (size_t astArgIdx = 0; astArgIdx < s.Args.size(); ++astArgIdx) {
-        const auto& arg = s.Args[astArgIdx];
-
-        if (const auto* pt = ProcParamArg(mangledName, astArgIdx)) {
-            ClosureAbi.pushProcParamArgs(args, *arg, *pt);
-            pi = args.size();
-            continue;
-        }
-        if (unsigned nd = Schema.schemaArgDiscs(mangledName, astArgIdx); nd > 0) {
-            Schema.pushSchemaArgs(args, *arg, nd);
-            pi = args.size();
-            continue;
-        }
-        const size_t dims = ConformantDimsOf(mangledName, astArgIdx);
-        if (dims > 0) {
-            ClosureAbi.pushConformantArgs(args, *arg, dims);
-            pi += 1 + 2 * dims;
-        } else {
-            std::optional<int64_t> destSetBase = ParamSetBaseOf(mangledName, astArgIdx);
-            args.push_back(Sets.alignSetArg(
-                StrCall.emitCallArg(*arg,
-                    pi < callee->arg_size()
-                        ? callee->getFunctionType()->getParamType(pi) : nullptr,
-                    ParamIsByRef(mangledName, astArgIdx)),
-                *arg, destSetBase));
-            ++pi;
-        }
-    }
+    // Issue #299 Phase 1 / #182 follow-up: the per-argument marshalling loop
+    // shared with CGProcCall::emitUserProcCall/CGFuncCall::emitUserFuncCall/
+    // emitMethodCallExpr -- see CGCallMarshal.h.  Same as emitMethodCallExpr's
+    // own call just below (CGFuncCall.cpp), starting pi/args after Self.
+    Marshal.marshalArgs(mangledName, callee->getFunctionType(), s.Args, args);
     // Turbo Tier 5, Cluster A item 5: see CGFuncCall::emitMethodCallExpr's
     // identical branch for the whole design -- a virtual method is called
     // INDIRECTLY, through the receiver's own `_vptr` and Owner's own
@@ -1265,35 +1241,9 @@ llvm::Value* CGProcCall::emitBoundMethodCall(
     std::vector<llvm::Value*> args;
     args.push_back(selfPtr);
 
-    size_t pi = args.size();
-    for (size_t astArgIdx = 0; astArgIdx < Args.size(); ++astArgIdx) {
-        const auto& arg = Args[astArgIdx];
-
-        if (const auto* pt = ProcParamArg(mangledName, astArgIdx)) {
-            ClosureAbi.pushProcParamArgs(args, *arg, *pt);
-            pi = args.size();
-            continue;
-        }
-        if (unsigned nd = Schema.schemaArgDiscs(mangledName, astArgIdx); nd > 0) {
-            Schema.pushSchemaArgs(args, *arg, nd);
-            pi = args.size();
-            continue;
-        }
-        const size_t dims = ConformantDimsOf(mangledName, astArgIdx);
-        if (dims > 0) {
-            ClosureAbi.pushConformantArgs(args, *arg, dims);
-            pi += 1 + 2 * dims;
-        } else {
-            std::optional<int64_t> destSetBase = ParamSetBaseOf(mangledName, astArgIdx);
-            args.push_back(Sets.alignSetArg(
-                StrCall.emitCallArg(*arg,
-                    pi < callee->arg_size()
-                        ? callee->getFunctionType()->getParamType(pi) : nullptr,
-                    ParamIsByRef(mangledName, astArgIdx)),
-                *arg, destSetBase));
-            ++pi;
-        }
-    }
+    // Issue #299 Phase 1 / #182 follow-up: same per-argument marshalling loop
+    // emitMethodCallStmt uses just above -- see CGCallMarshal.h.
+    Marshal.marshalArgs(mangledName, callee->getFunctionType(), Args, args);
 
     // A destructor commonly IS virtual in real TP7 idiom (confirmed
     // against a local fpc -Mtp build) -- exactly the point of
@@ -1421,38 +1371,11 @@ void CGProcCall::emitInheritedCallStmt(const InheritedCallStmt& s) {
         return;
     }
 
-    // Same per-argument marshalling loop emitMethodCallStmt uses just
-    // above -- an explicit 'inherited Method(args)' takes its own written
-    // argument list exactly like an ordinary method call does.
-    size_t pi = args.size();
-    for (size_t astArgIdx = 0; astArgIdx < s.Args.size(); ++astArgIdx) {
-        const auto& arg = s.Args[astArgIdx];
-
-        if (const auto* pt = ProcParamArg(mangledName, astArgIdx)) {
-            ClosureAbi.pushProcParamArgs(args, *arg, *pt);
-            pi = args.size();
-            continue;
-        }
-        if (unsigned nd = Schema.schemaArgDiscs(mangledName, astArgIdx); nd > 0) {
-            Schema.pushSchemaArgs(args, *arg, nd);
-            pi = args.size();
-            continue;
-        }
-        const size_t dims = ConformantDimsOf(mangledName, astArgIdx);
-        if (dims > 0) {
-            ClosureAbi.pushConformantArgs(args, *arg, dims);
-            pi += 1 + 2 * dims;
-        } else {
-            std::optional<int64_t> destSetBase = ParamSetBaseOf(mangledName, astArgIdx);
-            args.push_back(Sets.alignSetArg(
-                StrCall.emitCallArg(*arg,
-                    pi < callee->arg_size()
-                        ? callee->getFunctionType()->getParamType(pi) : nullptr,
-                    ParamIsByRef(mangledName, astArgIdx)),
-                *arg, destSetBase));
-            ++pi;
-        }
-    }
+    // Issue #299 Phase 1 / #182 follow-up: same per-argument marshalling loop
+    // emitMethodCallStmt uses just above -- an explicit 'inherited
+    // Method(args)' takes its own written argument list exactly like an
+    // ordinary method call does.  See CGCallMarshal.h.
+    Marshal.marshalArgs(mangledName, callee->getFunctionType(), s.Args, args);
     B.CreateCall(callee, args);
 }
 
