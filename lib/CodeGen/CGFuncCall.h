@@ -55,10 +55,6 @@ public:
                std::function<llvm::AllocaInst*(llvm::Type*, const std::string&)> CreateEntryAlloca,
                std::function<llvm::Value*(llvm::Value*, const std::string&)> CreateDynStrAlloca,
                std::function<llvm::Value*(const std::string&)> BuildStaticLinkFrame,
-               std::function<size_t(const std::string&, size_t)> ConformantDimsOf,
-               std::function<std::optional<int64_t>(const std::string&, size_t)> ParamSetBaseOf,
-               std::function<const plang::ProcedureTypeNode*(const std::string&, size_t)> ProcParamArg,
-               std::function<bool(const std::string&, size_t)> ParamIsByRef,
                std::function<bool(const plang::ExprNode&)> ExprIsVarStr,
                std::function<bool(const plang::ExprNode&)> ExprIsCharStr,
                std::function<int64_t(const plang::ExprNode&)> ExprCharStrLen,
@@ -76,9 +72,6 @@ public:
           CreateEntryAlloca(std::move(CreateEntryAlloca)),
           CreateDynStrAlloca(std::move(CreateDynStrAlloca)),
           BuildStaticLinkFrame(std::move(BuildStaticLinkFrame)),
-          ConformantDimsOf(std::move(ConformantDimsOf)),
-          ParamSetBaseOf(std::move(ParamSetBaseOf)),
-          ProcParamArg(std::move(ProcParamArg)), ParamIsByRef(std::move(ParamIsByRef)),
           ExprIsVarStr(std::move(ExprIsVarStr)), ExprIsCharStr(std::move(ExprIsCharStr)),
           ExprCharStrLen(std::move(ExprCharStrLen)), ExprStrCapStatic(std::move(ExprStrCapStatic)),
           ExprIsShortStr(std::move(ExprIsShortStr)), ExprShortStrCap(std::move(ExprShortStrCap)),
@@ -178,10 +171,6 @@ private:
     std::function<llvm::AllocaInst*(llvm::Type*, const std::string&)> CreateEntryAlloca;
     std::function<llvm::Value*(llvm::Value*, const std::string&)> CreateDynStrAlloca;
     std::function<llvm::Value*(const std::string&)> BuildStaticLinkFrame;
-    std::function<size_t(const std::string&, size_t)> ConformantDimsOf;
-    std::function<std::optional<int64_t>(const std::string&, size_t)> ParamSetBaseOf;
-    std::function<const plang::ProcedureTypeNode*(const std::string&, size_t)> ProcParamArg;
-    std::function<bool(const std::string&, size_t)> ParamIsByRef;
     std::function<bool(const plang::ExprNode&)> ExprIsVarStr;
     std::function<bool(const plang::ExprNode&)> ExprIsCharStr;
     std::function<int64_t(const plang::ExprNode&)> ExprCharStrLen;

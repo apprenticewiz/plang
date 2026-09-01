@@ -1097,56 +1097,19 @@ llvm::Value* CGFuncCall::emitInheritedCallExpr(const InheritedCallExpr& e) {
             args.push_back(curFn->getArg(i));
         ret = B.CreateCall(callee, args, "inherited.call");
     } else {
-        // Same per-argument marshalling loop emitMethodCallExpr uses above
-        // -- an explicit 'inherited Method(args)' takes its own written
-        // argument list exactly like an ordinary method call does.
-        size_t pi = args.size();
-        for (size_t astArgIdx = 0; astArgIdx < e.Args.size(); ++astArgIdx) {
-            const auto& arg = e.Args[astArgIdx];
-
-            if (const auto* pt = ProcParamArg(mangledName, astArgIdx)) {
-                ClosureAbi.pushProcParamArgs(args, *arg, *pt);
-                pi = args.size();
-                continue;
-            }
-            if (unsigned nd = Schema.schemaArgDiscs(mangledName, astArgIdx); nd > 0) {
-                Schema.pushSchemaArgs(args, *arg, nd);
-                pi = args.size();
-                continue;
-            }
-            const size_t dims = ConformantDimsOf(mangledName, astArgIdx);
-            if (dims > 0) {
-                ClosureAbi.pushConformantArgs(args, *arg, dims);
-                pi += 1 + 2 * dims;
-            } else {
-                std::optional<int64_t> destSetBase = ParamSetBaseOf(mangledName, astArgIdx);
-                args.push_back(Sets.alignSetArg(
-                    StrCall.emitCallArg(*arg,
-                        pi < callee->arg_size()
-                            ? callee->getFunctionType()->getParamType(pi) : nullptr,
-                        ParamIsByRef(mangledName, astArgIdx)),
-                    *arg, destSetBase));
-                ++pi;
-            }
-        }
+        // #182 follow-up (after PR #565's own CGProcCall.cpp sweep): same
+        // per-argument marshalling loop emitMethodCallExpr uses above -- an
+        // explicit 'inherited Method(args)' takes its own written argument
+        // list exactly like an ordinary method call does.  See
+        // CGCallMarshal.h.
+        Marshal.marshalArgs(mangledName, callee->getFunctionType(), e.Args, args);
         ret = B.CreateCall(callee, args, "inherited.call");
     }
 
-    // Same string/ShortString return-value spill emitMethodCallExpr's own
-    // tail (just above) and emitUserFuncCall's own perform, for the
-    // identical reason: a struct-shaped result comes back by value, and
-    // every consumer of a string expression expects an address instead.
-    if (ExprIsVarStr(e) && ret->getType()->isStructTy()) {
-        auto* tmp = CreateEntryAlloca(ret->getType(), "str.ret");
-        B.CreateStore(ret, tmp);
-        return tmp;
-    }
-    if (ExprIsShortStr(e) && ret->getType()->isStructTy()) {
-        auto* tmp = CreateEntryAlloca(ret->getType(), "sstr.ret");
-        B.CreateStore(ret, tmp);
-        return tmp;
-    }
-    return ret;
+    // #182 follow-up: same string/ShortString return-value spill
+    // emitMethodCallExpr's own tail (just above) and emitUserFuncCall's own
+    // perform -- see CGCallMarshal.h.
+    return Marshal.spillStructReturnIfNeeded(e, ret);
 }
 
 llvm::Value* CGFuncCall::emitUserFuncCall(const CallExpr& e) {
