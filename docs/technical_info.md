@@ -470,7 +470,7 @@ UBSan's `vptr` check is switched off with it, because the libraries are built
 `-fno-rtti` by LLVM convention and that check needs RTTI; left on, it reports
 every `shared_ptr` control block as having an invalid vptr.
 
-### Fuzzing (issue #183 Phase 1)
+### Fuzzing (issue #183)
 
 `-DPLANG_ENABLE_FUZZERS=ON` builds three libFuzzer targets under `fuzz/`:
 `scanner-fuzzer` and `parser-fuzzer` feed raw, arbitrary bytes straight
@@ -528,7 +528,44 @@ bug, and not specific to any one of the three targets.
 
 CI (`fuzz-smoke` in `.github/workflows/ci.yml`) runs each target for a short,
 fixed 60-second wall-clock budget on every PR against its checked-in seed
-corpus, as a crash-regression smoke check — not deep fuzzing, and
-deliberately not scheduled/long-running fuzzing infrastructure with its own
-corpus-persistence and crash-triage story (that is Phase 2 of issue #183,
-explicitly deferred).
+corpus, as a crash-regression smoke check — not deep fuzzing.
+
+#### Scheduled fuzzing and crash triage (issue #183 Phase 2)
+
+`fuzz-scheduled.yml` runs the same three targets on a nightly schedule (plus
+`workflow_dispatch` for an on-demand run), each for a bounded 5 minutes by
+default — deeper than the PR smoke check's 60s, but still an explicit,
+bounded number rather than open-ended fuzzing, per this project's own stated
+policy on Phase 2's cost. See that workflow file's own comments for the
+exact budget and cadence reasoning.
+
+Unlike the PR smoke job, this one does *not* start cold from
+`fuzz/corpus/<target>/` on every run. It caches an evolving
+`fuzz-corpus/<target>/` directory across runs (`actions/cache`, keyed so
+each run both restores the most recent prior corpus and saves its own
+growth back out, including when a target crashes partway through — see the
+workflow's own comments on why `actions/cache/save` with `if: always()` is
+used instead of the combined `actions/cache` action's default post-step,
+which skips saving once an earlier step has failed). The checked-in
+`fuzz/corpus/<target>/` seeds are still unioned in on every run (first run,
+cache miss, or otherwise), so newly added seed files are always picked up.
+
+If a run finds a crash, OOM, or timeout, the job fails visibly (it does not
+swallow the failure), uploads the crashing input(s) as a
+`fuzz-crashes-<run id>` build artifact, and prints a local-repro recipe in
+the job log. See `fuzz/README.md`'s "Reproducing a crash found by CI"
+section for that recipe (kept there, not duplicated here, since it is
+identical to what the workflow itself prints).
+
+Neither of the above two CI jobs can be fully exercised outside of GitHub
+Actions itself — a `schedule:` trigger only fires on GitHub's own scheduler,
+and `actions/cache` persistence is real object storage tied to a repository,
+not something reproducible in a one-off local run. What was verified before
+this workflow was added: the exact fuzz-target invocations (build + run
+commands, scaled down to a much shorter local budget) produce real fuzzing
+activity and a genuinely growing corpus; `actionlint` reports zero findings
+on the workflow YAML; and the crash-detection/artifact/repro-instructions
+path was exercised end-to-end against a synthetic always-crashing harness
+outside this repository, confirming the exit-code handling, the crash-file
+collection, and that the documented repro command reproduces the crash
+deterministically.

@@ -1,0 +1,250 @@
+name: Scheduled fuzzing
+
+# issue #183 Phase 2: deeper, scheduled fuzzing on top of Phase 1's per-PR
+# `fuzz-smoke` job in ci.yml (60s/target, every PR, always seeded from the
+# checked-in fuzz/corpus/ -- untouched by this file). This workflow is
+# entirely additive:
+#   - runs on its own schedule, not on push/pull_request, so it never adds
+#     time to a PR's required-checks path;
+#   - persists an evolving corpus across runs (via actions/cache) instead of
+#     re-seeding from the same handful of checked-in files every time, so it
+#     actually gets deeper over successive runs rather than re-discovering
+#     the same shallow coverage;
+#   - fails the job visibly and uploads the crashing input as an artifact if
+#     a target finds a crash, with a printed local-repro recipe -- see the
+#     "Fuzzing" section of docs/technical_info.md for the full triage story.
+#
+# Every time budget below is an explicit, bounded number -- see this
+# project's own re-triage comment on issue #183: "Phase 2 has real,
+# unbounded-if-not-careful cost -- fuzzing consumes however much time you
+# give it, so it needs an explicit ceiling, not an open-ended 'let it fuzz.'"
+
+on:
+  schedule:
+    # Nightly, once a day. A 24h cadence is enough to compound corpus growth
+    # meaningfully over time without turning this into a second, parallel
+    # "always running" CI surface for a P3 issue's own hardening feature.
+    # 04:37 UTC: deliberately off the top/half/quarter-hour, which is when
+    # the large fraction of scheduled workflows across all of GitHub Actions
+    # fire and queue-contend for runners -- an arbitrary few-minutes offset
+    # avoids piling on with them.
+    - cron: '37 4 * * *'
+  workflow_dispatch:
+    inputs:
+      seconds_per_target:
+        description: >-
+          Per-target fuzzing budget in seconds (overrides the nightly
+          default; use a small number like 30 for a quick manual sanity
+          check of the workflow itself).
+        required: false
+        default: '300'
+
+# Global (not per-ref) group: this workflow only ever runs on a schedule or
+# by manual dispatch, never per-branch/per-PR, so one run at a time overall
+# is the right scope. cancel-in-progress is deliberately false -- an
+# in-progress fuzz run should get to finish its own bounded budget rather
+# than being cut off mid-run by, say, a manual dispatch fired to double
+# check something; a second run just waits its turn.
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  LLVM_VERSION: '22'
+  # See the workflow_dispatch input above for why this can be overridden;
+  # the schedule trigger always uses the 300s (5 minute) default. 5 minutes
+  # x 3 targets = 15 minutes of actual fuzzing per night -- 5x deeper than
+  # Phase 1's 60s-per-target PR smoke check, while still small next to the
+  # LLVM-install-and-build time this job pays regardless (see timeout-minutes
+  # below), and nowhere near an open-ended "let it run" budget.
+  FUZZ_SECONDS_PER_TARGET: ${{ github.event.inputs.seconds_per_target || '300' }}
+
+jobs:
+  fuzz-scheduled:
+    name: scheduled fuzz (scanner/parser/pmi)
+    runs-on: ubuntu-latest
+    # Same LLVM-install-and-build cost as ci.yml's fuzz-smoke job (which
+    # budgets 20 minutes total for a 3x60s=3-minute fuzz phase, meaning
+    # install+build alone is comfortably under ~17 minutes). This job's own
+    # fuzz phase is 5x longer (up to 3x300s=15 minutes at the scheduled
+    # default), plus a little more for the cache restore/save and artifact
+    # upload steps neither of those has. 45 minutes gives real headroom
+    # above that ~32-minute expected total without being open-ended.
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install LLVM and lld
+        run: |
+          sudo apt-get update
+          wget -qO llvm.sh https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh "$LLVM_VERSION"
+          sudo apt-get install -y \
+            "llvm-$LLVM_VERSION" \
+            "llvm-$LLVM_VERSION-dev" \
+            "lld-$LLVM_VERSION"
+
+      - name: Put llc and ld.lld on PATH under their unversioned names
+        run: |
+          sudo ln -sf "/usr/bin/llc-$LLVM_VERSION"    /usr/local/bin/llc
+          sudo ln -sf "/usr/bin/ld.lld-$LLVM_VERSION" /usr/local/bin/ld.lld
+
+      - name: Install build dependencies
+        run: sudo apt-get install -y ninja-build
+
+      # --- Corpus persistence (issue #183 Phase 2) ---
+      #
+      # fuzz-corpus/<target>/ (NOT the checked-in, git-tracked
+      # fuzz/corpus/<target>/) is the directory each fuzz target actually
+      # runs against below, and the one this cache saves/restores. Keying on
+      # github.run_id means the exact-match lookup here always misses (a
+      # given run's own id has never been saved before it runs) and falls
+      # through to the restore-keys prefix, which resolves to the most
+      # recently saved cache entry -- the standard "ever-growing cache"
+      # pattern for a cache that needs updating on every run (see actions/
+      # cache's own tips-and-workarounds.md, "Update a cache"). The very
+      # first run ever (or any run after the entry has aged out of the
+      # cache's eviction window) simply gets a cache miss here and starts
+      # from nothing, which the seeding step right after this one handles.
+      - name: Restore evolved corpus from the most recent previous run
+        id: restore-corpus-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: fuzz-corpus
+          key: fuzz-corpus-${{ github.run_id }}
+          restore-keys: |
+            fuzz-corpus-
+
+      - name: Seed corpus (first run / cache miss, or newly-added checked-in seeds)
+        # Unions the checked-in fuzz/corpus/<target>/ seed files into
+        # fuzz-corpus/<target>/ on every run, cache hit or miss: a cache miss
+        # needs them to have anything to start from at all, and even a cache
+        # hit should still pick up any seed .pas files added to fuzz/corpus/
+        # since the cache was last populated. `cp -n` (no-clobber) never
+        # overwrites an already-cached, evolved file of the same name --
+        # not that a collision is likely, since libFuzzer names the corpus
+        # entries it writes by content hash, not by any checked-in seed's
+        # filename.
+        run: |
+          set -e
+          for target in scanner parser pmi; do
+            mkdir -p "fuzz-corpus/$target"
+            cp -n "fuzz/corpus/$target"/* "fuzz-corpus/$target/" 2>/dev/null || true
+          done
+
+      - name: Configure
+        # Mirrors ci.yml's fuzz-smoke job exactly (see its own comment for
+        # why: no PLANG_ENABLE_TESTS, Clang pinned explicitly).
+        run: |
+          cmake -S . -B build-fuzz -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DPLANG_ENABLE_FUZZERS=ON \
+            -DCMAKE_C_COMPILER=clang-$LLVM_VERSION \
+            -DCMAKE_CXX_COMPILER=clang++-$LLVM_VERSION \
+            -DLLVM_DIR="/usr/lib/llvm-$LLVM_VERSION/lib/cmake/llvm"
+
+      - name: Build
+        run: cmake --build build-fuzz -j"$(nproc)" --target scanner-fuzzer parser-fuzzer pmi-fuzzer
+
+      # --- Triage (issue #183 Phase 2) ---
+      #
+      # Each target runs against fuzz-corpus/<target>/ directly (not a throw-
+      # away copy, unlike fuzz-smoke's per-PR job): libFuzzer writing newly-
+      # interesting inputs back into that directory as it runs IS the corpus
+      # growth this job exists to produce, saved by the cache step at the
+      # end. A crash stops that one target's run immediately (libFuzzer's
+      # own behavior, not something this script has to arrange) and leaves a
+      # crash-<hash> file in that target's run directory; every target still
+      # runs regardless of an earlier one crashing, so one bad target never
+      # hides another's findings, and the job fails at the very end if any
+      # target found anything.
+      - name: Run each fuzz target for a bounded budget
+        id: run-fuzz
+        run: |
+          set +e
+          mkdir -p fuzz-crashes
+          overall_status=0
+          for target in scanner parser pmi; do
+            echo "::group::$target-fuzzer (${FUZZ_SECONDS_PER_TARGET}s budget)"
+            run_dir="$(mktemp -d)"
+            ( cd "$run_dir" && ASAN_OPTIONS=alloc_dealloc_mismatch=0 \
+                "$GITHUB_WORKSPACE/build-fuzz/bin/$target-fuzzer" \
+                  -max_total_time="$FUZZ_SECONDS_PER_TARGET" \
+                  "$GITHUB_WORKSPACE/fuzz-corpus/$target" )
+            status=$?
+            if [ "$status" -ne 0 ]; then
+              echo "::error::$target-fuzzer exited with status $status -- it found a crash, OOM, or timeout"
+              for f in "$run_dir"/crash-* "$run_dir"/oom-* "$run_dir"/timeout-* "$run_dir"/leak-*; do
+                [ -e "$f" ] || continue
+                cp "$f" "fuzz-crashes/$target-$(basename "$f")"
+              done
+              overall_status=1
+            fi
+            echo "::endgroup::"
+          done
+          exit "$overall_status"
+
+      - name: Upload crashing input(s) for local reproduction
+        if: failure() && steps.run-fuzz.outcome == 'failure'
+        uses: actions/upload-artifact@v7
+        with:
+          name: fuzz-crashes-${{ github.run_id }}
+          path: fuzz-crashes/
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Print local-reproduction instructions
+        if: failure() && steps.run-fuzz.outcome == 'failure'
+        run: |
+          cat <<'EOF'
+          ============================================================
+          A scheduled fuzz run found a crash, OOM, or timeout.
+
+          To reproduce and debug locally:
+            1. Download this run's "fuzz-crashes-<run id>" artifact from the
+               GitHub Actions run summary page (Artifacts section) -- it
+               contains one file per failing target, named
+               "<target>-crash-<hash>" (or oom-/timeout-/leak-<hash>).
+            2. Build the fuzz targets locally (Clang required):
+                 cmake -S . -B build-fuzz -G Ninja -DCMAKE_BUILD_TYPE=Debug \
+                   -DPLANG_ENABLE_FUZZERS=ON \
+                   -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
+                 cmake --build build-fuzz -j$(nproc)
+            3. Replay the downloaded file directly against the matching
+               target (substitute the actual downloaded filename):
+                 ASAN_OPTIONS=alloc_dealloc_mismatch=0 \
+                   ./build-fuzz/bin/<target>-fuzzer fuzz-crashes/<target>-crash-<hash>
+               This reproduces the crash outside of any fuzzing loop -- a
+               single deterministic run of the target on that one input --
+               so it is safe to run under gdb/lldb, rr, etc. for further
+               triage.
+            4. Once root-caused and fixed, consider adding a minimized
+               version of the crashing input to fuzz/corpus/<target>/ as a
+               permanent regression seed (see fuzz/README.md), so both this
+               scheduled job and the per-PR fuzz-smoke job in ci.yml catch
+               any future regression.
+
+          See docs/technical_info.md's "Fuzzing" section for the full
+          background (build options, corpus layout, ASAN_OPTIONS workaround).
+          ============================================================
+          EOF
+
+      # Saved unconditionally (always(), not success()-only): even a run
+      # that ends in a crash has typically already grown fuzz-corpus/ with
+      # genuinely new, non-crashing interesting inputs from earlier in that
+      # same run, which are still worth keeping for the next scheduled run.
+      # A plain actions/cache (combined restore+save) would skip this save
+      # entirely once an earlier step failed -- this is exactly the
+      # documented reason actions/cache/save exists as its own action (see
+      # actions/cache's save/README.md, "Always save cache").
+      - name: Save evolved corpus for the next scheduled run
+        if: always()
+        uses: actions/cache/save@v6
+        with:
+          path: fuzz-corpus
+          key: ${{ steps.restore-corpus-cache.outputs.cache-primary-key }}

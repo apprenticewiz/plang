@@ -64,6 +64,15 @@ local/
 build-asan/
 -
 
+# fuzz-scheduled.yml's (issue #183 Phase 2) working corpus and crash-artifact
+# directories, at the repo root only -- these are what a scheduled CI run's
+# actions/cache restores/saves and where it collects crash files, never
+# checked in themselves (the real, curated seed corpus lives, tracked, under
+# fuzz/corpus/ instead). Rooted (leading /) so this does not also match
+# fuzz/corpus/ itself.
+/fuzz-corpus/
+/fuzz-crashes/
+
 # Module interface files, generated as a side effect of compiling a module
 # declaration -- should only ever appear in a build/test tmp dir via split-file,
 # never in the checked-in source tree (a recurring mistake this guards against).
