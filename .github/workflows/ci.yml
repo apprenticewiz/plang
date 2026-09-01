@@ -229,6 +229,45 @@ jobs:
           plang -std=turbo usesrtl.pas -o usesrtl
           test "$(./usesrtl | sed -E $'s/\x1b\\[[0-9;]*m//g')" = "count=1 upper=WIDGET"
 
+      - name: Check the CMake package config (issue #191)
+        # The install rules above prove the plang binary itself works from
+        # the installed prefix; this proves the *frontend library's* own
+        # CMake package metadata (plangConfig.cmake/plangTargets.cmake) does
+        # too -- an external, entirely separate CMake project doing
+        # find_package(plang) and linking plang::plang_frontend, the same
+        # way a real embedder would, against nothing but the install this
+        # job already produced (no CMAKE_PREFIX_PATH override needed:
+        # /usr/local is on CMake's default search path).
+        #
+        # LANGUAGES C CXX, not just CXX: LLVMConfig.cmake's own
+        # FindLibEdit.cmake runs check_include_file(), which needs a C
+        # compiler enabled in the *calling* project -- confirmed locally
+        # that a CXX-only consumer project fails find_package(plang) with
+        # "Unknown extension '.c' ... try_compile() works only for enabled
+        # languages." See cmake/plangConfig.cmake.in's own header comment.
+        run: |
+          consumer_dir="$(mktemp -d)"
+          mkdir -p "$consumer_dir/src"
+          cat > "$consumer_dir/CMakeLists.txt" <<'EOF'
+          cmake_minimum_required(VERSION 3.16)
+          project(plang_consumer_smoke LANGUAGES C CXX)
+          set(CMAKE_CXX_STANDARD 17)
+          set(CMAKE_CXX_STANDARD_REQUIRED ON)
+          find_package(plang REQUIRED)
+          add_executable(consumer_smoke src/main.cpp)
+          target_link_libraries(consumer_smoke PRIVATE plang::plang_frontend)
+          EOF
+          cat > "$consumer_dir/src/main.cpp" <<'EOF'
+          #include <plang/Frontend/Frontend.h>
+          int main() {
+              const char *argv[] = {"plang", "-pc1", "--version"};
+              return plang::frontendPC1Main(3, const_cast<char **>(argv));
+          }
+          EOF
+          cmake -S "$consumer_dir" -B "$consumer_dir/build" -G Ninja
+          cmake --build "$consumer_dir/build"
+          "$consumer_dir/build/consumer_smoke" | grep -q '^plang version '
+
   macos:
     name: macOS / ${{ matrix.build_type }}
     # The arm64 runner, which is what macos-latest is, so this is also the
@@ -435,6 +474,38 @@ jobs:
           PASEOF
           plang -std=turbo usesrtl.pas -o usesrtl
           test "$(./usesrtl | sed -E $'s/\x1b\\[[0-9;]*m//g')" = "count=1 upper=WIDGET"
+
+      - name: Check the CMake package config (issue #191)
+        # As on Linux: an external CMake project doing find_package(plang)
+        # and linking plang::plang_frontend against this job's own install.
+        # CMAKE_PREFIX_PATH here points at the Homebrew LLVM keg -- plangConfig.cmake's
+        # find_dependency(LLVM CONFIG) needs it since Homebrew's llvm formula
+        # is keg-only and not on CMake's default search path (the main
+        # build above gets the equivalent via its own -DLLVM_DIR, but that's
+        # a separate cmake invocation with its own cache).
+        run: |
+          consumer_dir="$(mktemp -d)"
+          mkdir -p "$consumer_dir/src"
+          cat > "$consumer_dir/CMakeLists.txt" <<'EOF'
+          cmake_minimum_required(VERSION 3.16)
+          project(plang_consumer_smoke LANGUAGES C CXX)
+          set(CMAKE_CXX_STANDARD 17)
+          set(CMAKE_CXX_STANDARD_REQUIRED ON)
+          find_package(plang REQUIRED)
+          add_executable(consumer_smoke src/main.cpp)
+          target_link_libraries(consumer_smoke PRIVATE plang::plang_frontend)
+          EOF
+          cat > "$consumer_dir/src/main.cpp" <<'EOF'
+          #include <plang/Frontend/Frontend.h>
+          int main() {
+              const char *argv[] = {"plang", "-pc1", "--version"};
+              return plang::frontendPC1Main(3, const_cast<char **>(argv));
+          }
+          EOF
+          cmake -S "$consumer_dir" -B "$consumer_dir/build" -G Ninja \
+            -DCMAKE_PREFIX_PATH="$(brew --prefix "llvm@$LLVM_VERSION")"
+          cmake --build "$consumer_dir/build"
+          "$consumer_dir/build/consumer_smoke" | grep -q '^plang version '
 
   optimized:
     name: emitted programs at -O1/-O2/-O3
