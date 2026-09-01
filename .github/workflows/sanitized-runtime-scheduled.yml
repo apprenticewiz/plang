@@ -1,0 +1,307 @@
+name: Scheduled sanitized-runtime driver tests
+
+# issue #190 part B option 2 ("teach the driver to optionally link an
+# instrumented runtime variant for compiled TEST programs specifically,
+# letting the full existing corpus run end-to-end against a sanitized
+# runtime -- real driver plumbing, a bigger design decision, flag as the
+# more-complete-but-invasive option"). Completes part B alongside the other
+# two pieces:
+#   - part B option 1 (`runtime-sanitizer-tests` in ci.yml) links an
+#     ASan/UBSan-INSTRUMENTED plang_runtime_sanitized against a dedicated
+#     GTest harness calling the runtime's C-ABI directly -- no driver, no
+#     compiled Pascal program, no lit.
+#   - part B option 3 (valgrind-scheduled.yml) wraps the EXECUTION of
+#     already-compiled, ORDINARILY-linked Pascal programs in Valgrind's
+#     memcheck, catching heap corruption a guard-page allocator cannot see.
+#   - This workflow does the third, most invasive piece: the driver's own
+#     `-sanitize-runtime` flag (strictly opt-in, off by default -- see
+#     runtime/CMakeLists.txt and lib/Driver/Driver.cpp's linkSanitized for
+#     the full "why this cannot leak into an ordinary compile" story) links
+#     a COMPILED PASCAL PROGRAM against plang_runtime_sanitized instead of
+#     plang_runtime, and against the real ASan/UBSan compiler-rt runtime,
+#     letting the ENTIRE existing lit corpus run end-to-end against a
+#     sanitized runtime -- catching a UBSan-class bug (signed overflow,
+#     misaligned access, ...) or a non-heap-overflow ASan-class bug (stack
+#     buffer overflow, use-after-free, double-free, ...) inside the
+#     runtime's own C++ implementation that neither guardheap (a black-box
+#     allocator that can only ever see a write reaching a guard page) nor
+#     Valgrind's memcheck (real, but only reachable via an ORDINARY link,
+#     so still bound by whatever malloc plang_runtime itself was compiled
+#     against) can see reached through code the ordinarily-linked runtime
+#     never runs through the sanitizer at all.
+#
+# Scheduled, not per-PR, for the same reason fuzz-scheduled.yml and
+# valgrind-scheduled.yml both are: this project's own re-triage comment on
+# issue #190 explicitly named this option "the more-complete-but-invasive
+# option" with "a genuine per-PR-vs-scheduled cost decision" and recommended
+# scheduled/periodic given this cluster's CI footprint is already
+# substantial. Confirmed empirically while wiring this in that running the
+# FULL 2,946-test lit corpus (every category: Acceptance, CodeGen, Driver,
+# EP, Module, Turbo -- not a filtered subset the way the guardheap CI step
+# and valgrind-scheduled.yml both use) under -sanitize-runtime takes about
+# 10 seconds once the build is done, comparable to a plain unsanitized lit
+# run of the same corpus (about 15 seconds on the same machine) -- so unlike
+# fuzzing (inherently open-ended) or Valgrind (measurably viable only for a
+# bounded subset given memcheck's own per-instruction interpretation
+# overhead), the cost argument for narrowing this job's own SCOPE below the
+# full corpus does not actually hold; the scheduled-not-per-PR choice is
+# purely about keeping a P3-adjacent hardening feature's CI surface off the
+# required-checks path for every PR, matching this project's own
+# established practice for this exact issue cluster.
+
+on:
+  schedule:
+    # Nightly. 06:53 UTC: deliberately off the top/half/quarter-hour (see
+    # fuzz-scheduled.yml's own comment on why) AND offset from that
+    # workflow's own 04:37 UTC slot and valgrind-scheduled.yml's own 05:19
+    # UTC slot, so all three scheduled jobs do not queue-contend for
+    # runners against each other either.
+    - cron: '53 6 * * *'
+  workflow_dispatch: {}
+
+# Global (not per-ref) group, same reasoning as fuzz-scheduled.yml and
+# valgrind-scheduled.yml: this workflow only ever runs on a schedule or by
+# manual dispatch, never per-branch/per-PR, so one run at a time overall is
+# the right scope.
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  LLVM_VERSION: '22'
+
+jobs:
+  sanitized-runtime-scheduled:
+    name: full corpus under -sanitize-runtime (ASan/UBSan)
+    runs-on: ubuntu-latest
+    # Same LLVM-install-and-build cost as the `optimized`/`sanitizers`/
+    # `runtime-sanitizer-tests`/valgrind-scheduled.yml's own jobs (this
+    # job's own Configure/Build steps are copied from
+    # runtime-sanitizer-tests's almost verbatim, with PLANG_ENABLE_TESTS
+    # also building the driver and the full lit suite this time, not just
+    # the GTest harness) -- the sanitized lit run itself is under 15s (see
+    # the header comment above), so this budget is nearly all LLVM install +
+    # full project build, exactly like its siblings.
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install LLVM and lld
+        run: |
+          sudo apt-get update
+          wget -qO llvm.sh https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh "$LLVM_VERSION"
+          sudo apt-get install -y \
+            "llvm-$LLVM_VERSION" \
+            "llvm-$LLVM_VERSION-dev" \
+            "lld-$LLVM_VERSION"
+
+      - name: Put llc and ld.lld on PATH under their unversioned names
+        run: |
+          sudo ln -sf "/usr/bin/llc-$LLVM_VERSION"    /usr/local/bin/llc
+          sudo ln -sf "/usr/bin/ld.lld-$LLVM_VERSION" /usr/local/bin/ld.lld
+
+      - name: Install build dependencies
+        run: sudo apt-get install -y ninja-build libgtest-dev
+
+      - name: Install lit
+        # Same fix as ci.yml's own "Install lit" step and for the identical
+        # reason: this job invokes `lit` directly from a bare shell below,
+        # which needs it resolved onto PATH for real (apt.llvm.org's package
+        # does not put it there).
+        run: |
+          pip3 install --user --break-system-packages lit psutil
+          echo "$(python3 -m site --user-base)/bin" >> "$GITHUB_PATH"
+
+      - name: Configure
+        # PLANG_ENABLE_RUNTIME_SANITIZER_TESTS's own configure-time check
+        # already fails outright under a non-Clang C or C++ compiler and/or
+        # without PLANG_ENABLE_TESTS=ON (see the top-level CMakeLists.txt's
+        # own comment for why the driver's own -sanitize-runtime flag needs
+        # all three) -- CMAKE_C_COMPILER/CMAKE_CXX_COMPILER pinned to Clang
+        # explicitly anyway, belt and suspenders against ever landing on
+        # this runner's default gcc, the identical precaution
+        # runtime-sanitizer-tests's own Configure step takes.
+        run: |
+          cmake -S . -B build-sanitized-runtime -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DPLANG_ENABLE_TESTS=ON \
+            -DPLANG_ENABLE_RUNTIME_SANITIZER_TESTS=ON \
+            -DCMAKE_C_COMPILER=clang-$LLVM_VERSION \
+            -DCMAKE_CXX_COMPILER=clang++-$LLVM_VERSION \
+            -DLLVM_DIR="/usr/lib/llvm-$LLVM_VERSION/lib/cmake/llvm"
+
+      - name: Build
+        # The whole project, unlike runtime-sanitizer-tests's own targeted
+        # build: this job's own lit run below compiles Pascal test programs
+        # through the real driver (bin/plang), needing plang_runtime_sanitized
+        # AND the driver AND every lit substitution PLANG_ENABLE_TESTS wires
+        # up (build-sanitized-runtime/test/), not just the GTest harness.
+        run: cmake --build build-sanitized-runtime -j"$(nproc)"
+
+      # Same reasoning as run-under-guardheap.sh's own --self-test and
+      # run-under-valgrind.sh's own --self-test, invoked the same way by
+      # ci.yml's guardheap step and valgrind-scheduled.yml right before
+      # their own lit runs: a gate that always reports "clean" is
+      # indistinguishable from one that is simply broken. `-sanitize-runtime`
+      # itself has no separate self-test script -- unlike the other two
+      # gates, it is not a %run wrapper script this job could invoke
+      # standalone, but a driver flag threaded through the real compile
+      # step -- so this exercises the driver's own -sanitize-runtime LINK
+      # step directly instead, confirming the whole pipeline (the real
+      # -sanitize-runtime flag, the real plang_runtime_sanitized archive,
+      # the real baked-in clang path linkSanitized uses -- see its own
+      # comment in Driver.cpp) still actually catches a real bug before
+      # trusting a clean run of the real suite below to mean anything.
+      #
+      # A Pascal PROGRAM plang compiles is never itself sanitizer-
+      # instrumented -- only the RUNTIME it links against is (see
+      # linkSanitized's own comment) -- so a bug in Pascal-generated machine
+      # code could never demonstrate this gate; confirmed the hard way while
+      # wiring this in, with a deliberate Integer-overflow .pas program that
+      # ran clean under -sanitize-runtime (plang's own Integer is 64-bit
+      # under ISO 7185/-std=iso7185, so 2000000000+2000000000 does not even
+      # overflow it, and even a genuinely overflowing add in the compiled
+      # program's own machine code would still not be UBSan-instrumented in
+      # the first place). Compiling one deliberately-bad .c TU by hand with
+      # clang -fsanitize=address,undefined and handing plang -sanitize-
+      # runtime only the resulting .o (the driver's own "linker-only mode":
+      # bare .o/.a inputs, no .pas source -- see compile()'s own comment in
+      # Driver.cpp) exercises the real LINK step alone, the one piece of
+      # this whole feature that is actually new, without ever touching real
+      # runtime source with a throwaway bug.
+      - name: Sanitized-runtime gate self-test
+        run: |
+          set -e
+          d=$(mktemp -d); trap 'rm -rf "$d"' EXIT
+          cat > "$d/shim.c" <<'EOF'
+          #include <stdlib.h>
+          int main(void) {
+              char *p = malloc(8);
+              p[8] = 'X'; /* deliberate one-byte heap-buffer-overflow, self-test only */
+              return (int)(unsigned char)p[0];
+          }
+          EOF
+          "clang-$LLVM_VERSION" -fsanitize=address,undefined -fno-sanitize=vptr -O0 \
+            -c "$d/shim.c" -o "$d/shim.o"
+          ./build-sanitized-runtime/bin/plang -sanitize-runtime "$d/shim.o" -o "$d/shim_test"
+          if "$d/shim_test" >"$d/out.log" 2>&1; then
+            echo "::error::sanitized-runtime gate self-test FAILED: a known heap-buffer-overflow exited 0 under -sanitize-runtime instead of being caught by ASan"
+            cat "$d/out.log"
+            exit 1
+          fi
+          grep -q "AddressSanitizer: heap-buffer-overflow" "$d/out.log" || {
+            echo "::error::sanitized-runtime gate self-test FAILED: the program failed, but not with an ASan heap-buffer-overflow report"
+            cat "$d/out.log"
+            exit 1
+          }
+          echo "Self-test OK: -sanitize-runtime's own link step caught the known heap-buffer-overflow."
+
+      # Full corpus (issue #190 part B option 2's own "or the full corpus,
+      # if genuinely cheap enough -- measure first, don't assume" -- see
+      # this file's own header comment for the measurement: about 10s for
+      # all 2,946 tests, comparable to a plain unsanitized run of the same
+      # corpus on the same machine). `set -o pipefail` matters here: without
+      # it, `tee`'s own always-zero exit code would hide a failing `lit`
+      # behind the pipeline's exit status, and the job would report green
+      # on a real ASan/UBSan finding.
+      #
+      # ASAN_OPTIONS=detect_leaks=0: this gate targets memory CORRUPTION and
+      # undefined behavior, not leak hygiene -- the identical scope choice
+      # valgrind-scheduled.yml's own memcheck invocation makes (see that
+      # workflow's own comment). Confirmed empirically while wiring this in:
+      # without it, the ISO 7185 acceptance program's own already-known,
+      # already-filed 25-byte leak (test/Acceptance/iso7185pat.pas, issue
+      # #560, not fixed here) trips LeakSanitizer and corrupts that test's
+      # own stdout/stderr expectations, failing a test that has nothing to
+      # do with the corruption/UB bug class this job actually exists to
+      # catch.
+      #
+      # ASAN_OPTIONS=allocator_may_return_null=1: confirmed empirically
+      # while wiring this in that Turbo's own GetMem/HeapError test
+      # deliberately requests an absurdly large allocation to exercise
+      # Pascal's own out-of-memory handling, which ordinary glibc malloc
+      # answers by returning NULL -- ASan's own allocator instead treats a
+      # request past its own internal size ceiling as a FATAL ASan error by
+      # default, aborting before the program's own HeapError handling ever
+      # runs. This option is exactly ASan's own documented answer (its own
+      # abort message even names it): with it, ASan's allocator returns
+      # NULL for an over-limit request the same way glibc's does, letting
+      # the test's own intentional out-of-memory path run as designed.
+      - name: Full lit corpus under -sanitize-runtime
+        id: run-sanitized
+        run: |
+          set -o pipefail
+          cd build-sanitized-runtime/test
+          lit -sv --skip-test-time-recording --timeout 300 . \
+            2>&1 | tee "$GITHUB_WORKSPACE/sanitized-runtime-lit-output.log"
+        env:
+          PLANG_TEST_EXTRA_FLAGS: "-sanitize-runtime"
+          ASAN_OPTIONS: "detect_leaks=0:allocator_may_return_null=1"
+          UBSAN_OPTIONS: "print_stacktrace=1:halt_on_error=1"
+
+      - name: Upload lit output for local reproduction
+        if: failure() && steps.run-sanitized.outcome == 'failure'
+        uses: actions/upload-artifact@v7
+        with:
+          name: sanitized-runtime-lit-output-${{ github.run_id }}
+          path: sanitized-runtime-lit-output.log
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Print local-reproduction instructions
+        if: failure() && steps.run-sanitized.outcome == 'failure'
+        run: |
+          cat <<'EOF'
+          ============================================================
+          A scheduled -sanitize-runtime run found a real ASan/UBSan
+          finding inside the plang runtime itself (not the compiled
+          Pascal program's own logic).
+
+          To reproduce and debug locally:
+            1. Download this run's "sanitized-runtime-lit-output-<run id>"
+               artifact from the GitHub Actions run summary page (Artifacts
+               section), or scroll up in this job's own log -- it is the
+               exact same `lit -sv` output, including the full ASan/UBSan
+               report (which test file, which RUN line, and the sanitizer's
+               own stack trace through the plang runtime).
+            2. Build plang locally exactly as this job does (Clang, Debug,
+               PLANG_ENABLE_RUNTIME_SANITIZER_TESTS=ON):
+                 cmake -S . -B build-sanitized-runtime -G Ninja \
+                   -DCMAKE_BUILD_TYPE=Debug \
+                   -DPLANG_ENABLE_TESTS=ON \
+                   -DPLANG_ENABLE_RUNTIME_SANITIZER_TESTS=ON \
+                   -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
+                 cmake --build build-sanitized-runtime -j$(nproc)
+            3. Re-run the same lit invocation this job used, narrowed with
+               --filter to the one failing test if you already know which
+               one from step 1 (substitute its real name):
+                 cd build-sanitized-runtime/test
+                 PLANG_TEST_EXTRA_FLAGS="-sanitize-runtime" \
+                   ASAN_OPTIONS=detect_leaks=0:allocator_may_return_null=1 \
+                   UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 \
+                   lit -sv --filter='<failing-test-name>' .
+               This reproduces the exact compile-with--sanitize-runtime-
+               then-run sequence lit itself performed, safe to iterate on
+               locally.
+            4. Or compile and run the one failing .pas file directly,
+               outside of lit, for the fastest iteration loop:
+                 ./bin/plang -sanitize-runtime <path/to/the/failing/file.pas> -o /tmp/repro
+                 ASAN_OPTIONS=detect_leaks=0:allocator_may_return_null=1 \
+                   UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 \
+                   /tmp/repro
+            5. Once root-caused and fixed, re-run this same job's own
+               "Sanitized-runtime gate self-test" step's commands locally to
+               confirm the gate itself is still sound, then step 3 or 4
+               above to confirm the specific finding is gone.
+
+          See docs/technical_info.md's "-sanitize-runtime (scheduled)"
+          section for the full background (why this scope, why leaks are
+          excluded, why allocator_may_return_null=1 is load-bearing).
+          ============================================================
+          EOF
