@@ -1476,7 +1476,12 @@ Sema::PMILoadResult Sema::loadPMI(const std::string& Key, const std::string& Pat
     if (!PMIFile) return {PMILoadResult::Status::Unreadable, ""};
     std::ostringstream SS;
     SS << PMIFile.rdbuf();
+    return loadPMIFromBuffer(Key, Path, SS.str());
+}
 
+Sema::PMILoadResult Sema::loadPMIFromBuffer(const std::string& Key,
+                                            const std::string& PathForDiag,
+                                            const std::string& Content) {
     // A .pmi holds the interface of one module, written as an EP module
     // heading.  The parser reads a file of modules followed by a program, so
     // an empty program is appended to make one.  The wrapper's own name has
@@ -1488,7 +1493,7 @@ Sema::PMILoadResult Sema::loadPMI(const std::string& Key, const std::string& Pat
     // has no underscore at all, so it trips neither that rule nor the
     // EP-extension-underscore warning, and the diagnostic stream below can
     // now be trusted to reflect only the content that was actually read.
-    std::string Wrapped = SS.str();
+    std::string Wrapped = Content;
     Wrapped += "\nprogram pmiwrapper;\nbegin end.\n";
 
     // Parse the wrapped content using an in-memory scanner.  PMIDiags and
@@ -1502,7 +1507,7 @@ Sema::PMILoadResult Sema::loadPMI(const std::string& Key, const std::string& Pat
     LangOptions PMIOpts = Opts;
     PMIOpts.Std = LangOptions::Standard::ISO10206;
     SourceManager PMISrcMgr;
-    Scanner PSc(PMISrcMgr, "<" + Path + ">", Wrapped, PMIDiags, PMIOpts);
+    Scanner PSc(PMISrcMgr, "<" + PathForDiag + ">", Wrapped, PMIDiags, PMIOpts);
     Parser  PP(std::move(PSc), PMIDiags, PMIOpts);
     auto Prog = PP.parse();
     // Both !Prog and PMIDiags.hasErrors() matter now that the wrapper itself

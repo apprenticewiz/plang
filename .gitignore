@@ -68,6 +68,11 @@ build-asan/
 # declaration -- should only ever appear in a build/test tmp dir via split-file,
 # never in the checked-in source tree (a recurring mistake this guards against).
 *.pmi
+# Exception: the fuzz/ corpus seed is a deliberately checked-in .pmi, not a
+# build artifact -- without this exception it silently never gets committed
+# (confirmed: this is exactly what happened the first time this file was
+# added, breaking the fuzz-smoke CI job with no local warning at all).
+!fuzz/corpus/pmi/*.pmi
 
 # Schema-layout sidecar for the gdb pretty-printer (issue #130), written next
 # to the source file a -g compile with a runtime-varying schema type used --

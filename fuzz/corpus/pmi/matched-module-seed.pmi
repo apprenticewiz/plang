@@ -1,0 +1,4 @@
+module fuzzpmimod interface;
+  export const Answer = 42;
+  export function Double(x: integer): integer;
+end.

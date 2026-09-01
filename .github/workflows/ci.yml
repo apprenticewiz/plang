@@ -715,6 +715,85 @@ jobs:
         env:
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
 
+  fuzz-smoke:
+    name: fuzz smoke (scanner/parser/pmi)
+    runs-on: ubuntu-latest
+    # issue #183 Phase 1: a bounded, per-PR crash-regression smoke check, not
+    # deep fuzzing -- 60s per target (3 targets) against each one's checked-in
+    # seed corpus, sized the same deliberate way as every other job's own
+    # timeout-minutes (issue #189's policy): generous enough that ordinary CI
+    # variance never trips it, tight enough to still fail fast if the whole
+    # job hangs. The 3x60s of actual fuzzing is a small fraction of this --
+    # most of the budget, as in the `sanitizers` job right above, is the LLVM
+    # install and the build itself.
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install LLVM and lld
+        run: |
+          sudo apt-get update
+          wget -qO llvm.sh https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh "$LLVM_VERSION"
+          sudo apt-get install -y \
+            "llvm-$LLVM_VERSION" \
+            "llvm-$LLVM_VERSION-dev" \
+            "lld-$LLVM_VERSION"
+
+      - name: Put llc and ld.lld on PATH under their unversioned names
+        run: |
+          sudo ln -sf "/usr/bin/llc-$LLVM_VERSION"    /usr/local/bin/llc
+          sudo ln -sf "/usr/bin/ld.lld-$LLVM_VERSION" /usr/local/bin/ld.lld
+
+      - name: Install build dependencies
+        run: sudo apt-get install -y ninja-build
+
+      - name: Configure
+        # No PLANG_ENABLE_TESTS here: this job only needs the three fuzz
+        # targets, not the ~2,900-file lit suite or GoogleTest (which would
+        # also drag in libgtest-dev/psutil for no benefit to what this job
+        # checks). CMAKE_C_COMPILER/CMAKE_CXX_COMPILER pinned to Clang
+        # explicitly -- PLANG_ENABLE_FUZZERS itself already fails the
+        # configure step with a clear error under a non-Clang compiler (see
+        # the top-level CMakeLists.txt's own comment), so this is belt and
+        # suspenders against ever landing on this runner's default gcc.
+        run: |
+          cmake -S . -B build-fuzz -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DPLANG_ENABLE_FUZZERS=ON \
+            -DCMAKE_C_COMPILER=clang-$LLVM_VERSION \
+            -DCMAKE_CXX_COMPILER=clang++-$LLVM_VERSION \
+            -DLLVM_DIR="/usr/lib/llvm-$LLVM_VERSION/lib/cmake/llvm"
+
+      - name: Build
+        run: cmake --build build-fuzz -j"$(nproc)" --target scanner-fuzzer parser-fuzzer pmi-fuzzer
+
+      - name: Run each fuzz target for a bounded 60s against its seed corpus
+        # Each target reads from a COPY of its tracked corpus, never the
+        # tracked fuzz/corpus/<target>/ directory itself: libFuzzer writes
+        # newly-interesting inputs back into whatever directory it's given,
+        # and a CI run mutating checked-in seed files would make this job's
+        # own diff nondeterministic across runs (see docs/technical_info.md's
+        # "Fuzzing" section, which documents the identical copy-first
+        # practice for a real, longer local fuzzing session).
+        #
+        # ASAN_OPTIONS=alloc_dealloc_mismatch=0 works around a known ASan
+        # false positive in LLVM's own DenseMap/MemAlloc.cpp bucket
+        # allocator, not a plang bug -- see docs/technical_info.md's
+        # "Fuzzing" section for the full explanation.
+        run: |
+          set -e
+          for target in scanner parser pmi; do
+            echo "::group::$target-fuzzer"
+            corpus_copy="$(mktemp -d)/$target"
+            cp -r "fuzz/corpus/$target" "$corpus_copy"
+            ASAN_OPTIONS=alloc_dealloc_mismatch=0 \
+              "./build-fuzz/bin/$target-fuzzer" -max_total_time=60 "$corpus_copy"
+            echo "::endgroup::"
+          done
+
   lint-test:
     name: lint test/
     runs-on: ubuntu-latest
