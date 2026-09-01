@@ -7,16 +7,12 @@
 
 using namespace plang;
 
-namespace {
-// Turbo procedural VALUES: \p tn may name a procedural TYPE through any
-// number of `type Alias = OtherAlias;` hops (NamedTypeNode::Denotes, set by
-// Sema::resolveNamed at every one of them) before finally being written out
-// as `procedure(...)`/`function(...): T`.  Resolved once here, at the
-// variable's declaration, so a call through it later (ClosureAndCallABI::
-// emitProcVarCall) does not have to re-walk the chain.  Returns null for
-// anything that is not, eventually, a procedural type -- the overwhelming
-// majority of defVar's callers.
-const ProcedureTypeNode* resolveVarProcType(const TypeNode* tn) {
+namespace plang {
+// See this function's own comment, CGSymbolTable.h -- shared with
+// CodeGenProcs.cpp's parameter-list walk (issue #543), so it lives here
+// rather than in this file's own anonymous namespace the way it used to
+// when defVar was its only caller.
+const ProcedureTypeNode* resolveProcTypeAlias(const TypeNode* tn) {
     while (tn) {
         if (auto* pt = llvm::dyn_cast<ProcedureTypeNode>(tn)) return pt;
         auto* nt = llvm::dyn_cast<NamedTypeNode>(tn);
@@ -25,7 +21,7 @@ const ProcedureTypeNode* resolveVarProcType(const TypeNode* tn) {
     }
     return nullptr;
 }
-} // namespace
+} // namespace plang
 
 void CGSymbolTable::defVar(const std::string& name, llvm::Value* ptr, llvm::Type* type,
                             const TypeNode* typeNode, llvm::Value* debugIndirectPtr,
@@ -64,9 +60,9 @@ void CGSymbolTable::defVar(const std::string& name, llvm::Value* ptr, llvm::Type
     // frame} cell is registered through this same function but always with
     // typeNode == nullptr (CodeGenProcs.cpp's parameter loop, which sets
     // isProcParam/procType itself afterward -- see its own comment for why),
-    // so resolveVarProcType(nullptr) answers null there and this is a no-op
-    // for it; only a genuinely declared VARIABLE reaches this branch.
-    if (const auto* pt = resolveVarProcType(typeNode)) {
+    // so resolveProcTypeAlias(nullptr) answers null there and this is a
+    // no-op for it; only a genuinely declared VARIABLE reaches this branch.
+    if (const auto* pt = resolveProcTypeAlias(typeNode)) {
         VE.isProcVar = true;
         VE.procType  = pt;
     }
