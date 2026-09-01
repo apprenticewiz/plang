@@ -56,13 +56,26 @@ private:
     DiagnosticsEngine&       Diags;       // shared diagnostic sink
     int                      ErrorCount{}; // errors emitted by this parse pass
 
-    // Live activations of parseFactor.  Every recursive re-entry into
-    // expression parsing -- '(' via parseExpression, 'not' directly -- funnels
-    // through parseFactor, so bounding activations there (see ExprDepthScope
-    // and MaxExprDepth in ParseExpr.cpp) bounds the whole mutually-recursive
-    // parseExpression/parseSimpleExpr/parseTerm/parsePower/parseFactor cycle
-    // against adversarial input like x := ((((...(1)...)))), which used to
-    // exhaust the real C++ stack instead of failing with a diagnostic.
+    // Live activations of parseFactor, PLUS every other re-entry into
+    // expression parsing that shares this same budget instead of its own:
+    // parsePower's right-associative '**'/'pow' self-recursion (issue #550
+    // -- it does not funnel through parseFactor the way '(' via
+    // parseExpression and 'not'/'@' via direct recursion do, so it used to
+    // escape this ceiling entirely), and parseSimpleExpr/parseTerm's
+    // iterative addop/mulop folding loops (issue #300's own re-triage --
+    // those build a BinaryExpr chain exactly as deep as the source's flat
+    // 'a + a + a + ...'/'a * a * a * ...' run without ever recursing per
+    // operator, so nothing bounded how deep ONE long flat chain could get
+    // on its own, independent of how much '(' nesting, if any, it sits
+    // inside).  Bounding all of these against the one counter (see
+    // ExprDepthScope and MaxExprDepth in ParseExpr.cpp) bounds the whole
+    // mutually-recursive parseExpression/parseSimpleExpr/parseTerm/
+    // parsePower/parseFactor cycle -- covering every way it can grow, not
+    // just parenthesized nesting -- against adversarial input like
+    // x := ((((...(1)...)))) or x := 1 + 1 + 1 + ... + 1, either of which
+    // used to exhaust the real C++ stack (or, for the flat-chain case, the
+    // resulting AST's own destructor stack on teardown -- issue #551)
+    // instead of failing with a diagnostic.
     unsigned                 ExprDepth{};
     // Set once the "too deeply nested" diagnostic has fired for the chain of
     // parseFactor activations currently unwinding, so that the burst of

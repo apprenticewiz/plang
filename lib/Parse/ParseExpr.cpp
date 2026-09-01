@@ -4,6 +4,7 @@
 #include "ParserInternal.h"
 #include "plang/AST/Ast.h"
 #include "plang/Basic/Diagnostic.h"
+#include "plang/Basic/RecursionGuard.h"
 #include "plang/Basic/StringUtil.h"
 #include "plang/Basic/Token.h"
 #include "llvm/Support/Casting.h"
@@ -122,12 +123,36 @@ std::unique_ptr<ExprNode> Parser::parseSimpleExpr() {
         Left = parseTerm();
     }
 
+    // This loop folds a flat 'a + a + a + ...' run iteratively rather than
+    // recursing once per operator the way '(' does through parseFactor, so
+    // it does not naturally bump ExprDepth at all -- see ExprDepth's own
+    // comment (Parser.h) for why it needs to anyway (issue #300). Checked,
+    // and bumped, once per fold: a caller already sitting at the ceiling
+    // stops folding without folding once more first, matching parseFactor's
+    // own check-before-bump order. Added tracks how many folds THIS
+    // activation itself is responsible for, so they can be given back in
+    // one step below rather than one at a time the way a genuinely
+    // recursive call's RAII scope would -- a sibling flat chain at the same
+    // nesting depth (e.g. the next statement's own expression) still gets
+    // the full budget, while a flat chain genuinely nested inside '(' still
+    // shares it, matching parseFactor's own RAII shape (ExprDepthScope)
+    // without needing one instance of it per fold.
+    unsigned Added = 0;
     while (isAddop(Current.Kind)) {
         // Symmetric set difference is Extended Pascal's, and unlike 'or_else'
         // beside it, it is spelt as a symbol rather than a word, so nothing
         // else keeps it out of standard Pascal.
         if (Current.Kind == TokenKind::SymDiff && !Opts.extendedPascal())
             emitError(Current.toLoc(), diag::err_ep_operator, {"><"});
+        if (ExprDepth >= MaxExprDepth) {
+            if (!ExprDepthLimitHit) {
+                ExprDepthLimitHit = true;
+                emitError(Current.toLoc(), diag::err_expr_too_deeply_nested);
+            }
+            break;
+        }
+        ++ExprDepth;
+        ++Added;
         auto Node  = std::make_unique<BinaryExpr>();
         Node->Loc  = Current;
         Node->Op   = Current.Kind;
@@ -136,6 +161,8 @@ std::unique_ptr<ExprNode> Parser::parseSimpleExpr() {
         Node->Right = parseTerm();
         Left = std::move(Node);
     }
+    ExprDepth -= Added;
+    if (ExprDepth == 0) ExprDepthLimitHit = false;
 
     return Left;
 }
@@ -149,6 +176,26 @@ std::unique_ptr<ExprNode> Parser::parsePower() {
         // read as one under either standard.
         if (!Opts.extendedPascal())
             emitError(Current.toLoc(), diag::err_ep_operator, {Current.Lexeme});
+        // Unlike every OTHER re-entry into expression parsing (see
+        // ExprDepth's comment, Parser.h), this right-associative self-
+        // recursion for a chain of '**'/'pow' used to call parsePower
+        // directly without ever bumping ExprDepth, so a long enough
+        // '2 ** 2 ** 2 ** ...' chain drove the parser's own C++ call stack
+        // to overflow (issue #550), before Sema's separately-bounded
+        // checkExpr guard downstream ever got a chance to reject the same
+        // expression the way it already does for an equally long chain of
+        // '('. Checked and bumped exactly like parseFactor's own
+        // activation, via the shared RecursionGuard utility (Basic/
+        // RecursionGuard.h) rather than a fresh hand-rolled struct, so a mix
+        // of '(' nesting and '**' chaining shares one budget too.
+        if (ExprDepth >= MaxExprDepth) {
+            if (!ExprDepthLimitHit) {
+                ExprDepthLimitHit = true;
+                emitError(Current.toLoc(), diag::err_expr_too_deeply_nested);
+            }
+            return Left;
+        }
+        RecursionGuard DepthGuard(ExprDepth, &ExprDepthLimitHit);
         auto Node  = std::make_unique<BinaryExpr>();
         Node->Loc  = Current;
         Node->Op   = Current.Kind;
@@ -164,7 +211,21 @@ std::unique_ptr<ExprNode> Parser::parsePower() {
 std::unique_ptr<ExprNode> Parser::parseTerm() {
     auto Left = parsePower();
 
+    // See parseSimpleExpr's matching addop loop above for why this needs
+    // its own bump-and-batch-restore against ExprDepth (issue #300):
+    // 'a * a * a * ...' folds iteratively here too, and used to be just as
+    // unbounded.
+    unsigned Added = 0;
     while (isMulop(Current.Kind)) {
+        if (ExprDepth >= MaxExprDepth) {
+            if (!ExprDepthLimitHit) {
+                ExprDepthLimitHit = true;
+                emitError(Current.toLoc(), diag::err_expr_too_deeply_nested);
+            }
+            break;
+        }
+        ++ExprDepth;
+        ++Added;
         auto Node  = std::make_unique<BinaryExpr>();
         Node->Loc  = Current;
         Node->Op   = Current.Kind;
@@ -173,6 +234,8 @@ std::unique_ptr<ExprNode> Parser::parseTerm() {
         Node->Right = parsePower();
         Left = std::move(Node);
     }
+    ExprDepth -= Added;
+    if (ExprDepth == 0) ExprDepthLimitHit = false;
 
     return Left;
 }

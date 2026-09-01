@@ -3,50 +3,46 @@ Issue #518: AstPrinter.cpp's printExpr recurses into itself (for a
 BinaryExpr's Left/Right sub-expressions) with no depth guard at all, so a
 deeply-nested flat expression -- a chain of tens of thousands of unparenthesized
 '+' terms, exactly like the CONST initializer stress case next door in
-test-lit/Driver/SemaRobustness/ -- crashed -dump-parse-tree with a real
+test-lit/Driver/SemaRobustness/ -- used to crash -dump-parse-tree with a real
 segmentation fault rather than any diagnostic.  -dump-parse-tree runs
 Scanner+Parser only (see dump-parse-tree-prints-the-syntax-tree.pas next
-door): Sema is never constructed, so none of Sema's own recursion guards
-(Sema::ExprDepth/MaxExprDepth, or walkExprs/walkStmts's MaxWalkDepth --
-SemaUtil.h) are ever in the picture for this flag -- confirmed via gdb
-backtrace to be printExpr calling itself with nothing to stop it, a
-genuinely separate crash from the ones those guards fix.
+door), so #518's fix gave printExpr (and printType/printStmt, sharing the
+identical unguarded-recursion shape) their own recursion ceiling
+(MaxDumpDepth, AstPrinter.cpp) independent of Sema's, since Sema is never
+constructed on this path.
 
-The fix gives printExpr (and, sharing the identical unguarded-recursion
-shape, printType and printStmt) their own recursion ceiling
-(MaxDumpDepth, AstPrinter.cpp), sized independently of Sema's own
-MaxExprDepth since this is a completely separate, pre-Sema code path with
-no shared invariant.  Past the ceiling it prints a placeholder ('...') and
-stops recursing rather than crashing -- this file has no DiagnosticsEngine
-threaded through it at all, and a debug-dump utility's only real
-obligation here is to not crash, so a silent truncation (the same shape
-walkExprs/walkStmts's own guard already uses) is the right level of
-engineering.
+Issue #300/#550: the PARSER's own ExprDepth/MaxExprDepth ceiling
+(ParseExpr.cpp) originally only bounded genuinely recursive re-entries into
+expression parsing ('(' via parseExpression, 'not'/'@' directly) -- a flat
+chain like this one folds ITERATIVELY in parseSimpleExpr's addop loop
+instead of recursing once per '+', so it used to build a full-depth AST
+(however many '+' terms the source had) with no parser-level ceiling at
+all, only to be caught later by Sema's separate guard on the normal
+compile path, or (before #518) not caught at all on this one. Once that
+loop was given the same ExprDepth budget parseFactor's recursive cases
+already share, a chain this long -- 30000 terms, comfortably past
+MaxExprDepth (500) while staying fast to parse here -- is now rejected by
+the PARSER itself, with the same "expression is nested too deeply"
+diagnostic the SemaRobustness stress test asserts on the normal compile
+path, before -dump-parse-tree's printer ever sees the tree at all. This
+test now asserts that outcome directly: MaxDumpDepth's own guard is no
+longer reachable via THIS input shape (every parser-accepted expression is
+now at most 500 deep, well under MaxDumpDepth's 2000), but it stays in
+place as defense-in-depth for whatever the next unbounded-recursion gap
+turns out to be, the same way this file's own history is now two of those
+in a row.
 
-30000 terms is comfortably past MaxDumpDepth (2000) while staying fast to
-parse here.  Checked in verbatim rather than generated at build time,
-matching the CONST-initializer stress test's own precedent -- lit has no
-loop-emitting primitive, and the source is deterministic; nobody should
-have to look at 30000 terms to read this file, so the lit directives come
-first.
+Checked in verbatim rather than generated at build time, matching the
+CONST-initializer stress test's own precedent -- lit has no loop-emitting
+primitive, and the source is deterministic; nobody should have to look at
+30000 terms to read this file, so the lit directives come first.
 
-Unlike that test (which asserts a clean "nested too deeply" diagnostic,
-since Sema's own guard catches it first on that path), there is no
-Sema-level diagnostic to check for here -- -dump-parse-tree stops before
-Sema runs, so the only thing to prove is that the compiler dumps SOME
-complete, well-formed tree and exits cleanly rather than crashing. Lit's
-internal shell fails a RUN line if any stage of a pipe exits non-zero (or
-dies by signal), so `%plang_ir ... | FileCheck %s` alone is enough to
-catch a regression back to the crash -- no `not` needed, since this RUN
-line is expected to SUCCEED now, not fail with a clean diagnostic.
-
-RUN: %plang_ir -dump-parse-tree %s | FileCheck %s
+RUN: not %plang_ir -dump-parse-tree %s 2> %t.err
+RUN: FileCheck %s < %t.err
 *)
 
 (*
-CHECK: (program t
-CHECK: ...
-CHECK: (compound))
+CHECK: error: expression is nested too deeply
 *)
 
 program t;
