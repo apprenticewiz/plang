@@ -1044,7 +1044,26 @@ bool CGProcCall::tryEmitDosProcCall(const CallStmt& s) {
         auto* fn = RtFns.getExternFnN("plang_dos_findfirst", voidTy,
                                        {PtrTy, i16Ty, PtrTy});
         auto* pathArg = StrCall.emitCStrArg(*s.Args[0]);
-        auto* attrArg = EmitExpr(*s.Args[1]);
+        // Issue #696: a bare EmitExpr(*s.Args[1]) hands back whatever LLVM
+        // type the actual's own expression shape produces -- I64Ty for
+        // every integer LITERAL (CGExprCore.cpp's IntLitExpr case always
+        // materializes i64, unconditionally of context), regardless of
+        // plang_dos_findfirst's own `uint16_t attr` parameter just above.
+        // A Word variable or a named constant like Dos.pas's faAnyFile
+        // happened to already carry the right (narrower) LLVM type by the
+        // time it got here and never tripped this, so `FindFirst('*.*',
+        // faAnyFile, sr)` worked while the equally-legal, and far more
+        // idiomatic, `FindFirst('*.*', 63, sr)` was an LLVM IR verifier
+        // failure ("i64 63 passed to an i16 parameter") on the single most
+        // common call form.  StringCallMarshalling::emitCallArg is the
+        // general "marshal ONE actual to a callee's declared LLVM param
+        // type" mechanism every user-declared-procedure call already goes
+        // through (CGCallMarshal::marshalArgs); it ends in exactly the
+        // narrow/widen-to-paramTy coercion this raw builtin call site was
+        // missing, so routing through it here rather than a bespoke
+        // truncate fixes this the same way a user-declared `procedure
+        // p(attr: Word)` was already unaffected.
+        auto* attrArg = StrCall.emitCallArg(*s.Args[1], i16Ty, /*byRef=*/false);
         auto* recArg  = EmitLValue(*s.Args[2]);
         B.CreateCall(fn, {pathArg, attrArg, recArg});
         return true;

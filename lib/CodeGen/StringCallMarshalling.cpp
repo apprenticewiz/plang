@@ -222,6 +222,35 @@ llvm::Value* StringCallMarshalling::emitCStrArg(const ExprNode& e) {
         B.CreateStore(llvm::ConstantInt::get(i8Ty, 0), nulAt);
         return buf;
     }
+    // A §6.4.3.2 char-string-type (`packed array[1..n] of char`, Sema's own
+    // isCharStringType/ExprIsCharStr) has no NUL terminator of its own
+    // either -- like ShortString just above, it needs converting rather
+    // than falling to the "already a char *" default below.  Issue #671:
+    // TP's own Assign(f, name)/Rename(f, name) (CGProcCall.cpp) is the
+    // first caller that can reach this with a char-string-type argument
+    // (SemaStmt.cpp accepts it as string-like for that name argument), and
+    // before this the fallthrough below reached the generic EmitExpr(e):
+    // for a plain variable of array type that LOADS THE WHOLE [n x i8]
+    // ARRAY AS AN LLVM AGGREGATE VALUE (CGExprCore.cpp's IdentExpr case has
+    // no special "carried by address" treatment for this type the way it
+    // does for VarString/ShortString), an LLVM IR verifier failure ("[n x
+    // i8] passed to a ptr parameter") on every such call.  EmitLValue, not
+    // emitStrAddr: the same reason emitCharStrAsStr/emitCharStrStore below
+    // already read this exact type's address via EmitLValue directly --
+    // emitStrAddr's own "anything else" fallback IS EmitExpr(e), the very
+    // call that mis-loads a plain char-array identifier.
+    if (ExprIsCharStr(e)) {
+        auto* addr = EmitLValue(e);
+        if (!addr) codegenICE("a char-array value with no address");
+        const int64_t n = ExprCharStrLen(e);
+        auto* i8Ty = llvm::Type::getInt8Ty(Ctx);
+        auto* buf = CreateEntryAlloca(
+            llvm::ArrayType::get(i8Ty, static_cast<uint64_t>(n) + 1), "charstr.cstr");
+        B.CreateMemCpy(buf, llvm::MaybeAlign(), addr, llvm::MaybeAlign(), i64c(n));
+        auto* nulAt = B.CreateInBoundsGEP(i8Ty, buf, i64c(n), "charstr.cstr.nul");
+        B.CreateStore(llvm::ConstantInt::get(i8Ty, 0), nulAt);
+        return buf;
+    }
     // Only a string(n) value needs converting -- everything else EmitExpr
     // returns for a string-shaped argument (a plain string literal outside
     // Extended Pascal, an already-null-terminated `String`) is already a
