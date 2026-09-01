@@ -287,7 +287,7 @@ else()
 endif()
 
 # ---- Runtime sanitizer exerciser preset (-DPLANG_ENABLE_RUNTIME_SANITIZER_TESTS=ON,
-# issue #190 part B option 1) --
+# issue #190 part B options 1 and 2) --
 #
 # The sanitizers job above (PLANG_SANITIZE) instruments plang_frontend and its
 # own GoogleTest/lit consumers thoroughly, but runtime/CMakeLists.txt
@@ -312,13 +312,27 @@ endif()
 # was tried): runtime/CMakeLists.txt recompiles the exact same
 # PLANG_RUNTIME_SOURCES list into a SEPARATE static library,
 # plang_runtime_sanitized, with -fsanitize=address,undefined added -- never
-# linked into plang_runtime, plang_runtime_shared, the driver, or any
-# compiled Pascal program, so the "no sanitizer runtime in compiled output"
-# contract above is entirely undisturbed. test/unittests/RuntimeSanitized/
-# links directly against plang_runtime_sanitized and calls its public C-ABI
-# entry points with adversarial arguments -- no driver, no compiled Pascal
-# program, no lit -- sidestepping the driver entirely the way the fuzz
-# targets sidestep it for the frontend.
+# linked into plang_runtime, plang_runtime_shared, or any compiled Pascal
+# program the driver's ORDINARY (no -sanitize-runtime) link produces, so the
+# "no sanitizer runtime in compiled output" contract above is entirely
+# undisturbed for every ordinary invocation. Two separate, both opt-in,
+# consumers exist:
+#   - option 1: test/unittests/RuntimeSanitized/ links directly against
+#     plang_runtime_sanitized and calls its public C-ABI entry points with
+#     adversarial arguments -- no driver, no compiled Pascal program, no lit
+#     -- sidestepping the driver entirely the way the fuzz targets
+#     sidestep it for the frontend.
+#   - option 2: the driver's own -sanitize-runtime flag (Options.def,
+#     lib/Driver/Driver.cpp's linkSanitized), strictly opt-in and off by
+#     default, links a COMPILED PASCAL PROGRAM against plang_runtime_sanitized
+#     instead of plang_runtime, letting the existing lit test corpus run
+#     end-to-end against a sanitized runtime. This is why the Clang
+#     requirement below now also covers CMAKE_C_COMPILER, not just
+#     CMAKE_CXX_COMPILER: lib/Driver/CMakeLists.txt bakes CMAKE_C_COMPILER's
+#     path into the driver as the program linkSanitized hands the final
+#     -sanitize-runtime link to (see that function's own comment for why a
+#     real clang invocation, not a hand-assembled ld.lld command line, is
+#     needed for that link specifically).
 #
 # Gated on Clang for the identical reason PLANG_ENABLE_FUZZERS is: consistent
 # with every other -fsanitize=... preset in this file (PLANG_SANITIZE,
@@ -331,9 +345,10 @@ endif()
 # immediate, readable error instead of silently building
 # plang_runtime_sanitized with no GTest harness ever linking it.
 option(PLANG_ENABLE_RUNTIME_SANITIZER_TESTS
-    "Build an ASan/UBSan-instrumented plang_runtime variant plus a GTest \
-harness exercising its public entry points directly (Clang only, also \
-requires PLANG_ENABLE_TESTS=ON; see issue #190)"
+    "Build an ASan/UBSan-instrumented plang_runtime variant, a GTest \
+harness exercising its public entry points directly, and the driver's own \
+-sanitize-runtime flag to link a compiled Pascal program against it \
+(Clang only, also requires PLANG_ENABLE_TESTS=ON; see issue #190)"
     OFF)
 if(PLANG_ENABLE_RUNTIME_SANITIZER_TESTS)
     if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
@@ -344,6 +359,17 @@ if(PLANG_ENABLE_RUNTIME_SANITIZER_TESTS)
             "CMAKE_CXX_COMPILER_ID is '${CMAKE_CXX_COMPILER_ID}'. "
             "Reconfigure with -DCMAKE_CXX_COMPILER=clang++ (and "
             "-DCMAKE_C_COMPILER=clang).")
+    endif()
+    if(NOT CMAKE_C_COMPILER_ID MATCHES "Clang")
+        message(FATAL_ERROR
+            "PLANG_ENABLE_RUNTIME_SANITIZER_TESTS requires Clang for "
+            "CMAKE_C_COMPILER too, not just CMAKE_CXX_COMPILER: the "
+            "driver's own -sanitize-runtime flag (issue #190 part B option "
+            "2) hands its final link to CMAKE_C_COMPILER, baked in at "
+            "configure time (see lib/Driver/CMakeLists.txt), as a real "
+            "clang invocation; CMAKE_C_COMPILER_ID is "
+            "'${CMAKE_C_COMPILER_ID}'. Reconfigure with "
+            "-DCMAKE_C_COMPILER=clang (and -DCMAKE_CXX_COMPILER=clang++).")
     endif()
     if(NOT PLANG_ENABLE_TESTS)
         message(FATAL_ERROR
