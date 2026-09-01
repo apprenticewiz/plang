@@ -227,6 +227,66 @@ if(PLANG_SANITIZE)
     add_link_options(-fsanitize=${PLANG_SANITIZE} -fno-sanitize=vptr)
 endif()
 
+# ---- Fuzzer targets preset (-DPLANG_ENABLE_FUZZERS=ON, issue #183 Phase 1) --
+#
+# Off by default, same shape as PLANG_ENABLE_TESTS (see the "Tests" section
+# far below): a developer building the compiler to use it has no reason to
+# pay for this. Declared here, immediately after PLANG_SANITIZE rather than
+# down with PLANG_ENABLE_TESTS, and validated+acted on immediately too --
+# unlike PLANG_ENABLE_TESTS's own add_subdirectory(), which waits until
+# after add_subdirectory(lib)/add_subdirectory(tools) further down -- because
+# Sema.h's fuzz-only fuzzLoadPMIFromBuffer hook (see its own comment) is
+# gated on the identical `#ifdef PLANG_ENABLE_FUZZERS` preprocessor symbol
+# add_compile_definitions() sets below, and PlangSema is compiled by
+# add_subdirectory(lib), which runs long before the "Fuzzers" section below
+# does. A directory-property compile definition added after a subdirectory
+# has already been processed does not retroactively apply to it, so the
+# option/definition pair has to land before that add_subdirectory(lib) call
+# a few lines down -- only the actual fuzz/ subdirectory (the targets that
+# link against plang_frontend once it exists) waits until after lib/tools.
+#
+# Gated on Clang, unlike PLANG_ENABLE_TESTS: `-fsanitize=fuzzer` is a
+# Clang/compiler-rt feature with no GCC equivalent (GCC's own libFuzzer
+# support, where it exists at all, is not what apt.llvm.org's clang bundles
+# or what CI's `sanitizers` job above already uses), so turning this on
+# under GCC would otherwise fail at the first fuzz-target compile with a
+# confusing "unrecognized command-line option" rather than a clear,
+# immediate "this needs Clang".
+option(PLANG_ENABLE_FUZZERS
+    "Build libFuzzer targets for Scanner/Parser/PMI loading (Clang only; see fuzz/README.md)"
+    OFF)
+if(PLANG_ENABLE_FUZZERS)
+    if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+        message(FATAL_ERROR
+            "PLANG_ENABLE_FUZZERS requires Clang (-fsanitize=fuzzer is a "
+            "Clang/compiler-rt feature); CMAKE_CXX_COMPILER_ID is "
+            "'${CMAKE_CXX_COMPILER_ID}'. Reconfigure with "
+            "-DCMAKE_CXX_COMPILER=clang++ (and -DCMAKE_C_COMPILER=clang).")
+    endif()
+    message(STATUS "Fuzzers: enabled")
+    add_compile_definitions(PLANG_ENABLE_FUZZERS=1)
+    # -fsanitize=fuzzer-no-link,address applied globally (compile AND link
+    # options, exactly like the PLANG_SANITIZE block just above), not only
+    # to the three fuzz-target .cpp files under fuzz/: ASan has to
+    # instrument Scanner/Parser/Sema themselves (built as part of
+    # plang_frontend by add_subdirectory(lib) below) for a fuzz run to
+    # catch a memory bug IN the code being fuzzed, not just in the handful
+    # of lines each fuzz/*.cpp target adds on top. "fuzzer-no-link" (not
+    # plain "fuzzer") is deliberate here: it adds libFuzzer's
+    # SanitizerCoverage instrumentation to every translation unit without
+    # also pulling in libFuzzer's own main()/driver into targets that don't
+    # want it -- the plang/plang-po driver executables and every
+    # GoogleTest/lit test binary a PLANG_ENABLE_TESTS=ON build alongside
+    # this would otherwise fail to link with "multiple definition of
+    # `main'". Each fuzz/*.cpp target adds plain "-fsanitize=fuzzer" itself
+    # (fuzz/CMakeLists.txt) on top of this, which is what actually links
+    # libFuzzer's main in for those three targets alone.
+    add_compile_options(-fsanitize=fuzzer-no-link,address -fno-omit-frame-pointer -g)
+    add_link_options(-fsanitize=fuzzer-no-link,address)
+else()
+    message(STATUS "Fuzzers: disabled (-DPLANG_ENABLE_FUZZERS=ON to build them, Clang only)")
+endif()
+
 # Version.h is the one generated header, so the build directory joins the
 # include path — before the source one, though nothing there can shadow it now
 # that the hand-written copy is gone.
@@ -526,4 +586,19 @@ if(PLANG_ENABLE_TESTS)
     add_subdirectory(test)
 else()
     message(STATUS "Tests: disabled (-DPLANG_ENABLE_TESTS=ON to build them)")
+endif()
+
+# ---- Fuzzers (issue #183 Phase 1) ----
+# PLANG_ENABLE_FUZZERS itself is declared much earlier (right after the
+# PLANG_SANITIZE block above), because Sema.h's fuzz-only
+# fuzzLoadPMIFromBuffer hook is gated on the SAME `#ifdef PLANG_ENABLE_FUZZERS`
+# preprocessor macro that add_compile_definitions() there feeds every target
+# -- including PlangSema, built by add_subdirectory(lib) long before this
+# point -- so the option has to exist, and the compile definition has to be
+# added, before that add_subdirectory(lib) call, not here. This is only
+# add_subdirectory(fuzz) itself, which -- unlike the option -- DOES need to
+# come after lib/ and tools/: the fuzz targets link straight against the
+# plang_frontend target those define.
+if(PLANG_ENABLE_FUZZERS)
+    add_subdirectory(fuzz)
 endif()

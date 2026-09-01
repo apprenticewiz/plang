@@ -340,8 +340,48 @@ private:
     };
 
     // Load a .pmi interface file for module \p Key (lowercase) from \p Path.
-    // Parses the PMI content, resolves types, and populates ModuleExports_[Key].
+    // Thin file-reading wrapper: reads Path, then hands the raw content to
+    // loadPMIFromBuffer, which does the actual parsing/resolving work.  Split
+    // this way (rather than one function doing both) so the fuzz target
+    // below can drive the buffer-taking core directly with bytes libFuzzer
+    // generated, without needing a real file on disk for every input --
+    // see fuzz/pmi-fuzzer.cpp's own header comment for why a buffer-taking
+    // core was chosen over a friend declaration exposing loadPMI itself.
     PMILoadResult loadPMI(const std::string& Key, const std::string& Path);
+
+    // The actual .pmi-loading logic loadPMI above reads Path's bytes for:
+    // wraps Content as a module-heading-plus-empty-program (see this
+    // function's own definition for why), parses it with an in-memory
+    // Scanner/Parser, and on success resolves types and populates
+    // ModuleExports_[Key] exactly as loadPMI always has.  \p PathForDiag is
+    // used only for the wrapped source's diagnostic name (loadPMI passes its
+    // own Path; the fuzz target passes a fixed placeholder since it has no
+    // real file).
+    PMILoadResult loadPMIFromBuffer(const std::string& Key,
+                                    const std::string& PathForDiag,
+                                    const std::string& Content);
+
+#ifdef PLANG_ENABLE_FUZZERS
+public:
+    /// Fuzz-target-only entry point (fuzz/pmi-fuzzer.cpp) for the
+    /// buffer-taking core above: lets PMI fuzzing feed raw bytes straight
+    /// in-process instead of needing a real .pmi file on disk for every
+    /// mutation libFuzzer tries.  Returns only pass/fail -- the private
+    /// PMILoadResult type (with its Detail string) stays private, since a
+    /// fuzz target cares only about "did this crash / trip a sanitizer",
+    /// never the diagnostic text a real caller would show a user.
+    ///
+    /// Compiled only when PLANG_ENABLE_FUZZERS is on (the CMake option this
+    /// whole fuzz/ tree is gated behind), so an ordinary build's Sema has
+    /// zero additional public surface -- this exists purely to avoid a
+    /// `friend` declaration naming a free function in a directory most of
+    /// this header's readers will never open.
+    bool fuzzLoadPMIFromBuffer(const std::string& Key, const std::string& Content) {
+        return loadPMIFromBuffer(Key, "<fuzz-pmi>", Content).St ==
+               PMILoadResult::Status::Ok;
+    }
+private:
+#endif
 
     /// Issue #180/#304: a published interface file (\p InterfacePath, a
     /// resolved ".pmi" or ".tui") can go stale the moment its module/unit's
