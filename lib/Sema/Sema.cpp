@@ -802,12 +802,12 @@ void Sema::harvestModuleExports(const ModuleNode& Mod) {
             const Symbol* Last  = Symtab.lookup(Item.RangeEnd);
             if (!First || !Last || First->Kind != SymbolKind::EnumValue
                                 || Last->Kind  != SymbolKind::EnumValue
-                                || First->Ty.get() != Last->Ty.get()) {
+                                || First->declaredType().get() != Last->declaredType().get()) {
                 error(Item.Loc, diag::err_export_range_not_constants,
                       {Item.Name, Item.RangeEnd});
                 continue;
             }
-            Ranges.push_back({First->Ty.get(), First->OrdinalValue,
+            Ranges.push_back({First->declaredType().get(), First->OrdinalValue,
                               Last->OrdinalValue, Item.Protected});
         }
     }
@@ -1605,12 +1605,12 @@ void Sema::checkBindingCall(const std::string& LowerName, SourceLocation Loc,
         error(Loc, diag::err_bind_needs_variable, {LowerName});
     } else if (!Sym->IsBindable) {
         error(Loc, diag::err_bind_not_bindable, {Id->Name, LowerName});
-    } else if (!Sym->Ty || Sym->Ty->Kind != TypeKind::File) {
+    } else if (!Sym->hasDeclaredType() || Sym->declaredType()->Kind != TypeKind::File) {
         // EP §6.4.1 allows any type to be bindable and leaves what binding one
         // means to the implementation.  plang binds a file to a path and has
         // nothing to offer for anything else, so it says so.
         error(Loc, diag::err_bind_nonfile_unsupported,
-              {Id->Name, Sym->Ty ? Sym->Ty->Name : std::string("?")});
+              {Id->Name, Sym->hasDeclaredType() ? Sym->declaredType()->Name : std::string("?")});
     }
 
     for (size_t I = 1; I < Args.size(); ++I) {
@@ -1999,11 +1999,12 @@ void Sema::checkBlock(const BlockNode& Block,
                     && T->PointeeType && T->PointeeType->isUnresolved()) {
                 Symbol* Sym = Symtab.lookup(T->PointeeType->Name);
                 if (Sym && Sym->Kind == SymbolKind::TypeAlias
-                        && Sym->Ty && !Sym->Ty->isError() && !Sym->Ty->isUnresolved()) {
+                        && Sym->hasDeclaredType() && !Sym->declaredType()->isError()
+                        && !Sym->declaredType()->isUnresolved()) {
                     // Re-file as well as patch: the pointer was interned under
                     // the placeholder, and a later `^Node` looks it up under
                     // the real type.
-                    Ctx_.rebindPointer(T, Sym->Ty);
+                    Ctx_.rebindPointer(T, Sym->declaredType());
                 }
             }
             if (T->Kind == TypeKind::Record)
@@ -2018,6 +2019,10 @@ void Sema::checkBlock(const BlockNode& Block,
     for (const auto& Td : Block.Types) {
         Symbol* Sym = Symtab.lookupCurrent(Td.Name);
         if (Sym && Sym->Kind == SymbolKind::TypeAlias)
+            // fixForwardPtrs takes shared_ptr<Type>& and may reassign it in
+            // place (rebindPointer) -- declaredType() returns a const&, so
+            // this one call site needs the mutable field itself, not the
+            // accessor.
             fixForwardPtrs(Sym->Ty);
         // Schema symbols: skip (lazily resolved)
     }
@@ -2366,9 +2371,9 @@ void Sema::checkMethodBody(const ProcDecl& Proc) {
     // scope, oddly, does not have one, which cannot happen for a
     // known-valid Heading but costs nothing to allow.
     if (const Symbol* TypeSym = Symtab.lookup(Proc.OwnerType);
-            TypeSym && TypeSym->Kind == SymbolKind::TypeAlias && TypeSym->Ty
-            && !TypeSym->Ty->isError())
-        Proc.ResolvedOwnerType = TypeSym->Ty;
+            TypeSym && TypeSym->Kind == SymbolKind::TypeAlias && TypeSym->hasDeclaredType()
+            && !TypeSym->declaredType()->isError())
+        Proc.ResolvedOwnerType = TypeSym->declaredType();
 }
 
 int Sema::pushMethodSelfScope(const ProcDecl& Proc) {
@@ -2632,9 +2637,9 @@ void Sema::checkProcBody(const ProcDecl& Proc) {
         // Turbo untyped parameter (`procedure P(var x)`): Pg.Type is
         // deliberately null (ParamGroup::Type's own comment) and
         // resolveParamType has nothing to resolve -- see checkIdent's own
-        // comment for what a bare use of the resulting Sym->Ty==nullptr
-        // gets, and checkTypeCast's for the one thing it may legally be used
-        // for.
+        // comment for what a bare use of the resulting Sym->declaredType()
+        // == nullptr gets, and checkTypeCast's for the one thing it may
+        // legally be used for.
         auto T = Pg.Type ? resolveParamType(*Pg.Type, Pg.IsVar) : nullptr;
 
         // Turbo const parameter, structured type: CodeGen passes it by
