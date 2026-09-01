@@ -9,6 +9,7 @@
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/ProgramStack.h"
 
+#include <algorithm>
 #include <cctype>
 #include <charconv>
 #include <cstdint>
@@ -91,25 +92,35 @@ static bool isExpop(TokenKind K) {
 // a generated/fuzzed one) drives the real call stack instead of a diagnostic.
 static constexpr unsigned MaxExprDepth = 500;
 
-// Safety margin subtracted from the platform's real stack budget before
-// parsePower's own recursion (below) treats itself as "nearly exhausted".
-// Covers: (a) whatever of the thread's stack was already spent between
-// process start and Parser::StackBaseline being captured (a short, bounded,
-// non-recursive chain of frames through main()/the driver/Frontend down to
-// Parser's own constructor -- typically well under 100KB, never close to
-// this margin), and (b) headroom for everything that still has to run on
-// this same stack once parsePower stops recursing: unwinding back out
-// through parseTerm/parseSimpleExpr/parseExpression, diagnostic emission,
-// and (issue #551's own concern) AST teardown of whatever chain was already
-// built. 1 MiB is generous for all of that against an 8MiB default stack
-// while still leaving the overwhelming majority of the budget available to
-// recurse into -- see powerStackNearlyExhausted's own comment for why the
-// exact number here is far less load-bearing than it would be for a
-// term-count ceiling: get it somewhat wrong in either direction and the
-// worst case is rejecting a chain a few thousand terms earlier or later
-// than strictly necessary, not silently narrowing accepted syntax the way
-// reusing MaxExprDepth above for this did (PR #553, reverted; see issue
-// #300's reopening comment).
+// Ceiling on the safety margin subtracted from the platform's real stack
+// budget before parsePower's own recursion (below) treats itself as "nearly
+// exhausted". Covers: (a) whatever of the thread's stack was already spent
+// between process start and Parser::StackBaseline being captured (a short,
+// bounded, non-recursive chain of frames through main()/the driver/Frontend
+// down to Parser's own constructor -- typically well under 100KB, never
+// close to this margin on a normal-sized stack), and (b) headroom for
+// everything that still has to run on this same stack once parsePower stops
+// recursing: unwinding back out through parseTerm/parseSimpleExpr/
+// parseExpression, diagnostic emission, and (issue #551's own concern) AST
+// teardown of whatever chain was already built. 1 MiB is generous for all of
+// that against an 8MiB default stack while still leaving the overwhelming
+// majority of the budget available to recurse into -- see
+// powerStackNearlyExhausted's own comment for why the exact number here is
+// far less load-bearing than it would be for a term-count ceiling: get it
+// somewhat wrong in either direction and the worst case is rejecting a chain
+// a few thousand terms earlier or later than strictly necessary, not
+// silently narrowing accepted syntax the way reusing MaxExprDepth above for
+// this did (PR #553, reverted; see issue #300's reopening comment).
+//
+// This is a *ceiling*, not the margin actually used: powerStackNearlyExhausted
+// scales it down for unusually small budgets (see that function's own
+// comment) so that a small-but-real platform stack limit -- a constrained
+// container, a hardened deployment, or (this PR's own 3rd commit) a
+// parser-fuzzer worker's stack, any of which can be at or below this many
+// bytes -- cannot make the check treat itself as "already exhausted"
+// independent of how much of the budget is actually in use (found in PR
+// #555's own review, after the commit below first wired this check into a
+// context where such small budgets are realistic).
 static constexpr size_t PowerStackSafetyMargin = 1u << 20; // 1 MiB
 
 // True once continuing to recurse into parsePower (below) would risk
@@ -159,9 +170,24 @@ static bool powerStackNearlyExhausted(std::uintptr_t Baseline) {
     // are not directly comparable this way).
     const std::uintptr_t Used = (Baseline > Current) ? (Baseline - Current) : 0;
     const size_t Budget = llvm::getDefaultStackSize();
-    if (Budget <= PowerStackSafetyMargin)
-        return true; // an implausibly small or unqueryable limit: bail early
-    return Used >= (Budget - PowerStackSafetyMargin);
+    // Scale the margin down for a small budget rather than treating
+    // PowerStackSafetyMargin as an absolute floor: a budget at or below that
+    // fixed 1 MiB (a small-but-real platform limit -- see
+    // PowerStackSafetyMargin's own comment for concrete examples) must not
+    // make every call here look "exhausted" independent of how much of the
+    // budget is actually in use, which is what comparing against an
+    // unscaled, possibly-larger-than-the-whole-budget margin did (a
+    // trivial, zero-nesting `x ** y` was rejected outright under such a
+    // budget -- found in PR #555's own review). Reserving a quarter of the
+    // real budget, capped at the original 1 MiB, keeps a normal-sized
+    // (multi-MiB) stack's behavior byte-for-byte identical to before while
+    // still reserving genuine headroom -- comfortably more than one
+    // parsePower frame ever costs -- to safely unwind and tear down the AST
+    // once a small budget's own, correspondingly smaller ceiling is reached,
+    // so a genuinely deep '**' chain is still caught before it actually
+    // overflows the stack rather than the check being disabled outright.
+    const size_t Margin = std::min<size_t>(PowerStackSafetyMargin, Budget / 4);
+    return Used >= (Budget - Margin);
 }
 
 // ---------------------------------------------------------------------------
@@ -232,6 +258,21 @@ std::unique_ptr<ExprNode> Parser::parsePower() {
         // See powerStackNearlyExhausted's own comment above for why this
         // recursive edge -- unlike every other one in this file -- is
         // bounded by live stack headroom rather than a term-count ceiling.
+        //
+        // Unlike ExprDepthScope below (parseFactor), whose ceiling can only
+        // ever fire once MaxExprDepth other DepthGuards are already alive on
+        // the stack -- guaranteeing a Guard is already there to eventually
+        // reset the "already reported" flag as those unwind -- this check is
+        // driven by absolute stack headroom, so it can fire on the very
+        // *first* call (PowerDepth == 0), before any Guard has ever been
+        // constructed. So the Guard is constructed unconditionally here,
+        // before the check, rather than only in the not-exhausted branch
+        // below: otherwise a first-call exhaustion would set
+        // PowerDepthLimitHit with no Guard ever created to reset it,
+        // latching the flag true for the rest of this Parser's lifetime and
+        // silently swallowing the diagnostic for a later, unrelated '**'
+        // chain elsewhere in the same file (found in PR #555's own review).
+        PowerDepthScope Guard(PowerDepth, PowerDepthLimitHit);
         if (powerStackNearlyExhausted(StackBaseline)) {
             if (!PowerDepthLimitHit) {
                 PowerDepthLimitHit = true;
@@ -271,7 +312,6 @@ std::unique_ptr<ExprNode> Parser::parsePower() {
                 parseFactor();
             }
         } else {
-            PowerDepthScope Guard(PowerDepth, PowerDepthLimitHit);
             Node->Right = parsePower();   // right-associative
         }
         return Node;

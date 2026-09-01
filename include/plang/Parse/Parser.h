@@ -101,6 +101,13 @@ private:
     // measured from; PowerDepth/PowerDepthLimitHit/PowerDepthScope exist only
     // to reset the "already reported" flag between one deep '**' chain and
     // the next in the same file, the same way ExprDepthLimitHit resets above.
+    // Unlike ExprDepthScope, whose ceiling can only fire once MaxExprDepth
+    // other DepthGuards are already alive on the stack, the headroom check
+    // this Guard wraps can fire on the very first activation (PowerDepth ==
+    // 0) -- so parsePower constructs its PowerDepthScope unconditionally,
+    // before running the check, rather than only when it decides to recurse
+    // further; otherwise a first-call exhaustion would latch
+    // PowerDepthLimitHit with no Guard ever created to reset it.
     std::uintptr_t            StackBaseline;
     unsigned                  PowerDepth{};
     bool                      PowerDepthLimitHit{};
