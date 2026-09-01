@@ -1,19 +1,29 @@
-// CGCallMarshal.h — the per-argument marshalling loop shared by every
-// DIRECT call site keyed by a mangled callee name (issue #299, Phase 1):
-// CGProcCall::emitUserProcCall, CGFuncCall::emitUserFuncCall, and
-// CGFuncCall::emitMethodCallExpr used to each carry their own byte-for-byte
-// copy of "how do I marshal one Pascal-formal-shaped actual argument" --
-// the same ProcParamArg/pushSchemaArgs/pushConformantArgs/plain-value
-// dispatch chain, keyed by (mangledName, astArgIdx) lookups into the same
-// paramMeta_-backed accessors.  Extracted here so there is exactly ONE
-// implementation of that chain, not three.
+// CGCallMarshal.h — the per-argument marshalling loop shared by every call
+// site keyed by (mangledName, astArgIdx)-shaped lookups (issue #299):
+// CGProcCall::emitUserProcCall, CGFuncCall::emitUserFuncCall,
+// CGFuncCall::emitMethodCallExpr (Phase 1), and
+// ClosureAndCallABI::emitProcParamCall (Phase 2) used to each carry their
+// own byte-for-byte copy of "how do I marshal one Pascal-formal-shaped
+// actual argument" -- the same ProcParamArg/pushSchemaArgs/
+// pushConformantArgs/plain-value dispatch chain.  Extracted here so there
+// is exactly ONE implementation of that chain, not four.
 //
-// Deliberately NOT used by ClosureAndCallABI::emitProcParamCall (Phase 2,
-// out of scope here): that call site is structurally different -- it
-// dispatches per ParamGroup from a bare procedural type, with no mangled
-// callee name to key ConformantDimsOf/ParamSetBaseOf/ProcParamArg/
-// ParamIsByRef by -- so folding it in is a separate, larger reshaping this
-// issue's own comment defers on purpose.
+// The five lookup callbacks (ProcParamArg/ParamIsByRef/ConformantDimsOf/
+// ParamSetBaseOf/SchemaArgDiscsOf) are the whole reason this generalizes to
+// emitProcParamCall too: the three direct-call sites bind them to a real
+// paramMeta_ entry keyed by a mangled callee name, but emitProcParamCall has
+// no such name -- it builds a transient, per-call vector of the same facts
+// from its own ProcedureTypeNode (already in hand, its own declared
+// signature) and binds these same callbacks to read THAT vector by
+// astArgIdx instead, ignoring the mangledName parameter entirely.  Nothing
+// else in marshalArgs needs to know which kind of lookup is behind them.
+//
+// calleeTy is an llvm::FunctionType*, not an llvm::Function*: the one piece
+// of callee shape marshalArgs itself needs (a plain value argument's
+// destination LLVM parameter type, via getParamType) is available as a bare
+// signature, which is what emitProcParamCall's indirect call through a
+// {entry point, frame} pair has on hand -- there is no llvm::Function* to
+// give it, since the actual target is not known until runtime.
 #pragma once
 
 #include <cstdint>
@@ -26,7 +36,7 @@
 
 #include "llvm/IR/IRBuilder.h"
 
-namespace llvm { class Function; class LLVMContext; class Value; class AllocaInst; }
+namespace llvm { class Function; class FunctionType; class LLVMContext; class Value; class AllocaInst; }
 namespace plang { struct ExprNode; struct ProcedureTypeNode; }
 
 class ClosureAndCallABI;
@@ -43,6 +53,7 @@ public:
                   std::function<bool(const std::string&, size_t)> ParamIsByRef,
                   std::function<size_t(const std::string&, size_t)> ConformantDimsOf,
                   std::function<std::optional<int64_t>(const std::string&, size_t)> ParamSetBaseOf,
+                  std::function<unsigned(const std::string&, size_t)> SchemaArgDiscsOf,
                   std::function<bool(const plang::ExprNode&)> ExprIsVarStr,
                   std::function<bool(const plang::ExprNode&)> ExprIsShortStr)
         : B(B), ClosureAbi(ClosureAbi), Schema(Schema), Sets(Sets), StrCall(StrCall),
@@ -50,27 +61,27 @@ public:
           ProcParamArg(std::move(ProcParamArg)), ParamIsByRef(std::move(ParamIsByRef)),
           ConformantDimsOf(std::move(ConformantDimsOf)),
           ParamSetBaseOf(std::move(ParamSetBaseOf)),
+          SchemaArgDiscsOf(std::move(SchemaArgDiscsOf)),
           ExprIsVarStr(std::move(ExprIsVarStr)), ExprIsShortStr(std::move(ExprIsShortStr)) {}
 
     /// Marshals \p Args (the call's own written argument list, in AST order)
-    /// into \p args (the LLVM actual-argument list being built for a call to
-    /// \p callee, named \p mangledName for the ProcParamArg/schemaArgDiscs/
-    /// ConformantDimsOf/ParamSetBaseOf/ParamIsByRef lookups below) --
-    /// appending one or more llvm::Value*s per Pascal-level actual, exactly
-    /// mirroring whatever shape \p mangledName's astArgIdx-th formal has:
-    /// a procedural parameter (entry point plus frame), a schema parameter
-    /// (body pointer plus discriminants), a conformant-array parameter (data
-    /// pointer plus two bounds words per dimension), or an ordinary
-    /// value/var parameter (a single value, set-rebased through
-    /// SetOps::alignSetArg where relevant).
+    /// into \p args (the LLVM actual-argument list being built for a call
+    /// through \p calleeTy, named \p mangledName for the ProcParamArg/
+    /// SchemaArgDiscsOf/ConformantDimsOf/ParamSetBaseOf/ParamIsByRef lookups
+    /// below) -- appending one or more llvm::Value*s per Pascal-level
+    /// actual, exactly mirroring whatever shape \p mangledName's
+    /// astArgIdx-th formal has: a procedural parameter (entry point plus
+    /// frame), a schema parameter (body pointer plus discriminants), a
+    /// conformant-array parameter (data pointer plus two bounds words per
+    /// dimension), or an ordinary value/var parameter (a single value,
+    /// set-rebased through SetOps::alignSetArg where relevant).
     ///
     /// \p args may already hold a leading static-link frame or Self pointer
     /// -- the loop starts counting LLVM parameter positions (for the
-    /// getFunctionType()->getParamType(pi) probe plain values use to pick a
+    /// calleeTy->getParamType(pi) probe plain values use to pick a
     /// destination type) from args.size() as it stands on entry, exactly as
-    /// each of the three original call sites did before this was factored
-    /// out.
-    void marshalArgs(const std::string& mangledName, llvm::Function* callee,
+    /// each of the original call sites did before this was factored out.
+    void marshalArgs(const std::string& mangledName, llvm::FunctionType* calleeTy,
                       std::span<const std::unique_ptr<plang::ExprNode>> Args,
                       std::vector<llvm::Value*>& args) const;
 
@@ -98,6 +109,7 @@ private:
     std::function<bool(const std::string&, size_t)> ParamIsByRef;
     std::function<size_t(const std::string&, size_t)> ConformantDimsOf;
     std::function<std::optional<int64_t>(const std::string&, size_t)> ParamSetBaseOf;
+    std::function<unsigned(const std::string&, size_t)> SchemaArgDiscsOf;
     std::function<bool(const plang::ExprNode&)> ExprIsVarStr;
     std::function<bool(const plang::ExprNode&)> ExprIsShortStr;
 };

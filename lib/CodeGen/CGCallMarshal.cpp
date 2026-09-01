@@ -10,7 +10,7 @@
 
 using namespace plang;
 
-void CGCallMarshal::marshalArgs(const std::string& mangledName, llvm::Function* callee,
+void CGCallMarshal::marshalArgs(const std::string& mangledName, llvm::FunctionType* calleeTy,
                                  std::span<const std::unique_ptr<plang::ExprNode>> Args,
                                  std::vector<llvm::Value*>& args) const {
     // EP §6.7.3.7: look up conformant param dimensions for this callee.
@@ -30,7 +30,7 @@ void CGCallMarshal::marshalArgs(const std::string& mangledName, llvm::Function* 
 
         // Check if this AST arg position is conformant.
         // EP §6.4.7: schema param — body pointer plus its discriminants.
-        if (unsigned nd = Schema.schemaArgDiscs(mangledName, astArgIdx); nd > 0) {
+        if (unsigned nd = SchemaArgDiscsOf(mangledName, astArgIdx); nd > 0) {
             Schema.pushSchemaArgs(args, *arg, nd);
             pi = args.size();
             continue;
@@ -45,8 +45,8 @@ void CGCallMarshal::marshalArgs(const std::string& mangledName, llvm::Function* 
             std::optional<int64_t> destSetBase = ParamSetBaseOf(mangledName, astArgIdx);
             args.push_back(Sets.alignSetArg(
                 StrCall.emitCallArg(*arg,
-                    pi < callee->arg_size()
-                        ? callee->getFunctionType()->getParamType(pi) : nullptr,
+                    pi < calleeTy->getNumParams()
+                        ? calleeTy->getParamType(pi) : nullptr,
                     ParamIsByRef(mangledName, astArgIdx)),
                 *arg, destSetBase));
             ++pi;

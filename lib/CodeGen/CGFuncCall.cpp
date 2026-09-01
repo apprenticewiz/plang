@@ -965,7 +965,7 @@ llvm::Value* CGFuncCall::emitMethodCallExpr(const MethodCallExpr& e) {
     // CGCallMarshal.h.  conformant/schema/proc-param/plain-value argument
     // shapes apply identically to a method's own parameters -- just
     // starting pi/args after Self instead of after a static-link frame.
-    Marshal.marshalArgs(mangledName, callee, e.Args, args);
+    Marshal.marshalArgs(mangledName, callee->getFunctionType(), e.Args, args);
     // Turbo Tier 5, Cluster A item 5: a virtual method is called INDIRECTLY,
     // through the receiver's own `_vptr` and Owner's own VmtSlot index --
     // never the direct call to Owner's mangled symbol every OTHER call still
@@ -1195,7 +1195,7 @@ llvm::Value* CGFuncCall::emitUserFuncCall(const CallExpr& e) {
     // Issue #299 Phase 1: the per-argument marshalling loop shared with
     // CGProcCall::emitUserProcCall/CGFuncCall::emitMethodCallExpr -- see
     // CGCallMarshal.h.
-    Marshal.marshalArgs(mangledName, callee, e.Args, args);
+    Marshal.marshalArgs(mangledName, callee->getFunctionType(), e.Args, args);
     auto* ret = B.CreateCall(callee, args, "call");
     // A string/ShortString result comes back as the whole struct-shaped
     // value, but every consumer of a string expression expects its address.
