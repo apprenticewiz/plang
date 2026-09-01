@@ -47,15 +47,22 @@ public:
     [[nodiscard]] std::string printHeadline(const Diagnostic& D) const {
         const std::string Sev = severityLabel(D.Severity, UseColor);
         const PresumedLoc P   = SM->getPresumedLoc(D.Loc);
+        // D.Message can itself embed attacker-controlled text (an
+        // identifier lexed from source, an argv-supplied filename quoted
+        // into "no such file or directory", ...), so it goes through
+        // escapeControlChars the same as a filename does -- otherwise a
+        // raw control byte reaches stderr from inside the message body
+        // instead of just the "file:line:col:" prefix in front of it.
+        const std::string Msg = escapeControlChars(D.Message);
         if (!P.isValid()) {
-            if (Prefix.empty()) return std::format("{}: {}", Sev, D.Message);
-            return std::format("{}: {}: {}", Prefix, Sev, D.Message);
+            if (Prefix.empty()) return std::format("{}: {}", Sev, Msg);
+            return std::format("{}: {}: {}", Prefix, Sev, Msg);
         }
         // P.Filename is whatever the command line named -- not text plang
         // wrote -- so it goes through escapeControlChars before it reaches
         // stderr: see that function's comment for why.
         return std::format("{}:{}:{}: {}: {}", escapeControlChars(P.Filename),
-                           P.Line, P.Column, Sev, D.Message);
+                           P.Line, P.Column, Sev, Msg);
     }
 
     /// The offending source line with a caret under it, or empty if there is
