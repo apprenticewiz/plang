@@ -65,6 +65,35 @@ to the same-terminator rule above.
 | `%run` | `PLANG_TEST_RUN_WRAPPER` if set (e.g. the guardheap allocator), empty otherwise — **always wrap a just-built program's execution as `%run %t`, never a bare `%t`**, or this hook silently stops applying to that one file with no failure signal |
 | `%FileCheck`, `not`, `split-file`, `%s`, `%t`, `%T` | lit/LLVM defaults, via `lit.llvm` |
 
+## Test timeouts
+
+Every lit invocation in this project (`test/CMakeLists.txt`'s `LIT_ARGS`,
+and the guardheap step in CI) passes `--timeout 300` (issue #189): any
+single test that runs past 300s is killed and reported as a failure
+rather than left to hang a CI job indefinitely.
+
+This is a genuinely global, process-wide cap — **there is no working
+per-test or per-directory override** in the lit version this project
+targets. `lit`'s own `main.py` reads a single `lit_config.
+maxIndividualTestTime` value at startup, and explicitly makes the
+`--timeout` command-line flag win over anything a `lit.cfg.py`/
+`lit.local.cfg` sets (confirmed by reading `lit/main.py`'s own "Command
+line overrides configuration for maxIndividualTestTime" logic, and by
+reproducing it directly). A `lit.local.cfg` setting `config.
+maxIndividualTestTime` in some subdirectory looks plausible from lit's
+docs but has no effect once a `--timeout` flag is present on the command
+line, which every invocation in this project always has. Don't add one
+expecting it to work.
+
+300s was sized off the slowest test observed in this suite under the
+*heaviest* real instrumentation: the deliberate O(n) layout stress test
+(`test/CodeGen/CodegenRecord/laying-out-tens-of-thousands-of-fields-is-
+not-quadratic.pas`) legitimately takes longer than the original 120s
+budget under the `asan + ubsan` CI job's sanitizer overhead. If a future
+test needs still more headroom, the only real lever is raising this one
+global number (in both places it's set) — there is no cheaper, more
+targeted mechanism available today.
+
 `REQUIRES: fpc-binary` (not bare `fpc` — `include/plang/Basic/Dialects.def`
 already reserves that name for a future, unrelated `-std=fpc` plang
 dialect) gates a test on a real, working `fpc` install. The feature

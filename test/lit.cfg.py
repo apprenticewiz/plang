@@ -33,6 +33,25 @@ config.test_format = lit.formats.ShTest(execute_external=False)
 config.test_source_root = os.path.dirname(__file__)
 config.test_exec_root = os.path.join(config.plang_binary_dir, "test")
 
+# Per-test wall-clock cap (issue #189) is set via `--timeout 300` on lit's
+# own command line (test/CMakeLists.txt's LIT_ARGS), not as a config-file
+# attribute assignment here: the attribute this file would set --
+# lit_config.maxIndividualTestTime vs. config.maxIndividualTestTime -- is not
+# stable across lit versions (confirmed: a newer pip-installed lit rejects
+# `lit_config.maxIndividualTestTime = ...` as read-only and wants the
+# `config.` form instead, while the `--timeout` CLI flag goes through
+# LitConfig's own real property setter on every version tried and isn't
+# subject to that split). The comment on execute_external=False above
+# already relies on lit being able to kill a hung child cleanly; the CLI
+# timeout is what arms that kill for every test rather than only the one
+# deliberately-hangable stdin-blocked test that brings its own 5s watchdog.
+# 300s is sized off the slowest test observed under the heaviest real
+# instrumentation this suite runs under (the O(n) layout stress test under
+# the asan+ubsan CI job's sanitizer overhead), not off the plain-build
+# slowest test (6.62s). This is a single global cap -- there is no working
+# per-directory override in this lit version; see test/README.md's "Test
+# timeouts" section for why a lit.local.cfg override does NOT work here.
+
 lit.llvm.initialize(lit_config, config)
 llvm_config = lit.llvm.llvm_config  # a global set by initialize(), not a class to construct
 llvm_config.use_default_substitutions()
