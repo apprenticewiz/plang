@@ -715,6 +715,80 @@ jobs:
         env:
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
 
+  runtime-sanitizer-tests:
+    name: runtime sanitizer harness (issue #190)
+    runs-on: ubuntu-latest
+    # issue #189's own timeout-minutes policy, same shape as fuzz-smoke right
+    # below: this job builds only runtime_sanitized_test and its own
+    # dependency (plang_runtime_sanitized) -- not the driver, not
+    # plang_frontend, not the ~2,900-file lit suite -- so almost this entire
+    # budget is the LLVM install, exactly like `sanitizers` and `fuzz-smoke`
+    # right above/below.
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install LLVM and lld
+        run: |
+          sudo apt-get update
+          wget -qO llvm.sh https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh "$LLVM_VERSION"
+          sudo apt-get install -y \
+            "llvm-$LLVM_VERSION" \
+            "llvm-$LLVM_VERSION-dev" \
+            "lld-$LLVM_VERSION"
+
+      - name: Put llc and ld.lld on PATH under their unversioned names
+        run: |
+          sudo ln -sf "/usr/bin/llc-$LLVM_VERSION"    /usr/local/bin/llc
+          sudo ln -sf "/usr/bin/ld.lld-$LLVM_VERSION" /usr/local/bin/ld.lld
+
+      - name: Install build dependencies
+        run: sudo apt-get install -y ninja-build libgtest-dev
+
+      - name: Configure
+        # PLANG_ENABLE_RUNTIME_SANITIZER_TESTS's own configure-time check
+        # already fails outright under a non-Clang compiler and/or without
+        # PLANG_ENABLE_TESTS=ON (see the top-level CMakeLists.txt's own
+        # comment for why the harness this option builds needs both) --
+        # CMAKE_C_COMPILER/CMAKE_CXX_COMPILER pinned to Clang explicitly
+        # anyway, belt and suspenders against ever landing on this runner's
+        # default gcc, the identical precaution fuzz-smoke's own Configure
+        # step takes for PLANG_ENABLE_FUZZERS.
+        run: |
+          cmake -S . -B build-runtime-sanitizer -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DPLANG_ENABLE_TESTS=ON \
+            -DPLANG_ENABLE_RUNTIME_SANITIZER_TESTS=ON \
+            -DCMAKE_C_COMPILER=clang-$LLVM_VERSION \
+            -DCMAKE_CXX_COMPILER=clang++-$LLVM_VERSION \
+            -DLLVM_DIR="/usr/lib/llvm-$LLVM_VERSION/lib/cmake/llvm"
+
+      - name: Build
+        # Only runtime_sanitized_test and plang_runtime_sanitized -- PLANG_ENABLE_TESTS=ON
+        # also registers every other GTest/lit target in the same build tree
+        # (test/unittests/RuntimeSanitized/'s own CMakeLists.txt guard needs
+        # it turned on -- see that file's comment), but nothing else here is
+        # ever built, the same targeted-build shape fuzz-smoke uses right
+        # below for its own three fuzz targets.
+        run: cmake --build build-runtime-sanitizer -j"$(nproc)" --target runtime_sanitized_test
+
+      - name: Run the runtime sanitizer harness
+        # -R '^RuntimeSanitized': every TEST() in test/unittests/RuntimeSanitized/
+        # names its suite with that prefix specifically so this filter can
+        # select just them -- the OTHER GTest/lit targets PLANG_ENABLE_TESTS=ON
+        # also registered with ctest above were never built (see the Build
+        # step's own comment), so running ctest here with no filter at all
+        # would fail every one of them looking for a binary that does not
+        # exist.
+        run: |
+          ctest --test-dir build-runtime-sanitizer -R '^RuntimeSanitized' \
+            -j"$(nproc)" --output-on-failure
+        env:
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+
   fuzz-smoke:
     name: fuzz smoke (scanner/parser/pmi)
     runs-on: ubuntu-latest
