@@ -864,6 +864,20 @@ DIAG(err_unit_name_mismatch, Error,
 // the stack.
 DIAG(err_unit_circular_uses, Error,
      "circular 'uses': unit '%0' is used while it is still being loaded")
+// Issue #180/#304: neither a .pmi nor a .tui carries any version/fingerprint
+// metadata that would let a reader detect a mismatch against the source it
+// was published from, so this substitutes the cheap mtime-based check a
+// make/ninja-style build already does -- a companion '<name>.pas' sitting in
+// the SAME directory as the interface file that is NEWER than it (or than
+// its paired '<name>.o', when one exists) means the interface/object was
+// published before the source's last edit and is likely stale.  Deliberately
+// a warning, not an error: a false positive (source touched but unchanged in
+// any way that matters, a checked-out tree with only the source's mtime
+// bumped by e.g. `git checkout`) must not turn into a build failure for
+// every already-published interface file on upgrade.
+DIAG(warn_stale_interface_file, Warning,
+     "'%0' may be stale: its source '%1' was modified more recently; "
+     "recompile '%1' to refresh it")
 // Turbo's Integer/Byte/ShortInt/Word/LongInt are genuinely narrower than the
 // one 64-bit Integer ISO 7185/EP always have (Type::Width, see its comment),
 // so an arithmetic constant-expression that is a perfectly ordinary fold

@@ -343,6 +343,22 @@ private:
     // Parses the PMI content, resolves types, and populates ModuleExports_[Key].
     PMILoadResult loadPMI(const std::string& Key, const std::string& Path);
 
+    /// Issue #180/#304: a published interface file (\p InterfacePath, a
+    /// resolved ".pmi" or ".tui") can go stale the moment its module/unit's
+    /// own ".pas" is edited without recompiling -- neither format carries any
+    /// version/fingerprint metadata to catch that on its own (see #180's own
+    /// re-triage comment), so this is the cheap, purely mtime-based substitute
+    /// that closes the actual reported bug: silently linking a stale object
+    /// with no diagnostic at all.  A no-op (no diagnostic, not even a lookup)
+    /// unless a ".pas" with the same base name as \p InterfacePath sits in the
+    /// SAME directory -- the common case of a vendored/external interface
+    /// with no local source alongside it must see no behavior change at all.
+    /// When such a companion source exists and is newer than \p InterfacePath
+    /// itself, or newer than that interface's paired ".o" (same directory,
+    /// same base name, when one exists), warns once, naming both files.
+    void warnIfInterfaceStale(SourceLocation Loc, const std::string& InterfacePath,
+                               const std::string& PasPath);
+
     /// The syntax trees of the interfaces loaded from .pmi files.  Types
     /// resolved from them keep pointers into the declarations they came from,
     /// which codegen follows, so they live as long as this Sema does.
