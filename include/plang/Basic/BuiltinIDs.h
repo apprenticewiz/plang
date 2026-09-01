@@ -85,7 +85,7 @@ struct BuiltinArity { int Min, Max; };
 /// (or lack of one) it already had in checkCallExpr/checkCallStmt.
 enum class BuiltinArgKind {
     Any, Numeric, NumericNonComplex, Complex, Ordinal,
-    StringLike, EPStringLike, TurboStringLike
+    StringLike, EPStringLike, TurboStringLike, File
 };
 
 [[nodiscard]] constexpr BuiltinArgKind builtinArgKind(BuiltinID ID) {
@@ -97,6 +97,7 @@ enum class BuiltinArgKind {
 #define AK_StringLike         BuiltinArgKind::StringLike
 #define AK_EPStringLike       BuiltinArgKind::EPStringLike
 #define AK_TurboStringLike    BuiltinArgKind::TurboStringLike
+#define AK_File               BuiltinArgKind::File
     switch (ID) {
     case BuiltinID::None: return BuiltinArgKind::Any;
 #define BUILTIN(Id, Spelling, Kind, Dialects, MinArgs, MaxArgs, Result, ArgKind) \
@@ -104,6 +105,7 @@ enum class BuiltinArgKind {
 #include "plang/Basic/Builtins.def"
     }
     return BuiltinArgKind::Any;
+#undef AK_File
 #undef AK_TurboStringLike
 #undef AK_EPStringLike
 #undef AK_StringLike

@@ -110,19 +110,45 @@
 //                       differently-kinded arguments, which is exactly the
 //                       "does not apply uniformly" shape that keeps a builtin
 //                       hand-written (see below).
+//   AK_File             T->Kind == TypeKind::File -- the plain file-typed-
+//                       argument predicate eof/eoln (issue #261) and
+//                       position/lastposition/empty (issue #417) already
+//                       enforced by hand (err_file_argument) before this
+//                       column existed.  Used only where EVERY argument in
+//                       the call is File-shaped: eof/eoln (0 or 1 argument),
+//                       position/lastposition/empty/filepos/filesize/
+//                       seekeof/seekeoln/append/truncate/erase/flush (always
+//                       exactly 1), and get/put/close (ISO §6.6.5.2/6.6.5.3's
+//                       one-argument shape -- MaxArgs is -1 for these three,
+//                       an old, unrelated arity looseness this column does
+//                       not correct, but every argument any of them is ever
+//                       actually called with is still File-typed).  NOT used
+//                       for reset/rewrite/assign/rename/seek/blockread/
+//                       blockwrite/settextbuf/extend/update/seekread/
+//                       seekwrite/seekupdate, each of which mixes a File
+//                       argument with a DIFFERENT kind (a filename, an index
+//                       value, an untyped buffer, a transfer count, ...) in
+//                       the same call -- issue #557 tracks the resulting gap
+//                       (several of these never actually checked their own
+//                       file argument's kind by hand either) as a separate,
+//                       smaller bug fix rather than folding it into this
+//                       refactor-only column.
 //
 // The numeric family (including EP's complex functions), ord/chr/odd of the
-// ordinal family (issue #306's second slice), and now length/index/trim/eq/
-// ne/lt/gt/le/ge/pos/concat of the string family (issue #306's third slice)
-// have been migrated to ArgKind -- the rest of AK_Any's special-cased
-// builtins are exactly as before.  succ/pred are ALSO ordinal-argument-shaped
-// in their first argument, but are deliberately NOT migrated: their optional
-// second (step-count) argument requires a different kind (isIntegral(), EP
-// §6.7.6.5) than their first, and checkBuiltinArgKinds applies one AK_* tag
-// to every argument uniformly, so a builtin whose arguments do not all share
-// one required kind has to stay hand-written (see the ArgKind column
-// description above) -- this was anticipated in this same comment before
-// any of the ordinal family was migrated.
+// ordinal family (issue #306's second slice), length/index/trim/eq/ne/lt/gt/
+// le/ge/pos/concat of the string family (issue #306's third slice), and now
+// eof/eoln/position/lastposition/empty/filepos/filesize/seekeof/seekeoln/
+// append/truncate/erase/flush/get/put/close of the file family (issue #306's
+// fourth slice) have been migrated to ArgKind -- the rest of AK_Any's
+// special-cased builtins are exactly as before.  succ/pred are ALSO
+// ordinal-argument-shaped in their first argument, but are deliberately NOT
+// migrated: their optional second (step-count) argument requires a
+// different kind (isIntegral(), EP §6.7.6.5) than their first, and
+// checkBuiltinArgKinds applies one AK_* tag to every argument uniformly, so
+// a builtin whose arguments do not all share one required kind has to stay
+// hand-written (see the ArgKind column description above) -- this was
+// anticipated in this same comment before any of the ordinal family was
+// migrated.
 //
 // The third slice's own non-migrations, for the identical reason: substr
 // (EP, string + two non-string index/count arguments), copy (Turbo, string +
@@ -139,10 +165,25 @@
 // Integer index -- neither is a member of the string family despite the
 // "string" in their neighborhood, confirmed by reading each's own
 // pre-migration arm before excluding it, the same diligence succ/pred's
-// exclusion above already modeled.  A later slice widening this to the file
-// family should extend this vocabulary the same way: cross-check against the
-// predicate a hand-written arm already calls before adding a new AK_* tag
-// for it, rather than inventing one no arm needed.
+// exclusion above already modeled.
+//
+// The fourth (file-family) slice's own non-migrations: reset/rewrite/assign/
+// rename/seek/blockread/blockwrite/settextbuf/extend/update/seekread/
+// seekwrite/seekupdate all mix a File argument with a different kind in the
+// same call (see AK_File's own comment above) -- the identical "does not
+// apply uniformly" shape substr/copy stayed hand-written for.  bind/unbind/
+// binding stay hand-written for a DIFFERENT reason -- their real requirement
+// is about the argument's underlying SYMBOL (an IdentExpr naming a bindable
+// Var/VarParam), not just its resolved type, which checkBuiltinArgKinds
+// cannot express at all (see their own row comment, above) -- the same
+// context-sensitive shape that keeps SizeOf/High/Low/Assert/Exit/Break/
+// Continue hand-written.  ioresult takes no arguments at all, so it is not a
+// member of this family despite its neighborhood.  With this slice, every
+// builtin family the issue's own scope named (numeric, ordinal, string,
+// file) has been investigated; what remains AK_Any is either genuinely
+// multi-kind, genuinely context-sensitive, or (ioresult, and every other
+// builtin outside these four families) simply never had a migratable
+// argument-kind check to begin with.
 //
 //===----------------------------------------------------------------------===//
 
@@ -173,12 +214,41 @@ BUILTIN(Page,      "page",      Proc, ISO, 0, -1, R_None, AK_Any)
 // §6.7.5.2 / Turbo's record-size overload) -- CodeGen's lowering (CGProcCall,
 // the reset/rewrite arm) only ever reads args[0] and args[1], so -1 here
 // let a third argument through unexamined into a runtime call already typed
-// for two.
+// for two.  Deliberately still AK_Any, not AK_File: the second argument is a
+// DIFFERENT kind (a filename under EP, a record size under Turbo) from the
+// first, and checkBuiltinArgKinds applies one tag to every argument in the
+// call uniformly -- issue #306's fourth slice found this is the same
+// position-specific shape that kept succ/pred (a different kind per
+// argument) and substr/copy (a string mixed with non-string index/count
+// arguments) hand-written in earlier slices.  reset/rewrite's own arg0 is
+// NOT actually file-checked by hand either today (confirmed by reading
+// checkCallStmt's own reset/rewrite arms before excluding this row, the same
+// diligence the third slice's own substr/copy exclusion modeled) -- a
+// pre-existing gap, not something this migration removes; tracked
+// separately (issue #557) rather than hand-adding a brand new check under
+// cover of a refactor-only slice.
 BUILTIN(Reset,     "reset",     Proc, ALL, 1,  2, R_None, AK_Any)
 BUILTIN(Rewrite,   "rewrite",   Proc, ALL, 1,  2, R_None, AK_Any)
-BUILTIN(Get,       "get",       Proc, ISO, 1, -1, R_None, AK_Any)
-BUILTIN(Put,       "put",       Proc, ISO, 1, -1, R_None, AK_Any)
-BUILTIN(Close,     "close",     Proc, ALL, 1, -1, R_None, AK_Any)
+// get/put/close: ISO §6.6.5.2/6.6.5.3's one-file-argument procedures, unlike
+// reset/rewrite just above -- every argument these are ever legitimately
+// called with is File-typed (confirmed empirically: no multi-argument
+// get/put/close call exists anywhere in this project's own test suite), so
+// AK_File applies uniformly even though MaxArgs is -1 rather than 1 (an old,
+// unaudited looseness this slice does not tighten -- that is Builtins.def's
+// ARITY column, a separate concern from ArgKind).  None of the three had ANY
+// argument-kind check before this (confirmed by reading checkCallStmt/
+// checkCallExpr, which special-case neither name at all) -- the SAME
+// FileVarHelpers::fileVarPtr IdentExpr fast path issue #417 closed for
+// position/lastposition/empty and #261 closed for eof/eoln hands back ANY
+// variable's storage address unchecked for these three too, so `close(i)`
+// for a plain integer i corrupts memory with no diagnostic.  Unlike
+// reset/rewrite above, closing this gap needs no bespoke hand-written code
+// at all: checkCallStmt's own generic fallback (issue #547) already calls
+// checkBuiltinArgKinds for any builtin with no dedicated arm, so tagging
+// these three AK_File is the whole fix.
+BUILTIN(Get,       "get",       Proc, ISO, 1, -1, R_None, AK_File)
+BUILTIN(Put,       "put",       Proc, ISO, 1, -1, R_None, AK_File)
+BUILTIN(Close,     "close",     Proc, ALL, 1, -1, R_None, AK_File)
 BUILTIN(Pack,      "pack",      Proc, ISO, 3,  3, R_None, AK_Any)
 BUILTIN(Unpack,    "unpack",    Proc, ISO, 3,  3, R_None, AK_Any)
 
@@ -206,8 +276,8 @@ BUILTIN(Succ,      "succ",      Func, ALL, 1,  2, R_Int, AK_Any)
 BUILTIN(Pred,      "pred",      Func, ALL, 1,  2, R_Int, AK_Any)
 BUILTIN(Chr,       "chr",       Func, ALL, 1,  1, R_Char, AK_Ordinal)
 BUILTIN(Odd,       "odd",       Func, ALL, 1,  1, R_Bool, AK_Ordinal)
-BUILTIN(Eof,       "eof",       Func, ALL, 0,  1, R_Bool, AK_Any)
-BUILTIN(Eoln,      "eoln",      Func, ALL, 0,  1, R_Bool, AK_Any)
+BUILTIN(Eof,       "eof",       Func, ALL, 0,  1, R_Bool, AK_File)
+BUILTIN(Eoln,      "eoln",      Func, ALL, 0,  1, R_Bool, AK_File)
 
 // ISO 10206 §6.7.5.7
 BUILTIN(Halt,      "halt",      Proc, EP | TP, 0, 1, R_None, AK_Any)
@@ -242,21 +312,42 @@ BUILTIN(Re,        "re",        Func, EP,  1,  1, R_Real, AK_Complex)
 BUILTIN(Im,        "im",        Func, EP,  1,  1, R_Real, AK_Complex)
 BUILTIN(Arg,       "arg",       Func, EP,  1,  1, R_Real, AK_Complex)
 // EP §6.7.5.2: direct-access files.  Same two-argument shape as reset/rewrite
-// above, and the same reason it is 2 rather than -1.
+// above, and the same reason it is 2 rather than -1.  Extend/Update stay
+// AK_Any for the identical multi-kind reason reset/rewrite do (arg1 is a
+// filename, a different kind from arg0's File); SeekRead/SeekWrite/
+// SeekUpdate stay AK_Any because THEIR arg1 is a value of the file's own
+// declared INDEX type (EP §6.7.5.2), not File either -- also multi-kind, and
+// also not File-checked on arg0 by hand today (no dedicated Sema arm exists
+// for any of these five names at all) -- tracked with reset/rewrite's own
+// identical gap, issue #557, rather than hand-added here.
 BUILTIN(Extend,    "extend",    Proc, EP,  1,  2, R_None, AK_Any)
 BUILTIN(Update,    "update",    Proc, EP,  1,  2, R_None, AK_Any)
 BUILTIN(SeekRead,  "seekread",  Proc, EP,  2,  2, R_None, AK_Any)
 BUILTIN(SeekWrite, "seekwrite", Proc, EP,  2,  2, R_None, AK_Any)
 BUILTIN(SeekUpdate,"seekupdate",Proc, EP,  2,  2, R_None, AK_Any)
-// EP §6.7.6.6 / §6.7.6.5
-BUILTIN(Position,     "position",     Func, EP, 1, 1, R_Int, AK_Any)
-BUILTIN(LastPosition, "lastposition", Func, EP, 1, 1, R_Int, AK_Any)
-BUILTIN(Empty,        "empty",        Func, EP, 1, 1, R_Bool, AK_Any)
+// EP §6.7.6.6 / §6.7.6.5: each takes a file argument alone and had no
+// argument-kind check of its own before issue #417 added one by hand
+// (err_file_argument) -- generic now (issue #306's fourth slice).
+BUILTIN(Position,     "position",     Func, EP, 1, 1, R_Int, AK_File)
+BUILTIN(LastPosition, "lastposition", Func, EP, 1, 1, R_Int, AK_File)
+BUILTIN(Empty,        "empty",        Func, EP, 1, 1, R_Bool, AK_File)
 // EP §6.7.5.8 / §6.7.6.9: date and time
 BUILTIN(GetTimeStamp, "gettimestamp", Proc, EP, 1, 1, R_None, AK_Any)
 BUILTIN(Date,         "date",         Func, EP, 1, 1, R_Str, AK_Any)
 BUILTIN(Time,         "time",         Func, EP, 1, 1, R_Str, AK_Any)
-// EP §6.7.5.6 / §6.7.6.8: binding
+// EP §6.7.5.6 / §6.7.6.8: binding.  All three stay AK_Any and hand-written
+// (Sema::checkBindingCall, Sema.cpp) despite each taking what looks like a
+// plain file argument: the real requirement is narrower and context-
+// sensitive in the same way SizeOf/High/Low's type-or-value shape is -- the
+// first argument must be an IdentExpr naming a SymbolKind::Var/VarParam
+// SYMBOL directly (not an arbitrary File-typed expression -- a record field
+// or array element of file type is refused, unlike every AK_File builtin
+// above), that symbol's own IsBindable flag must be set, AND its declared
+// type must be File -- three checks with three different diagnostics
+// (err_bind_needs_variable / err_bind_not_bindable /
+// err_bind_nonfile_unsupported), none of which checkBuiltinArgKinds's
+// generic "call checkExpr, test the resolved TYPE" shape can express (it has
+// no access to the underlying Symbol at all, only the expression's type).
 BUILTIN(Bind,         "bind",         Proc, EP, 2, 2, R_None, AK_Any)
 BUILTIN(Unbind,       "unbind",       Proc, EP, 1, 1, R_None, AK_Any)
 BUILTIN(Binding,      "binding",      Func, EP, 1, 1, R_BindingType, AK_Any)
@@ -512,7 +603,10 @@ BUILTIN(ParamStr,     "paramstr",     Func, TP, 1, 1, R_Str, AK_Any)
 // checkEPOnly call, closed for exactly this shape of builtin by the fix
 // ParamCount/Random's own arrival there required) -- confirmed for
 // IOResult specifically, not just assumed to transfer, by this item's own
-// dialect-gating lit test.
+// dialect-gating lit test.  AK_Any is not a placeholder here awaiting
+// migration -- IOResult takes NO arguments at all (MinArgs = MaxArgs = 0),
+// so it is not a file-argument builtin despite living in this neighborhood;
+// there is no argument for any ArgKind tag, File included, to ever check.
 BUILTIN(IOResult,     "ioresult",     Func, TP, 0, 0, R_Int, AK_Any)
 
 // -std=turbo only: Assign(var f; const name: string) / Append(var f: Text).
@@ -525,9 +619,16 @@ BUILTIN(IOResult,     "ioresult",     Func, TP, 0, 0, R_Int, AK_Any)
 // plang_tp_close for the whole design -- a genuinely separate function
 // family from the ISO ones just above, per this project's P7 rule that
 // dialect selection happens at the CALL SITE, never inside one runtime
-// function branching on a passed-in "which dialect" flag.
+// function branching on a passed-in "which dialect" flag.  Assign stays
+// AK_Any: its own arg0 File check is already hand-written (err_file_argument,
+// checkCallStmt), but arg1 is a DIFFERENT kind (the filename, string-like),
+// so the whole call cannot take one uniform AK_* tag -- the same
+// reset/rewrite shape, issue #557.  Append, unlike Assign, takes ONLY the
+// file (Builtins.def's own MaxArgs = 1) -- genuinely uniform, so it is
+// migrated (AK_File), split out of the hand-written arm it used to share
+// with Assign (SemaStmt.cpp) into its own.
 BUILTIN(Assign,       "assign",       Proc, TP, 2, 2, R_None, AK_Any)
-BUILTIN(Append,       "append",       Proc, TP, 1, 1, R_None, AK_Any)
+BUILTIN(Append,       "append",       Proc, TP, 1, 1, R_None, AK_File)
 
 // -std=turbo only: FilePos(f) / FileSize(f) -- current / total record
 // position, in units of f's own RecSize (Cluster A item 4's RecSize
@@ -539,24 +640,36 @@ BUILTIN(Append,       "append",       Proc, TP, 1, 1, R_None, AK_Any)
 // Int64 here, wide enough that a >2GB file's FileSize does not wrap the
 // way Turbo's own 32-bit LongInt eventually would.  Both refuse a Text
 // argument (err_binary_file_required) -- confirmed against `fpc -Mtp`,
-// which refuses to call either with one at all.
-BUILTIN(FilePos,      "filepos",      Func, TP, 1, 1, R_Int, AK_Any)
-BUILTIN(FileSize,     "filesize",     Func, TP, 1, 1, R_Int, AK_Any)
+// which refuses to call either with one at all.  The base File-kind check
+// is generic now (AK_File, issue #306's fourth slice); the binary-only
+// restriction is not a KIND (only ever one argument here to begin with), so
+// it stays a hand-written follow-on check exactly like Eoln's own text-only
+// restriction does.
+BUILTIN(FilePos,      "filepos",      Func, TP, 1, 1, R_Int, AK_File)
+BUILTIN(FileSize,     "filesize",     Func, TP, 1, 1, R_Int, AK_File)
 // -std=turbo only: SeekEof(f) / SeekEoln(f) -- the CONSUMING counterparts
 // of Eof/Eoln: SeekEof skips past any blanks, tabs and line markers ahead
 // of the current position before testing; SeekEoln skips only blanks and
 // tabs (a line marker is itself what Eoln tests for, so SeekEoln does not
 // cross one).  Text-only, the same restriction Eoln itself already has
-// (err_line_proc_not_text) -- confirmed against `fpc -Mtp`.
-BUILTIN(SeekEof,      "seekeof",      Func, TP, 1, 1, R_Bool, AK_Any)
-BUILTIN(SeekEoln,     "seekeoln",     Func, TP, 1, 1, R_Bool, AK_Any)
+// (err_line_proc_not_text) -- confirmed against `fpc -Mtp`.  Base File-kind
+// check generic now (AK_File); text-only restriction hand-written, same
+// reasoning as FilePos/FileSize's binary-only one just above.
+BUILTIN(SeekEof,      "seekeof",      Func, TP, 1, 1, R_Bool, AK_File)
+BUILTIN(SeekEoln,     "seekeoln",     Func, TP, 1, 1, R_Bool, AK_File)
 
 // -std=turbo only: Seek(f, n) / Truncate(f) -- position f at record n
 // (0-relative, in units of RecSize) / truncate f at the current position.
 // Both refuse a Text argument (err_binary_file_required), the same as
-// FilePos/FileSize above.
+// FilePos/FileSize above.  Seek stays AK_Any: arg1 (n) is a DIFFERENT kind
+// (Integer) from arg0's File, the same multi-kind shape as reset/rewrite,
+// so its whole hand-written arm (both arguments) is unchanged.  Truncate,
+// unlike Seek, takes ONLY the file (MaxArgs = 1) -- genuinely uniform, so it
+// is migrated (AK_File), split out of the arm it used to share with Seek
+// (SemaStmt.cpp) into its own, keeping the binary-only restriction
+// hand-written the same way FilePos/FileSize/SeekEof/SeekEoln's own do.
 BUILTIN(Seek,         "seek",         Proc, TP, 2, 2, R_None, AK_Any)
-BUILTIN(Truncate,     "truncate",     Proc, TP, 1, 1, R_None, AK_Any)
+BUILTIN(Truncate,     "truncate",     Proc, TP, 1, 1, R_None, AK_File)
 // -std=turbo only: BlockRead(f, var buf; count[; var result]) /
 // BlockWrite(f, var buf; count[; var result]) -- transfer count
 // RecSize-sized records between f and buf, an UNTYPED var parameter (any
@@ -566,7 +679,11 @@ BUILTIN(Truncate,     "truncate",     Proc, TP, 1, 1, R_None, AK_Any)
 // receives the actual count transferred; WITHOUT one, a short transfer
 // sets InOutRes to 100 (BlockRead)/101 (BlockWrite) -- Borland's own
 // documented distinction, confirmed against `fpc -Mtp`.  See
-// CGProcCall.cpp's own dispatch for exactly where that arity reads.
+// CGProcCall.cpp's own dispatch for exactly where that arity reads.  Stays
+// AK_Any: three (or four) genuinely different kinds in one call -- File,
+// then an untyped lvalue, then an Integer count, then an optional Integer
+// result -- the same multi-kind shape that keeps BlockRead/BlockWrite's
+// whole hand-written arm as it was.
 BUILTIN(BlockRead,    "blockread",    Proc, TP, 3, 4, R_None, AK_Any)
 BUILTIN(BlockWrite,   "blockwrite",   Proc, TP, 3, 4, R_None, AK_Any)
 // -std=turbo only: Erase(f) / Rename(f, newname) -- delete / rename the
@@ -574,13 +691,16 @@ BUILTIN(BlockWrite,   "blockwrite",   Proc, TP, 3, 4, R_None, AK_Any)
 // name to match.  Both require f to be fmClosed first -- confirmed against
 // `fpc -Mtp`: either call against a still-open f sets InOutRes to 102
 // ("file not assigned" -- FPC's own field practice reuses that code here
-// rather than a dedicated one) and performs nothing.
-BUILTIN(Erase,        "erase",        Proc, TP, 1, 1, R_None, AK_Any)
+// rather than a dedicated one) and performs nothing.  Erase takes only the
+// file -- genuinely uniform, migrated (AK_File).  Rename stays AK_Any: its
+// second argument (newname) is string-like, a different kind from File, the
+// same multi-kind shape as Assign's own filename argument just above.
+BUILTIN(Erase,        "erase",        Proc, TP, 1, 1, R_None, AK_File)
 BUILTIN(Rename,       "rename",       Proc, TP, 2, 2, R_None, AK_Any)
 // -std=turbo only: Flush(f) -- flush f's buffered output without closing
 // it.  No Text/binary restriction of its own (confirmed against
-// `fpc -Mtp`: both accept it).
-BUILTIN(Flush,        "flush",        Proc, TP, 1, 1, R_None, AK_Any)
+// `fpc -Mtp`: both accept it).  One argument, one kind -- migrated (AK_File).
+BUILTIN(Flush,        "flush",        Proc, TP, 1, 1, R_None, AK_File)
 // -std=turbo only: SetTextBuf(var f: Text; var buf[; size]) -- overrides
 // f's own internal I/O buffer with caller-supplied storage.  buf is an
 // UNTYPED var parameter like BlockRead/BlockWrite's own above; size
@@ -588,7 +708,9 @@ BUILTIN(Flush,        "flush",        Proc, TP, 1, 1, R_None, AK_Any)
 // SizeOf(buf), which plang cannot know for an untyped actual with no
 // further help -- see CGProcCall.cpp's own comment for why a fixed default
 // is used instead).  Text-only (err_line_proc_not_text), the same
-// restriction Eoln/SeekEoln already have.
+// restriction Eoln/SeekEoln already have.  Stays AK_Any: File, then an
+// untyped lvalue, then an optional Integer -- the same multi-kind shape as
+// BlockRead/BlockWrite just above.
 BUILTIN(SetTextBuf,   "settextbuf",   Proc, TP, 2, 3, R_None, AK_Any)
 
 // Turbo Tier 4, Cluster C item 5: real TP's own Crt unit's three routines

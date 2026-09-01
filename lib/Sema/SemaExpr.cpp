@@ -1258,6 +1258,21 @@ std::vector<std::shared_ptr<Type>> Sema::checkBuiltinArgKinds(
                     && T->Kind != TypeKind::String)
                 error(Arg->Loc, diag::err_string_fn_arg_type, {LowerName, T->Name});
             break;
+        // eof/eoln, position/lastposition/empty, filepos/filesize,
+        // seekeof/seekeoln, append, truncate, erase, flush: every argument a
+        // file-family builtin like this one shares is a plain file-typed
+        // expression -- T->Kind == TypeKind::File, the same predicate each
+        // of these already used by hand (err_file_argument) before
+        // migration.  Only ever applied to builtins whose EVERY argument is
+        // File-shaped -- see Builtins.def's own header comment on why
+        // reset/rewrite/assign/seek/blockread/... stay hand-written instead:
+        // their second (or later) argument is a DIFFERENT kind (a filename,
+        // an index value, an untyped buffer, ...), which this uniform,
+        // one-tag-per-call mechanism cannot express.
+        case BuiltinArgKind::File:
+            if (T->Kind != TypeKind::File)
+                error(Arg->Loc, diag::err_file_argument, {LowerName, T->Name});
+            break;
         }
     }
     return Types;
@@ -1455,13 +1470,21 @@ std::shared_ptr<Type> Sema::checkCallExpr(const CallExpr& E) {
         // (FileVars.isFileVar) and falls back to testing the standard input
         // file for anything else, so `eof(i)` for a plain integer i compiled
         // to testing INPUT's own eof status and silently discarded 'i'
-        // (issue #261).
+        // (issue #261).  The base File-kind check is generic now
+        // (Builtins.def's AK_File row, issue #306's fourth slice) -- the
+        // `isError() || Kind != File` re-test just below does not re-emit
+        // anything (checkBuiltinArgKinds already did, once), it only decides
+        // whether THIS call returns TyErr or TyBool, the same "check once,
+        // decide the result from what came back" split ord/chr/odd's own
+        // migrated arm above established.  eoln's extra text-only
+        // restriction (only a text file has a line marker to be at) is not a
+        // KIND every argument shares (there is only ever one argument here
+        // to begin with), so it stays a hand-written follow-on check reading
+        // back Types[0], same as before migration.
         if ((Lo == "eof" || Lo == "eoln") && !E.Args.empty()) {
-            auto ArgTy = checkExpr(*E.Args[0]);
-            if (!ArgTy->isError() && ArgTy->Kind != TypeKind::File) {
-                error(E.Args[0]->Loc, diag::err_file_argument, {Lo, ArgTy->Name});
-                return TyErr;
-            }
+            auto Types = checkBuiltinArgKinds(Sym->BuiltinKind, Lo, E.Args);
+            auto& ArgTy = Types[0];
+            if (!ArgTy->isError() && ArgTy->Kind != TypeKind::File) return TyErr;
             // eoln asks whether the position is at a line marker, and only a
             // text file has those.  eof applies to any file and is not
             // restricted here.  isTextFile (Type.h) is dialect-aware -- see
@@ -1481,31 +1504,31 @@ std::shared_ptr<Type> Sema::checkCallExpr(const CallExpr& E) {
         // CodeGen's lowering (FileVars.fileVarPtr) has no non-file fallback
         // the way eof/eoln's stdin fallback does: it handed the
         // wrong-typed variable's own address to the runtime as a
-        // PascalFile*, segfaulting with no diagnostic (issue #417).
+        // PascalFile*, segfaulting with no diagnostic (issue #417).  Generic
+        // now too (Builtins.def's AK_File row) -- none of the three need
+        // anything more than the base check.
         if ((Lo == "position" || Lo == "lastposition" || Lo == "empty")
                 && !E.Args.empty()) {
-            auto ArgTy = checkExpr(*E.Args[0]);
-            if (!ArgTy->isError() && ArgTy->Kind != TypeKind::File) {
-                error(E.Args[0]->Loc, diag::err_file_argument, {Lo, ArgTy->Name});
-                return TyErr;
-            }
+            auto Types = checkBuiltinArgKinds(Sym->BuiltinKind, Lo, E.Args);
+            auto& ArgTy = Types[0];
+            if (!ArgTy->isError() && ArgTy->Kind != TypeKind::File) return TyErr;
             return Sym->ReturnType ? Sym->ReturnType : TyErr;
         }
         // TP-only: FilePos(f) / FileSize(f) -- see Builtins.def's own
         // comment for what these report and why.  Both take a typed or
         // untyped BINARY file (err_binary_file_required rejects Text, the
         // same way eoln's err_line_proc_not_text rejects a non-text file
-        // just below) and answer with a genuine 64-bit Int64, overriding
+        // just above) and answer with a genuine 64-bit Int64, overriding
         // Builtins.def's R_Int placeholder the same way abs/sqr's own
-        // ArgTy override does just below.
+        // ArgTy override does just below.  The base File-kind check is
+        // generic now (Builtins.def's AK_File row); the binary-only
+        // restriction is not a kind every argument shares (again, only one
+        // argument here), so it stays a hand-written follow-on check.
         if ((Lo == "filepos" || Lo == "filesize") && !E.Args.empty()) {
-            auto ArgTy = checkExpr(*E.Args[0]);
-            for (size_t I = 1; I < E.Args.size(); ++I) (void)checkExpr(*E.Args[I]);
+            auto Types = checkBuiltinArgKinds(Sym->BuiltinKind, Lo, E.Args);
+            auto& ArgTy = Types[0];
             if (!ArgTy->isError()) {
-                if (ArgTy->Kind != TypeKind::File) {
-                    error(E.Args[0]->Loc, diag::err_file_argument, {Lo, ArgTy->Name});
-                    return TyErr;
-                }
+                if (ArgTy->Kind != TypeKind::File) return TyErr;
                 if (isTextFile(*ArgTy, Opts)) {
                     error(E.Args[0]->Loc, diag::err_binary_file_required,
                           {Lo, ArgTy->Name});
@@ -1516,14 +1539,15 @@ std::shared_ptr<Type> Sema::checkCallExpr(const CallExpr& E) {
         }
         // TP-only: SeekEof(f) / SeekEoln(f) -- the CONSUMING counterparts
         // of Eof/Eoln (Builtins.def's own comment); Text-only, exactly the
-        // restriction eoln already enforces just above.
+        // restriction eoln already enforces just above.  Base File-kind
+        // check generic now (Builtins.def's AK_File row); the text-only
+        // restriction stays hand-written for the same reason FilePos/
+        // FileSize's binary-only one does, just above.
         if ((Lo == "seekeof" || Lo == "seekeoln") && !E.Args.empty()) {
-            auto ArgTy = checkExpr(*E.Args[0]);
+            auto Types = checkBuiltinArgKinds(Sym->BuiltinKind, Lo, E.Args);
+            auto& ArgTy = Types[0];
             if (!ArgTy->isError()) {
-                if (ArgTy->Kind != TypeKind::File) {
-                    error(E.Args[0]->Loc, diag::err_file_argument, {Lo, ArgTy->Name});
-                    return TyErr;
-                }
+                if (ArgTy->Kind != TypeKind::File) return TyErr;
                 if (!isTextFile(*ArgTy, Opts)) {
                     error(E.Args[0]->Loc, diag::err_line_proc_not_text,
                           {Lo, ArgTy->Name});
