@@ -616,3 +616,19 @@ jobs:
 
       - name: Lint test/
         run: python3 tools/lint_test.py --strict
+
+  lint-diagnostics:
+    name: lint diagnostics
+    runs-on: ubuntu-latest
+    # No C++ build needed: pure Python text analysis over
+    # include/plang/Basic/*Kinds.def vs lib/**. Deliberately its own job, not
+    # a step tacked onto `build`: it has nothing to do with any
+    # compiler/arch/build_type axis, and it should fail fast without waiting
+    # on a full compiler matrix to say so (issue #308 part (b): a dead
+    # diagnostic -- declared but never emitted -- is either cruft or a lost
+    # check, and this had already recurred once by the time it was caught).
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Lint diagnostics
+        run: python3 tools/lint_diagnostics.py --strict

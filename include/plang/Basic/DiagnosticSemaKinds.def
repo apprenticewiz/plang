@@ -487,14 +487,6 @@ DIAG(err_proc_param_not_congruous, Error,
 DIAG(err_proc_param_not_assignable, Error,
      "'%0' is a procedural parameter and cannot be assigned to")
 DIAG(err_unrecognized_type, Error, "unrecognized type expression")
-// Turbo Tier 5, Cluster A item 0 gave object types their own placeholder
-// diagnostic here while only parsing existed (Parser::parseObjectType);
-// Cluster A item 1 (this one) gives Sema real inheritance/VMT resolution, so
-// this message is no longer emitted by resolveTypeImpl -- kept in the
-// catalog, unused, the same way err_unit_compilation_not_yet_supported was
-// kept after Tier 4's own placeholder was retired (Frontend.cpp's comment).
-DIAG(err_object_type_not_yet_supported, Error,
-     "object types are not yet supported")
 // Turbo Tier 5, Cluster A item 1: real Turbo Pascal (confirmed against a
 // local fpc -Mtp build) has no anonymous object type -- 'var x: object ...
 // end' is refused ("Anonymous class definitions are not allowed") --
