@@ -29,6 +29,7 @@
 #include "CGLinkage.h"
 #include "CGSymbolTable.h"
 #include "CGTypes.h"
+#include "RangeCheckGuards.h"
 #include "SchemaAccess.h"
 #include "SchemaLayoutEngine.h"
 #include "SetOps.h"
@@ -56,7 +57,7 @@ public:
         llvm::LLVMContext& Ctx, llvm::Module& Mod, llvm::IRBuilder<>& B,
         SchemaAccess& Schema, SchemaLayoutEngine& SchemaLayout, CGTypes& Types,
         CGSymbolTable& SymTab, CGLinkage& Linkage, CGDebugInfo& DbgInfo,
-        SetOps& Sets, StringCallMarshalling& StrCall,
+        SetOps& Sets, StringCallMarshalling& StrCall, RangeCheckGuards& RangeGuards,
         llvm::IntegerType* I32Ty, llvm::IntegerType* I64Ty, llvm::PointerType* PtrTy,
         std::function<llvm::Value*(const plang::ExprNode&)> EmitLValue,
         std::function<llvm::Value*(const plang::ExprNode&, llvm::Type*, bool)> EmitCallArg,
@@ -65,7 +66,7 @@ public:
         std::function<bool(const std::string&)> IsNestedFunction)
         : Ctx(Ctx), Mod(Mod), B(B), Schema(Schema), SchemaLayout(SchemaLayout),
           Types(Types), SymTab(SymTab), Linkage(Linkage), DbgInfo(DbgInfo),
-          Sets(Sets), StrCall(StrCall),
+          Sets(Sets), StrCall(StrCall), RangeGuards(RangeGuards),
           I32Ty(I32Ty), I64Ty(I64Ty), PtrTy(PtrTy),
           EmitLValue(std::move(EmitLValue)), EmitCallArg(std::move(EmitCallArg)),
           CreateEntryAlloca(std::move(CreateEntryAlloca)),
@@ -131,6 +132,11 @@ private:
     /// the same way it already holds Schema/Sets rather than going through
     /// a closure for them.
     StringCallMarshalling& StrCall;
+    /// emitProcVarCall's own nil-entry-point guard (issue #646) -- the same
+    /// RTE 216 idiom CGProcCall/CGFuncCall/CGFieldAccess/SchemaAccess
+    /// already use for every other pointer dereference, reused rather than
+    /// reimplemented here.
+    RangeCheckGuards& RangeGuards;
     llvm::IntegerType* I32Ty;
     llvm::IntegerType* I64Ty;
     llvm::PointerType* PtrTy;

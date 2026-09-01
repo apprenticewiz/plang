@@ -91,6 +91,25 @@ struct IdentExpr : ExprNode {
     /// statically for just this one, where no runtime instance exists.
     mutable bool IsTypeArgument{false};
 
+    /// True only when Sema::checkTypeCast resolved this occurrence as the
+    /// OPERAND of a Turbo untyped-var-parameter typecast (`Integer(x)` where
+    /// `x: var` has no declared type) -- set directly by that function's own
+    /// special case, which also aliases this node's ResolvedType to the
+    /// cast's TARGET type so the write-side (isLValue's TypeCastExpr case)
+    /// sees a trivial same-size match. That alias is exactly what makes the
+    /// READ side ambiguous purely from ResolvedType: CGExprCore::
+    /// emitTypeCastValue's bothScalar test (Dst ordinal-or-real AND Src
+    /// ordinal-or-real) spuriously reads true for ANY ordinal/real target,
+    /// since Src now IS Dst, sending it down the "genuine value conversion"
+    /// path (emitExpr(x), i.e. an ordinary load through x's OWN storage
+    /// type) instead of the correct "reinterpret x's REFERENT" path
+    /// (emitLValue(x) -- x's storage IS the caller's address for an untyped
+    /// var param -- loaded back at the target's width). This flag is the
+    /// one syntactic fact that survives the alias, so emitTypeCastValue
+    /// checks it first and never reaches the ambiguous bothScalar test at
+    /// all for this shape (issue #645).
+    mutable bool IsUntypedParamCastOperand{false};
+
     /// What a bare occurrence of an ENCLOSING FUNCTION'S OWN NAME (or its
     /// EP §6.7.2 named result variable) means, decided once by
     /// Sema::checkIdent and read back by codegen instead of re-deriving it

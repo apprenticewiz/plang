@@ -437,6 +437,24 @@ llvm::Value* CGExprCore::emitTypeCastValue(const TypeCastExpr& n) {
     llvm::Type*  dstLlvmTy = Types.llvmTypeOfSemaType(*n.ResolvedType);
     const auto&  DstTy     = n.ResolvedType;
     const auto&  SrcTy     = n.Operand->ResolvedType;
+    // Issue #645: Sema::checkTypeCast's untyped-var-parameter special case
+    // aliases n.Operand->ResolvedType TO n.ResolvedType (see
+    // IdentExpr::IsUntypedParamCastOperand's own comment), so SrcTy above is
+    // never actually the operand's own type for this shape -- it is
+    // DstTy's, making the bothScalar test just below spuriously true for
+    // ANY ordinal/real target and routing a plain `v := Integer(x)` through
+    // "value-evaluate x" (a load through x's OWN storage, which for an
+    // untyped var param is a bare `ptr` slot holding the CALLER's address --
+    // not x's referent at all) instead of "load x's referent at the
+    // target's width".  Checked first, unconditionally: this is always a
+    // reinterpretation of the caller's storage, never a value conversion,
+    // regardless of what TargetTy happens to be.
+    if (auto* id = llvm::dyn_cast<IdentExpr>(n.Operand.get());
+            id && id->IsUntypedParamCastOperand) {
+        llvm::Value* ptr = emitLValue(*n.Operand);
+        if (!ptr) codegenICE("untyped var-parameter typecast operand has no storage");
+        return B.CreateLoad(dstLlvmTy, ptr, "typecast.untyped");
+    }
     const bool bothScalar = DstTy && SrcTy
         && (DstTy->isOrdinal() || DstTy->Kind == plang::TypeKind::Real)
         && (SrcTy->isOrdinal() || SrcTy->Kind == plang::TypeKind::Real);
