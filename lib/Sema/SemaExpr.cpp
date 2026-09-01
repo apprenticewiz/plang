@@ -2399,7 +2399,7 @@ void Sema::checkTypedConstFoldable(const ExprNode& E, const std::string& Name) {
 // See NumSemaTypeKinds in Sema/Type.h.  A new structured kind that can hold a
 // component defaults to "contains no file", and ISO §6.6.3.3's rule that a
 // file may not be passed by value stops being enforced through it.
-static_assert(NumSemaTypeKinds == 23,
+static_assert(NumSemaTypeKinds == 24,
               "a new structured type kind needs a case in typeContainsFile");
 
 bool Sema::typeContainsFile(const Type& T) {

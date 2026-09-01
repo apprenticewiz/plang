@@ -629,7 +629,7 @@ CGTypes::arrayIndexRange(const ArrayTypeNode& n) const {
 // reaches debugTypeOfSemaType and is silently given no DIType at all,
 // which is the *correct*, deliberate answer for a composite kind but a
 // silent gap for a new scalar-like kind that should have gotten one.
-static_assert(NumSemaTypeKinds == 23,
+static_assert(NumSemaTypeKinds == 24,
               "a new semantic type kind needs a case in canLowerSemaType, "
               "llvmTypeOfSemaType, and (if it is scalar-like) "
               "debugTypeOfSemaType");
