@@ -114,6 +114,29 @@ The test suite is off by default and is built with `-DPLANG_ENABLE_TESTS=ON`.
 See [`docs/technical_info.md`](docs/technical_info.md) for details as to
 what is in it.
 
+### Embedding the frontend library
+
+`cmake --install` also installs CMake package metadata for `libplang-frontend`
+(the shared library behind the `plang` driver's own `-pc1` frontend pass, and
+the frontend for embedders), so a separate CMake project can do:
+
+```cmake
+project(my_project LANGUAGES C CXX)   # C is required -- see note below
+find_package(plang REQUIRED)
+target_link_libraries(my_target PRIVATE plang::plang_frontend)
+```
+
+`LANGUAGES C CXX`, not just `CXX`: LLVM's own `LLVMConfig.cmake` needs a C
+compiler enabled in the *calling* project (`FindLibEdit.cmake`'s
+`check_include_file()`), even though nothing plang-specific touches C.
+`plang_frontend` links LLVM `PRIVATE`, so consumers don't inherit LLVM's own
+CMake requirements just to link against it — this is the one exception,
+coming from `find_package(LLVM CONFIG)` validating `plang_frontend`'s link
+interface at `find_package(plang)` time.
+
+Only the frontend library is exported this way; the `plang` driver
+executable itself is not.
+
 ## Usage
 
 ```bash
