@@ -569,3 +569,63 @@ path was exercised end-to-end against a synthetic always-crashing harness
 outside this repository, confirming the exit-code handling, the crash-file
 collection, and that the documented repro command reproduces the crash
 deterministically.
+
+### Runtime sanitizer exerciser (issue #190 part B option 1)
+
+`runtime/CMakeLists.txt` opts `plang_runtime`/`plang_runtime_shared` out of
+`PLANG_SANITIZE` (the "Sanitizers" section above) deliberately: the driver
+links those two into every compiled Pascal program with no sanitizer runtime
+present, so an instrumented runtime would leave `undefined symbol:
+__asan_report_load8` (and a dozen siblings) in every single program plang
+compiles. That leaves `runtime/*.cpp` itself with no sanitizer coverage at
+all through the normal `sanitizers` CI job (which only ever instruments
+`plang_frontend`) — and guardheap (`test/`'s black-box allocator wrapper over
+*compiled* programs) can only ever catch a heap overflow crossing an
+allocation it wrapped, never a UBSan-class bug or a non-heap-overflow
+ASan-class bug (stack overflow, use-after-free, double-free, ...) inside the
+runtime's own C++ implementation.
+
+`-DPLANG_ENABLE_RUNTIME_SANITIZER_TESTS=ON` closes that gap the same way
+`-DPLANG_ENABLE_FUZZERS` closes the analogous one for the frontend: a
+SEPARATE, isolated target, `plang_runtime_sanitized`, recompiles the exact
+same `runtime/*.cpp` sources `plang_runtime` itself does, with
+`-fsanitize=address,undefined` added — never linked into `plang_runtime`,
+`plang_runtime_shared`, the driver, or any compiled Pascal program, so the
+"no sanitizer runtime in compiled output" contract above is entirely
+undisturbed. `test/unittests/RuntimeSanitized/` links directly against
+`plang_runtime_sanitized` and calls its public C-ABI entry points (starting
+with the `Strings` unit's `plang_strings_*` implementations and
+`plang_file.cpp`'s file-variable entry points) with deliberately adversarial
+arguments — a nil pointer where a real Pascal caller could never construct
+one but the C-ABI itself does not forbid, a zero-length buffer, a
+boundary-sized (exactly-fits) heap allocation, a double-close, an
+already-closed file handed to a real I/O call — no driver, no compiled
+Pascal program, no lit, sidestepping the driver entirely the way the fuzz
+targets sidestep it for the frontend.
+
+Requires Clang, for the identical reason `-DPLANG_ENABLE_FUZZERS` does, and
+also requires `-DPLANG_ENABLE_TESTS=ON` (the harness lives under
+`test/unittests/`); configure fails immediately with a clear error under
+either a non-Clang compiler or `PLANG_ENABLE_TESTS` left off, rather than
+silently building `plang_runtime_sanitized` with nothing ever linking it:
+
+```bash
+cmake -S . -B build-runtime-sanitizer -G Ninja -DCMAKE_BUILD_TYPE=Debug \
+  -DPLANG_ENABLE_TESTS=ON -DPLANG_ENABLE_RUNTIME_SANITIZER_TESTS=ON \
+  -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
+cmake --build build-runtime-sanitizer -j$(getconf _NPROCESSORS_ONLN) \
+  --target runtime_sanitized_test
+ctest --test-dir build-runtime-sanitizer -R '^RuntimeSanitized' --output-on-failure
+```
+
+The `-R '^RuntimeSanitized'` filter matters: turning `PLANG_ENABLE_TESTS=ON`
+on registers every other GTest/lit target with ctest too, even though the
+`--target runtime_sanitized_test` build above never built any of them —
+every `TEST()` under `test/unittests/RuntimeSanitized/` names its suite with
+that prefix specifically so this filter can select just them.
+
+CI (`runtime-sanitizer-tests` in `.github/workflows/ci.yml`) builds and runs
+this harness on every PR — proper unit-test-style coverage over a fixed,
+finite set of adversarial call sequences, not open-ended fuzzing, so (unlike
+`fuzz-smoke`'s deliberately bounded per-PR budget) there is no cost/coverage
+tradeoff to defer to a periodic/scheduled job for.
