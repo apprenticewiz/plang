@@ -1,0 +1,220 @@
+name: Scheduled Valgrind memcheck
+
+# issue #190 part B option 3 ("Valgrind, cheapest of the three, zero new
+# build config -- a periodic memcheck pass over already-built binaries from
+# the normal build job"). Complements, rather than duplicates, the other two
+# pieces of part B:
+#   - part B option 1 (`runtime-sanitizer-tests` in ci.yml) links an
+#     ASan/UBSan-INSTRUMENTED plang_runtime_sanitized against a dedicated
+#     GTest harness calling the runtime's C-ABI directly -- no driver, no
+#     compiled Pascal program, no lit.
+#   - This workflow does the opposite: a completely ORDINARY Debug build
+#     (no sanitizer flags, no separate build variant -- "zero new build
+#     config" is this option's whole reason for being cheapest of the
+#     three), with Valgrind's memcheck tool wrapping the EXECUTION of
+#     already-compiled Pascal test programs from the real lit suite, the
+#     same %run hook run-under-guardheap.sh already uses (see
+#     test/tools/run-under-valgrind.sh). Where guardheap is a black-box
+#     allocator that can only ever catch a write reaching all the way to a
+#     guard page, memcheck's own shadow memory catches a SMALL heap
+#     overflow, a use-after-free, a double-free, or an uninitialized-value
+#     read regardless of where in an allocation it lands -- confirmed for
+#     real against two standalone repro programs while wiring this in (see
+#     run-under-valgrind.sh's own header comment).
+#
+# Scheduled, not per-PR, for the same reason fuzz-scheduled.yml is: this
+# project's own re-triage comment on issue #190 explicitly named Valgrind
+# "cheapest of the three" but still recommended scheduled/periodic over
+# per-PR given how many job executions a push to this repo already triggers.
+# Unlike fuzzing, a Valgrind pass over a small, bounded set of programs is
+# NOT inherently open-ended (it does not fuzz -- it deterministically re-runs
+# a fixed test corpus once), so this is closer in spirit to
+# `runtime-sanitizer-tests` (a fixed, finite check) than to
+# `fuzz-scheduled.yml` (an open-ended budget) -- confirmed empirically while
+# wiring this in that the whole memcheck-wrapped subset below runs in well
+# under 20 seconds, comfortably inside the SAME per-PR budget the other
+# CI.yml jobs already spend on LLVM install alone. It stays scheduled anyway,
+# on the same "distinct CI surface for a P3-adjacent hardening feature
+# shouldn't ride on every PR's required-checks path" reasoning
+# fuzz-scheduled.yml's own header comment gives, and because a definite Xn
+# finding here still needs a human to triage the log rather than
+# auto-blocking a merge.
+
+on:
+  schedule:
+    # Nightly. 05:19 UTC: deliberately off the top/half/quarter-hour (see
+    # fuzz-scheduled.yml's own comment on why) AND offset from that
+    # workflow's own 04:37 UTC slot, so the two scheduled jobs do not queue-
+    # contend for runners against each other either.
+    - cron: '19 5 * * *'
+  workflow_dispatch: {}
+
+# Global (not per-ref) group, same reasoning as fuzz-scheduled.yml: this
+# workflow only ever runs on a schedule or by manual dispatch, never
+# per-branch/per-PR, so one run at a time overall is the right scope.
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  LLVM_VERSION: '22'
+
+jobs:
+  valgrind-scheduled:
+    name: valgrind memcheck (Turbo + Acceptance + guardheap's own filtered subset)
+    runs-on: ubuntu-latest
+    # Same LLVM-install-and-build cost as the `optimized`/`sanitizers`/
+    # `runtime-sanitizer-tests` jobs in ci.yml (this job's own Configure/Build
+    # steps are copied from theirs almost verbatim) -- the memcheck-wrapped
+    # lit run itself is under 20s (see the header comment above), so this
+    # budget is nearly all LLVM install + full project build, exactly like
+    # its siblings.
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install LLVM and lld
+        run: |
+          sudo apt-get update
+          wget -qO llvm.sh https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh "$LLVM_VERSION"
+          sudo apt-get install -y \
+            "llvm-$LLVM_VERSION" \
+            "llvm-$LLVM_VERSION-dev" \
+            "lld-$LLVM_VERSION"
+
+      - name: Put llc and ld.lld on PATH under their unversioned names
+        run: |
+          sudo ln -sf "/usr/bin/llc-$LLVM_VERSION"    /usr/local/bin/llc
+          sudo ln -sf "/usr/bin/ld.lld-$LLVM_VERSION" /usr/local/bin/ld.lld
+
+      - name: Install build dependencies
+        # valgrind alongside the usual ninja-build/libgtest-dev: apt.llvm.org
+        # does not carry it (it is not an LLVM component at all), but it is a
+        # plain, ordinary Ubuntu archive package -- no PPA, no special repo,
+        # exactly the "zero new build config" this option is named for.
+        run: sudo apt-get install -y ninja-build libgtest-dev valgrind
+
+      - name: Install lit
+        # Same fix as ci.yml's own "Install lit" step and for the identical
+        # reason: this job invokes `lit` directly from a bare shell below,
+        # which needs it resolved onto PATH for real (apt.llvm.org's package
+        # does not put it there).
+        run: |
+          pip3 install --user --break-system-packages lit psutil
+          echo "$(python3 -m site --user-base)/bin" >> "$GITHUB_PATH"
+
+      - name: Configure
+        # Plain Debug, Clang pinned (matching `sanitizers`/
+        # `runtime-sanitizer-tests`/`fuzz-smoke`'s own Debug+Clang
+        # convention) -- deliberately NOT `-DPLANG_SANITIZE=...` or any other
+        # special flag. The whole point of this option (see the top-of-file
+        # comment) is that the binaries under test here are no different from
+        # an ordinary developer's own `cmake --build`.
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DPLANG_ENABLE_TESTS=ON \
+            -DCMAKE_C_COMPILER=clang-$LLVM_VERSION \
+            -DCMAKE_CXX_COMPILER=clang++-$LLVM_VERSION \
+            -DLLVM_DIR="/usr/lib/llvm-$LLVM_VERSION/lib/cmake/llvm"
+
+      - name: Build
+        run: cmake --build build -j"$(nproc)"
+
+      # Same reasoning as run-under-guardheap.sh's own --self-test, invoked
+      # the same way by ci.yml's guardheap step right before its own lit
+      # runs: a memory-safety gate that always reports "clean" is
+      # indistinguishable from one that is simply broken, so this checks it
+      # can both stay silent on a valid program AND catch a real corruption
+      # bug before trusting its exit code across the real suite below.
+      - name: Valgrind gate self-test
+        run: bash test/tools/run-under-valgrind.sh --self-test
+
+      # Scope (issue #190 part B option 3's own "explicit, bounded scope, not
+      # 'run Valgrind over everything'" requirement): the IDENTICAL two
+      # category/filter selections ci.yml's guardheap steps already use --
+      # not a new selection invented for this job. Reusing guardheap's own
+      # already-reviewed, already-justified scope means this job checks the
+      # SAME programs for a DIFFERENT, complementary bug class (heap
+      # corruption invisible to a guard-page allocator: use-after-free,
+      # double-free, uninitialized-value reads, and small overflows that
+      # never reach a guard page) rather than inventing a second scope with
+      # its own cost/coverage story to justify from scratch. Confirmed
+      # empirically while wiring this in: both selections combined (roughly
+      # 550 matched test files, of which the ones with a `%run %t` RUN line
+      # actually execute a compiled binary under Valgrind) run in well under
+      # 20 seconds total even serialized, given real per-test overhead is
+      # tiny for this suite's small emitted programs.
+      #
+      # `set -o pipefail` matters here: without it, `tee`'s own always-zero
+      # exit code would hide a failing `lit` behind the pipeline's exit
+      # status, and the job would report green on a real Valgrind finding.
+      - name: Test schema/variant/pointer/string subset + Turbo + Acceptance under Valgrind (lit)
+        id: run-valgrind
+        run: |
+          set -o pipefail
+          cd build/test
+          lit -sv --skip-test-time-recording --timeout 300 \
+            --filter='Schema|VariantRecord|VariantPart|ConformantArray|Shadowing|Storage|String|Substr|Pointer' \
+            CodeGen EP Module Driver 2>&1 | tee "$GITHUB_WORKSPACE/valgrind-lit-output.log"
+          lit -sv --skip-test-time-recording --timeout 300 \
+            Turbo Acceptance 2>&1 | tee -a "$GITHUB_WORKSPACE/valgrind-lit-output.log"
+        env:
+          PLANG_TEST_RUN_WRAPPER: "bash ${{ github.workspace }}/test/tools/run-under-valgrind.sh"
+
+      - name: Upload lit output for local reproduction
+        if: failure() && steps.run-valgrind.outcome == 'failure'
+        uses: actions/upload-artifact@v7
+        with:
+          name: valgrind-lit-output-${{ github.run_id }}
+          path: valgrind-lit-output.log
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Print local-reproduction instructions
+        if: failure() && steps.run-valgrind.outcome == 'failure'
+        run: |
+          cat <<'EOF'
+          ============================================================
+          A scheduled Valgrind memcheck run found a real memory-safety
+          finding (an invalid read/write, use-after-free, double-free, or
+          uninitialized-value use -- plain leaks are deliberately excluded,
+          see test/tools/run-under-valgrind.sh's own header comment).
+
+          To reproduce and debug locally:
+            1. Download this run's "valgrind-lit-output-<run id>" artifact
+               from the GitHub Actions run summary page (Artifacts section),
+               or scroll up in this job's own log -- it is the exact same
+               `lit -sv` output, including the full Valgrind report (which
+               test file, which RUN line, and memcheck's own stack trace
+               through the plang runtime).
+            2. Build plang locally exactly as this job does (Clang, Debug):
+                 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug \
+                   -DPLANG_ENABLE_TESTS=ON \
+                   -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
+                 cmake --build build -j$(nproc)
+            3. Re-run the same lit invocation this job used, narrowed with
+               --filter to the one failing test if you already know which
+               one from step 1 (substitute its real name):
+                 cd build/test
+                 PLANG_TEST_RUN_WRAPPER="bash $PWD/../../test/tools/run-under-valgrind.sh" \
+                   lit -sv --filter='<failing-test-name>' Turbo Acceptance CodeGen EP Module Driver
+               This reproduces the exact compile-then-run-under-Valgrind
+               sequence lit itself performed, safe to iterate on locally.
+            4. Once root-caused and fixed, re-run
+               `bash test/tools/run-under-valgrind.sh --self-test` to
+               confirm the gate itself is still sound, then the lit
+               invocation from step 3 to confirm the specific finding is
+               gone.
+
+          See docs/technical_info.md's "Valgrind memcheck (scheduled)"
+          section for the full background (why this scope, why leaks are
+          excluded, why -q/--show-leak-kinds=none are both load-bearing).
+          ============================================================
+          EOF

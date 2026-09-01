@@ -629,3 +629,210 @@ this harness on every PR — proper unit-test-style coverage over a fixed,
 finite set of adversarial call sequences, not open-ended fuzzing, so (unlike
 `fuzz-smoke`'s deliberately bounded per-PR budget) there is no cost/coverage
 tradeoff to defer to a periodic/scheduled job for.
+
+### Valgrind memcheck (scheduled) (issue #190 part B option 3)
+
+The `sanitizers` CI job instruments the compiler's own C++ code; the runtime
+sanitizer exerciser just above instruments `plang_runtime` in isolation
+through a dedicated GTest harness; guardheap (`test/tools/guardheap.c`, see
+`ci.yml`'s own guardheap steps) is a black-box guard-page allocator wrapped
+around *compiled* Pascal programs, but it can only ever catch a write that
+walks all the way off the end of an allocation and lands on the guard page —
+nothing in this tree, before this workflow, could see a use-after-free, a
+double-free, an uninitialized-value read, or a SMALL heap overflow that never
+reaches a guard page, in an actual *compiled and running* Pascal program.
+Confirmed for real while wiring this in: a program that dereferences a
+pointer immediately after `Dispose`-ing it prints the ORIGINAL value and
+exits 0 on a plain run (the freed byte is still readable — the exact "silent
+corruption" shape that motivated guardheap in the first place), while
+Valgrind's memcheck tool flags it as an invalid read with a full stack trace
+through `plang_dispose`/`plang_new` in `runtime/plang_sys.cpp`. The same
+holds for a 1-byte overflow one byte past a small allocation — memcheck's own
+per-allocation redzones catch it with no guard page involved at all.
+
+`test/tools/run-under-valgrind.sh` hooks in through `%run`, `test/lit.cfg.py`'s
+own substitution for the `PLANG_TEST_RUN_WRAPPER` environment variable —
+a no-op by default, and the same mechanism `run-under-guardheap.sh` already
+uses for the guardheap steps in `ci.yml`. Any RUN line spelled `%run %t`
+(rather than a bare `%t`) runs its just-built program through whatever
+`PLANG_TEST_RUN_WRAPPER` names, wrapping a compiled test program's execution
+in:
+
+```
+valgrind -q --error-exitcode=1 --leak-check=full \
+  --show-leak-kinds=none --errors-for-leak-kinds=none --log-file=<tmp> <program> [args...]
+```
+
+**`--error-exitcode=1` alone is not enough**, and shipping it without the
+`--log-file` scan described below was a real, since-fixed gap (found by
+adversarial review of the PR that introduced this workflow, before it
+merged): `--error-exitcode=1` only overrides the wrapped program's own exit
+code, and a large, high-value slice of this suite's own RUN lines —
+`RUN: not %run %t ... | FileCheck ...`, the idiom every test of plang's own
+runtime-error/trap behavior uses (concentrated in `EP7Schema`,
+`Module/Schema`, `EP6ConformantArray`, `StringCapacity`/`StringIndex`,
+`Substr`/`Substring`, and `Storage` — precisely the schema/pointer/
+allocation-heavy paths this workflow exists to check) — already expects and
+inverts a nonzero exit via `not`. Confirmed for real: a synthetic program
+combining a genuine use-after-free with a legitimate `return 201;`-style
+trap and its own expected stderr text passed its `not %run %t` RUN line and
+its stderr `FileCheck` match cleanly (the match still found its substring,
+merely buried in extra Valgrind noise), with Valgrind's own "Invalid read"
+finding completely invisible — `not` cannot tell "the program's own
+intentional nonzero trap" from "Valgrind forced a nonzero exit" apart, since
+both are just "nonzero" to it, and lit only ever prints a test's captured
+output when the test *fails*.
+
+The fix: `run-under-valgrind.sh` never relies on the wrapped program's own
+exit code to decide whether *Valgrind* found something. It always passes
+`--log-file=<tmp>` (a fresh, unique file per invocation), so Valgrind's own
+diagnostic output is captured completely independent of the wrapped
+program's own stdout/stderr — and, given the flag set above, that log file
+is empty unless Valgrind reported a real, non-leak error (`-q` suppresses
+the banner and, confirmed empirically, even the closing "ERROR SUMMARY"
+line; `--show-leak-kinds=none`/`--errors-for-leak-kinds=none` mean a leak
+alone never writes anything there either). After the wrapped program exits,
+the wrapper unconditionally checks that log file. If it is non-empty, the
+wrapper prints it (to its own stderr, so it lands wherever the RUN line's
+own redirection already sends it, and is visible in lit's captured output
+for the now-failing test) and kills *itself* with `SIGABRT`, regardless of
+whatever the wrapped program's own exit code was. A self-inflicted crash is
+the one outcome LLVM's `not` does **not** invert: `not` treats a crash as an
+unconditional failure regardless of its own negation, unless invoked with
+`not --crash` (which none of these RUN lines use) — confirmed empirically
+against the real `not` binary. lit's own internal shell (used for every RUN
+line here, `not`-negated or not) independently treats a signal-terminated
+command's exit status as a failure too, so the identical self-`SIGABRT`
+correctly fails a bare, non-`not` `%run %t` RUN line exactly as
+`--error-exitcode=1` alone already did. Net effect: a real Valgrind finding
+now fails the RUN line the same way regardless of which of the two RUN-line
+shapes wraps it, closing the gap above — the "`not %run %t`-style tests are
+equally protected" claim this section made before the fix is now backed by
+an end-to-end proof against the real `not` binary in
+`run-under-valgrind.sh --self-test` itself, not just asserted.
+
+Three more flags are load-bearing beyond `--error-exitcode=1`/`--log-file`,
+and each was chosen after a real false positive/negative found while wiring
+this in, not by inspection of the manual alone:
+
+- **`--errors-for-leak-kinds=none`**: this gate targets memory *corruption*
+  (invalid reads/writes, use-after-free, double-free, uninitialized-value
+  use), not leak hygiene. `--leak-check=full` is still on — matching this
+  project's own issue #190 triage comment, which named this exact invocation
+  — so memcheck still performs the leak search, but a leak alone never flips
+  the exit code. Found for real while wiring this in: the ISO 7185
+  acceptance program (`test/Acceptance/iso7185pat.pas`), a large,
+  carefully-constructed conformance test nobody has ever audited for
+  dispose-everything cleanliness, definitely-leaks 25 bytes in 4 blocks (filed
+  as issue #560, not fixed here). That is not a corruption bug, and auditing
+  decades-old acceptance-test hygiene for leak-freedom is a separate piece of
+  work from standing up this gate.
+- **`--show-leak-kinds=none`**: `--errors-for-leak-kinds=none` alone controls
+  what counts as an *error*, not what gets *printed* — `--leak-check=full`
+  still prints each individual "N bytes ... definitely lost in loss record
+  ..." block to stderr regardless. That broke a real, unrelated RUN line:
+  `Acceptance/iso7185pat.pas` itself asserts its wrapped program's stderr is
+  EMPTY on a passing run (`test ! -s %t.err`), true of the plain, unwrapped
+  program, and still broken by the leak-record printing above even once the
+  leak stopped counting as an *error*. `--show-leak-kinds=none` stops the
+  printing outright, restoring the empty-stderr contract.
+- **`-q`/`--quiet`**: valgrind's own startup banner goes to stderr on
+  *every* run, clean or not, independent of both flags above — the same
+  `test ! -s %t.err` RUN line fails on the banner alone even with zero
+  memcheck errors and zero leak output. `-q` suppresses it. With all three
+  together, a clean-of-corruption run (leaky or not) produces zero bytes of
+  stderr, matching the unwrapped program's own contract exactly, while an
+  actual corruption finding still prints in full (banner included) and still
+  sets the exit code.
+
+`run-under-valgrind.sh --self-test` checks all of this empirically before
+trusting the gate on the real suite, the same self-test discipline
+`run-under-guardheap.sh --self-test` already established: a valid program
+must stay silent AND exit 0, a 1-byte heap overflow and a use-after-free must
+both still be caught, a plain leak must exit 0 while ALSO staying silent
+(regression coverage for the exact `--show-leak-kinds`/`iso7185pat.pas`
+interaction above), a program with its own legitimate nonzero trap and NO
+memory bug must exit with that SAME code unchanged and stay silent, and —
+the regression coverage for the `not %run %t` gap described above — a
+program combining a genuine use-after-free with its own legitimate nonzero
+trap must still be caught (reported via the self-`SIGABRT`, not silently
+absorbed by the trap's own exit code). Each of these is invoked as a fresh
+subprocess of the real script, exactly how lit's own `%run` substitution
+invokes it, rather than calling the wrapper's internal shell function
+in-process — self-`SIGABRT` is only safe to test from a separate child.
+When the real `not` binary is resolvable on `PATH`, the self-test also
+proves the exact end-to-end scenario above against it directly: `not
+run-under-valgrind.sh` on the use-after-free+trap program must report
+FAILURE, and on the trap-only program must still report PASS.
+
+**Scope** (this option's own "explicit, bounded scope, not 'run Valgrind
+over everything'" framing from the issue #190 re-triage comment):
+`valgrind-scheduled.yml` runs this wrapper over the IDENTICAL two
+category/filter selections `ci.yml`'s guardheap steps already use — the
+`Schema|VariantRecord|VariantPart|ConformantArray|Shadowing|Storage|String|
+Substr|Pointer` filter over `CodeGen`/`EP`/`Module`/`Driver`, plus all of
+`Turbo`/`Acceptance` unfiltered — rather than inventing a new selection with
+its own cost/coverage story to justify from scratch. This means the SAME
+programs get checked for a DIFFERENT, complementary bug class than
+guardheap's per-PR pass already covers. Confirmed empirically: roughly 550
+matched test files (of which the ones with a `%run %t` RUN line actually
+execute a compiled binary under Valgrind) run in well under 20 seconds total,
+even serialized — cheap enough that the job's real cost is almost entirely
+the same LLVM-install-and-build overhead every other scheduled/CI job in this
+project already pays, not the memcheck pass itself.
+
+**"Zero new build config"** (this option's own name for itself in the issue
+#190 triage comment) means exactly that: `valgrind-scheduled.yml` configures
+a completely ordinary `-DCMAKE_BUILD_TYPE=Debug` build with Clang pinned
+(matching `sanitizers`/`runtime-sanitizer-tests`/`fuzz-smoke`'s own
+Debug+Clang convention) — no `-DPLANG_SANITIZE`, no `-DPLANG_ENABLE_FUZZERS`,
+no separate build variant. The binaries Valgrind wraps here are exactly the
+kind an ordinary `cmake --build` produces.
+
+**Scheduled, not per-PR**, for the same reason `fuzz-scheduled.yml` is (see
+its own header comment): this project's own re-triage comment on issue #190
+explicitly named Valgrind "cheapest of the three" but still recommended
+scheduled/periodic over per-PR, given how many job executions a push to this
+repo already triggers. Nightly at 05:19 UTC (`fuzz-scheduled.yml`'s own
+04:37 UTC slot, offset so the two scheduled jobs do not queue-contend against
+each other), plus `workflow_dispatch` for an on-demand run. On a real
+finding, the job fails visibly, uploads the full `lit -sv` output (including
+Valgrind's own stack trace) as a `valgrind-lit-output-<run id>` build
+artifact, and prints a local-repro recipe in the job log — the same
+triage-transparency shape `fuzz-scheduled.yml` already established for issue
+#183 Phase 2.
+
+What was verified before this workflow was added, all against a real local
+build (Ubuntu 24.04 + the exact `apt.llvm.org` LLVM 22 packages CI installs,
+Valgrind from Ubuntu's own archive — this machine's own host OS did not have
+Valgrind packaged, so verification ran inside a container matching CI's own
+base image instead of being skipped): the self-test above; the full
+guardheap-matching scope run clean (0 failures) as an unprivileged user
+(matching real CI, not root — running as root inside a container was tried
+first and produced 2 unrelated false failures in `Turbo`'s own IOResult
+tests, both `chmod 000`-permission probes that root silently bypasses,
+confirmed by reproducing the identical two failures with NO wrapper involved
+at all); a deliberately-injected use-after-free in a scratch (never
+committed) lit test file, run through the exact `tee`+`pipefail` pipeline the
+workflow itself uses, correctly failed the pipeline and produced a log
+containing Valgrind's full report; and `actionlint` reports zero findings on
+the workflow YAML. What could **not** be verified locally: a real
+`schedule:` trigger only fires on GitHub's own scheduler, and
+`actions/upload-artifact` is real GitHub-hosted storage, neither reproducible
+in a one-off local run — the same honest limitation `fuzz-scheduled.yml`'s
+own verification already carried.
+
+What was additionally verified for the `--log-file`/self-`SIGABRT` fix
+above (same real local build): the reviewer's own synthetic use-after-free +
+`return 201;`-trap program, run through the *pre-fix* wrapper under the real
+`not` binary with a `FileCheck` of stderr, reproduced the gap exactly as
+described — `not` reported PASS, `FileCheck` still matched — before this fix
+existed; the identical scenario against the *post-fix* wrapper now correctly
+reports FAILURE via `not`, with Valgrind's own finding printed in the
+captured output; a plain `%run %t` (no `not`) program with a genuine
+use-after-free and no trap still fails, unchanged; a `not %run %t` program
+with a legitimate trap and no memory bug still passes, with stderr containing
+only the program's own text and no Valgrind noise; and a clean, bug-free
+program under a bare `%run %t` still passes silently. All four are now
+permanent `run-under-valgrind.sh --self-test` cases, not just one-off manual
+checks.
