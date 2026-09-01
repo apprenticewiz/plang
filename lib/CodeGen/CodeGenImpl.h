@@ -1670,15 +1670,48 @@ struct Codegen::Impl {
     /// VMT (e.g. TDog's own VMT, built while compiling a program that only
     /// 'uses' the unit TDog was declared in, still needs a slot for
     /// TAnimal's own Speak when TDog does not override it, and TAnimal was
-    /// compiled as a wholly separate .o).  Every translation unit that needs
-    /// a concrete type's VMT at all builds its OWN full copy of it (this
-    /// memo is per-Impl, i.e. per translation unit) -- deliberately not
-    /// shared or exported: the array itself stays InternalLinkage exactly as
-    /// it always has, and correctness across the unit boundary rests
-    /// entirely on every slot's FUNCTION POINTER resolving to the real,
-    /// correctly-mangled external symbol (mangledMethod's own
-    /// declaringModule parameter) -- declareImportedMethod's own comment.
+    /// compiled as a wholly separate .o).  Every slot's own FUNCTION POINTER
+    /// resolves to the real, correctly-mangled external symbol
+    /// (mangledMethod's own declaringModule parameter) regardless of which
+    /// translation unit's own body actually implements it --
+    /// declareImportedMethod's own comment.
+    ///
+    /// Issue #619: the ARRAY ITSELF -- unlike each individual slot's own
+    /// function pointer -- is a real, single, ExternalLinkage global, DEFINED
+    /// (with a real initializer) by exactly the one translation unit that
+    /// compiles T's own DeclaringModule, and merely DECLARED (external, no
+    /// initializer) by every other one that only USES T.  Every translation
+    /// unit that needs a concrete type's VMT still gets its own memo entry
+    /// (this memo is per-Impl, i.e. per translation unit) -- but that entry
+    /// is a shared reference to ONE symbol, not each TU's own private copy:
+    /// this codebase's old behavior (every TU builds and DEFINES its own
+    /// full copy, InternalLinkage) left dispatch correct -- every copy was
+    /// content-identical -- but broke `TypeOf(p^) = TypeOf(T)`, the
+    /// canonical TP7 type-identity idiom, for an object type used from a
+    /// different translation unit than the one that declared it (each TU's
+    /// own local symbol is a different address).
     llvm::GlobalVariable* getOrCreateVmt(const Type& T);
+    /// Issue #619: for every object type DECLARED directly in \p block
+    /// (block.Types, not walked transitively into anything it references),
+    /// calls getOrCreateVmt unconditionally -- a no-op for a type this
+    /// block does NOT itself declare (T.DeclaringModule != currentUnit_;
+    /// getOrCreateVmt's own ownership check makes that call a mere
+    /// reference, never a redefinition) or one with no virtual method
+    /// anywhere in its own hierarchy (T.VmtSlots.empty()), but for a type
+    /// this block DOES declare, this is what makes its real, single,
+    /// external VMT DEFINITION exist at all: without it, a unit that only
+    /// EXPORTS an object type for other translation units to use -- never
+    /// itself instantiating or referencing one, which is completely legal
+    /// -- would never call getOrCreateVmt for it on its own, leaving every
+    /// OTHER translation unit's own external reference undefined at link
+    /// time.  Called once per block that can declare an object type,
+    /// AFTER every LOCAL method that block's own object types could need a
+    /// VMT slot for is already at least declared (emitAllProcedures's own
+    /// method pre-pass) -- calling this any earlier would make
+    /// getOrCreateVmt's own slot-filling loop mistake a method this exact
+    /// compile is ABOUT to define for one only a separately-compiled
+    /// translation unit could ever supply.
+    void ensureOwnedVmtsDefined(const BlockNode& block);
     /// Turbo Tier 5, Cluster B item 8: an external declaration (never a
     /// definition) for a method this translation unit did not itself
     /// compile, under \p mangledName (already computed by the caller, from
@@ -1707,6 +1740,32 @@ struct Codegen::Impl {
     /// wrong guess for whenever that changes.
     llvm::Function* declareImportedMethod(const Type::Method& M,
                                           const std::string& mangledName);
+    /// Issue #682: CGFuncCall::emitInheritedCallExpr/CGProcCall::
+    /// emitInheritedCallStmt's own "explicit 'inherited Method(args)', and
+    /// the ancestor lives in a translation unit this compile has not
+    /// declared it in yet" fallback.  Delegates the declaration itself to
+    /// declareImportedMethod (same M, so byte-for-byte the same shape an
+    /// ordinary cross-unit method call already declares its own foreign
+    /// callee with), then ADDITIONALLY registers paramMeta_ for
+    /// mangledName from M.Params -- the same byRef/setBase formula
+    /// emitFunctionDef's own plain-parameter branch computes for a
+    /// LOCALLY compiled method (CodeGenProcs.cpp), just read from M.Params
+    /// directly since there is no ParamGroup AST here.  declareImportedMethod
+    /// alone was never enough for 'inherited' specifically (unlike an
+    /// ordinary method call, which only ever DECLARES a foreign callee and
+    /// leaves marshalling its OWN arguments to a separate call a moment
+    /// later reusing this same paramMeta_): a `var`/const-by-reference
+    /// parameter's correctness happens to fall out of the declaration's
+    /// own LLVM shape alone (StringCallMarshalling::emitCallArg takes an
+    /// address whenever the destination type is `ptr`, independent of
+    /// ParamIsByRef) -- but a SET parameter's own rebasing
+    /// (SetOps::alignSetArg) has no such fallback and needs a real
+    /// ParamSetBaseOf answer, which only a paramMeta_ entry can give.
+    /// Without this, a set actual crossing an 'inherited' call to a
+    /// different translation unit arrived with the wrong bits whenever its
+    /// own declared base differed from the ancestor formal's.
+    llvm::Function* declareForeignInheritedCallee(const Type::Method& M,
+                                                  const std::string& mangledName);
     /// Turbo Tier 5, Cluster A item 7: an 'abstract' virtual method
     /// (Type::Method::IsAbstract) has no body by construction
     /// (err_object_abstract_method_has_body) and so is never among

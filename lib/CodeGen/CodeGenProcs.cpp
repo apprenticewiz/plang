@@ -1811,6 +1811,35 @@ llvm::GlobalVariable* Codegen::Impl::getOrCreateVmt(const Type& T) {
     if (T.Kind != TypeKind::Object || T.VmtSlots.empty()) return nullptr;
     if (auto it = vmtGlobals_.find(&T); it != vmtGlobals_.end()) return it->second;
 
+    const std::string symName = mangledVmt(T.Name, T.DeclaringModule);
+
+    // Issue #619: exactly ONE translation unit -- the one that actually
+    // compiles T's own DECLARING module -- may DEFINE this VMT; every other
+    // translation unit that merely USES T (an object type reached only
+    // through a re-parsed .tui, the same Cluster B item 8 situation this
+    // function's own slot-filling loop below already handles per SLOT) must
+    // reference the SAME external symbol instead of materializing its own
+    // private copy.  Emitting a full, separately-initialized copy in every
+    // TU that needs one (this function's old behavior, InternalLinkage)
+    // left dispatch working -- every copy is content-identical -- but broke
+    // the canonical TP7 type-identity idiom (`TypeOf(p^) = TypeOf(T)`):
+    // each TU's own local symbol is a DIFFERENT address, so the comparison
+    // silently answers false for objects of the same declared type merely
+    // because the type is used from a different translation unit than the
+    // one that declared it (confirmed via `nm`: a LOCAL 'd' pas_vmt$ symbol
+    // in every object that references it, never one true external
+    // definition).  eqCI, not `==`: Pascal module names are case-
+    // insensitive, and currentUnit_/DeclaringModule are not guaranteed to
+    // already agree on case at every call site.
+    if (!eqCI(T.DeclaringModule, currentUnit_)) {
+        auto* arrTy = llvm::ArrayType::get(ptrTy, T.VmtSlots.size());
+        auto* gv = new llvm::GlobalVariable(
+            *mod, arrTy, /*isConstant=*/true, llvm::GlobalValue::ExternalLinkage,
+            /*Initializer=*/nullptr, symName);
+        vmtGlobals_[&T] = gv;
+        return gv;
+    }
+
     std::vector<llvm::Constant*> elems;
     elems.reserve(T.VmtSlots.size());
     for (const auto& slot : T.VmtSlots) {
@@ -1841,10 +1870,19 @@ llvm::GlobalVariable* Codegen::Impl::getOrCreateVmt(const Type& T) {
     auto* arrTy = llvm::ArrayType::get(ptrTy, elems.size());
     auto* init  = llvm::ConstantArray::get(arrTy, elems);
     auto* gv = new llvm::GlobalVariable(
-        *mod, arrTy, /*isConstant=*/true, llvm::GlobalValue::InternalLinkage,
-        init, mangledVmt(T.Name, T.DeclaringModule));
+        *mod, arrTy, /*isConstant=*/true, llvm::GlobalValue::ExternalLinkage,
+        init, symName);
     vmtGlobals_[&T] = gv;
     return gv;
+}
+
+// Issue #619: see this function's own declaration (CodeGenImpl.h) for the
+// whole design.
+void Codegen::Impl::ensureOwnedVmtsDefined(const BlockNode& block) {
+    for (const auto& td : block.Types)
+        if (td.Type && td.Type->ResolvedType
+                && td.Type->ResolvedType->Kind == TypeKind::Object)
+            getOrCreateVmt(*td.Type->ResolvedType);
 }
 
 // Turbo Tier 5, Cluster B item 8: see this function's own declaration
@@ -1882,6 +1920,29 @@ llvm::Function* Codegen::Impl::declareImportedMethod(const Type::Method& M,
     auto* fnTy = llvm::FunctionType::get(retTy, paramTys, /*isVarArg=*/false);
     return llvm::Function::Create(fnTy, llvm::GlobalValue::ExternalLinkage,
                                   mangledName, mod.get());
+}
+
+// Issue #682: see this function's own declaration (CodeGenImpl.h) for the
+// whole design.
+llvm::Function* Codegen::Impl::declareForeignInheritedCallee(
+        const Type::Method& M, const std::string& mangledName) {
+    llvm::Function* fn = declareImportedMethod(M, mangledName);
+    if (paramMeta_.count(mangledName)) return fn;
+    std::vector<ParamMeta> meta;
+    meta.reserve(M.Params.size());
+    for (const auto& P : M.Params) {
+        if (P.IsUntyped) { meta.push_back(ParamMeta{ .byRef = true }); continue; }
+        // declareImportedMethod (just above) already codegenICE'd on a
+        // conformant-array/procedural-type parameter or a null Ty, so by
+        // construction P.Ty is a real, resolved, non-conformant type here.
+        const bool constByRef = P.IsConst && !P.Ty->isError()
+            && isStructuredForConstByRef(*P.Ty);
+        const bool passByRef = P.IsVar || constByRef;
+        const int64_t sb = (P.Ty->Kind == TypeKind::Set) ? setOffsetOf(*P.Ty) : 0;
+        meta.push_back(ParamMeta{ .setBase = sb, .byRef = passByRef });
+    }
+    paramMeta_[mangledName] = std::move(meta);
+    return fn;
 }
 
 // Turbo Tier 5, Cluster A item 5: see this function's own declaration

@@ -2725,7 +2725,8 @@ std::shared_ptr<Type> Sema::checkInheritedCall(
         const std::string& Method, SourceLocation Loc,
         std::span<const std::unique_ptr<ExprNode>> Args, bool ExpectFunction,
         std::string& ResolvedMethod, std::string& ImplementingType,
-        std::string& ImplementingModule) {
+        std::string& ImplementingModule,
+        std::shared_ptr<Type>& ImplementingOwnerType) {
     if (!CurrentProc || CurrentProc->OwnerType.empty()
             || !CurrentProc->ResolvedOwnerType) {
         error(Loc, diag::err_inherited_outside_method, {});
@@ -2751,11 +2752,18 @@ std::shared_ptr<Type> Sema::checkInheritedCall(
     // Same ancestor-chain walk checkMethodCall itself uses (composite-key
     // lookup, resolveObjectType's own registration), just starting one level
     // up: Parent, never OwnerTy itself, so a method can never 'inherited'
-    // its own body.
+    // its own body.  Walked through the shared_ptr chain itself (not just
+    // raw Type* observation, as before issue #682) so Owner -- the exact
+    // Type object MethodSym was found on -- can be retained and handed back
+    // through \p ImplementingOwnerType: CodeGen needs the real, resolved
+    // ancestor Type::Method (Params with their own IsVar/set-base shape),
+    // not just its name, once the ancestor's own out-of-line body may live
+    // in a translation unit this compile never sees.
     const Symbol* MethodSym = nullptr;
-    for (const Type* Cur = OwnerTy.Parent.get(); Cur; Cur = Cur->Parent.get()) {
+    std::shared_ptr<Type> Owner;
+    for (std::shared_ptr<Type> Cur = OwnerTy.Parent; Cur; Cur = Cur->Parent) {
         Symbol* Sy = Symtab.lookup(objectMethodKey(Cur->Name, MethodName));
-        if (Sy && Sy->Kind == SymbolKind::Method) { MethodSym = Sy; break; }
+        if (Sy && Sy->Kind == SymbolKind::Method) { MethodSym = Sy; Owner = Cur; break; }
     }
     if (!MethodSym) {
         error(Loc, diag::err_inherited_method_not_found, {OwnerTy.Name, MethodName});
@@ -2769,9 +2777,10 @@ std::shared_ptr<Type> Sema::checkInheritedCall(
         error(Loc, diag::err_object_private_method,
               {MethodSym->MethodOwnerType, MethodName});
 
-    ResolvedMethod     = MethodName;
-    ImplementingType   = MethodSym->MethodOwnerType;
-    ImplementingModule = MethodSym->Module;
+    ResolvedMethod       = MethodName;
+    ImplementingType     = MethodSym->MethodOwnerType;
+    ImplementingModule   = MethodSym->Module;
+    ImplementingOwnerType = Owner;
 
     // Hand off to the SAME arity/argument-type checking an ordinary
     // procedure/function call gets, via a synthetic SymbolKind::Proc
@@ -2788,10 +2797,44 @@ std::shared_ptr<Type> Sema::checkInheritedCall(
     if (Method.empty()) {
         // Bare form: no argument list was ever written down to check arity
         // against -- Args is always empty for this form (see this
-        // function's own comment above), regardless of how many parameters
-        // Indirect really takes, so checkUserDefinedCall's ordinary arity
-        // check does not apply here and is skipped entirely, exactly like
-        // checkInheritedCallStmt always has.
+        // function's own comment above) -- CodeGen instead forwards THIS
+        // ACTIVATION'S OWN actual parameter values, by position, straight
+        // into MethodSym's own parameter list.  That is only well-typed
+        // when CurrentProc's own declared signature is IDENTICAL (arity,
+        // per-parameter var-ness/type) to MethodSym's: guaranteed already
+        // when CurrentProc is a true VIRTUAL OVERRIDE of MethodSym
+        // (resolveObjectType's own err_object_virtual_override_signature_
+        // mismatch, SemaType.cpp), but NOT when CurrentProc merely statically
+        // HIDES an inherited method of the same name (legal here, and common
+        // for the "same-named constructor at every level" idiom), or shares
+        // a name with an unrelated, independently-declared virtual method
+        // several levels up.  Issue #616: unchecked, a differing signature
+        // (even same-arity, different-TYPE, as fpc -Mtp's own "Wrong number
+        // of parameters" experimentally confirms it rejects too) reaches
+        // CodeGen, which forwards the wrong-shaped LLVM value into the
+        // ancestor's own parameter slot -- an LLVM IR verifier failure, not
+        // a clean diagnostic.
+        const Symbol* OwnSym = Symtab.lookup(objectMethodKey(OwnerTy.Name, CurrentProc->Name));
+        bool SignatureOk = OwnSym != nullptr
+            && OwnSym->IsFunction == Indirect.IsFunction
+            && OwnSym->Params.size() == Indirect.Params.size();
+        for (size_t I = 0; SignatureOk && I < OwnSym->Params.size(); ++I) {
+            const auto& P = OwnSym->Params[I];
+            const auto& Q = Indirect.Params[I];
+            if (P.IsVar != Q.IsVar || P.IsUntyped != Q.IsUntyped) { SignatureOk = false; break; }
+            if (P.IsUntyped) continue;
+            if (!P.Ty || !Q.Ty || !sameParamType(P.Ty, Q.Ty)) SignatureOk = false;
+        }
+        if (SignatureOk && Indirect.IsFunction
+                && (!OwnSym->ReturnType || !Indirect.ReturnType
+                    || !isIdenticalType(OwnSym->ReturnType, Indirect.ReturnType)))
+            SignatureOk = false;
+        if (!SignatureOk) {
+            error(Loc, diag::err_inherited_bare_signature_mismatch,
+                  {OwnerTy.Name + "." + CurrentProc->Name, ImplementingType, MethodName});
+            return TyErr;
+        }
+
         if (!ExpectFunction)
             // Statement context: whatever this resolves to, its result (if
             // it even has one) is unused -- checkInheritedCallStmt's own
@@ -2817,7 +2860,8 @@ std::shared_ptr<Type> Sema::checkInheritedCall(
 
 std::shared_ptr<Type> Sema::checkInheritedCallExpr(const InheritedCallExpr& E) {
     return checkInheritedCall(E.Method, E.Loc, E.Args, /*ExpectFunction=*/true,
-                              E.ResolvedMethod, E.ImplementingType, E.ImplementingModule);
+                              E.ResolvedMethod, E.ImplementingType, E.ImplementingModule,
+                              E.ImplementingOwnerType);
 }
 
 /// The ordinal index type of \p T's outermost dimension, for an actual that

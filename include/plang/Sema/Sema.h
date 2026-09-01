@@ -1180,26 +1180,32 @@ private:
     /// \p Method empty -- CurrentProc's own name) exactly like
     /// checkMethodCall's own walk -- see InheritedCallStmt's own comment
     /// (AstStmt.h) for the whole design.  \p ResolvedMethod/
-    /// \p ImplementingType/\p ImplementingModule are OUT parameters because
-    /// InheritedCallStmt and InheritedCallExpr each carry their own copy of
-    /// these three fields (mirroring each other exactly) rather than a
-    /// shared base to write through.  \p ExpectFunction is forwarded to
-    /// checkUserDefinedCall for the explicit-name form unchanged: true from
-    /// checkInheritedCallExpr (a value is required), false from
-    /// checkInheritedCallStmt.  The BARE form (\p Method empty) never
-    /// reaches checkUserDefinedCall at all -- it has no actual argument list
-    /// of its own to hold against arity (CodeGen forwards this activation's
-    /// own parameters unchanged instead) -- so \p ExpectFunction is handled
-    /// directly for that form: statement context (false) leaves the result
-    /// unused exactly as checkInheritedCallStmt always has, expression
-    /// context (true) requires the resolved ancestor to really be a
-    /// function (err_proc_cannot_return_value otherwise, the same
-    /// diagnostic checkUserDefinedCall itself would give).
+    /// \p ImplementingType/\p ImplementingModule/\p ImplementingOwnerType are
+    /// OUT parameters because InheritedCallStmt and InheritedCallExpr each
+    /// carry their own copy of these four fields (mirroring each other
+    /// exactly) rather than a shared base to write through.
+    /// \p ImplementingOwnerType (issue #682) is the actual ancestor Type
+    /// object MethodSym was found on -- see InheritedCallStmt::
+    /// ImplementingOwnerType's own comment (AstStmt.h) for why CodeGen needs
+    /// the real Type object, not just its name.  \p ExpectFunction is
+    /// forwarded to checkUserDefinedCall for the explicit-name form
+    /// unchanged: true from checkInheritedCallExpr (a value is required),
+    /// false from checkInheritedCallStmt.  The BARE form (\p Method empty)
+    /// never reaches checkUserDefinedCall at all -- it has no actual
+    /// argument list of its own to hold against arity (CodeGen forwards
+    /// this activation's own parameters unchanged instead) -- so
+    /// \p ExpectFunction is handled directly for that form: statement
+    /// context (false) leaves the result unused exactly as
+    /// checkInheritedCallStmt always has, expression context (true)
+    /// requires the resolved ancestor to really be a function
+    /// (err_proc_cannot_return_value otherwise, the same diagnostic
+    /// checkUserDefinedCall itself would give).
     [[nodiscard]] std::shared_ptr<Type> checkInheritedCall(
         const std::string& Method, SourceLocation Loc,
         std::span<const std::unique_ptr<ExprNode>> Args, bool ExpectFunction,
         std::string& ResolvedMethod, std::string& ImplementingType,
-        std::string& ImplementingModule);
+        std::string& ImplementingModule,
+        std::shared_ptr<Type>& ImplementingOwnerType);
     /// SizeOf/High/Low's sole argument: either a TYPE NAME -- one of the
     /// five primitive keywords (parsed as a synthetic IdentExpr; see
     /// Parser::parseSizeHighLowArg) or an ordinary user-defined type name

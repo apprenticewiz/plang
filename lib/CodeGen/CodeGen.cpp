@@ -139,6 +139,12 @@ bool Codegen::emit(const ProgramNode& prog, std::ostream& os) {
                     break;
                 }
             PImpl->emitAllProcedures(*Mod->Body);
+            // Issue #619: see ensureOwnedVmtsDefined's own comment
+            // (CodeGenImpl.h) -- a no-op today (TypeKind::Object is Turbo-
+            // only, and an EP module is never compiled under -std=turbo),
+            // added for the same completeness every other block that can
+            // declare a type gets, should that ever change.
+            PImpl->ensureOwnedVmtsDefined(*Mod->Body);
         }
         // The lifecycle blocks read the module's own variables, so they are
         // emitted here, while its scope is still standing.  The finaliser goes
@@ -183,6 +189,13 @@ bool Codegen::emit(const ProgramNode& prog, std::ostream& os) {
     // buffer that goto returns to has to exist before the procedures do.
     PImpl->openLabelScope(*prog.Block, /*programBlock=*/true);
     PImpl->emitAllProcedures(*prog.Block);
+    // Issue #619: see ensureOwnedVmtsDefined's own comment (CodeGenImpl.h)
+    // -- an object type declared directly by the program itself (not by
+    // any unit) is always self-contained within this one translation unit,
+    // so this is a belt-and-suspenders completeness match for the same
+    // call every unit/module block gets, not a fix for any observed
+    // cross-TU gap here.
+    PImpl->ensureOwnedVmtsDefined(*prog.Block);
 
     // For module-only compilation units (no program body), skip emitting
     // main() so the object file can be linked with a separate program object.
@@ -273,6 +286,17 @@ bool Codegen::emitUnit(const UnitNode& Unit, std::ostream& os) {
             PImpl->emitFunctionDef(*Proc, /*declareOnly=*/true);
     if (Unit.ImplementationBlock)
         PImpl->emitAllProcedures(*Unit.ImplementationBlock);
+
+    // Issue #619: every object type this UNIT declares (interface or
+    // implementation section alike -- see ensureOwnedVmtsDefined's own
+    // comment, CodeGenImpl.h) must get its real VMT definition from THIS
+    // compile, regardless of whether this unit's own code happens to
+    // instantiate or reference one itself.  After both emitAllProcedures
+    // calls just above (and the interface heading pre-pass before them),
+    // so every LOCAL method a slot could need is already at least
+    // declared.
+    if (Unit.InterfaceBlock)      PImpl->ensureOwnedVmtsDefined(*Unit.InterfaceBlock);
+    if (Unit.ImplementationBlock) PImpl->ensureOwnedVmtsDefined(*Unit.ImplementationBlock);
 
     PImpl->emitUnitInitFn(Unit);
 

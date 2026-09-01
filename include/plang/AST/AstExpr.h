@@ -378,10 +378,14 @@ struct InheritedCallExpr : ExprNode {
 
     /// Sema::checkInheritedCall's resolution, consumed by
     /// CGFuncCall::emitInheritedCallExpr -- mirrors InheritedCallStmt's own
-    /// three fields of the same names exactly; see their comments there.
+    /// four fields of the same names exactly; see their comments there.
     mutable std::string ResolvedMethod;
     mutable std::string ImplementingType;
     mutable std::string ImplementingModule;
+    /// Turbo Tier 5 issue #682: see InheritedCallStmt::ImplementingOwnerType's
+    /// own comment (AstStmt.h) -- identical purpose and lifetime, just for
+    /// the expression form.
+    mutable std::shared_ptr<Type> ImplementingOwnerType;
 };
 
 } // namespace plang

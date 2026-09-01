@@ -30,7 +30,7 @@
 #include "StringCallMarshalling.h"
 #include "StringRuntime.h"
 
-namespace llvm { class BasicBlock; class Module; class Value; }
+namespace llvm { class BasicBlock; class Module; class Value; class Function; }
 namespace plang {
 struct CallStmt; struct ExprNode; struct TypeNode;
 struct ProcedureTypeNode; struct MethodCallStmt; struct InheritedCallStmt;
@@ -71,7 +71,9 @@ public:
                    std::span<const std::unique_ptr<plang::ExprNode>>,
                    plang::SourceLocation)> EmitBuiltinFuncCall,
                std::function<void(llvm::Value*, const plang::Type&)> StampVptr,
-               std::function<void(llvm::Value*, const plang::Type&)> StampFieldVptrs)
+               std::function<void(llvm::Value*, const plang::Type&)> StampFieldVptrs,
+               std::function<llvm::Function*(const plang::Type::Method&,
+                                             const std::string&)> DeclareForeignInheritedCallee)
         : Ctx(Ctx), Mod(Mod), B(B), FileVars(FileVars), RtFns(RtFns),
           Builtins(Builtins), ClosureAbi(ClosureAbi), Schema(Schema), Types(Types),
           SymTab(SymTab), Linkage(Linkage), Sets(Sets), StrCall(StrCall),
@@ -96,7 +98,8 @@ public:
           CurCtorOkAlloca(std::move(CurCtorOkAlloca)),
           EmitBuiltinFuncCall(std::move(EmitBuiltinFuncCall)),
           StampVptr(std::move(StampVptr)),
-          StampFieldVptrs(std::move(StampFieldVptrs)) {}
+          StampFieldVptrs(std::move(StampFieldVptrs)),
+          DeclareForeignInheritedCallee(std::move(DeclareForeignInheritedCallee)) {}
 
     void emitCallStmt(const plang::CallStmt& s);
     void emitUserProcCall(const plang::CallStmt& s);
@@ -307,4 +310,11 @@ private:
     /// this reaches only what \p Type's OWN structure holds nested inside
     /// it, not \p Type's own top-level slot.
     std::function<void(llvm::Value*, const plang::Type&)> StampFieldVptrs;
+    /// Issue #682: see Codegen::Impl::declareForeignInheritedCallee's own
+    /// comment (CodeGenImpl.h) -- emitInheritedCallStmt's explicit-form
+    /// "not yet declared in this translation unit" fallback bridges
+    /// through here rather than reaching Impl::paramMeta_ directly (which
+    /// this class, unlike Impl itself, has no access to).
+    std::function<llvm::Function*(const plang::Type::Method&,
+                                  const std::string&)> DeclareForeignInheritedCallee;
 };
