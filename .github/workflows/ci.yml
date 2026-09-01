@@ -623,6 +623,29 @@ jobs:
         env:
           PLANG_TEST_RUN_WRAPPER: "bash ${{ github.workspace }}/test/tools/run-under-guardheap.sh"
 
+      # Issue #190 part A: Turbo (27 files -- Crt/Dos/Strings/Objects, the
+      # pointer/VMT/lifecycle-heavy surface most likely to hit this bug
+      # class, and the newest/least-hardened part of the tree) and
+      # Acceptance (the single largest generated program in the suite) were
+      # both entirely excluded from the guardheap gate above -- not
+      # filtered narrowly, just never selected at all. The 9-term regex
+      # above was tuned to the four categories it already covers and does
+      # not obviously reach Turbo's own memory-relevant surface by keyword
+      # (New/Dispose/Fail object lifecycle, VMT dispatch, PChar buffer
+      # handling aren't literally named in it), and Acceptance is one file
+      # a filter would just exclude outright. Rather than stretch that
+      # regex to cover vocabulary it was never tuned for, both run here
+      # UNFILTERED instead: Turbo is 27 files and Acceptance is 1, so
+      # "unfiltered" and "appropriately scoped" are the same thing for
+      # both -- confirmed empirically at under half a second each for the
+      # whole category, not assumed.
+      - name: Test Turbo and Acceptance under guardheap (lit)
+        run: |
+          cd build/test
+          lit -sv --skip-test-time-recording --timeout 300 Turbo Acceptance
+        env:
+          PLANG_TEST_RUN_WRAPPER: "bash ${{ github.workspace }}/test/tools/run-under-guardheap.sh"
+
       - name: Test with emitted programs at -O1
         run: ctest --test-dir build -j"$(nproc)" --output-on-failure
         env:
