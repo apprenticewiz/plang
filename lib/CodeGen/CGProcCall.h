@@ -61,10 +61,6 @@ public:
                std::function<void(llvm::Value*, const plang::Type&,
                                   const std::vector<llvm::Value*>&)> EmitSchemaInitialState,
                std::function<llvm::Value*(const std::string&)> BuildStaticLinkFrame,
-               std::function<const plang::ProcedureTypeNode*(const std::string&, size_t)> ProcParamArg,
-               std::function<bool(const std::string&, size_t)> ParamIsByRef,
-               std::function<size_t(const std::string&, size_t)> ConformantDimsOf,
-               std::function<std::optional<int64_t>(const std::string&, size_t)> ParamSetBaseOf,
                std::function<const std::string&()> CurFuncName,
                std::function<std::shared_ptr<plang::Type>()> CurRetSemaType,
                std::function<llvm::BasicBlock*()> CurrentContinueTarget,
@@ -93,9 +89,6 @@ public:
           EmitInitialState(std::move(EmitInitialState)),
           EmitSchemaInitialState(std::move(EmitSchemaInitialState)),
           BuildStaticLinkFrame(std::move(BuildStaticLinkFrame)),
-          ProcParamArg(std::move(ProcParamArg)), ParamIsByRef(std::move(ParamIsByRef)),
-          ConformantDimsOf(std::move(ConformantDimsOf)),
-          ParamSetBaseOf(std::move(ParamSetBaseOf)),
           CurFuncName(std::move(CurFuncName)), CurRetSemaType(std::move(CurRetSemaType)),
           CurrentContinueTarget(std::move(CurrentContinueTarget)),
           CurrentBreakTarget(std::move(CurrentBreakTarget)),
@@ -257,10 +250,6 @@ private:
     std::function<void(llvm::Value*, const plang::Type&,
                        const std::vector<llvm::Value*>&)> EmitSchemaInitialState;
     std::function<llvm::Value*(const std::string&)> BuildStaticLinkFrame;
-    std::function<const plang::ProcedureTypeNode*(const std::string&, size_t)> ProcParamArg;
-    std::function<bool(const std::string&, size_t)> ParamIsByRef;
-    std::function<size_t(const std::string&, size_t)> ConformantDimsOf;
-    std::function<std::optional<int64_t>(const std::string&, size_t)> ParamSetBaseOf;
 
     // TP-only: Exit/Break/Continue (all reached through CallStmt, dispatched
     // on spelling below exactly like Halt/Assert).

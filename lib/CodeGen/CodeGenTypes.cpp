@@ -320,19 +320,20 @@ void Codegen::Impl::init(const std::string& progName) {
         [this](const ExprNode& e){ return emitLValue(e); },
         [this](llvm::Value* v){ return toI64(v); },
         [](const TypeNode* tn){ return peelPackedNode(tn); });
-    // Issue #299 Phase 1: the per-argument marshalling loop shared by
-    // procCall_/funcCall_'s direct-call-shaped sites (emitUserProcCall/
-    // emitUserFuncCall/emitMethodCallExpr) -- built here, before either, so
-    // both can hold a plain reference to it.  ProcParamArg/ParamIsByRef/
-    // ConformantDimsOf/ParamSetBaseOf/SchemaArgDiscsOf/ExprIsVarStr/
-    // ExprIsShortStr are the same narrow closures procCall_/funcCall_
-    // themselves already bridge (see their own construction, just below) --
-    // CGCallMarshal needs its own independent copies for the same "no
-    // shared-mutable-closure-state" reason every other multiply-bridged
-    // accessor in this file already gets (ConformantDimsOf/ParamSetBaseOf's
-    // own comment on procCall_, just below, is the precedent).  This
-    // instance's five lookup callbacks are all paramMeta_-backed, keyed by a
-    // real mangled callee name; issue #299 Phase 2 gives
+    // Issue #299 Phase 1 (widened by #182's own follow-up): the per-argument
+    // marshalling loop shared by every direct-call-shaped site --
+    // procCall_'s emitUserProcCall/emitMethodCallStmt/emitBoundMethodCall/
+    // emitInheritedCallStmt and funcCall_'s emitUserFuncCall/
+    // emitMethodCallExpr -- built here, before either, so both can hold a
+    // plain reference to it.  ProcParamArg/ParamIsByRef/ConformantDimsOf/
+    // ParamSetBaseOf/SchemaArgDiscsOf/ExprIsVarStr/ExprIsShortStr are the
+    // same narrow closures funcCall_ still bridges on its own account (its
+    // own not-yet-migrated emitInheritedCallExpr, CGFuncCall.cpp) -- see its
+    // own construction, further below.  CGCallMarshal needs its own
+    // independent copies for the same "no shared-mutable-closure-state"
+    // reason every other multiply-bridged accessor in this file already
+    // gets.  This instance's five lookup callbacks are all paramMeta_-backed,
+    // keyed by a real mangled callee name; issue #299 Phase 2 gives
     // ClosureAndCallABI::emitProcParamCall its OWN separate CGCallMarshal
     // instance (built fresh per call, in ClosureAndCallABI.cpp) with the
     // same five callbacks instead bound to a transient, per-call vector --
@@ -360,16 +361,18 @@ void Codegen::Impl::init(const std::string& progName) {
         [](const ExprNode& e){ return exprIsShortStr(e); });
     // The required-procedure dispatch chain and user-declared procedure
     // calls.  EmitExpr/EmitLValue/ToI64/EnsureI1/InitialStateShapeOf/
-    // HasInitialState/EmitInitialState/BuildStaticLinkFrame/ProcParamArg/
-    // ParamIsByRef are narrow closures into methods not yet extracted or
-    // (BuildStaticLinkFrame) deliberately staying on Impl permanently --
-    // this project's standing extra-caution zone for the closure-capture
-    // loop.  ConformantDimsOf/ParamSetBaseOf stand in for direct
-    // paramMeta_ access, the same narrow-derived-query treatment
-    // SchemaArgDiscCountOf already got in Wave 5 -- paramMeta_ itself
-    // stays on Impl, read from CodeGenExprs.cpp's parallel call-expression
-    // marshalling too.  rangeGuards_ (already built, above) and EnsureI1 are
-    // both new here, for Assert's own {$C-}-gated guard.
+    // HasInitialState/EmitInitialState/BuildStaticLinkFrame are narrow
+    // closures into methods not yet extracted or (BuildStaticLinkFrame)
+    // deliberately staying on Impl permanently -- this project's standing
+    // extra-caution zone for the closure-capture loop.  rangeGuards_
+    // (already built, above) and EnsureI1 are both new here, for Assert's
+    // own {$C-}-gated guard.  #182's own follow-up (after issue #299 Phase
+    // 1): ProcParamArg/ParamIsByRef/ConformantDimsOf/ParamSetBaseOf used to
+    // be bridged here too, for emitMethodCallStmt/emitBoundMethodCall/
+    // emitInheritedCallStmt's own inlined copies of the per-argument
+    // marshalling loop -- now all three call callMarshal_ (just above)
+    // instead, like emitUserProcCall already did, so CGProcCall no longer
+    // needs its own copies of these four callbacks at all.
     procCall_ = std::make_unique<CGProcCall>(ctx, *mod, builder,
         *fileVarHelpers_, *runtimeFns_, *builtinIO_, *closureAbi_,
         *schemaAccess_, *cgTypes_, *symTab_, *linkage_, *setOps_,
@@ -392,20 +395,6 @@ void Codegen::Impl::init(const std::string& progName) {
                const std::vector<llvm::Value*>& discs){
             emitSchemaInitialState(bodyAddr, schema, discs); },
         [this](const std::string& mangledName){ return buildStaticLinkFrame(mangledName); },
-        [this](const std::string& mangledName, size_t astArgIdx){
-            return procParamArg(mangledName, astArgIdx); },
-        [this](const std::string& mangledName, size_t astArgIdx){
-            return paramIsByRef(mangledName, astArgIdx); },
-        [this](const std::string& mangledName, size_t astArgIdx) -> size_t {
-            auto it = paramMeta_.find(mangledName);
-            if (it == paramMeta_.end() || astArgIdx >= it->second.size()) return 0;
-            return it->second[astArgIdx].conformantDims.size();
-        },
-        [this](const std::string& mangledName, size_t astArgIdx) -> std::optional<int64_t> {
-            auto it = paramMeta_.find(mangledName);
-            if (it == paramMeta_.end() || astArgIdx >= it->second.size()) return std::nullopt;
-            return it->second[astArgIdx].setBase;
-        },
         // TP-only: Exit/Break/Continue -- see CGProcCall.h's own comments on
         // each closure for what guarantees Sema already made before codegen
         // ever reads curFn_ through these.
@@ -507,11 +496,16 @@ void Codegen::Impl::init(const std::string& progName) {
         [](const ExprNode& e){ return exprIsShortStr(e); },
         [](const ExprNode& e){ return exprShortStrCap(e); });
     // Call-expression emission: the built-in dispatch chain plus the tail
-    // call to a user-declared function.  Same 12-sibling-unit shape as
-    // procCall_'s analogous split; BuildStaticLinkFrame stays on Impl
-    // permanently (the closure-capture-loop extra-caution zone).
-    // ConformantDimsOf/ParamSetBaseOf/ProcParamArg/ParamIsByRef reuse
-    // procCall_'s own established closures a second, independent time.
+    // call to a user-declared function.  Same 12-sibling-unit shape
+    // procCall_'s analogous split used to have; BuildStaticLinkFrame stays
+    // on Impl permanently (the closure-capture-loop extra-caution zone).
+    // ConformantDimsOf/ParamSetBaseOf/ProcParamArg/ParamIsByRef are fresh
+    // closures of the same shape procCall_ used to bridge before #182's own
+    // follow-up moved all of ITS remaining direct-marshalling call sites
+    // onto callMarshal_ -- funcCall_ still needs its own independent copies
+    // here, for emitInheritedCallExpr's own not-yet-migrated inline copy of
+    // the same loop (CGFuncCall.cpp) -- a #299-shaped cleanup left for
+    // whoever next touches that one specifically.
     funcCall_ = std::make_unique<CGFuncCall>(ctx, *mod, builder,
         *runtimeFns_, *setOps_, *complexOps_, *fileVarHelpers_, *cgTypes_,
         *schemaAccess_, *strings_, *strCallMarshal_, *linkage_, *symTab_,
