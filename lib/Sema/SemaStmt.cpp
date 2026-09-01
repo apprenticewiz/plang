@@ -2002,9 +2002,34 @@ void Sema::checkCallStmt(const CallStmt& S) {
         }
 
         // Generic: arity was already checked against Builtins.def above.
-        // Evaluate arguments for side-effects / type errors and leave the
-        // rest -- which argument means what -- to codegen.
-        for (const auto& Arg : S.Args) (void)checkExpr(*Arg);
+        // Every builtin with its own ArgKind (Builtins.def's own column --
+        // Ordinal for ord/chr/odd, Numeric for sqrt/abs/sqr/..., ...) falls
+        // through every dedicated arm above to land here when called as a
+        // bare statement, the same way checkCallExpr's OWN generic fallback
+        // (SemaExpr.cpp, at the very end of its Func arm) is where an
+        // expression-context call of one of these lands once none of ITS
+        // dedicated arms matches either -- except that one calls
+        // checkBuiltinArgKinds (via each dedicated `if (Lo == ...)` arm
+        // above it) for every ArgKind-migrated builtin, and this one, until
+        // now, never did, for ANY builtin, in either its own dedicated arms
+        // or this fallback.  A required FUNCTION reaches here at all only
+        // via Turbo's `{$X+}` (checked above -- Sym->IsFunction gate), so
+        // `ord(1.5);` written as a bare statement under `{$X+}` skipped
+        // checkBuiltinArgKinds entirely and reached CodeGen's unconditional
+        // zext, aborting the compiler with an LLVM IR verifier failure
+        // instead of a diagnostic (issue #547) -- the exact ICE class issue
+        // #212 fixed for the expression-context path, left open here.
+        // checkBuiltinArgKinds is a documented no-op beyond calling checkExpr
+        // once per argument (Sema.h's own comment: "emits nothing... for
+        // AK_Any, which is every builtin this column has not migrated yet"),
+        // so swapping it in here is behavior-preserving for the AK_Any
+        // majority (write, read, reset, ... -- though most of those already
+        // returned via their own dedicated arm above and never reach this
+        // fallback at all) and adds the missing check for every ArgKind
+        // builtin, migrated now or in the future, with no risk of
+        // checkExpr running twice on the same argument (issue #272) since
+        // this is the sole remaining evaluation of S.Args on this path.
+        (void)checkBuiltinArgKinds(Sym->BuiltinKind, Lo, S.Args);
         return;
     }
     // Turbo procedural VALUES: see the identical mark in checkCallExpr

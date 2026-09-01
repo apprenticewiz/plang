@@ -151,6 +151,16 @@ BRACE_CHECK_EXEMPT = {
     "test/Driver/Turbo/x-plus-lets-a-function-be-called-as-a-statement-discarding-its-result.pas",
     "test/Driver/Turbo/x-minus-rejects-a-function-called-as-a-statement-with-isos-own-diagnostic.pas",
     "test/Driver/Turbo/a-builtin-function-called-as-a-statement-under-x-plus-compiles-and-runs.pas",
+    # Same reasoning again (only ever compiles under -std=turbo -- see each
+    # file's own RUN: line -- so the matched-delimiter rule this check
+    # doesn't model is the one that actually applies), for issue #547's own
+    # regression tests (ord/chr/odd rejecting a non-ordinal argument called
+    # as a bare STATEMENT under '{$X+}', not just in expression position):
+    # their header prose discusses '{$X+}' syntax in English the same way
+    # the three files just above already do.  Not a hazard to fix.
+    "test/CodeGen/OrdChrOdd/ord-rejects-a-non-ordinal-argument-called-as-a-statement.pas",
+    "test/CodeGen/OrdChrOdd/chr-rejects-a-non-ordinal-argument-called-as-a-statement.pas",
+    "test/CodeGen/OrdChrOdd/odd-rejects-a-non-ordinal-argument-called-as-a-statement.pas",
     # Same reasoning again (only ever compiles under -std=turbo -- see its own
     # RUN: line -- so the matched-delimiter rule this check doesn't model is
     # the one that actually applies): its header prose discusses '{$R+}'

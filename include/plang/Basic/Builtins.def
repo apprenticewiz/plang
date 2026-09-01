@@ -69,21 +69,80 @@
 //                       its own pre-migration arm (issue #306's second
 //                       slice), which used isOrdinal() for all three
 //                       identically.
+//   AK_StringLike       isVarStringLike() || isCharStringType() ||
+//                       isShortStringLike() || Char || String -- the UNION
+//                       of every string-like shape any dialect has, needed
+//                       only by length (EP §6.7.6.7 / Turbo's own
+//                       ShortString-length overload -- Builtins.def's own
+//                       comment on Length) and EP's index, which shared one
+//                       hand-written loop applying this exact union to
+//                       EVERY argument before migration (index(s, t) checks
+//                       both s and t identically, not just s).  isVarStringLike
+//                       and isShortStringLike are individually dialect-exclusive
+//                       (VarString cannot exist under -std=turbo, ShortString
+//                       cannot exist under EP), so this union is equivalent
+//                       to whichever narrower kind below applies under the
+//                       active dialect -- it is spelled as a full union
+//                       rather than picking one only because length/index's
+//                       own pre-migration arm checked it as one, undifferentiated
+//                       by dialect.
+//   AK_EPStringLike     isVarStringLike() || isCharStringType() || Char ||
+//                       String -- EP §6.7.6.7's canonical-string-type
+//                       requirement, without ShortString: the narrower
+//                       predicate trim and the six comparison functions
+//                       (eq/ne/lt/gt/le/ge) already used by hand, deliberately
+//                       NOT the AK_StringLike union above since neither is
+//                       ever reachable under -std=turbo (checkEPOnly refuses
+//                       the call before either arm runs), so widening to
+//                       recognize a ShortString here would be dead code, not
+//                       a real acceptance.
+//   AK_TurboStringLike  isShortStringLike() || Char || String -- Turbo's own
+//                       narrower string-like predicate (named isTurboStringLike
+//                       at each of its pre-migration hand-written call sites,
+//                       SemaExpr.cpp/SemaStmt.cpp), deliberately NOT
+//                       isCharStringType: Turbo's own operators (checkBinary's
+//                       Plus/comparison ShortString arms) never widen for the
+//                       ISO/EP packed-array-of-char shape either, so neither
+//                       does this.  Used where pos/concat's own pre-migration
+//                       arms applied it uniformly to every argument (pos's two,
+//                       concat's variadic list) -- copy and stringofchar also
+//                       call isTurboStringLike, but only on ONE of their several
+//                       differently-kinded arguments, which is exactly the
+//                       "does not apply uniformly" shape that keeps a builtin
+//                       hand-written (see below).
 //
-// The numeric family (including EP's complex functions) and, as of issue
-// #306's second slice, ord/chr/odd of the ordinal family have been migrated
-// to ArgKind -- the rest of AK_Any's special-cased builtins are exactly as
-// before.  succ/pred are ALSO ordinal-argument-shaped in their first
-// argument, but are deliberately NOT migrated: their optional second
-// (step-count) argument requires a different kind (isIntegral(), EP
+// The numeric family (including EP's complex functions), ord/chr/odd of the
+// ordinal family (issue #306's second slice), and now length/index/trim/eq/
+// ne/lt/gt/le/ge/pos/concat of the string family (issue #306's third slice)
+// have been migrated to ArgKind -- the rest of AK_Any's special-cased
+// builtins are exactly as before.  succ/pred are ALSO ordinal-argument-shaped
+// in their first argument, but are deliberately NOT migrated: their optional
+// second (step-count) argument requires a different kind (isIntegral(), EP
 // §6.7.6.5) than their first, and checkBuiltinArgKinds applies one AK_* tag
 // to every argument uniformly, so a builtin whose arguments do not all share
 // one required kind has to stay hand-written (see the ArgKind column
 // description above) -- this was anticipated in this same comment before
-// any of the ordinal family was migrated.  A later slice widening this to
-// the string/file families should extend this vocabulary the same way:
-// cross-check against the predicate a hand-written arm already calls before
-// adding a new AK_* tag for it, rather than inventing one no arm needed.
+// any of the ordinal family was migrated.
+//
+// The third slice's own non-migrations, for the identical reason: substr
+// (EP, string + two non-string index/count arguments), copy (Turbo, string +
+// two non-string index/count arguments), stringofchar (Turbo, a Char argument
+// that must be EXACTLY Char, not string-like, + a non-string count), and
+// delete/insert/setlength/str/val (Turbo, each mixing a string argument with
+// one or more var-parameter and/or non-string arguments, and Procs besides,
+// checked in checkCallStmt rather than checkCallExpr) all stay hand-written.
+// readstr/writestr (EP) were checked too and found to have no string-kind
+// argument check to migrate at all -- their existing hand-written arm only
+// enforces that specific argument POSITIONS are lvalues, never that any
+// argument is string-like, so there is nothing here for ArgKind to replace.
+// upcase (Turbo) takes a Char, not a string, and paramstr (Turbo) takes an
+// Integer index -- neither is a member of the string family despite the
+// "string" in their neighborhood, confirmed by reading each's own
+// pre-migration arm before excluding it, the same diligence succ/pred's
+// exclusion above already modeled.  A later slice widening this to the file
+// family should extend this vocabulary the same way: cross-check against the
+// predicate a hand-written arm already calls before adding a new AK_* tag
+// for it, rather than inventing one no arm needed.
 //
 //===----------------------------------------------------------------------===//
 
@@ -162,17 +221,17 @@ BUILTIN(Card,      "card",      Func, EP,  1,  1, R_Int, AK_Any)
 // ShortString its own length), not a pre-existing, deliberate Turbo
 // omission: no prior Turbo work landed a "length" of any kind, and nothing
 // under -std=turbo could ask a ShortString's length at all before this.
-BUILTIN(Length,    "length",    Func, EP | TP,  1,  1, R_Int, AK_Any)
-BUILTIN(Index,     "index",     Func, EP,  2,  2, R_Int, AK_Any)
+BUILTIN(Length,    "length",    Func, EP | TP,  1,  1, R_Int, AK_StringLike)
+BUILTIN(Index,     "index",     Func, EP,  2,  2, R_Int, AK_StringLike)
 BUILTIN(Substr,    "substr",    Func, EP,  2,  3, R_Str, AK_Any)
-BUILTIN(Trim,      "trim",      Func, EP,  1,  1, R_Str, AK_Any)
+BUILTIN(Trim,      "trim",      Func, EP,  1,  1, R_Str, AK_EPStringLike)
 // EP §6.7.6.7: string comparison, which differs from the relational operators
-BUILTIN(StrEQ,     "eq",        Func, EP,  2,  2, R_Bool, AK_Any)
-BUILTIN(StrNE,     "ne",        Func, EP,  2,  2, R_Bool, AK_Any)
-BUILTIN(StrLT,     "lt",        Func, EP,  2,  2, R_Bool, AK_Any)
-BUILTIN(StrGT,     "gt",        Func, EP,  2,  2, R_Bool, AK_Any)
-BUILTIN(StrLE,     "le",        Func, EP,  2,  2, R_Bool, AK_Any)
-BUILTIN(StrGE,     "ge",        Func, EP,  2,  2, R_Bool, AK_Any)
+BUILTIN(StrEQ,     "eq",        Func, EP,  2,  2, R_Bool, AK_EPStringLike)
+BUILTIN(StrNE,     "ne",        Func, EP,  2,  2, R_Bool, AK_EPStringLike)
+BUILTIN(StrLT,     "lt",        Func, EP,  2,  2, R_Bool, AK_EPStringLike)
+BUILTIN(StrGT,     "gt",        Func, EP,  2,  2, R_Bool, AK_EPStringLike)
+BUILTIN(StrLE,     "le",        Func, EP,  2,  2, R_Bool, AK_EPStringLike)
+BUILTIN(StrGE,     "ge",        Func, EP,  2,  2, R_Bool, AK_EPStringLike)
 // EP §6.7.5.5
 BUILTIN(Readstr,   "readstr",   Proc, EP,  2, -1, R_None, AK_Any)
 BUILTIN(Writestr,  "writestr",  Proc, EP,  2, -1, R_None, AK_Any)
@@ -362,12 +421,12 @@ BUILTIN(Copy,         "copy",         Func, TP, 3, 3, R_Str, AK_Any)
 // Pos('', s) is 0 for every s, empty or not.  A completely separate runtime
 // entry point (plang_sstr_pos) from EP's plang_str_index for exactly this
 // reason, even though the search algorithm is otherwise the same shape.
-BUILTIN(Pos,          "pos",          Func, TP, 2, 2, R_Int, AK_Any)
+BUILTIN(Pos,          "pos",          Func, TP, 2, 2, R_Int, AK_TurboStringLike)
 // Concat(s1 [, s2, ..., sn]) -- variadic concatenation, same capacity-255
 // result and same clamping the `+` operator's own ShortString arm already
 // implements (CGBinaryOps.cpp); MaxArgs -1 since real Turbo/FPC's Concat
 // takes one or more strings, not exactly two.
-BUILTIN(Concat,       "concat",       Func, TP, 1, -1, R_Str, AK_Any)
+BUILTIN(Concat,       "concat",       Func, TP, 1, -1, R_Str, AK_TurboStringLike)
 // Delete(var s: string; index, count: Integer) -- removes count characters
 // from s starting at index, MUTATING s in place.  Unlike Copy's index/count
 // clamping, an out-of-range index (< 1 or > Length(s)) is a silent NO-OP,
