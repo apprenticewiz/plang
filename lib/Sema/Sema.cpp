@@ -1766,9 +1766,12 @@ void Sema::checkBlock(const BlockNode& Block,
     }
 
     // Phase 3a — Per-type stubs for forward pointer references (ISO §6.4.4).
-    // Each stub is a unique shared_ptr with Kind=Error and Name=type-name so that
-    // Phase 3c can identify which type a captured forward reference pointed to.
-    // (We can't use the TyErr singleton because singletons have no identifying name.)
+    // Each stub is a unique shared_ptr with Kind=Unresolved and Name=type-name
+    // so that Phase 3c can identify which type a captured forward reference
+    // pointed to. (We can't use the TyErr singleton because singletons have
+    // no identifying name, and Kind=Unresolved -- rather than Kind=Error --
+    // is what lets a stub be told apart from a genuine type error by its Kind
+    // alone; see TypeKind::Unresolved's own comment, Sema/Type.h.)
     // EP §6.4.7: Schema definitions are registered immediately as Schema symbols
     // (no forward-pointer stub needed since schema bodies are not resolved eagerly).
     //
@@ -1793,7 +1796,7 @@ void Sema::checkBlock(const BlockNode& Block,
                 error(Td.Type->Loc, diag::err_duplicate_type_decl, {Td.Name});
         } else {
             auto Stub = std::make_shared<Type>();
-            Stub->Kind = TypeKind::Error;
+            Stub->Kind = TypeKind::Unresolved;
             Stub->Name = Td.Name;   // name survives Phase 3b; Phase 3c uses it to look up
             Symbol S;
             S.Kind = SymbolKind::TypeAlias;
@@ -1809,7 +1812,7 @@ void Sema::checkBlock(const BlockNode& Block,
     // We do NOT mutate stubs in-place here so that enum-value symbols (which capture
     // the freshly-resolved shared_ptr) stay consistent.  Instead Phase 3c below
     // walks the resolved types and patches any pointer PointeeType that still holds
-    // an unresolved stub (identified by Kind=Error and non-empty Name).
+    // an unresolved stub (identified by Kind=Unresolved).
     // EP §6.4.7: Schema definitions were already registered in Phase 3a; their
     // discriminants are resolved below, in Phase 3b(ii), after this loop.
     for (const auto& Td : Block.Types) {
@@ -1895,9 +1898,9 @@ void Sema::checkBlock(const BlockNode& Block,
 
     // Phase 3c — Recursive pointer fixup (ISO §6.4.4 forward references).
     // After Phase 3b every type name is resolved, but pointer types formed during
-    // Phase 3b that referenced a not-yet-defined type hold a stub with Kind=Error.
-    // The stub's Name identifies the target; walk all types recursively and patch
-    // such dangling pointers.  This handles both:
+    // Phase 3b that referenced a not-yet-defined type hold a stub with
+    // Kind=Unresolved.  The stub's Name identifies the target; walk all types
+    // recursively and patch such dangling pointers.  This handles both:
     //   PNode = ^Node;  Node = record … end   (top-level forward reference)
     //   Node  = record … next: ^Node end       (self-referential type)
     //   PList = array[1..N] of ^Node           (element-type forward reference)
@@ -1906,11 +1909,10 @@ void Sema::checkBlock(const BlockNode& Block,
         [&](std::shared_ptr<Type>& T) {
             if (!T) return;
             if (T->Kind == TypeKind::Pointer
-                    && T->PointeeType && T->PointeeType->isError()
-                    && !T->PointeeType->Name.empty()) {
+                    && T->PointeeType && T->PointeeType->isUnresolved()) {
                 Symbol* Sym = Symtab.lookup(T->PointeeType->Name);
                 if (Sym && Sym->Kind == SymbolKind::TypeAlias
-                        && Sym->Ty && !Sym->Ty->isError()) {
+                        && Sym->Ty && !Sym->Ty->isError() && !Sym->Ty->isUnresolved()) {
                     // Re-file as well as patch: the pointer was interned under
                     // the placeholder, and a later `^Node` looks it up under
                     // the real type.
