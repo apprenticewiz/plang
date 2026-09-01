@@ -80,6 +80,22 @@ target_link_libraries(PlangSemaFuzz  PRIVATE PlangLexFuzz PlangParseFuzz PlangLo
 add_executable(scanner-fuzzer scanner-fuzzer.cpp)
 target_link_libraries(scanner-fuzzer PRIVATE
     PlangLexFuzz PlangBasicFuzz PlangLocaleFuzz)
+# lib/Basic/StackHeadroom.cpp (captureStackBaseline(), issue #556) calls two
+# out-of-line LLVM Support functions directly (llvm::getStackPointer()/
+# getDefaultStackSize(), llvm/Support/ProgramStack.h), and PlangBasicFuzz
+# above recompiles it into this build. The real PlangBasic never links LLVM
+# itself either (lib/Basic/CMakeLists.txt has no such edge) -- it relies on
+# plang_frontend's own final link supplying libLLVM.so, which scanner-fuzzer
+# has no equivalent of, so it needs this edge directly. Same TARGET-then-
+# find_library fallback parser-fuzzer/pmi-fuzzer's own identical need
+# (below, for Parser.cpp's/Sema.cpp's out-of-line LLVM calls) and
+# lib/Driver/CMakeLists.txt already use.
+if(TARGET LLVM)
+    target_link_libraries(scanner-fuzzer PRIVATE LLVM)
+else()
+    find_library(LLVM_SHARED_LIB NAMES LLVM LLVM-${LLVM_PACKAGE_VERSION} REQUIRED)
+    target_link_libraries(scanner-fuzzer PRIVATE ${LLVM_SHARED_LIB})
+endif()
 
 add_executable(parser-fuzzer parser-fuzzer.cpp)
 target_link_libraries(parser-fuzzer PRIVATE
