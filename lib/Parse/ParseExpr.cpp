@@ -7,9 +7,11 @@
 #include "plang/Basic/StringUtil.h"
 #include "plang/Basic/Token.h"
 #include "llvm/Support/Casting.h"
+#include "llvm/Support/ProgramStack.h"
 
 #include <cctype>
 #include <charconv>
+#include <cstdint>
 #include <format>
 #include <string>
 
@@ -89,6 +91,79 @@ static bool isExpop(TokenKind K) {
 // a generated/fuzzed one) drives the real call stack instead of a diagnostic.
 static constexpr unsigned MaxExprDepth = 500;
 
+// Safety margin subtracted from the platform's real stack budget before
+// parsePower's own recursion (below) treats itself as "nearly exhausted".
+// Covers: (a) whatever of the thread's stack was already spent between
+// process start and Parser::StackBaseline being captured (a short, bounded,
+// non-recursive chain of frames through main()/the driver/Frontend down to
+// Parser's own constructor -- typically well under 100KB, never close to
+// this margin), and (b) headroom for everything that still has to run on
+// this same stack once parsePower stops recursing: unwinding back out
+// through parseTerm/parseSimpleExpr/parseExpression, diagnostic emission,
+// and (issue #551's own concern) AST teardown of whatever chain was already
+// built. 1 MiB is generous for all of that against an 8MiB default stack
+// while still leaving the overwhelming majority of the budget available to
+// recurse into -- see powerStackNearlyExhausted's own comment for why the
+// exact number here is far less load-bearing than it would be for a
+// term-count ceiling: get it somewhat wrong in either direction and the
+// worst case is rejecting a chain a few thousand terms earlier or later
+// than strictly necessary, not silently narrowing accepted syntax the way
+// reusing MaxExprDepth above for this did (PR #553, reverted; see issue
+// #300's reopening comment).
+static constexpr size_t PowerStackSafetyMargin = 1u << 20; // 1 MiB
+
+// True once continuing to recurse into parsePower (below) would risk
+// running the real C++ call stack past the platform's own limit.
+//
+// parsePower's right-associative recursion for a '**'/'pow' chain (EP
+// §6.8.3.2) is the one re-entry into expression parsing that does not
+// funnel through parseFactor, so MaxExprDepth/ExprDepth above -- which
+// bounds every *other* recursive edge in the parseExpression/
+// parseSimpleExpr/parseTerm/parsePower/parseFactor cycle -- never fires for
+// it (issue #550).  Unlike that guard, and unlike TypeDepth/StmtDepth/
+// BlockDepth elsewhere in this file's siblings, this is deliberately NOT a
+// term-count ceiling: a first attempt at this fix (PR #553, reverted; see
+// issue #300's reopening comment) reused MaxExprDepth's own constant for an
+// unrelated, iteratively-folded flat-chain loop and rejected input `main`
+// had always accepted.  A dedicated term-count constant for *this*
+// genuinely-recursive edge would dodge that specific mistake, but would
+// still face a version of the same underlying problem: the "right" count
+// isn't a fixed number, it's however many parsePower frames actually fit in
+// the stack space available, which depends on how large one parsePower
+// frame is -- itself a function of build type (Debug frames are
+// substantially larger than Release's optimized ones) and platform, neither
+// of which a compile-time constant can track.
+//
+// So this measures real stack headroom directly instead, the same way
+// clang::Sema::isStackNearlyExhausted() does (clang/Basic/Stack.h, not
+// linked into plang but a design precedent): llvm::getStackPointer() and
+// llvm::getDefaultStackSize() (llvm/Support/ProgramStack.h) are both already
+// reusable utilities LLVM ships and this project already links against
+// (confirmed: getDefaultStackSize() is backed by getrlimit(RLIMIT_STACK) on
+// POSIX, with its own platform-appropriate fallback when that is
+// unavailable or unlimited, so this tracks the actual runtime stack budget
+// rather than guessing at one).  A 1000-term '**' chain -- Sema's own
+// MaxExprDepth (Sema.h), the deepest expression Sema itself ever accepts --
+// costs on the order of a few hundred KB of stack even under an
+// unoptimized Debug build, nowhere near the several-MiB budget this checks
+// against, so this never rejects anything Sema's own limit would have
+// accepted anyway.
+static bool powerStackNearlyExhausted(std::uintptr_t Baseline) {
+    const std::uintptr_t Current = llvm::getStackPointer();
+    // The stack grows down on every architecture plang targets (x86-64,
+    // AArch64), and Baseline was captured at Parser construction, further up
+    // an always-shallower stack than any point parsing itself can reach, so
+    // Baseline >= Current holds once any recursion at all has happened; the
+    // clamp below is just defensive in case some unusual environment
+    // violates that (e.g. a split/segmented stack where the two addresses
+    // are not directly comparable this way).
+    const std::uintptr_t Used = (Baseline > Current) ? (Baseline - Current) : 0;
+    const size_t Budget = llvm::getDefaultStackSize();
+    if (Budget <= PowerStackSafetyMargin)
+        return true; // an implausibly small or unqueryable limit: bail early
+    return Used >= (Budget - PowerStackSafetyMargin);
+}
+
 // ---------------------------------------------------------------------------
 // Expressions
 // ---------------------------------------------------------------------------
@@ -154,7 +229,51 @@ std::unique_ptr<ExprNode> Parser::parsePower() {
         Node->Op   = Current.Kind;
         advance();
         Node->Left  = std::move(Left);
-        Node->Right = parsePower();   // right-associative
+        // See powerStackNearlyExhausted's own comment above for why this
+        // recursive edge -- unlike every other one in this file -- is
+        // bounded by live stack headroom rather than a term-count ceiling.
+        if (powerStackNearlyExhausted(StackBaseline)) {
+            if (!PowerDepthLimitHit) {
+                PowerDepthLimitHit = true;
+                emitError(Current.toLoc(), diag::err_expr_too_deeply_nested);
+            }
+            // Unlike parseFactor's own ExprDepth ceiling -- where every
+            // caller still on the stack is waiting on its own matching ')'
+            // and unwinds cleanly once it sees one still there -- a '**'
+            // chain has no such per-level closing token for an aborted
+            // right operand to leave for an enclosing caller to find. Left
+            // as a bare stub, the remainder of the chain (however many more
+            // 'expop factor' pairs the adversarial input still has queued
+            // up) would simply sit unconsumed and desync everything that
+            // parses after this expression, cascading into a burst of
+            // unrelated-looking "expected ';'"/"expected 'end'"/etc.
+            // diagnostics -- still bounded and non-crashing, but needless
+            // noise the "one diagnostic, not a pile of confusing ones"
+            // precedent elsewhere in this file (see ExprDepthLimitHit's own
+            // comment) already avoids for every other guard. So drain the
+            // rest of the chain here instead: same 'expop factor' shape the
+            // grammar comment above already describes, just iterative
+            // rather than recursive, and its parsed operands are discarded
+            // rather than linked into the tree -- this stub subtree is
+            // already being reported as an error, so what it evaluates to
+            // does not matter, only that the token stream ends up
+            // positioned after the whole chain rather than in the middle
+            // of it. Current is already sitting on the immediate right
+            // operand (the operator itself was consumed above before this
+            // check ever runs), so that one is parsed normally -- via
+            // parseFactor, not a further parsePower recursion, which is the
+            // whole point -- and becomes Node->Right for real; only any
+            // *further* 'expop factor' pairs past it are drained and
+            // discarded.
+            Node->Right = parseFactor();
+            while (isExpop(Current.Kind)) {
+                advance();
+                parseFactor();
+            }
+        } else {
+            PowerDepthScope Guard(PowerDepth, PowerDepthLimitHit);
+            Node->Right = parsePower();   // right-associative
+        }
         return Node;
     }
     return Left;

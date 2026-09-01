@@ -7,6 +7,7 @@
 #include "plang/Basic/StringUtil.h"
 #include "plang/Basic/Token.h"
 #include "llvm/Support/Casting.h"
+#include "llvm/Support/ProgramStack.h"
 
 #include <cctype>
 #include <charconv>
@@ -20,7 +21,16 @@ using namespace plang;
 // ---------------------------------------------------------------------------
 
 Parser::Parser(Scanner Sc, DiagnosticsEngine& Diags, LangOptions Opts)
-    : Opts(Opts), Lex(std::move(Sc)), Diags(Diags) {
+    : Opts(Opts), Lex(std::move(Sc)), Diags(Diags),
+      // Reference point parsePower's own stack-headroom check (ParseExpr.cpp,
+      // issue #550) measures usage from -- see StackBaseline's own comment
+      // (Parser.h) for why this needs to be a live measurement rather than a
+      // term-count constant.  Captured here, at construction, rather than
+      // lazily on parsePower's first call, so it reflects the shallowest
+      // point this Parser instance is ever active at, regardless of how deep
+      // '('-nesting (bounded separately by ExprDepth) has already gone by the
+      // time a '**' chain is first encountered.
+      StackBaseline(llvm::getStackPointer()) {
     // TypeNames_ is normally populated only as a `type` section's own
     // definitions are parsed (parseTypeDef), since ordinary user types don't
     // exist until declared. The Turbo sized-integer ladder (Sema::
