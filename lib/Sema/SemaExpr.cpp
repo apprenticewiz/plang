@@ -2082,6 +2082,14 @@ std::shared_ptr<Type> Sema::checkTypeCast(const TypeCastExpr& E) {
                 && (Sym->Kind == SymbolKind::Var || Sym->Kind == SymbolKind::VarParam)) {
             Sym->Referenced = true;
             E.Operand->ResolvedType = TargetTy;
+            // See IdentExpr::IsUntypedParamCastOperand's own comment
+            // (AstExpr.h): the ResolvedType alias just above is what lets
+            // the WRITE side (isLValue) work with no special case of its
+            // own, but it also makes the READ side (CGExprCore::
+            // emitTypeCastValue) unable to tell this apart from a genuine
+            // same-type scalar conversion just by comparing types -- this
+            // flag is that missing signal (issue #645).
+            Id->IsUntypedParamCastOperand = true;
             if (TargetTy->isError()) return TyErr;
             return TargetTy;
         }

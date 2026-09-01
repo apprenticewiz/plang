@@ -479,6 +479,12 @@ ClosureAndCallABI::emitProcVarCall(const VarEntry& ve,
     // never a {entry point, frame} cell -- see VarEntry::isProcVar's own
     // comment), so the callee address is simply what is stored there.
     auto* callee = B.CreateLoad(PtrTy, ve.ptr, "procvar.fn");
+    // A nil procedural variable is exactly as much a bad-pointer call as a
+    // nil object pointer's method call is (CGProcCall.cpp/CGFuncCall.cpp's
+    // own vmt nil checks) -- calling through it segfaults (or worse, jumps
+    // to address 0) with no diagnostic at all otherwise.  Same RTE 216 idiom
+    // as every other pointer dereference in this codebase (issue #646).
+    RangeGuards.emitNilCheck(callee);
 
     std::vector<llvm::Value*> args;
     size_t flat = 0;

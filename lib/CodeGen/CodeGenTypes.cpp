@@ -205,7 +205,7 @@ void Codegen::Impl::init(const std::string& progName) {
     // CodeGenTypes.cpp).
     closureAbi_ = std::make_unique<ClosureAndCallABI>(ctx, *mod, builder,
         *schemaAccess_, *schemaLayout_, *cgTypes_, *symTab_, *linkage_, *dbgInfo_,
-        *setOps_, *strCallMarshal_,
+        *setOps_, *strCallMarshal_, *rangeGuards_,
         i32Ty, i64Ty, ptrTy,
         [this](const ExprNode& e){ return emitLValue(e); },
         [this](const ExprNode& e, llvm::Type* t, bool byRef){

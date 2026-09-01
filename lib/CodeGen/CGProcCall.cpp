@@ -607,6 +607,12 @@ void CGProcCall::emitCallStmt(const CallStmt& s) {
         auto* dst   = EmitLValue(*s.Args[0]);
         auto* count = ToI64(EmitExpr(*s.Args[1]), exprIsSigned(*s.Args[1]));
         auto* val   = B.CreateTrunc(ToI64(EmitExpr(*s.Args[2]), exprIsSigned(*s.Args[2])), I8Ty, "fillchar.val");
+        // A negative Count is a no-op in real TP7/fpc, not a size_t (issue
+        // #628): CreateMemSet's size operand is unsigned, so passing the i64
+        // `count` straight through would reinterpret a negative value as a
+        // huge byte count and stomp far past `dst`.  Clamp to zero first.
+        auto* isNegCount = B.CreateICmpSLT(count, llvm::ConstantInt::get(I64Ty, 0), "fillchar.count.isneg");
+        count = B.CreateSelect(isNegCount, llvm::ConstantInt::get(I64Ty, 0), count, "fillchar.count.clamped");
         B.CreateMemSet(dst, val, count, llvm::MaybeAlign());
         return;
     }
@@ -623,6 +629,11 @@ void CGProcCall::emitCallStmt(const CallStmt& s) {
         auto* src   = EmitLValue(*s.Args[0]);
         auto* dst   = EmitLValue(*s.Args[1]);
         auto* count = ToI64(EmitExpr(*s.Args[2]), exprIsSigned(*s.Args[2]));
+        // Same negative-Count no-op as FillChar above (issue #628): a
+        // negative i64 handed to CreateMemMove's unsigned size operand
+        // becomes a near-SIZE_MAX copy and segfaults.
+        auto* isNegCount = B.CreateICmpSLT(count, llvm::ConstantInt::get(I64Ty, 0), "move.count.isneg");
+        count = B.CreateSelect(isNegCount, llvm::ConstantInt::get(I64Ty, 0), count, "move.count.clamped");
         B.CreateMemMove(dst, llvm::MaybeAlign(), src, llvm::MaybeAlign(), count);
         return;
     }
