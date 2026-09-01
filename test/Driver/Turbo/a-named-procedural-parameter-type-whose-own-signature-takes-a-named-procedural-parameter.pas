@@ -4,7 +4,7 @@ the bug (CodeGenProcs.cpp's paramMeta_ population missing a NAMED-type
 procedural parameter) has three siblings inside ClosureAndCallABI.cpp
 (procParamFnType/procVarFnType/flattenProcParams/emitProcVarCall) that
 independently re-detect whether ONE OF A PROCEDURAL TYPE'S OWN PARAMETERS
-is itself procedural, so that its {entry point, frame} pair is built and
+is itself procedural, so that its entry-point/frame pair is built and
 relayed correctly. Each used the same un-alias-resolved dyn_cast and would
 still miscompile this program even after CodeGenProcs.cpp's own fix alone:
 IntOpApplier's declared parameter 'op' is itself of a NAMED procedural type
