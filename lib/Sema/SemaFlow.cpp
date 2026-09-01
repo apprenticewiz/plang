@@ -112,12 +112,18 @@ bool isSimpleValue(const Type* T) {
 /// Whether the flow through this block can be followed at all.  A goto may
 /// land on any label in scope, so a block using them is one where "the paths
 /// reaching this statement" is not a question the walk can answer.
-bool flowIsFollowable(const BlockNode& Block) {
+///
+/// \p Baseline: this and collectNamesUsedIn just below are free functions,
+/// not Sema members, so they cannot reach Sema::StackBaseline on their own
+/// (issue #556's follow-up, SemaUtil.h's own comment) -- their one caller,
+/// Sema::checkDefiniteAssignment, threads its own StackBaseline down into
+/// both instead.
+bool flowIsFollowable(const BlockNode& Block, std::uintptr_t Baseline) {
     if (!Block.Labels.empty()) return false;
     bool Ok = true;
     walkStmts(Block.Body.get(), [&](const StmtNode* S) {
         if (llvm::isa<GotoStmt>(S) || llvm::isa<LabeledStmt>(S)) Ok = false;
-    });
+    }, Baseline);
     return Ok;
 }
 
@@ -125,7 +131,7 @@ bool flowIsFollowable(const BlockNode& Block) {
 /// nested within them.  A variable of the enclosing block that appears in here
 /// may be assigned out of the walk's sight, so it cannot be tracked.
 void collectNamesUsedIn(const std::vector<std::unique_ptr<ProcDecl>>& Procs,
-                        std::set<std::string>& Out) {
+                        std::set<std::string>& Out, std::uintptr_t Baseline) {
     for (const auto& P : Procs) {
         if (!P->Body) continue;
         walkStmts(P->Body->Body.get(), [&](const StmtNode* S) {
@@ -134,10 +140,10 @@ void collectNamesUsedIn(const std::vector<std::unique_ptr<ProcDecl>>& Procs,
                 walkExprs(E, [&](const ExprNode* X) {
                     if (auto* Id = llvm::dyn_cast<IdentExpr>(X))
                         Out.insert(toLower(Id->Name));
-                });
+                }, Baseline);
             });
-        });
-        collectNamesUsedIn(P->Body->Procs, Out);
+        }, Baseline);
+        collectNamesUsedIn(P->Body->Procs, Out, Baseline);
     }
 }
 
@@ -227,7 +233,7 @@ void Sema::flowRead(const ExprNode* E, FlowState& St) {
             warning(Id->Loc, diag::warn_var_uninitialized, {Id->Name});
         }
         FlowReported_.insert(Key);
-    });
+    }, StackBaseline);
 }
 
 void Sema::flowWrite(const ExprNode* E, FlowState& St) {
@@ -282,7 +288,7 @@ void Sema::flowStmt(const StmtNode* S, FlowState& St) {
                     if (X != Root && !llvm::isa<IdentExpr>(X)) return;
                     if (X == Root) return;
                     flowRead(X, St);
-                });
+                }, StackBaseline);
                 // A dereference reads the variable it is of: p^ := 0 needs p
                 // to point somewhere. An index, a substring, or a Turbo
                 // variable typecast do not -- a[i] := 0 needs only i (already
@@ -598,12 +604,12 @@ void Sema::checkDefiniteAssignment(const BlockNode& Block) {
     if (std::ranges::any_of(Diags, [](const Diagnostic& D) {
             return D.Severity == DiagSeverity::Error; }))
         return;
-    if (!flowIsFollowable(Block)) return;
+    if (!flowIsFollowable(Block, StackBaseline)) return;
 
     // Anything a nested procedure names might be assigned in there, out of
     // sight of this walk.
     std::set<std::string> Hidden;
-    collectNamesUsedIn(Block.Procs, Hidden);
+    collectNamesUsedIn(Block.Procs, Hidden, StackBaseline);
 
     auto SavedTracked  = std::move(FlowTracked_);
     auto SavedResults  = std::move(FlowResultNames_);

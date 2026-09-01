@@ -107,15 +107,29 @@ void Sema::warnIfComparisonIsSettled(const BinaryExpr& E, const Type& Lt,
 // ITERATIVELY by precedence climbing, so its AST can be arbitrarily deep with
 // no parser-side ceiling on it; checkExpr's own recursive walk of that AST is
 // the first place this needs a guard.  MaxExprDepth/ExprDepth/
-// ExprDepthLimitHit/ExprDepthScope are declared on Sema (Sema.h) rather than
-// here, now that constBound/buildExtentForm (SemaType.cpp) share them too --
-// see the comment there.
+// ExprDepthLimitHit/ExprDepthScope/StackBaseline are declared on Sema
+// (Sema.h) rather than here, now that constBound/buildExtentForm
+// (SemaType.cpp) share them too -- see the comment there. See StackBaseline's
+// own comment for why the term-count ceiling alone (MaxExprDepth) is not
+// enough under a small platform stack budget (issue #556).
 
 std::shared_ptr<Type> Sema::checkExpr(const ExprNode& E) {
-    // See MaxExprDepth (Sema.h). Checked before the RAII bump: a caller
-    // already sitting at the ceiling must return without recursing again,
-    // not recurse once more and only then stop.
-    if (ExprDepth >= MaxExprDepth) {
+    // See MaxExprDepth/StackBaseline (Sema.h). Unlike the pure term-count
+    // check alone, plang::stackNearlyExhausted (issue #556, Basic/
+    // StackHeadroom.h) can fire on the very first activation, before any
+    // Guard for ExprDepth has ever been constructed -- so DepthGuard is
+    // constructed unconditionally here, before either check runs, rather
+    // than only once both have already decided not to reject. Otherwise a
+    // first-call exhaustion would latch ExprDepthLimitHit with no Guard ever
+    // created to reset it, silently poisoning every later, unrelated deep
+    // expression elsewhere in the same file (see plang::RecursionGuard's own
+    // comment for the general rule, and Parser::parsePower's call site,
+    // ParseExpr.cpp, for the identical bug this ordering avoids -- found
+    // there in PR #555's own review). Checking `ExprDepth > MaxExprDepth`
+    // rather than `>=` accounts for DepthGuard's constructor having already
+    // bumped ExprDepth by one before this runs.
+    ExprDepthScope DepthGuard(ExprDepth, ExprDepthLimitHit);
+    if (ExprDepth > MaxExprDepth || stackNearlyExhausted(StackBaseline)) {
         if (!ExprDepthLimitHit) {
             ExprDepthLimitHit = true;
             error(E.Loc, diag::err_expr_too_deeply_nested);
@@ -123,7 +137,6 @@ std::shared_ptr<Type> Sema::checkExpr(const ExprNode& E) {
         E.ResolvedType = TyErr;
         return TyErr;
     }
-    ExprDepthScope DepthGuard(ExprDepth, ExprDepthLimitHit);
 
     std::shared_ptr<Type> T;
 

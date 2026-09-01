@@ -35,7 +35,16 @@ using namespace plang;
 
 Sema::Sema(DiagnosticsEngine& Diags, LangOptions Opts)
     : Opts  (Opts),
-      Diags (Diags)
+      Diags (Diags),
+      // Reference point checkExpr/constBound/buildExtentForm's own stack-
+      // headroom check (SemaExpr.cpp/SemaType.cpp, issue #556) measures
+      // usage from -- see StackBaseline's own comment (Sema.h) for why this
+      // needs to be a live measurement rather than a term-count constant,
+      // the same reasoning Parser::StackBaseline is captured for. Captured
+      // here, at construction, rather than lazily on checkExpr's first call,
+      // so it reflects the shallowest point this Sema instance is ever
+      // active at.
+      StackBaseline(captureStackBaseline())
     // TyInt, TyReal, etc. are reference members bound to Ctx_ singletons;
     // Ctx_ is default-constructed above, so the singletons are already live.
 {}
@@ -1763,7 +1772,7 @@ void Sema::checkBlock(const BlockNode& Block,
             if (auto* Id = llvm::dyn_cast<IdentExpr>(X))
                 if (!Symtab.lookup(Id->Name) && PendingEnumNames.count(toLower(Id->Name)))
                     Found = true;
-        });
+        }, StackBaseline);
         return Found;
     };
     auto defineConst = [&](const ConstDef& Cd) {
@@ -2199,7 +2208,7 @@ void Sema::checkBlock(const BlockNode& Block,
         std::vector<const ForStmt*> ForLoops;
         walkStmts(Block.Body.get(), [&](const StmtNode* S) {
             if (auto* F = llvm::dyn_cast<ForStmt>(S)) ForLoops.push_back(F);
-        });
+        }, StackBaseline);
 
         for (const auto* F : ForLoops)
             for (const auto& Proc : Block.Procs)
@@ -2594,7 +2603,7 @@ void Sema::recordModifiedParams(const ProcDecl& Proc) {
                     if (ByRef) note(Cs->Args[I].get());
                 }
             }
-        });
+        }, StackBaseline);
     // A function call in an expression can take a var parameter too.
     walkStmts(Proc.Body->Body.get(), [&](const StmtNode* S) {
             forEachStmtExpr(S, [&](const ExprNode* E) {
@@ -2608,9 +2617,9 @@ void Sema::recordModifiedParams(const ProcDecl& Proc) {
                             || Callee->Params[I].IsVar;
                         if (ByRef) note(Ce->Args[I].get());
                     }
-                });
+                }, StackBaseline);
             });
-        });
+        }, StackBaseline);
 }
 
 void Sema::checkProcBody(const ProcDecl& Proc) {

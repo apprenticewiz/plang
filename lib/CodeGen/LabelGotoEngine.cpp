@@ -9,6 +9,7 @@
 
 #include "plang/AST/Ast.h"
 #include "plang/Basic/SemaUtil.h"
+#include "plang/Basic/StackHeadroom.h"
 
 #include "CodegenICE.h"
 
@@ -21,7 +22,8 @@ bool LabelGotoEngine::declaresLabel(const BlockNode& block, const std::string& l
 }
 
 void LabelGotoEngine::scanNonLocalTargets(const BlockNode& inner, const BlockNode& block,
-                                           std::set<std::string>& found) {
+                                           std::set<std::string>& found,
+                                           std::uintptr_t baseline) {
     for (const auto& proc : inner.Procs) {
         if (!proc->Body) continue;
         // A procedure declaring the label itself means its own, and every goto
@@ -31,14 +33,16 @@ void LabelGotoEngine::scanNonLocalTargets(const BlockNode& inner, const BlockNod
                 if (declaresLabel(block, g->Label)
                         && !declaresLabel(*proc->Body, g->Label))
                     found.insert(g->Label);
-        });
-        scanNonLocalTargets(*proc->Body, block, found);
+        }, baseline);
+        scanNonLocalTargets(*proc->Body, block, found, baseline);
     }
 }
 
 std::set<std::string> LabelGotoEngine::nonLocalTargets(const BlockNode& block) {
     std::set<std::string> found;
-    scanNonLocalTargets(block, block, found);
+    // See scanNonLocalTargets' own comment (LabelGotoEngine.h) for why the
+    // baseline is captured once, here, rather than by walkStmts itself.
+    scanNonLocalTargets(block, block, found, captureStackBaseline());
     return found;
 }
 

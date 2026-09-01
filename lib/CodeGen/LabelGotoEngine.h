@@ -94,9 +94,19 @@ private:
     /// Recursive half of nonLocalTargets: scans the procedures declared in
     /// \p inner for gotos naming a label \p block declares, collecting into
     /// \p found.
+    ///
+    /// \p baseline: nonLocalTargets' own walkStmts call (issue #556's
+    /// follow-up, plang::SemaUtil.h) needs a stack-headroom reference point;
+    /// this static helper has no owning object with an existing one to
+    /// reuse (unlike Sema's -- see SemaUtil.h's own comment), so
+    /// nonLocalTargets captures one, once, at its own entry -- the
+    /// shallowest point this particular scan is ever known to start from --
+    /// and this threads it down through the recursion rather than each
+    /// level capturing its own.
     static void scanNonLocalTargets(const plang::BlockNode& inner,
                                      const plang::BlockNode& block,
-                                     std::set<std::string>& found);
+                                     std::set<std::string>& found,
+                                     std::uintptr_t baseline);
 
     llvm::LLVMContext& Ctx;
     llvm::Module& Mod;

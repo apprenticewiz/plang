@@ -4,6 +4,7 @@
 #include "plang/Basic/Diagnostic.h"
 #include "plang/Basic/Diagnostic.h"
 #include "plang/Basic/LangOptions.h"
+#include "plang/Basic/StackHeadroom.h"
 #include "plang/Lex/Scanner.h"
 #include "plang/Basic/Token.h"
 
@@ -90,34 +91,31 @@ private:
     // all. Unlike ExprDepth/TypeDepth/StmtDepth/BlockDepth, which each bound
     // a *count* of live activations against a fixed constant, this one is
     // bounded by comparing actual stack-pointer headroom against the
-    // platform's real stack budget (see powerStackNearlyExhausted in
-    // ParseExpr.cpp) -- a term-count ceiling was tried and reverted (see
-    // PR #553/issue #300's reopening comment) because the "right" count is
-    // not a fixed number, it depends on how much stack a single parsePower
-    // frame actually costs, which varies by build (Debug vs Release) and
-    // platform in a way a hardcoded constant cannot track but a live
-    // headroom check naturally does.  StackBaseline is captured once, here,
-    // at Parser construction (Parser.cpp) as the reference point headroom is
-    // measured from; PowerDepth/PowerDepthLimitHit/PowerDepthScope exist only
-    // to reset the "already reported" flag between one deep '**' chain and
-    // the next in the same file, the same way ExprDepthLimitHit resets above.
+    // platform's real stack budget -- via the shared
+    // plang::stackNearlyExhausted utility (Basic/StackHeadroom.h, issue #556
+    // generalizes this call site's own original, independent
+    // powerStackNearlyExhausted into that shared utility so Sema and CodeGen
+    // can reuse the same math rather than each copying it) -- a term-count
+    // ceiling was tried and reverted (see PR #553/issue #300's reopening
+    // comment) because the "right" count is not a fixed number, it depends
+    // on how much stack a single parsePower frame actually costs, which
+    // varies by build (Debug vs Release) and platform in a way a hardcoded
+    // constant cannot track but a live headroom check naturally does.
+    // StackBaseline is captured once, here, at Parser construction
+    // (Parser.cpp) as the reference point headroom is measured from;
+    // PowerDepth/PowerDepthLimitHit/plang::RecursionGuard exist only to
+    // reset the "already reported" flag between one deep '**' chain and the
+    // next in the same file, the same way ExprDepthLimitHit resets above.
     // Unlike ExprDepthScope, whose ceiling can only fire once MaxExprDepth
     // other DepthGuards are already alive on the stack, the headroom check
     // this Guard wraps can fire on the very first activation (PowerDepth ==
-    // 0) -- so parsePower constructs its PowerDepthScope unconditionally,
-    // before running the check, rather than only when it decides to recurse
-    // further; otherwise a first-call exhaustion would latch
-    // PowerDepthLimitHit with no Guard ever created to reset it.
+    // 0) -- so parsePower constructs its plang::RecursionGuard
+    // unconditionally, before running the check, rather than only when it
+    // decides to recurse further; otherwise a first-call exhaustion would
+    // latch PowerDepthLimitHit with no Guard ever created to reset it.
     std::uintptr_t            StackBaseline;
     unsigned                  PowerDepth{};
     bool                      PowerDepthLimitHit{};
-    struct PowerDepthScope {
-        unsigned& N;
-        bool&     LimitHit;
-        explicit PowerDepthScope(unsigned& Counter, bool& LimitHitFlag)
-            : N(Counter), LimitHit(LimitHitFlag) { ++N; }
-        ~PowerDepthScope() { if (--N == 0) LimitHit = false; }
-    };
 
     // Live activations of parseTypeExpr.  Every recursive re-entry into type
     // parsing -- an array's element type, a pointer's base type, a record

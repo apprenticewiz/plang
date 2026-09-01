@@ -13,6 +13,8 @@
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/LLVMContext.h"
 
+#include "plang/Basic/StackHeadroom.h"
+
 #include "CGBinaryOps.h"
 #include "CGFieldAccess.h"
 #include "CGFuncCall.h"
@@ -107,6 +109,18 @@ private:
     /// (numeric conversion vs. bit-for-bit reinterpretation) applies.
     llvm::Value* emitTypeCastValue(const plang::TypeCastExpr& e);
 
+    // Reference point the stack-headroom check below (see MaxExprDepth's own
+    // comment) measures usage from -- the same role Parser::StackBaseline and
+    // Sema::StackBaseline play for their own guards (issue #556). An in-class
+    // default member initializer, rather than a constructor parameter, is
+    // enough here (unlike Parser's/Sema's own StackBaseline, threaded through
+    // an explicit constructor for documentation's sake) since it is still
+    // evaluated fresh at every CGExprCore construction -- this class has
+    // exactly one constructor, so there is no risk of a second one leaving it
+    // stale -- and this avoids adding yet another parameter to the already
+    // very long parameter list just below.
+    std::uintptr_t             StackBaseline_ = plang::captureStackBaseline();
+
     // Live activations of emitExpr.  Every recursive re-entry into expression
     // emission -- a binary/unary operand, a call argument, an index/field/
     // deref base -- funnels through emitExpr (directly, or indirectly via the
@@ -141,6 +155,44 @@ private:
     // recursion raw-SIGSEGV" -- turning the crash into the same clean,
     // diagnosable failure (codegenICE, CodegenICE.h) every other invariant
     // violation in codegen produces.
+    //
+    // A note for anyone writing a lit regression fixture that needs to reach
+    // codegen with a deep, non-folded expression tree (a call-statement
+    // argument, for instance -- unlike a `const` initializer, which Sema
+    // folds away before codegen ever sees it): under this project's own
+    // ASan+UBSan CI build specifically, 200 above is a HARD, deterministic
+    // activation-count ceiling, not a live-stack-headroom trip, so it fires
+    // at the exact same term count on every machine -- there is no "usually
+    // safe up to N terms" the way there is for the live stackNearlyExhausted
+    // check just below. A fixture pattern this size or larger will fail that
+    // CI job's build specifically, even though the very same input compiles
+    // fine on every non-ASan configuration in this project's CI matrix. Stay
+    // well clear of 200 (not just of Sema's much higher MaxExprDepth=1000,
+    // Sema.h) for any such fixture. This is exactly the mistake issue #556's
+    // own PR #558 regression test made the first time around -- it copied a
+    // 900-term figure from a sibling fixture whose shape (a `const`
+    // initializer) never reaches codegen at all, so 900 was never actually
+    // exercising this ceiling until it was fixed to use a for-loop-body
+    // call-statement argument instead. See
+    // test/Driver/ParserRobustness/a-100-term-power-chain-in-a-for-loop-
+    // body-call-argument-still-compiles-cleanly.pas for the empirically-
+    // measured boundary (an exact, deterministic 200/201 terms) and the
+    // margin this project settled on.
+    //
+    // Neither of those defenses is a live stack-headroom check, though: both
+    // are term-count ceilings, tuned against a NORMAL-sized (multi-MiB, or
+    // ASan-inflated-but-still-multi-MiB) stack. Under a small but real
+    // platform stack budget instead (a constrained container, a hardened
+    // deployment, a fuzzing worker -- issue #556), a `**` chain in the
+    // 500-1000 term range crashes CodeGen with a raw SIGSEGV in emitBinary/
+    // emitExpr's mutual recursion well under BOTH ceilings above -- confirmed
+    // via gdb, `ulimit -s 1024`. So plang::stackNearlyExhausted (Basic/
+    // StackHeadroom.h, generalized from Parser::parsePower's own guard) is
+    // checked alongside the term count below, the same way Sema's own
+    // checkExpr needs one for the identical reason (SemaExpr.cpp).
+    // codegenICE never returns, so unlike Parser's/Sema's own guards there is
+    // no "already reported" latch to worry about ordering a Guard around --
+    // the process exits on the very statement that detects either ceiling.
 #if defined(__SANITIZE_ADDRESS__) \
     || (defined(__has_feature) && __has_feature(address_sanitizer))
     static constexpr unsigned MaxExprDepth = 200;

@@ -710,7 +710,7 @@ void Sema::checkForBody(const StmtNode* Stmt, const std::string& VarName,
             walkExprs(E, [&](const ExprNode* Ex) {
                 if (auto* Ce = llvm::dyn_cast<CallExpr>(Ex))
                     checkVarParamArgs(Ce->Name, Ce->Args, Ce->Loc);
-            });
+            }, StackBaseline);
         });
     }
 

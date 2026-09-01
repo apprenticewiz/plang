@@ -4,9 +4,11 @@
 // Not intended for inclusion outside the Sema implementation.
 
 #include "plang/AST/Ast.h"
+#include "plang/Basic/StackHeadroom.h"
 #include "llvm/Support/Casting.h"
 
 #include <concepts>
+#include <cstdint>
 
 namespace plang {
 
@@ -78,37 +80,97 @@ static_assert(NumExprKinds == 19,
 // this one.
 constexpr unsigned MaxWalkDepth = 1000;
 
+// Issue #556's follow-up (found in that issue's own adversarial review,
+// PR #558): `const x = 2**2**...**2;` (a flat chain hundreds of terms deep,
+// entirely ordinary syntax -- no nesting, no fuzzing needed) reaches
+// Sema::checkBlock's refsPendingEnum lambda, which walks the SAME kind of
+// flat-chain AST as checkExpr/constBound/buildExtentForm do, through THIS
+// walk instead -- and MaxWalkDepth alone has exactly the gap
+// checkExpr/constBound/buildExtentForm already had before issue #556: it
+// bounds a term COUNT, not the real C++ stack, so a small-but-real platform
+// stack budget (a constrained container, a hardened deployment, a fuzzer
+// worker) can exhaust the actual stack before 1000 live walkStmts/walkExprs
+// activations ever accumulate -- confirmed via gdb, `ulimit -s 256`, Debug:
+// a 700-term flat `**` chain crashes inside walkExprs's own recursion,
+// nowhere near MaxWalkDepth.
+//
+// So every walk below also checks plang::stackNearlyExhausted (Basic/
+// StackHeadroom.h), exactly the way checkExpr/constBound/buildExtentForm
+// do, measured from a \p Baseline the CALLER supplies rather than one this
+// header captures for itself: capturing a fresh baseline on every top-level
+// walkStmts/walkExprs call, the way a lazily-captured "first call" baseline
+// would, is wrong here specifically BECAUSE walkStmts/walkExprs are free
+// functions with call sites that nest inside one another (a walkStmts
+// callback that itself calls forEachStmtExpr then walkExprs -- see
+// Sema::recordModifiedParams and SemaFlow.cpp's collectNamesUsedIn) and
+// inside a caller's own unrelated recursion elsewhere on the same stack; a
+// baseline captured freshly at the INNER call's own entry would measure
+// headroom from that already-deep point rather than from the true
+// shallowest point of the whole call chain, undercounting real stack usage
+// by however deep the outer recursion already was -- the identical bug this
+// whole mechanism exists to catch, reintroduced one level up. Every Sema-
+// side caller instead threads down the ONE Sema::StackBaseline captured
+// once at Sema construction (Sema.h) -- valid from any depth this Sema
+// instance is ever called at, nested or not, for the same reason it is
+// already valid for checkExpr/constBound/buildExtentForm. LabelGotoEngine's
+// call site (CodeGen/LabelGotoEngine.cpp) has no equivalent fixed reference
+// to thread down, so it captures its own baseline once, at nonLocalTargets'
+// own entry -- the shallowest point that particular call tree is known to
+// start from.
+//
+// No diagnostic of its own here either, for exactly the reasons the comment
+// above (MaxWalkDepth's own) already gives for the term-count ceiling: this
+// second check catches the identical trees, by the identical "checkExpr/
+// checkStmt already has, or is about to run, its own guarded walk over the
+// same tree" property, just before the real stack rather than the term
+// count runs out first.
+//
+// Unlike Sema::ExprDepthScope (a RecursionGuard bumping a MEMBER counter,
+// needed there because checkExpr's many mutually-recursive helpers cannot
+// all thread a Depth parameter through each other), walkStmts/walkExprs
+// already thread Depth as an ordinary by-value parameter through their own
+// direct self-recursion, so a live-activation count (in lockstep with the
+// real call stack) comes for free with no separate RAII object needed: it
+// is bumped by every recursive call and unwound automatically as the C++
+// stack itself unwinds, with nothing left to reset on the way out.
+
 /// Pre-order walk of all statement nodes in the tree rooted at S.
 /// Calls F(S) first, then recurses into all sub-statements.
 /// Does not cross procedure/function body boundaries.
 ///
+/// \p Baseline is the stack-headroom reference point every call in this
+/// walk is measured from (plang::captureStackBaseline(), or a caller's own
+/// already-captured baseline -- see MaxWalkDepth's own comment above for why
+/// this is a required parameter rather than something this function
+/// captures for itself).
+///
 /// \p Depth is an implementation detail (recursion depth so far), not a
 /// parameter callers pass; see MaxWalkDepth above.
 template<std::invocable<const StmtNode*> Fn>
-void walkStmts(const StmtNode* S, Fn&& F, unsigned Depth = 0) {
+void walkStmts(const StmtNode* S, Fn&& F, std::uintptr_t Baseline, unsigned Depth = 0) {
     if (!S) return;
-    if (Depth >= MaxWalkDepth) return;
+    if (Depth >= MaxWalkDepth || stackNearlyExhausted(Baseline)) return;
     F(S);
     if (auto* Cs = llvm::dyn_cast<CompoundStmt>(S)) {
-        for (const auto& St : Cs->Stmts) walkStmts(St.get(), F, Depth + 1);
+        for (const auto& St : Cs->Stmts) walkStmts(St.get(), F, Baseline, Depth + 1);
     } else if (auto* Is = llvm::dyn_cast<IfStmt>(S)) {
-        walkStmts(Is->Then.get(), F, Depth + 1);
-        walkStmts(Is->Else.get(), F, Depth + 1);
+        walkStmts(Is->Then.get(), F, Baseline, Depth + 1);
+        walkStmts(Is->Else.get(), F, Baseline, Depth + 1);
     } else if (auto* Fs = llvm::dyn_cast<ForStmt>(S)) {
-        walkStmts(Fs->Body.get(), F, Depth + 1);
+        walkStmts(Fs->Body.get(), F, Baseline, Depth + 1);
     } else if (auto* Fi = llvm::dyn_cast<ForInStmt>(S)) {
-        walkStmts(Fi->Body.get(), F, Depth + 1);
+        walkStmts(Fi->Body.get(), F, Baseline, Depth + 1);
     } else if (auto* Ws = llvm::dyn_cast<WhileStmt>(S)) {
-        walkStmts(Ws->Body.get(), F, Depth + 1);
+        walkStmts(Ws->Body.get(), F, Baseline, Depth + 1);
     } else if (auto* Rs = llvm::dyn_cast<RepeatStmt>(S)) {
-        for (const auto& St : Rs->Stmts) walkStmts(St.get(), F, Depth + 1);
+        for (const auto& St : Rs->Stmts) walkStmts(St.get(), F, Baseline, Depth + 1);
     } else if (auto* Cas = llvm::dyn_cast<CaseStmt>(S)) {
-        for (const auto& Arm : Cas->Arms) walkStmts(Arm.Body.get(), F, Depth + 1);
-        walkStmts(Cas->Else.get(), F, Depth + 1);
+        for (const auto& Arm : Cas->Arms) walkStmts(Arm.Body.get(), F, Baseline, Depth + 1);
+        walkStmts(Cas->Else.get(), F, Baseline, Depth + 1);
     } else if (auto* Wts = llvm::dyn_cast<WithStmt>(S)) {
-        walkStmts(Wts->Body.get(), F, Depth + 1);
+        walkStmts(Wts->Body.get(), F, Baseline, Depth + 1);
     } else if (auto* Ls = llvm::dyn_cast<LabeledStmt>(S)) {
-        walkStmts(Ls->Stmt.get(), F, Depth + 1);
+        walkStmts(Ls->Stmt.get(), F, Baseline, Depth + 1);
     }
 }
 
@@ -118,54 +180,59 @@ void walkStmts(const StmtNode* S, Fn&& F, unsigned Depth = 0) {
 /// See NumExprKinds in AstBase.h: every kind that owns a child expression has
 /// to appear below, or the walk silently stops short of it.
 ///
+/// \p Baseline is the stack-headroom reference point every call in this
+/// walk is measured from; see walkStmts' own comment (and MaxWalkDepth's,
+/// above) for why this is a required parameter rather than something this
+/// function captures for itself.
+///
 /// \p Depth is an implementation detail (recursion depth so far), not a
 /// parameter callers pass; see MaxWalkDepth above.
 template<std::invocable<const ExprNode*> Fn>
-void walkExprs(const ExprNode* E, Fn&& F, unsigned Depth = 0) {
+void walkExprs(const ExprNode* E, Fn&& F, std::uintptr_t Baseline, unsigned Depth = 0) {
     if (!E) return;
-    if (Depth >= MaxWalkDepth) return;
+    if (Depth >= MaxWalkDepth || stackNearlyExhausted(Baseline)) return;
     F(E);
     if (auto* N = llvm::dyn_cast<IndexExpr>(E)) {
-        walkExprs(N->Array.get(), F, Depth + 1);
-        walkExprs(N->Index.get(), F, Depth + 1);
+        walkExprs(N->Array.get(), F, Baseline, Depth + 1);
+        walkExprs(N->Index.get(), F, Baseline, Depth + 1);
     } else if (auto* N = llvm::dyn_cast<FieldExpr>(E)) {
-        walkExprs(N->Record.get(), F, Depth + 1);
+        walkExprs(N->Record.get(), F, Baseline, Depth + 1);
     } else if (auto* N = llvm::dyn_cast<DerefExpr>(E)) {
-        walkExprs(N->Pointer.get(), F, Depth + 1);
+        walkExprs(N->Pointer.get(), F, Baseline, Depth + 1);
     } else if (auto* N = llvm::dyn_cast<BinaryExpr>(E)) {
-        walkExprs(N->Left.get(), F, Depth + 1);
-        walkExprs(N->Right.get(), F, Depth + 1);
+        walkExprs(N->Left.get(), F, Baseline, Depth + 1);
+        walkExprs(N->Right.get(), F, Baseline, Depth + 1);
     } else if (auto* N = llvm::dyn_cast<UnaryExpr>(E)) {
-        walkExprs(N->Operand.get(), F, Depth + 1);
+        walkExprs(N->Operand.get(), F, Baseline, Depth + 1);
     } else if (auto* N = llvm::dyn_cast<CallExpr>(E)) {
-        for (const auto& A : N->Args) walkExprs(A.get(), F, Depth + 1);
+        for (const auto& A : N->Args) walkExprs(A.get(), F, Baseline, Depth + 1);
     } else if (auto* N = llvm::dyn_cast<MethodCallExpr>(E)) {
-        walkExprs(N->Receiver.get(), F, Depth + 1);
-        for (const auto& A : N->Args) walkExprs(A.get(), F, Depth + 1);
+        walkExprs(N->Receiver.get(), F, Baseline, Depth + 1);
+        for (const auto& A : N->Args) walkExprs(A.get(), F, Baseline, Depth + 1);
     } else if (auto* N = llvm::dyn_cast<InheritedCallExpr>(E)) {
         // No Receiver to walk -- see InheritedCallExpr's own comment
         // (AstExpr.h): the receiver is always the implicit Self.
-        for (const auto& A : N->Args) walkExprs(A.get(), F, Depth + 1);
+        for (const auto& A : N->Args) walkExprs(A.get(), F, Baseline, Depth + 1);
     } else if (auto* N = llvm::dyn_cast<SetRangeExpr>(E)) {
-        walkExprs(N->Low.get(), F, Depth + 1);
-        walkExprs(N->High.get(), F, Depth + 1);
+        walkExprs(N->Low.get(), F, Baseline, Depth + 1);
+        walkExprs(N->High.get(), F, Baseline, Depth + 1);
     } else if (auto* N = llvm::dyn_cast<SetLiteralExpr>(E)) {
-        for (const auto& X : N->Elements) walkExprs(X.get(), F, Depth + 1);
+        for (const auto& X : N->Elements) walkExprs(X.get(), F, Baseline, Depth + 1);
     } else if (auto* N = llvm::dyn_cast<SubstringExpr>(E)) {
-        walkExprs(N->Str.get(), F, Depth + 1);
-        walkExprs(N->Low.get(), F, Depth + 1);
-        walkExprs(N->High.get(), F, Depth + 1);
+        walkExprs(N->Str.get(), F, Baseline, Depth + 1);
+        walkExprs(N->Low.get(), F, Baseline, Depth + 1);
+        walkExprs(N->High.get(), F, Baseline, Depth + 1);
     } else if (auto* N = llvm::dyn_cast<StructuredValueExpr>(E)) {
         for (const auto& Arm : N->Arms) {
-            for (const auto& L : Arm.Labels) walkExprs(L.get(), F, Depth + 1);
-            walkExprs(Arm.Value.get(), F, Depth + 1);
+            for (const auto& L : Arm.Labels) walkExprs(L.get(), F, Baseline, Depth + 1);
+            walkExprs(Arm.Value.get(), F, Baseline, Depth + 1);
         }
     } else if (auto* N = llvm::dyn_cast<WriteParam>(E)) {
-        walkExprs(N->Value.get(), F, Depth + 1);
-        walkExprs(N->Width.get(), F, Depth + 1);
-        walkExprs(N->Decimals.get(), F, Depth + 1);
+        walkExprs(N->Value.get(), F, Baseline, Depth + 1);
+        walkExprs(N->Width.get(), F, Baseline, Depth + 1);
+        walkExprs(N->Decimals.get(), F, Baseline, Depth + 1);
     } else if (auto* N = llvm::dyn_cast<TypeCastExpr>(E)) {
-        walkExprs(N->Operand.get(), F, Depth + 1);
+        walkExprs(N->Operand.get(), F, Baseline, Depth + 1);
     }
 }
 
