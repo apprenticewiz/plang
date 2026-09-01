@@ -1323,6 +1323,28 @@ private:
                                           bool ExactBounds = false,
                                           int Depth = 0) const;
 
+    /// Issue #307: the recurring structural-walk shape one level of a
+    /// conformant-array schema is compared with -- packedness, then this
+    /// dimension's ordinal index type, then the element type (recursing when
+    /// the element is itself another conformant-array dimension) -- shared by
+    /// isConformable (ISO §6.7.3.8 conformance: does this actual array fit
+    /// this schema?) and congruousConformant (EP §6.7.3.7 congruity: do these
+    /// two schema headings denote the same type?).  The two relations are
+    /// genuinely different, not the same predicate twice, so \p Strict picks
+    /// which one this call answers rather than blurring them together:
+    ///  - Strict=false (conformance): index/element types need only be
+    ///    isAssignCompatible, not identical -- an Integer actual conforms to
+    ///    a schema over a subrange of Integer -- packedness must match
+    ///    exactly (§6.7.3.8 d), and an unresolved element type is treated
+    ///    permissively (existing error-recovery behavior: true rather than a
+    ///    cascading false).
+    ///  - Strict=true (congruity): index/element types must be
+    ///    isIdenticalType, packedness plays no part in whether two schema
+    ///    headings are the same type so it is not checked, and an unresolved
+    ///    element type is treated as a mismatch (false), not permissively.
+    [[nodiscard]] bool conformantStructuralWalk(const Type& L, const Type& R,
+                                                bool Strict) const;
+
     /// ISO §6.6.3.8: "may an array of type Actual be passed to a conformant
     /// array parameter declared with schema Formal?"  A separate question from
     /// assignment: an array conforms to a schema whatever bounds it was
