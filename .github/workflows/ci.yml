@@ -716,7 +716,7 @@ jobs:
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
 
   runtime-sanitizer-tests:
-    name: runtime sanitizer harness (issue #190)
+    name: "runtime sanitizer harness (issue #190)"
     runs-on: ubuntu-latest
     # issue #189's own timeout-minutes policy, same shape as fuzz-smoke right
     # below: this job builds only runtime_sanitized_test and its own
