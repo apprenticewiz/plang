@@ -271,6 +271,7 @@ static void unloadComponent(PascalFile *F) { F->CompLoaded = 0; }
 /// earlier one left behind cannot survive to be misread as this one's own.
 static void abortIfClosed(PascalFile *F, const char *Op) {
     if (!F || !F->Fp) {
+        std::fflush(stdout);
         std::fprintf(stderr, "plang runtime: file not open in '%s'\n", Op);
         std::abort();
     }
@@ -1238,6 +1239,7 @@ void *plang_file_buffer(PascalFile *F, int64_t ElemSize, int8_t IsText) {
             / PlangFileBufferAlign * PlangFileBufferAlign;
         F->Comp = std::aligned_alloc(PlangFileBufferAlign, AllocSize);
         if (!F->Comp) {
+            std::fflush(stdout);
             std::fprintf(stderr, "plang runtime: out of memory for a file buffer\n");
             std::abort();
         }
