@@ -293,8 +293,9 @@ std::shared_ptr<Type> Sema::checkIdent(const IdentExpr& E) {
         auto It = ActiveSchemaBindings_.find(toLower(E.Name));
         if (It != ActiveSchemaBindings_.end()) {
             if (Symbol* S = Symtab.lookup(E.Name);
-                    S && S->Kind == SymbolKind::Const && S->Ty && !S->Ty->isError())
-                return S->Ty;
+                    S && S->Kind == SymbolKind::Const && S->hasDeclaredType()
+                        && !S->declaredType()->isError())
+                return S->declaredType();
             return TyInt;
         }
     }
@@ -312,22 +313,23 @@ std::shared_ptr<Type> Sema::checkIdent(const IdentExpr& E) {
         case SymbolKind::Const:
         case SymbolKind::EnumValue:
             // Turbo untyped parameter (`procedure P(var x)`) used bare --
-            // Sym->Ty is deliberately null (ParamGroup::Type's own comment).
-            // The two legal uses of one bypass checkIdent entirely rather
-            // than reaching this point: the operand of a variable typecast
-            // (checkTypeCast's own comment) and a direct relay to another
-            // untyped formal (checkCallArgs's own comment).  Every other use
-            // -- arithmetic, field/index access, an ordinary argument, a
-            // bare read -- lands here and gets a real diagnostic instead of
-            // silently becoming TyErr (which, being the generic error
-            // sentinel, would have let every one of those through unchecked
-            // rather than rejecting them the way this feature requires).
-            if (!Sym->Ty && (Sym->Kind == SymbolKind::Var
+            // Sym->declaredType() is deliberately null (ParamGroup::Type's
+            // own comment).  The two legal uses of one bypass checkIdent
+            // entirely rather than reaching this point: the operand of a
+            // variable typecast (checkTypeCast's own comment) and a direct
+            // relay to another untyped formal (checkCallArgs's own
+            // comment).  Every other use -- arithmetic, field/index access,
+            // an ordinary argument, a bare read -- lands here and gets a
+            // real diagnostic instead of silently becoming TyErr (which,
+            // being the generic error sentinel, would have let every one of
+            // those through unchecked rather than rejecting them the way
+            // this feature requires).
+            if (!Sym->hasDeclaredType() && (Sym->Kind == SymbolKind::Var
                              || Sym->Kind == SymbolKind::VarParam)) {
                 error(E.Loc, diag::err_untyped_param_bare_use, {E.Name});
                 return TyErr;
             }
-            return Sym->Ty ? Sym->Ty : TyErr;
+            return Sym->hasDeclaredType() ? Sym->declaredType() : TyErr;
         case SymbolKind::Proc:
             if (Sym->IsFunction) {
                 if (!Sym->Params.empty()) {
@@ -1319,7 +1321,7 @@ std::shared_ptr<Type> Sema::resolveTypeArgOrValue(const ExprNode& Arg) {
             Sym->Referenced = true;
             Id->UserDeclared = true;
             Id->IsTypeArgument = true;
-            Id->ResolvedType = Sym->Ty ? Sym->Ty : TyErr;
+            Id->ResolvedType = Sym->hasDeclaredType() ? Sym->declaredType() : TyErr;
             return Id->ResolvedType;
         }
     }
@@ -1963,7 +1965,7 @@ std::shared_ptr<Type> Sema::checkTypeCast(const TypeCastExpr& E) {
     // same-size match rather than needing its own copy of this special case.
     if (auto* Id = llvm::dyn_cast<IdentExpr>(E.Operand.get())) {
         if (Symbol* Sym = Symtab.lookup(Id->Name);
-                Sym && !Sym->Ty
+                Sym && !Sym->hasDeclaredType()
                 && (Sym->Kind == SymbolKind::Var || Sym->Kind == SymbolKind::VarParam)) {
             Sym->Referenced = true;
             E.Operand->ResolvedType = TargetTy;
@@ -2022,9 +2024,9 @@ std::shared_ptr<Type> Sema::checkSetLit(const SetLiteralExpr& E, const std::shar
     std::shared_ptr<Type> Named;
     if (!E.TypeName.empty())
         if (const Symbol* Sym = Symtab.lookup(E.TypeName))
-            if (Sym->Kind == SymbolKind::TypeAlias && Sym->Ty
-                    && Sym->Ty->Kind == TypeKind::Set)
-                Named = Sym->Ty;
+            if (Sym->Kind == SymbolKind::TypeAlias && Sym->hasDeclaredType()
+                    && Sym->declaredType()->Kind == TypeKind::Set)
+                Named = Sym->declaredType();
 
     std::shared_ptr<Type> BaseType;
     for (const auto& Elem : E.Elements) {
@@ -2231,13 +2233,13 @@ std::shared_ptr<Type> Sema::checkStructuredValue(const StructuredValueExpr& E) {
     if (!E.TypeName.empty() || !T) {
         // Look up the type name as a TypeAlias in the symbol table.
         Symbol* Sym = Symtab.lookup(E.TypeName);
-        if (!Sym || Sym->Kind != SymbolKind::TypeAlias || !Sym->Ty
-                 || Sym->Ty->isError()) {
+        if (!Sym || Sym->Kind != SymbolKind::TypeAlias || !Sym->hasDeclaredType()
+                 || Sym->declaredType()->isError()) {
             error(E.Loc, diag::err_constructor_type_not_found, {E.TypeName});
             checkAllArms();
             return TyErr;
         }
-        T = Sym->Ty;
+        T = Sym->declaredType();
     }
     // What is expected of an arm is settled by the arm, not by the value it
     // belongs to, so it does not carry on down.
@@ -3006,7 +3008,7 @@ void Sema::checkCallArgs(const Symbol& Sym, SourceLocation CallLoc,
             bool RelayedUntyped = false;
             if (auto* Id = llvm::dyn_cast<IdentExpr>(&ArgNode)) {
                 if (Symbol* ASym = Symtab.lookup(Id->Name);
-                        ASym && !ASym->Ty
+                        ASym && !ASym->hasDeclaredType()
                         && (ASym->Kind == SymbolKind::Var
                             || ASym->Kind == SymbolKind::VarParam)) {
                     ASym->Referenced = true;

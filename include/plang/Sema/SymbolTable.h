@@ -64,8 +64,28 @@ struct Symbol {
     /// Empty when nothing renamed it.
     std::string   LinkName;
 
-    /// Declared type; used for Var, VarParam, Const, and EnumValue.
+    /// Declared type; used for Var, VarParam, Const, and EnumValue -- null
+    /// for every other SymbolKind, and also null for a Var/VarParam/Const/
+    /// EnumValue whose own declared type failed to resolve (an untyped
+    /// formal parameter is the other legitimate null case; see
+    /// ParamGroup::Type's own comment).  Prefer declaredType()/
+    /// hasDeclaredType() below over touching this field directly: issue
+    /// #302 found ~27 call sites across Sema re-deriving this same
+    /// null-check ad hoc (the #205 for-loop SIGSEGV was exactly one of them
+    /// forgetting to), and centralizing the read here is Phase 2 of that
+    /// issue's fix -- it does not change what null means, only where the
+    /// check lives.
     std::shared_ptr<Type> Ty;
+
+    /// Null-safe read of Ty.  Still possibly null -- see Ty's own comment
+    /// for when -- but funnels every consumer through one auditable spot
+    /// instead of each re-deriving "is this SymbolKind one Ty is meaningful
+    /// for" on its own.  Prefer this (or hasDeclaredType() for a bare
+    /// presence check) over `Sym->Ty` everywhere outside Symbol's own
+    /// construction/mutation sites.
+    [[nodiscard]] const std::shared_ptr<Type>& declaredType() const noexcept { return Ty; }
+    /// True iff declaredType() is non-null.
+    [[nodiscard]] bool hasDeclaredType() const noexcept { return static_cast<bool>(Ty); }
 
     /// How many scopes were open when this symbol was defined.  A schema's body
     /// is resolved standing in that many, so it binds where it was written.
