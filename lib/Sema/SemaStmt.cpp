@@ -552,6 +552,19 @@ void Sema::checkFor(const ForStmt& S) {
         if (!Limit->isError() && !isAssignCompatible(*Sym->declaredType(), *Limit))
             error(S.Limit->Loc, diag::err_for_bound_wrong_type,
                   {Limit->Name, S.Var, Sym->declaredType()->Name});
+
+        // Issue #654: a bound that IS assignment-compatible (right type) can
+        // still be a constant provably outside the control variable's own
+        // ordinal range -- `var i: 1..10; for i := 1 to 15 do` type-checks
+        // (15 is an Integer, same as i's host type) but can never actually
+        // run 1..15 through a `1..10` variable. warnIfConstantOutOfRange is
+        // the same check assignment and Exit/function-result already use for
+        // exactly this "right type, wrong constant value" gap; it is a no-op
+        // whenever the declared type is not itself a Subrange or the bound
+        // is not a compile-time constant, so this adds no diagnostic for the
+        // (far more common) non-subrange or non-constant-bound loop.
+        warnIfConstantOutOfRange(*Sym->declaredType(), *S.From);
+        warnIfConstantOutOfRange(*Sym->declaredType(), *S.Limit);
     }
 
     // ISO §6.8.3.9: the body must not threaten the control variable (assign to

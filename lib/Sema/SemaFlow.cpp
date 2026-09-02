@@ -208,7 +208,28 @@ void Sema::FlowState::mergeWith(const FlowState& Other) {
 
 void Sema::flowRead(const ExprNode* E, FlowState& St) {
     if (!E) return;
+
+    // SizeOf/High/Low never evaluate their argument as an expression --
+    // a type name has no value to evaluate, and a value argument is only
+    // ever asked for its static type (docs/turbo.md: "SizeOf(arr[F]) does
+    // not call F"), the same unevaluated-operand rule C's own sizeof
+    // follows.  Pre-scan E for any such call and collect every node
+    // reachable from its argument list, so the read-detection walk below
+    // can skip them instead of reporting a false "read before assigned".
+    std::set<const ExprNode*> UnevaluatedOperands;
     walkExprs(E, [&](const ExprNode* X) {
+        auto* Call = llvm::dyn_cast<CallExpr>(X);
+        if (!Call) return;
+        const std::string Lo = toLower(Call->Name);
+        if (Lo != "sizeof" && Lo != "high" && Lo != "low") return;
+        for (const auto& A : Call->Args)
+            walkExprs(A.get(), [&](const ExprNode* Y) {
+                UnevaluatedOperands.insert(Y);
+            }, StackBaseline);
+    }, StackBaseline);
+
+    walkExprs(E, [&](const ExprNode* X) {
+        if (UnevaluatedOperands.contains(X)) return;
         // An access is a read of the variable it is rooted in.  The subscript
         // of an index and the like are reached by the walk in their own right,
         // so only the root has to be named here.
@@ -511,7 +532,15 @@ void Sema::flowStmt(const StmtNode* S, FlowState& St) {
         // unreachable still gets the benefit of the doubt, which costs a
         // missed warning rather than a wrong one.
         St.UndefAfterFor = unite(St.UndefAfterFor, Body.UndefAfterFor);
-        if (Broke && FlowTracked_.contains(Key)) {
+        // Issue #659: ISO §6.8.3.9 undefines the control variable once the
+        // loop exhausts its range, but real Turbo Pascal does not -- `fpc
+        // -Mtp` leaves it holding the last value the loop ran with (10,
+        // after `for i := 1 to 10 do ;`), the same well-defined-after-Break
+        // treatment the comment above already gives TP's `break` idiom, just
+        // for the loop's OTHER way of ending. So under -std=turbo a normal
+        // exit is treated exactly like Broke below: genuinely assigned, not
+        // merely "not known to be undefined".
+        if ((Broke || Opts.turbo()) && FlowTracked_.contains(Key)) {
             // Treated as genuinely assigned, not merely "not known to be
             // undefined" -- flowRead reports EITHER an UndefAfterFor member
             // or (failing that) a plain FlowTracked_ one that Assigned does
