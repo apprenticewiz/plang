@@ -1913,6 +1913,14 @@ void Sema::checkCallStmt(const CallStmt& S) {
                           IsReadstr ? diag::err_readstr_not_variable
                                     : diag::err_writestr_not_variable,
                           {T.Name});
+                // Issue #714: readstr/writestr assign straight into this
+                // target's storage the same way read/readln's own targets
+                // do above, so they need the identical checkNotProtected
+                // guard -- without it a `protected` string parameter's
+                // contents were silently mutable through readstr/writestr
+                // even though a direct `s := ...` assignment was refused.
+                else if (!T.isError())
+                    checkNotProtected(*S.Args[I], S.Args[I]->Loc);
             }
             return;
         }

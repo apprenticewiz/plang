@@ -557,7 +557,12 @@ ParamGroup Parser::parseParamGroup() {
     if (Opts.turbo() && check(TokenKind::Const)) {
         G.IsConst = true; advance();
     }
-    G.IsVar = match(TokenKind::Var);
+    if (G.IsConst && check(TokenKind::Var)) {
+        emitError(Current.toLoc(), diag::err_const_var_combined, {});
+        advance();
+    } else {
+        G.IsVar = match(TokenKind::Var);
+    }
     {
         Token T = expect(TokenKind::Identifier);
         G.Names.push_back(T.Lexeme);
