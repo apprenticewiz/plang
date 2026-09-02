@@ -2355,7 +2355,13 @@ void Sema::checkBlock(const BlockNode& Block,
     //
     // What is looked for is a threat to the *variable*, so a procedure declaring
     // the same name of its own is passed over: `i` inside it is its own `i`.
-    if (!Block.Procs.empty() && Block.Body) {
+    //
+    // Turbo has no such restriction (issue #650): `fpc -Mtp` accepts a
+    // control-variable assignment both directly in the loop body and through
+    // a called procedure, so this whole ISO-only scan is skipped under
+    // -std=turbo the same way checkFor's own intra-procedural checkForBody
+    // call is (see SemaStmt.cpp).
+    if (!Opts.turbo() && !Block.Procs.empty() && Block.Body) {
         // Collect every ForStmt in the compound body (at all nesting depths).
         std::vector<const ForStmt*> ForLoops;
         walkStmts(Block.Body.get(), [&](const StmtNode* S) {
