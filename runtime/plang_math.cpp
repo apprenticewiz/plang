@@ -206,20 +206,40 @@ double plang_tp_random_real(void) {
     return static_cast<double>(plangTpAdvanceRandSeed()) / 4294967296.0; // 2^32
 }
 
-/// TP Random(Range) -- the ONE-argument shape.  Range <= 0 has no [0, Range)
-/// to answer from; plang's own choice (not a claim about real TP/FPC's own,
-/// inconsistent-with-each-other behavior here) is to answer 0 rather than
-/// abort, the same "always in range, never a crash" answer 0 already is for
-/// every genuinely in-range Range.  Otherwise: advance the generator once,
-/// then map its full 32-bit state down to [0, Range) with a widening
-/// multiply-and-shift (Range promoted to 64 bits first so the product can
-/// never overflow) rather than `% Range`, which would bias low results
-/// whenever Range does not evenly divide 2^32.
+/// TP Random(Range) -- the ONE-argument shape.  Range == 0 has no [0, Range)
+/// (or (Range, 0]) to answer from, so that case alone stays a flat 0 with no
+/// generator advance, the same "always in range, never a crash" answer 0
+/// already is for every genuinely in-range Range.  A NEGATIVE Range is NOT
+/// the same "answer 0" case (issue #676): `fpc -Mtp` 3.2.2 answers a
+/// deterministic, nonzero-capable value in (Range, 0], not a flat 0.
+///
+/// The magnitude is computed with the identical unsigned widening multiply-
+/// and-shift the positive-Range path already used, against |Range| rather
+/// than Range itself, and then negated for a negative Range -- NOT a signed
+/// multiply against Range directly performing its own floor division (an
+/// earlier version of this fix tried that, on the theory that `fpc -Mtp`
+/// computes `random(-R)` and `random(R)` from the same generator state with
+/// a shared floor(S*Range / 2^32) formula; empirically, against many Range
+/// values and RandSeeds, `fpc -Mtp` visibly does NOT hold to that relationship
+/// -- its own random(-R) and random(R) pairs disagree with a pure floor-
+/// division reading of each other often enough that a signed-multiply
+/// implementation occasionally answered exactly Range itself, e.g.
+/// random(-50) = -50, a boundary value never in (Range, 0) -- see this
+/// project's own README on why plang's generator does not claim to
+/// reproduce ANY real implementation's sequence bit-for-bit).  Reusing the
+/// positive path's own magnitude computation against |Range| instead keeps
+/// the same guarantee the positive path already has -- the result's
+/// magnitude is always STRICTLY less than |Range|, so a negative Range can
+/// never answer Range itself, only strictly inside (Range, 0].
 int64_t plang_tp_random_range(int64_t Range) {
-    if (Range <= 0) return 0;
+    if (Range == 0) return 0;
     const uint32_t S = plangTpAdvanceRandSeed();
-    return static_cast<int64_t>(
-        (static_cast<uint64_t>(S) * static_cast<uint64_t>(Range)) >> 32);
+    const bool Neg = Range < 0;
+    const uint64_t AbsRange =
+        Neg ? static_cast<uint64_t>(-Range) : static_cast<uint64_t>(Range);
+    const int64_t Magnitude = static_cast<int64_t>(
+        (static_cast<uint64_t>(S) * AbsRange) >> 32);
+    return Neg ? -Magnitude : Magnitude;
 }
 
 /// TP Randomize -- reseeds RandSeed from wall-clock time, so successive RUNS

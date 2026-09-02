@@ -33,6 +33,7 @@
 #include <cctype>
 #include <cerrno>
 #include <cinttypes>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -72,6 +73,11 @@ static void clearWritePath(PascalFile *F);
 /// needs it to bound its own hand-rolled padding loop the same way the
 /// writers below it already do (issue #247).
 static int checkedWidth(int64_t W);
+
+/// -std=turbo only: defined alongside checkedWidth further down; the Turbo
+/// string writers above need it for the identical reason checkedWidth
+/// itself is forward-declared here (issue #675).
+static int64_t wrapWidthTP(int64_t W);
 
 /// Defined with the binding table further down; reset and rewrite call this
 /// too now (issue #239): a name given directly to either -- not just one
@@ -1961,11 +1967,19 @@ void plang_read_file_char(PascalFile *F, int8_t *P) {
 // abstract "line marker" of its own the way ISO's f^ does; every byte the
 // underlying file holds, including CR and LF, is a character read can
 // return.
+// Issue #680: at EOF, `fpc -Mtp`'s text driver answers #26 (Ctrl-Z / SUB) --
+// the classic DOS end-of-file marker -- not #0, and keeps answering it for
+// every further char read past the end (confirmed empirically: reading past
+// a 2-byte file returns 26, 26, ... not 0).  ISO/EP's own
+// plang_read_file_char (just above) is unaffected: its own EOF answer is a
+// dialect-agnostic ISO 7185 choice this item does not touch.
+static constexpr int8_t PlangTpEofChar = 26;
+
 void plang_read_file_char_turbo(PascalFile *F, int8_t *P) {
     if (!tpFileReady(F, "read")) { *P = 0; return; }
     tpTrapOnWrongDirection(F, 0);
     ensurePrimed(F);
-    if (F->Buf == EOF) { *P = 0; return; }
+    if (F->Buf == EOF) { *P = PlangTpEofChar; return; }
     const int C = advance(F);
     tpTrapOnStreamError(F, 0);
     *P = static_cast<int8_t>(C);
@@ -2206,6 +2220,7 @@ void plang_str_write_file_w(PascalFile *F, const void *S, int64_t /*Cap*/,
 void plang_str_write_file_w_turbo(PascalFile *F, const void *S, int64_t /*Cap*/,
                                    int64_t W) {
     if (!tpFileReady(F, "write")) return;
+    W = wrapWidthTP(W);
     if (W == 0) return;
     tpTrapOnWrongDirection(F, 1);
     const auto* Base = static_cast<const char*>(S);
@@ -2270,6 +2285,7 @@ void plang_sstr_write_file(PascalFile *F, const void *S, int64_t /*Cap*/) {
 void plang_sstr_write_file_w(PascalFile *F, const void *S, int64_t /*Cap*/,
                               int64_t W) {
     if (!tpFileReady(F, "write")) return;
+    W = wrapWidthTP(W);
     if (W == 0) return;
     tpTrapOnWrongDirection(F, 1);
     const auto*   Base = static_cast<const char*>(S);
@@ -2385,6 +2401,25 @@ static int checkedWidth(int64_t W) {
     return static_cast<int>(W);
 }
 
+// -std=turbo only: an out-of-range TotalWidth/FracDigits has no business
+// reaching checkedWidth's ISO-reporter abort at all (issue #675) -- Turbo's
+// dialect leans on the resumable InOutRes/{$I-} mechanism for a write
+// failure, not an unconditional exit(70), and `fpc -Mtp` does not even treat
+// this as a failure: it simply narrows the int64 width the same way an
+// implicit int64->int32 conversion would, silently wrapping.  Confirmed
+// empirically against `fpc -Mtp` 3.2.2: `w := 5000000000; write(f, 123:w)`
+// writes 705032704 spaces (5000000000 mod 2**32) with IOResult left at 0;
+// `w := 3000000000` wraps NEGATIVE, -1294967296, which every Turbo write
+// function below already special-cases as "no width was given" before it
+// would ever reach checkedWidth -- which is why this wraps ahead of that
+// existing check (each `_turbo` call site applies this to W, and to D where
+// there is one, before doing anything else) rather than inside checkedWidth
+// itself, so that path already handles the wrapped-negative case correctly
+// with no separate logic needed here.
+static int64_t wrapWidthTP(int64_t W) {
+    return (W > INT32_MAX || W < INT32_MIN) ? static_cast<int32_t>(W) : W;
+}
+
 void plang_write_file_i64_w (PascalFile *F, int64_t V, int64_t W) {
     abortIfClosed(F,"write");
     trapOnWrongDirection(F, "write", 1);
@@ -2394,7 +2429,7 @@ void plang_write_file_i64_w (PascalFile *F, int64_t V, int64_t W) {
 void plang_write_file_i64_w_turbo (PascalFile *F, int64_t V, int64_t W) {
     if (!tpFileReady(F,"write")) return;
     tpTrapOnWrongDirection(F, 1);
-    std::fprintf(F->Fp, "%*" PRId64, checkedWidth(W), V);
+    std::fprintf(F->Fp, "%*" PRId64, checkedWidth(wrapWidthTP(W)), V);
     tpTrapOnStreamError(F, 1);
 }
 // See plang_io.cpp's plang_write_u64_w for why QWord needs its own,
@@ -2408,7 +2443,7 @@ void plang_write_file_u64_w (PascalFile *F, uint64_t V, int64_t W) {
 void plang_write_file_u64_w_turbo (PascalFile *F, uint64_t V, int64_t W) {
     if (!tpFileReady(F,"write")) return;
     tpTrapOnWrongDirection(F, 1);
-    std::fprintf(F->Fp, "%*" PRIu64, checkedWidth(W), V);
+    std::fprintf(F->Fp, "%*" PRIu64, checkedWidth(wrapWidthTP(W)), V);
     tpTrapOnStreamError(F, 1);
 }
 void plang_write_file_f64_e (PascalFile *F, double V, int64_t W, int8_t Upper) {
@@ -2447,9 +2482,43 @@ void plang_write_file_f32_e_turbo (PascalFile *F, double V, int64_t W, int8_t Up
     std::fwrite(Buf, 1, N, F->Fp);
     tpTrapOnStreamError(F, 1);
 }
-// A negative FracDigits falls back to the same exponential format omitting
-// the decimals clause entirely produces, exactly as plang_write_file_cplx_w's
-// own per-component formatting already did before it started calling this.
+// -std=turbo only: issue #677.  V used to go straight into printf's
+// `%*.*f`, which prints a double's EXACT binary value out to D decimals --
+// correct arithmetic, but not what a Pascal reader expects once D asks for
+// more digits than a double actually carries (15-17 significant decimals).
+// See plang_real.h's PlangRealFixedShape for the full rationale and the
+// `fpc -Mtp` field practice this matches, and plang_io.cpp's
+// plang_write_f64_f for the identical stdout-side fix.  Turbo-only, and
+// called only from plang_write_file_f64_f_turbo below -- NOT shared with
+// ISO/EP's own plang_write_file_f64_f, which keeps its original,
+// uncapped `%*.*f` call untouched: EP's own iso7185pat.pas acceptance test
+// (test/Acceptance/) exercises exactly this "precision dropoff" exact-
+// binary-expansion behavior on purpose (`writeln(i+0.234...:1:i)` for i up
+// to 20), so capping ISO/EP's own output the same way Turbo's now is here
+// would be a real conformance regression, not a fix -- confirmed by
+// actually breaking that acceptance test during this item's development.
+// Inf/NaN keep the original printf call untouched (rounding "to 17
+// significant digits" is not a meaningful question for either).
+static void writeRealFixedTP(std::FILE *Fp, double V, int64_t W, int64_t D) {
+    const int Dc = checkedWidth(D);
+    PlangRealFixedShape Shape;
+    if (!std::isfinite(V) || !plangRealFixedNeedsCap(V, Dc, &Shape)) {
+        std::fprintf(Fp, "%*.*f", checkedWidth(W), Dc, V);
+        return;
+    }
+    const int64_t IntDigits = plangRealFixedIntDigits(Shape);
+    const int64_t Len = (Shape.Negative ? 1 : 0) + IntDigits + (Dc > 0 ? 1 + Dc : 0);
+    for (int64_t I = Len; I < checkedWidth(W); ++I) std::fputc(' ', Fp);
+    if (Shape.Negative) std::fputc('-', Fp);
+    for (int64_t Wt = IntDigits - 1; Wt >= 0; --Wt)
+        std::fputc(plangRealFixedDigitAt(Shape, Wt), Fp);
+    if (Dc > 0) {
+        std::fputc('.', Fp);
+        for (int64_t Wt = -1; Wt >= -Dc; --Wt)
+            std::fputc(plangRealFixedDigitAt(Shape, Wt), Fp);
+    }
+}
+
 void plang_write_file_f64_f (PascalFile *F, double V, int64_t W, int64_t D, int8_t Upper) {
     abortIfClosed(F,"write");
     if (D < 0) { plang_write_file_f64_e(F, V, W, Upper); return; }
@@ -2459,9 +2528,11 @@ void plang_write_file_f64_f (PascalFile *F, double V, int64_t W, int64_t D, int8
 }
 void plang_write_file_f64_f_turbo (PascalFile *F, double V, int64_t W, int64_t D, int8_t Upper) {
     if (!tpFileReady(F,"write")) return;
+    W = wrapWidthTP(W);
+    D = wrapWidthTP(D);
     if (D < 0) { plang_write_file_f64_e_turbo(F, V, W, Upper); return; }
     tpTrapOnWrongDirection(F, 1);
-    std::fprintf(F->Fp, "%*.*f", checkedWidth(W), checkedWidth(D), V);
+    writeRealFixedTP(F->Fp, V, W, D);
     tpTrapOnStreamError(F, 1);
 }
 // §6.9.3.6: the field is exactly W characters, so a longer string loses its
@@ -2506,6 +2577,7 @@ static void writePadded(PascalFile *F, const char *S, int64_t W, int8_t NoTrunc)
 // unconditional abort on a wrong-direction file.  Every `_turbo` caller
 // below calls this instead.
 static void tpWritePadded(PascalFile *F, const char *S, int64_t W, int8_t NoTrunc) {
+    W = wrapWidthTP(W);
     if (!NoTrunc && W == 0) return;
     tpTrapOnWrongDirection(F, /*WantWrite=*/1);
     const std::size_t Len = S ? std::strlen(S) : 0;
@@ -2555,6 +2627,7 @@ void plang_write_file_char_w(PascalFile *F, int8_t V, int64_t W, int8_t AlwaysWr
 }
 void plang_write_file_char_w_turbo(PascalFile *F, int8_t V, int64_t W, int8_t AlwaysWrite) {
     if (!tpFileReady(F,"write")) return;
+    W = wrapWidthTP(W);
     if (W == 0 && !AlwaysWrite) return;
     tpTrapOnWrongDirection(F, 1);
     if (W < 0) {

@@ -1036,9 +1036,11 @@ Turbo I/O failure gets.
 
 ## `InOutRes` and `IOResult`
 
-`InOutRes: Integer`, a hidden global (not itself a predefined identifier a
-program can name — real Turbo Pascal does not expose it directly either),
-latches the numbered result of the most recent I/O operation. `IOResult`
+`InOutRes: Integer`, a hidden global that is nonetheless a nameable
+identifier a program can read and assign directly (registered as an
+ordinary `Var` by `Sema::registerBuiltins`; real Turbo Pascal/`fpc -Mtp`
+expose it the same way), latches the numbered result of the most recent I/O
+operation. `IOResult`
 (callable as `IOResult()` or bare `IOResult`, both syntactic forms reaching
 the identical runtime accessor) **reads InOutRes and clears it to 0 in the
 same call** — a second, immediately following `IOResult` read always
