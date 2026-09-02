@@ -1927,26 +1927,21 @@ that shape.
 
 ### Known gaps
 
-Two restrictions a user of this tier's `object` model can actually run
+One restriction a user of this tier's `object` model can actually run
 into, confirmed against a local `fpc -Mtp` build rather than assumed.
 (This capstone item's own integration testing found two more,
 genuinely new bugs while building the tests above — `TypeOf` resolving
 its argument's static type instead of its dynamic one, and `inherited`
 only being usable as a statement, never an expression — both since
-fixed, see issues #508 and #509.)
-
-**A bare (no-parens) method call does not resolve in expression
-position.** `Obj.Method(args)`/`P^.Method(args)` and a bare, argument-free
-call *in statement position* (`D.Bark;`, no parens, item 5's own idiom)
-both resolve correctly. A bare, argument-free method call used **as a
-value** — `writeln(GetLegs)`, `x := Self.GetLegs`, `x := GetLegs` inside
-the method's own body relying on the implicit `Self` — does not: Sema
-reports `object type 'TFoo' has no field 'GetLegs'` (qualified) or
-`undefined identifier 'GetLegs'` (bare), even for a directly-declared,
-non-inherited, single-file method with no units or inheritance involved at
-all. Every test in this tier routes around it with explicit parens
-(`GetLegs()`) — the workaround real Turbo Pascal never actually needs, but
-plang currently does.
+fixed, see issues #508 and #509. A THIRD gap this section used to
+describe — a bare, argument-free method call used as a value not
+resolving in expression position — is also now fixed: see issues #773
+and #781, the latter closing a related silent-wrong-answer edge case a
+fix for the former introduced when the bare call's name happened to
+collide with an inherited field's own name. Both directions — a bare
+call to an ordinary method, and a bare call to one shadowing a field —
+are now correctly resolved and covered by regression tests under
+`test/Turbo/Objects/`.)
 
 **A record/object type cannot be its own by-value parameter type before
 its own declaration finishes.** `procedure Copy(Other: TFoo)` inside
