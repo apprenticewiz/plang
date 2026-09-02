@@ -1710,6 +1710,36 @@ void Codegen::Impl::registerEnumValues(const TypeNode* tn) {
         // A variant part can introduce an enumeration too, as its tag type or
         // as the type of a field in one of the alternatives.
         if (rtn->Variant) registerVariantEnumValues(*rtn->Variant);
+        return;
+    }
+    // set of (...): the base ordinal type of a set can be an anonymous
+    // inline enumeration just as an array's element/index type can be
+    // (issue #774) -- without this, `set of (a, b, c)` compiled but its
+    // literals were only ever referenced, never defined, and linking failed
+    // with an undefined symbol for every one of them.
+    if (auto* stn = llvm::dyn_cast<SetTypeNode>(tn)) {
+        registerEnumValues(stn->Base.get());
+        return;
+    }
+    // file of (...) / file [(...)] of T: both the optional direct-access
+    // index type and the element type can likewise be an anonymous inline
+    // enumeration.
+    if (auto* ftn = llvm::dyn_cast<FileTypeNode>(tn)) {
+        registerEnumValues(ftn->Index.get());
+        registerEnumValues(ftn->Element.get());
+        return;
+    }
+    // ^(...): an anonymous enumeration as a pointer's base type.
+    if (auto* ptn = llvm::dyn_cast<PointerTypeNode>(tn)) {
+        registerEnumValues(ptn->Base.get());
+        return;
+    }
+    // 'packed' before something other than array/record/set wraps the inner
+    // type denoter in a PackedTypeNode; an anonymous enum can still be that
+    // inner type.
+    if (auto* pktn = llvm::dyn_cast<PackedTypeNode>(tn)) {
+        registerEnumValues(pktn->Inner.get());
+        return;
     }
 }
 
