@@ -1172,8 +1172,19 @@ void plang_tp_seek(PascalFile *F, int64_t N) {
     if (!tpFileReady(F, "Seek")) return;
     long Offset;
     const int64_t RecSize = F->RecSize > 0 ? F->RecSize : 1;
-    if (!seekOffset(N, RecSize, 0, &Offset)
-            || std::fseek(F->Fp, Offset, SEEK_SET) != 0) {
+    // Issue #583: seekOffset() returning false means N * RecSize overflowed
+    // int64 before fseek(3) was ever called, so fseek never ran and errno
+    // was never (re)set for this failure -- reading it here would report
+    // whatever unrelated value happened to be left over from some earlier,
+    // possibly much earlier, libc call (including 0, misread as success).
+    // Report the fixed EINVAL-equivalent InOutRes 218 directly instead,
+    // mirroring the negative-N case's own EINVAL result (reached for real
+    // via a genuine fseek failure with a freshly-set errno).
+    if (!seekOffset(N, RecSize, 0, &Offset)) {
+        setInOutResIfClear(218);
+        return;
+    }
+    if (std::fseek(F->Fp, Offset, SEEK_SET) != 0) {
         const int Err = errno;
         setInOutResIfClear(plang_tp_posix_to_run_error(Err));
         return;

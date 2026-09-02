@@ -698,8 +698,14 @@ BUILTIN(BlockWrite,   "blockwrite",   Proc, TP, 3, 4, R_None, AK_Any)
 BUILTIN(Erase,        "erase",        Proc, TP, 1, 1, R_None, AK_File)
 BUILTIN(Rename,       "rename",       Proc, TP, 2, 2, R_None, AK_Any)
 // -std=turbo only: Flush(f) -- flush f's buffered output without closing
-// it.  No Text/binary restriction of its own (confirmed against
-// `fpc -Mtp`: both accept it).  One argument, one kind -- migrated (AK_File).
+// it.  Issue #739: an earlier version of this comment claimed no
+// Text/binary restriction ("confirmed against `fpc -Mtp`: both accept
+// it") -- re-checked against a local fpc -Mtp 3.2.2 install and that does
+// NOT hold; fpc accepts only Text, refusing both typed and untyped files
+// ("Call by var for arg no. 1 has to match exactly: ... expected 'Text'").
+// One argument, one kind (AK_File) for the base File/not-a-File check;
+// SemaStmt.cpp's own "flush" arm adds the Text-only restriction on top,
+// the same split Truncate's binary-only restriction has.
 BUILTIN(Flush,        "flush",        Proc, TP, 1, 1, R_None, AK_File)
 // -std=turbo only: SetTextBuf(var f: Text; var buf[; size]) -- overrides
 // f's own internal I/O buffer with caller-supplied storage.  buf is an
