@@ -72,6 +72,41 @@ SchemaAccess::schemaRefOf(const ExprNode& e) {
     return std::nullopt;
 }
 
+void SchemaAccess::emitDisposeSchemaDiscCheck(llvm::Value* base,
+        const plang::Type& schema,
+        std::span<const std::unique_ptr<ExprNode>> discArgs) {
+    // Reading the header dereferences p just as surely as schemaRefOf's own
+    // p^ arm does; nil is the one case a bare 'dispose(p)' -- no extra
+    // arguments, never reaching this at all -- tolerates as a no-op, so it
+    // stays that way for a nil p given no discriminants to check either.
+    if (base->getType()->isPointerTy()) RangeGuards.emitNilCheck(base);
+
+    SchemaRef actual;
+    actual.semaTy = &schema;
+    for (size_t i = 0; i < schema.SchemaDiscs.size(); ++i) {
+        auto* slot = B.CreateGEP(I64Ty, base,
+            {llvm::ConstantInt::get(I64Ty, i)}, "sch.disc.ptr");
+        actual.discs.push_back(B.CreateLoad(I64Ty, slot, "sch.disc"));
+    }
+
+    SchemaRef supplied;
+    supplied.semaTy = &schema;
+    supplied.discs.reserve(discArgs.size());
+    for (auto& a : discArgs) {
+        auto* v = ToI64(EmitExpr(*a));
+        if (!v) codegenICE("discriminant of dispose() for schema '" + schema.SchemaName
+                           + "' is not an integer value");
+        supplied.discs.push_back(v);
+    }
+
+    // A wrong count is a Sema-time error (SemaStmt.cpp's own ToSchema arm);
+    // reaching here with one anyway means Sema already refused the program,
+    // so there is nothing left to compare -- every discArgs expression
+    // above was still evaluated for its own side effects regardless.
+    if (supplied.discs.size() == actual.discs.size())
+        emitSchemaDiscMatch(actual, supplied);
+}
+
 std::pair<llvm::Value*, std::vector<llvm::Value*>>
 SchemaAccess::schemaActual(const ExprNode& arg, unsigned discCount) {
     // A schematic actual passes its own discriminants straight through.

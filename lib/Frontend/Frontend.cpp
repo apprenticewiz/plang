@@ -347,6 +347,10 @@ static std::string routineHeadingToString(const ProcedureTypeNode& PT,
 static std::string typeNodeToString(const TypeNode& TN) {
     std::string R = typeDenoterToString(TN);
     if (R.empty()) return R;
+    // EP §6.4.1: 'bindable' qualifies the denoter without changing the type it
+    // denotes, but bind()/unbind() only accept a variable whose declared type
+    // carries the flag, so it has to round-trip through the interface too.
+    if (TN.Bindable) R = "bindable " + R;
     // EP §6.6: the state a variable of the type begins in is part of what the
     // type-denoter says, so an importer has to be told it too.
     if (TN.InitialState) R += " value " + exprToString(*TN.InitialState);

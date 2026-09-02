@@ -965,6 +965,31 @@ void CGProcCall::emitCallStmt(const CallStmt& s) {
     }
     if (lo == "dispose" && !s.Args.empty()) {
         auto* val = EmitExpr(*s.Args[0]);
+        // Issue #688: every argument past the pointer used to be dropped
+        // here entirely -- neither evaluated (so 'dispose(q, sideEffect())'
+        // never ran sideEffect()) nor checked against what the instance
+        // being freed actually carries (ISO 10206 D.42).  Sema::checkStmt's
+        // own dispose arm (SemaStmt.cpp) already confirmed each argument's
+        // own type; this evaluates every one of them regardless, and, for a
+        // schema's discriminants -- checkable against the live header
+        // emitNewSchema wrote -- traps on a mismatch.  A variant record's
+        // own case-constants are evaluated here too, but not similarly
+        // matched against live storage: unlike a schema's header, new()
+        // does not persist the case-constant it is given into the tag
+        // field at all (a separate, pre-existing gap -- confirmed against
+        // 'new(q, true); writeln(q^.tag)' printing 'false' -- so there is
+        // no live value here to check an argument against yet).
+        if (s.Args.size() > 1) {
+            const auto& pt0 = s.Args[0]->ResolvedType;
+            const plang::Type* pointee0 = (pt0 && pt0->Kind == TypeKind::Pointer)
+                                               ? pt0->PointeeType.get() : nullptr;
+            if (pointee0 && pointee0->Kind == TypeKind::Schema) {
+                Schema.emitDisposeSchemaDiscCheck(val, *pointee0,
+                    std::span(s.Args).subspan(1));
+            } else {
+                for (size_t i = 1; i < s.Args.size(); ++i) EmitExpr(*s.Args[i]);
+            }
+        }
         B.CreateCall(RtFns.getRuntimeDisposeFn(), {val});
         return;
     }
