@@ -377,6 +377,45 @@ SchemaAccess::SchemaRef SchemaAccess::emitNewSchema(const ExprNode& ptrArg,
     return SchemaRef{&schema, data, std::move(discs)};
 }
 
+SchemaAccess::SchemaRef SchemaAccess::emitLocalSchema(
+        std::span<const std::unique_ptr<ExprNode>> discArgs,
+        const plang::Type& schema, const std::string& name) {
+    const size_t s = schema.SchemaDiscs.size();
+    if (discArgs.size() != s)
+        codegenICE("local variable of schema '" + schema.SchemaName
+                   + "' was given the wrong number of discriminants");
+
+    // Same per-discriminant evaluate/range-check loop emitNewSchema's own
+    // discArgs loop uses -- see its own comment.
+    std::vector<llvm::Value*> discs;
+    discs.reserve(s);
+    for (size_t i = 0; i < s; ++i) {
+        auto* v = ToI64(EmitExpr(*discArgs[i]));
+        if (!v) codegenICE("discriminant of local schema '" + schema.SchemaName
+                           + "' is not an integer value");
+        checkDiscRange(v, schema.SchemaDiscs[i], discArgs[i]->Loc);
+        discs.push_back(v);
+    }
+    // Issue #409's own nested-discriminant check, mirrored here for the same
+    // reason emitNewSchema applies it: a nested schema-instantiation field
+    // inside this local's own body has a discriminant derived from these,
+    // never independently checked otherwise.
+    if (const TypeNode* body = SchemaTypes.schemaBodyNodeOf(schema))
+        rangeCheckNestedDiscs(body, discs,
+                              discArgs.empty() ? SourceLocation{} : discArgs[0]->Loc);
+
+    // No header: unlike a heap object (emitNewSchema) or a schema-typed
+    // VALUE PARAMETER's own copy (CodeGenProcs.cpp, which copies FROM an
+    // already-live caller object), this storage starts life uninitialized,
+    // so nothing needs to precede the body the way a heap object's
+    // discriminant header does -- emitSchemaInitialState (the caller's own
+    // next step, mirroring EP §6.6's initial-state clause) is what gives it
+    // defined contents.
+    auto* bytes = schemaBodySize(schema, discs);
+    auto* data  = B.CreateAlloca(I8Ty, bytes, name + ".addr");
+    return SchemaRef{&schema, data, std::move(discs)};
+}
+
 llvm::Value* SchemaAccess::exprStrCapV(const ExprNode& e) {
     // DELIBERATELY EP-only, Turbo string[N] included: this whole function
     // exists to answer a capacity that may depend on a run-time

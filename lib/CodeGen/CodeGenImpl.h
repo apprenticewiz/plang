@@ -1474,6 +1474,17 @@ struct Codegen::Impl {
         SchemaRef ref = schemaAccess_->emitNewSchema(ptrArg, schema, discArgs);
         emitSchemaInitialState(ref.data, schema, ref.discs);
     }
+    /// Issue #691: a LOCAL variable's own run-time discriminant list -- see
+    /// SchemaAccess::emitLocalSchema's own comment.  Handed back whole (not
+    /// pre-wrapped with emitSchemaInitialState the way emitNewSchema just
+    /// above is) because the caller (CodeGenProcs.cpp's emitBlockAllocas)
+    /// still has per-NAME bookkeeping of its own to do -- registering
+    /// schemaTy/schemaDiscs/schemaDiscNames -- before the initial-state
+    /// clause runs.
+    SchemaRef emitLocalSchema(std::span<const std::unique_ptr<ExprNode>> discArgs,
+                              const plang::Type& schema, const std::string& name) {
+        return schemaAccess_->emitLocalSchema(discArgs, schema, name);
+    }
     void emitStrFromCStr(llvm::Value* dst, llvm::Value* cap, llvm::Value* cstr) {
         strings_->emitStrFromCStr(dst, cap, cstr);
     }

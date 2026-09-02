@@ -1243,29 +1243,45 @@ llvm::Value* CGFuncCall::emitInheritedCallExpr(const InheritedCallExpr& e) {
         }
     }
 
-    // The CURRENTLY EXECUTING function's own Self -- forwarded unchanged,
-    // never re-read through the 'Self' symbol table entry, so this works
-    // identically whether or not the enclosing method happens to still have
-    // 'Self' in scope under that name.
     llvm::Function* curFn = B.GetInsertBlock()->getParent();
-    if (curFn->arg_size() == 0)
-        codegenICE("'inherited' used inside a function with no 'Self' "
-                   "parameter -- Sema::checkInheritedCall should have "
-                   "refused this outside a method body already");
-    llvm::Value* selfPtr = curFn->getArg(0);
-
     std::vector<llvm::Value*> args;
-    args.push_back(selfPtr);
 
     llvm::Value* ret;
     if (e.Method.empty()) {
-        // Bare 'inherited': this activation's own remaining parameters,
-        // forwarded positionally with no re-marshalling -- see this
-        // function's own declaration comment for why that is sound.
+        // Bare 'inherited': Sema (checkInheritedCall) only ever accepts
+        // this form when CurrentProc itself is the method -- never from a
+        // nested procedure -- so curFn IS the method and its own Self is
+        // arg0; the rest of this activation's own parameters are forwarded
+        // positionally, with no re-marshalling -- see this function's own
+        // declaration comment for why that is sound.
+        if (curFn->arg_size() == 0)
+            codegenICE("'inherited' used inside a function with no 'Self' "
+                       "parameter -- Sema::checkInheritedCall should have "
+                       "refused this outside a method body already");
+        args.push_back(curFn->getArg(0));
         for (unsigned i = 1; i < curFn->arg_size(); ++i)
             args.push_back(curFn->getArg(i));
         ret = B.CreateCall(callee, args, "inherited.call");
     } else {
+        // Issue #625: an explicit 'inherited Method(...)' may be written
+        // inside a NESTED procedure declared within a method body, in which
+        // case curFn is that nested procedure -- its own arg0 is its
+        // static-link frame pointer (or its own first Pascal parameter),
+        // not Self.  'Self' is captured into a nested procedure's frame the
+        // same way any other outer variable is (CodeGenProcs.cpp's
+        // outerVars walk, which the enclosing method's own
+        // defVar("Self", ...) makes visible to it) -- looking it up through
+        // the symbol table, rather than assuming arg0, is what already
+        // works for every other reference to 'Self' inside a nested
+        // procedure and gives the correct value in both the nested and
+        // non-nested case alike.  See CGProcCall::emitInheritedCallStmt's
+        // own identical comment.
+        const auto* SelfVE = SymTab.findVar("Self");
+        if (!SelfVE)
+            codegenICE("'inherited " + e.Method + "' reached CodeGen with no "
+                       "'Self' in scope -- Sema::checkInheritedCall should "
+                       "have refused this outside a method body already");
+        args.push_back(SelfVE->ptr);
         // #182 follow-up (after PR #565's own CGProcCall.cpp sweep): same
         // per-argument marshalling loop emitMethodCallExpr uses above -- an
         // explicit 'inherited Method(args)' takes its own written argument

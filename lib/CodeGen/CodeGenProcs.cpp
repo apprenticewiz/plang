@@ -1780,6 +1780,55 @@ void Codegen::Impl::emitBlockAllocas(const BlockNode& block) {
     // this block's t rather than an enclosing block's.
     emitBlockDecls(block);
     for (const auto& vg : block.Vars) {
+        // Issue #691: a LOCAL variable declared with a run-time (non-const)
+        // discriminant list (`var v: vec(k);`) -- Sema's AllowRuntimeSchemaDisc_
+        // path (SemaType.cpp) resolved vg.Type to the SAME undiscriminated,
+        // probe-resolved representation a schema-typed formal PARAMETER's
+        // own body already gets (Kind==Schema, not the concrete
+        // Kind==SchemaInstance an ordinary constant-discriminant local
+        // gets), which llvmTypeOf below has no static LLVM type for -- see
+        // CGTypes::llvmTypeOfSemaType's own default-case ICE.  Given the
+        // exact same storage a by-value schema PARAMETER's own prologue
+        // copy gets instead (CodeGenProcs.cpp's own paramMeta[ci].
+        // schemaDiscCount>0 branch, just below in this file): a
+        // dynamically-sized alloca, registered through the same
+        // schemaTy/schemaDiscs/schemaDiscNames fields SchemaAccess's
+        // run-time field-access path already reads for a parameter.
+        if (auto* schemaNode = llvm::dyn_cast<SchemaTypeNode>(vg.Type.get());
+                schemaNode && vg.Type->ResolvedType
+                && vg.Type->ResolvedType->Kind == TypeKind::Schema) {
+            const plang::Type& schTy = *vg.Type->ResolvedType;
+            const plang::Type* body  = schTy.SchemaBody.get();
+            llvm::Type* valTy = i64Ty;
+            if (body && !body->isError())
+                valTy = (body->Kind == TypeKind::Array && body->ElemType)
+                            ? llvmTypeOfSemaType(*body->ElemType)
+                            : llvmTypeOfSemaType(*body);
+            for (const auto& nm : vg.Names) {
+                SchemaRef ref = emitLocalSchema(schemaNode->Actuals, schTy, nm);
+                defVar(nm, ref.data, valTy, vg.Type.get(),
+                       /*debugIndirectPtr=*/nullptr, /*suppressDebugDecl=*/true);
+                dbgInfo_->declareSchemaParamRef(nm, vg.Type.get(), ref.discs, ref.data);
+                auto& ve   = scopes.back()[toLower(nm)];
+                ve.schemaTy = &schTy;
+                // Spilled to cells and named, same reason and idiom the
+                // schema-typed PARAMETER path just below uses: a nested
+                // procedure reaches this local through the static link,
+                // which carries addresses, not this activation's own SSA
+                // values.
+                for (size_t d = 0; d < ref.discs.size(); ++d) {
+                    const std::string dn = nm + PlangScopeSep + "disc"
+                                         + std::to_string(d);
+                    auto* slot = createEntryAlloca(i64Ty, dn);
+                    builder.CreateStore(ref.discs[d], slot);
+                    defVar(dn, slot, i64Ty);
+                    ve.schemaDiscNames.push_back(dn);
+                }
+                ve.schemaDiscs = ref.discs;
+                emitSchemaInitialState(ref.data, schTy, ref.discs);
+            }
+            continue;
+        }
         llvm::Type* ty = llvmTypeOf(vg.Type.get(), nullptr);
 
         // TP-only: 'absolute' overlays this declaration's storage onto an

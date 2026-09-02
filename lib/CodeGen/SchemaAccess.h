@@ -115,6 +115,17 @@ public:
     /// time.
     SchemaRef emitNewSchema(const plang::ExprNode& ptrArg, const plang::Type& schema,
                        std::span<const std::unique_ptr<plang::ExprNode>> discArgs);
+    /// Issue #691: a LOCAL variable declared with a run-time discriminant
+    /// list (`var v: vec(k);`) -- \p schema is the SAME undiscriminated,
+    /// probe-resolved representation a schema-typed formal PARAMETER's own
+    /// body already gets (Sema::resolveUndiscriminatedSchema), so sizing
+    /// and range-checking \p discArgs here is emitNewSchema's own identical
+    /// discriminant loop, just without a header or a heap allocation: the
+    /// storage is a plain (dynamically-sized) stack `alloca`, exactly like
+    /// the copy a by-value schema PARAMETER's own prologue makes
+    /// (CodeGenProcs.cpp).
+    SchemaRef emitLocalSchema(std::span<const std::unique_ptr<plang::ExprNode>> discArgs,
+                              const plang::Type& schema, const std::string& name);
     /// Issue #688: 'dispose(p, e1,...,es)' on a schema pointee re-supplies
     /// its discriminants.  \p base is the ALREADY-EVALUATED pointer value
     /// (the caller needs its own copy right after, for the runtime free

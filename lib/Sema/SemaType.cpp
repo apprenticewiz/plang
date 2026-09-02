@@ -831,6 +831,15 @@ std::shared_ptr<Type> Sema::resolveTypeImpl(const TypeNode& Node) {
         // Evaluate each discriminant as a compile-time integer constant.
         std::vector<Type::SchemaDisc> Discs;
         bool HasError = false;
+        // Issue #691: a LOCAL variable's own discriminant list need not
+        // fold to a constant -- see AllowRuntimeSchemaDisc_'s own comment
+        // (Sema.h).  Set once a discriminant fails constBound() under that
+        // permission; once true, this instantiation is handed off whole to
+        // resolveUndiscriminatedSchema below (the SAME run-time
+        // representation a schema-typed PARAMETER's discriminants already
+        // use), rather than folded into a concrete SchemaInstance the way
+        // every constant discriminant here otherwise is.
+        bool AnyRuntimeDisc = false;
         for (size_t I = 0; I < Sym->SchemaDeclParams.size(); ++I) {
             auto At = checkExpr(*N->Actuals[I]); // type-check for diagnostics
             // Check ordinality first and independently of constness -- unlike
@@ -852,6 +861,21 @@ std::shared_ptr<Type> Sema::resolveTypeImpl(const TypeNode& Node) {
             }
             const auto Val = constBound(*N->Actuals[I]);
             if (!Val) {
+                if (AllowRuntimeSchemaDisc_ > 0) {
+                    AnyRuntimeDisc = true;
+                    // Still worth the same assign-compatibility check an
+                    // ordinary assignment to this discriminant would get --
+                    // new()'s own run-time discriminant path (just above in
+                    // this file) applies the identical rule.
+                    if (At && !At->isError() && Sym->SchemaDeclParams[I].Ty
+                            && !Sym->SchemaDeclParams[I].Ty->isError()
+                            && !isAssignCompatible(*Sym->SchemaDeclParams[I].Ty, *At)) {
+                        error(N->Actuals[I]->Loc, diag::err_assign_mismatch,
+                              {At->Name, Sym->SchemaDeclParams[I].Ty->Name});
+                        HasError = true;
+                    }
+                    continue;
+                }
                 error(N->Actuals[I]->Loc, diag::err_schema_disc_not_const,
                       {Sym->SchemaDeclParams[I].Name});
                 HasError = true;
@@ -868,6 +892,22 @@ std::shared_ptr<Type> Sema::resolveTypeImpl(const TypeNode& Node) {
                                  .Ty    = Sym->SchemaDeclParams[I].Ty});
                 ActiveSchemaBindings_[toLower(Sym->SchemaDeclParams[I].Name)] = *Val;
             }
+        }
+        if (AnyRuntimeDisc) {
+            // None of the concrete-Value machinery below (ActiveSchemaBindings_,
+            // the constant-Discs SchemaInstance) applies once even one
+            // discriminant is a run-time value -- the whole instantiation
+            // takes the SAME undiscriminated, probe-resolved representation
+            // a schema-typed formal parameter's body already gets, and
+            // CodeGen evaluates \p N's own Actuals itself, once, at the
+            // local's own point of declaration (CodeGenProcs.cpp), the same
+            // way it already evaluates an ordinary local's initializer.
+            ActiveSchemaBindings_ = std::move(SavedBindings);
+            SchemaBindingUsed_    = SavedActualUsed;
+            if (HasError) return TyErr;
+            auto T = resolveUndiscriminatedSchema(*Sym, N->Name, N->Loc);
+            N->ResolvedBody = T;
+            return T;
         }
         const bool ActualsVary = SchemaBindingUsed_ && ProbeBindingsActive_;
         // The actuals as closed forms over the ENCLOSING discriminants, so the
@@ -1515,6 +1555,12 @@ void Sema::resolveSchemaParams(Symbol& Sym) {
 
 std::shared_ptr<Type> Sema::resolveUndiscriminatedSchema(Symbol& Sym,
                                                          const NamedTypeNode& N) {
+    return resolveUndiscriminatedSchema(Sym, N.Name, N.Loc);
+}
+
+std::shared_ptr<Type> Sema::resolveUndiscriminatedSchema(Symbol& Sym,
+                                                         const std::string& Name,
+                                                         SourceLocation Loc) {
     // On-demand resolution: a pointer's domain type (ISO §6.2.2.9) or a
     // formal parameter's type (EP §6.7.3.7) may name this schema before
     // Sema.cpp's Phase 3b(ii) sweep reaches it -- e.g. `type pl = ^t;
@@ -1526,7 +1572,7 @@ std::shared_ptr<Type> Sema::resolveUndiscriminatedSchema(Symbol& Sym,
     // One type object per schema definition, so that two spellings of `^vec`
     // give the same pointer type.  The body node address identifies the
     // definition even if the name is later shadowed.
-    const std::string Key = toLower(N.Name) + "@"
+    const std::string Key = toLower(Name) + "@"
                           + std::to_string(reinterpret_cast<uintptr_t>(Sym.SchemaBodyNode));
     if (auto It = UndiscSchemaTypes_.find(Key); It != UndiscSchemaTypes_.end())
         return It->second;
@@ -1540,7 +1586,7 @@ std::shared_ptr<Type> Sema::resolveUndiscriminatedSchema(Symbol& Sym,
     // the compiler's stack with it.
     if (auto It = SchemaInProgress_.find(Key); It != SchemaInProgress_.end()) {
         if (InPointerDomain_ <= 0) {
-            error(N.Loc, diag::err_schema_recursive, {N.Name});
+            error(Loc, diag::err_schema_recursive, {Name});
             return TyErr;
         }
         return It->second;
@@ -1549,8 +1595,8 @@ std::shared_ptr<Type> Sema::resolveUndiscriminatedSchema(Symbol& Sym,
     // Registered BEFORE the body is resolved, which is the whole point.
     auto T = std::make_shared<Type>();
     T->Kind           = TypeKind::Schema;
-    T->Name           = N.Name;
-    T->SchemaName     = N.Name;
+    T->Name           = Name;
+    T->SchemaName     = Name;
     T->SchemaBodyNode = Sym.SchemaBodyNode;
     for (const auto& P : Sym.SchemaDeclParams)
         T->SchemaDiscs.push_back({.Name = P.Name, .Ty = P.Ty});
@@ -1626,7 +1672,7 @@ std::shared_ptr<Type> Sema::resolveUndiscriminatedSchema(Symbol& Sym,
     // what it fixes is the range k is checked against -- marks nothing and
     // leaves nothing to compute from.  That one can never be laid out.
     if (LayoutVaries && Body->Kind != TypeKind::Array && !Body->ExtentVaries) {
-        error(N.Loc, diag::err_schema_body_not_representable, {N.Name});
+        error(Loc, diag::err_schema_body_not_representable, {Name});
         return TyErr;
     }
     // A variant part is laid out too: its alternatives share one run of

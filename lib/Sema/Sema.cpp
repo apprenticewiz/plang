@@ -2182,7 +2182,17 @@ void Sema::checkBlock(const BlockNode& Block,
 
     // Phase 4 — Variables
     for (const auto& Vg : Block.Vars) {
+        // Issue #691: a LOCAL variable's own schema discriminant list need
+        // not be a compile-time constant -- see AllowRuntimeSchemaDisc_'s
+        // own comment (Sema.h) for why this is scoped to locals only (never
+        // IsGlobalScope, which has no per-activation "commencement" for
+        // ISO 10206 §6.4.8 to evaluate one within) and why the resulting
+        // Type is sound regardless of what Vg.Type's own SchemaTypeNode
+        // branch (SemaType.cpp) does with it.
+        std::optional<AllowSchemaScope> RuntimeDiscGuard;
+        if (!IsGlobalScope) RuntimeDiscGuard.emplace(AllowRuntimeSchemaDisc_);
         auto T = resolveType(*Vg.Type);
+        RuntimeDiscGuard.reset();
 
         // A global (program- or module-level) variable becomes one linked
         // object, and every access to it -- including ones from the runtime
@@ -2340,7 +2350,14 @@ void Sema::checkBlock(const BlockNode& Block,
         if (!Proc->OwnerType.empty()) {
             const int Pushed = pushMethodSelfScope(*Proc);
             if (Pushed > 0) {
+                // Issue #625: CurrentMethodProc names the enclosing method
+                // for the whole duration of its body, including any nested
+                // (non-method) procedures checkProcBody descends into below
+                // -- see CurrentMethodProc's own comment (Sema.h).
+                const ProcDecl* SavedMethodProc = CurrentMethodProc;
+                CurrentMethodProc = Proc.get();
                 checkProcBody(*Proc);
+                CurrentMethodProc = SavedMethodProc;
                 Symtab.popScope();
                 // Turbo Tier 5, issue #571: pop pushMethodSelfScope's own
                 // ImplicitCallReceivers_ entry, pushed in the same call.
