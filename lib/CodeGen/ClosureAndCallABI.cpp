@@ -18,6 +18,34 @@ using namespace plang;
 
 using SchemaPath = SchemaAccess::SchemaPath;
 
+namespace {
+// Issue #772: whether an AST ParamGroup (a procedural-variable/-parameter
+// TYPE's own formal, as opposed to a real declared routine's ParamGroup that
+// CodeGenProcs.cpp's identical constByRef computation reads) is Turbo's
+// `const` on a structured (record/array/set) type -- the one shape passed by
+// REFERENCE rather than copied in (isStructuredForConstByRef's own comment,
+// Sema/Type.h).  Every LLVM-signature builder and argument-marshalling loop
+// for an INDIRECT call (procParamFnType/procVarFnType and their
+// emitProcParamCall/emitProcVarCall call-site twins) has to agree with this
+// exact test, or the callee's declared parameter shape (a bare struct, from
+// CodeGenProcs.cpp's own passByRef-gated paramTypes) stops matching what the
+// call site builds/passes -- a direct call already gets this right
+// (CodeGenProcs.cpp/CGFuncCall.cpp/CGProcCall.cpp's own identical
+// constByRef), so this mirrors it rather than reinventing it.
+bool constByRefParamGroup(const ParamGroup& pg) {
+    return pg.IsConst && pg.Type && pg.Type->ResolvedType
+        && !pg.Type->ResolvedType->isError()
+        && isStructuredForConstByRef(*pg.Type->ResolvedType);
+}
+// Same test, for a semantic Type::Param (emitIndirectCall's own shape --
+// there is no ParamGroup/TypeNode at all there, only a resolved Type::Param,
+// see fnTypeFromSemaType's own comment).
+bool constByRefParam(const Type::Param& p) {
+    return p.IsConst && p.Ty && !p.Ty->isError()
+        && isStructuredForConstByRef(*p.Ty);
+}
+} // namespace
+
 void ClosureAndCallABI::storeProcPair(llvm::Value* cell, llvm::Value* fn,
                                        llvm::Value* frame) {
     auto* zero = llvm::ConstantInt::get(I32Ty, 0);
@@ -239,7 +267,17 @@ llvm::FunctionType* ClosureAndCallABI::procParamFnType(const ProcedureTypeNode& 
                 params.push_back(PtrTy);            // entry point
                 params.push_back(PtrTy);            // its own frame
             } else {
-                params.push_back(pg.IsVar ? PtrTy : Types.llvmTypeOfNode(*pg.Type));
+                // Issue #772: Turbo's `const` parameter on a structured
+                // (record/array/set) type is passed BY REFERENCE, same as a
+                // var parameter's pointer -- see constByRefParamGroup's own
+                // comment just above.  Missing this, a procedural
+                // parameter's declared LLVM signature disagreed with the
+                // struct-by-value-vs-pointer shape a direct call to the same
+                // routine (CodeGenProcs.cpp) actually has, so a relayed call
+                // through this procedural parameter mis-marshalled the
+                // struct (or the mismatched IR verifier-failed outright).
+                const bool byRef = pg.IsVar || constByRefParamGroup(pg);
+                params.push_back(byRef ? PtrTy : Types.llvmTypeOfNode(*pg.Type));
             }
         }
     }
@@ -432,8 +470,13 @@ std::vector<FlatProcParamMeta> flattenProcParams(
         const int64_t sb = (pg.Type && pg.Type->ResolvedType
                              && pg.Type->ResolvedType->Kind == TypeKind::Set)
                                 ? setOffsetOf(*pg.Type->ResolvedType) : 0;
+        // Issue #772: a structured `const` formal is passed by reference too
+        // (constByRefParamGroup's own comment) -- pg.IsVar alone missed it,
+        // so byRef here disagreed with procParamFnType's own identical
+        // by-reference test just above for the very same signature.
+        const bool byRef = pg.IsVar || constByRefParamGroup(pg);
         for (size_t k = 0; k < pg.Names.size(); ++k)
-            meta.push_back(FlatProcParamMeta{inner, discs, cdims, sb, pg.IsVar});
+            meta.push_back(FlatProcParamMeta{inner, discs, cdims, sb, byRef});
     }
     return meta;
 }
@@ -541,7 +584,18 @@ llvm::FunctionType* ClosureAndCallABI::procVarFnType(const ProcedureTypeNode& no
                 params.push_back(PtrTy); // entry point
                 params.push_back(PtrTy); // its own frame
             } else {
-                params.push_back(pg.IsVar ? PtrTy : Types.llvmTypeOfNode(*pg.Type));
+                // Issue #772: a structured `const` formal is passed by
+                // reference too (constByRefParamGroup's own comment) --
+                // pg.IsVar alone missed it, so a procedural VARIABLE's own
+                // declared LLVM signature disagreed with a direct call to
+                // the same routine (CodeGenProcs.cpp's identical
+                // constByRef), which passes a pointer where this built a
+                // bare struct parameter instead: the const record actual
+                // then landed in the wrong LLVM slot entirely (silently
+                // wrong for a small record, or read past the end of a
+                // wider one -- e.g. a set field -- for a segfault).
+                const bool byRef = pg.IsVar || constByRefParamGroup(pg);
+                params.push_back(byRef ? PtrTy : Types.llvmTypeOfNode(*pg.Type));
             }
         }
     }
@@ -599,12 +653,25 @@ ClosureAndCallABI::emitProcVarCall(const VarEntry& ve,
                 if (pg.Type && pg.Type->ResolvedType
                     && pg.Type->ResolvedType->Kind == TypeKind::Set)
                     destSetBase = setOffsetOf(*pg.Type->ResolvedType);
+                // Issue #772: a structured `const` formal is passed BY
+                // REFERENCE (constByRefParamGroup's own comment, matching
+                // procVarFnType's identical test for the very same
+                // parameter just above) -- byRef=false unconditionally used
+                // to hand the callee a loaded VALUE for one, against a
+                // FunctionType that (before this fix) also wrongly declared
+                // that slot as the struct type rather than a pointer.  Now
+                // that procVarFnType's fnTy agrees the slot is a pointer,
+                // this has to pass byRef=true too, or EmitCallArg's own
+                // paramTy==PtrTy test (StringCallMarshalling::emitCallArg)
+                // loads the struct instead of taking its address, an LLVM
+                // IR verifier failure at best.
+                const bool constByRef = constByRefParamGroup(pg);
                 args.push_back(Sets.alignSetArg(
                     EmitCallArg(a,
                         args.size() < fnTy->getNumParams()
                             ? fnTy->getParamType(args.size())
                             : nullptr,
-                        /*byRef=*/false),
+                        /*byRef=*/constByRef),
                     a, destSetBase));
             }
         }
@@ -637,7 +704,11 @@ llvm::FunctionType* ClosureAndCallABI::fnTypeFromSemaType(const Type& fnTy) {
     // two-pointer shape.
     std::vector<llvm::Type*> params;
     for (const auto& p : fnTy.Params) {
-        if (p.IsUntyped || p.IsVar) params.push_back(PtrTy);
+        // Issue #772: a structured `const` formal is passed by reference
+        // too (constByRefParam's own comment) -- p.IsVar alone missed it,
+        // the same gap procVarFnType/procParamFnType had for their own
+        // ParamGroup-shaped signatures just above.
+        if (p.IsUntyped || p.IsVar || constByRefParam(p)) params.push_back(PtrTy);
         else                        params.push_back(Types.llvmTypeOfSemaType(*p.Ty));
     }
     llvm::Type* ret = fnTy.RetType ? Types.llvmTypeOfSemaType(*fnTy.RetType)
@@ -670,12 +741,19 @@ ClosureAndCallABI::emitIndirectCall(llvm::Value* calleeAddr, const Type& fnTy,
             std::optional<int64_t> destSetBase;
             if (p.Ty && p.Ty->Kind == TypeKind::Set)
                 destSetBase = setOffsetOf(*p.Ty);
+            // Issue #772: matches fnTypeFromSemaType's own constByRefParam
+            // test just above for this exact parameter -- byRef has to
+            // agree with whether that FunctionType declared this slot a
+            // pointer, or EmitCallArg's paramTy==PtrTy dispatch
+            // (StringCallMarshalling::emitCallArg) loads the struct instead
+            // of taking its address.
+            const bool constByRef = constByRefParam(p);
             args.push_back(Sets.alignSetArg(
                 EmitCallArg(a,
                     args.size() < fnLLVMTy->getNumParams()
                         ? fnLLVMTy->getParamType(args.size())
                         : nullptr,
-                    /*byRef=*/false),
+                    /*byRef=*/constByRef),
                 a, destSetBase));
         }
     }
