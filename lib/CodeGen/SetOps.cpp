@@ -39,13 +39,17 @@ llvm::Value* SetOps::clampToSetWidth(llvm::Value* v) {
 }
 
 int64_t SetOps::setBaseOf(const ExprNode& e) {
-    const auto& t = e.ResolvedType;
+    // Issue #584/#637: a schema-instantiated set (`s(5)`) carries
+    // TypeKind::Schema/SchemaInstance on the expression itself -- the real
+    // Set type (and its ElemType) is one schemaUnderlying hop away, the same
+    // unwrap Sema now applies before every set-operator Kind check.
+    const Type* t = schemaUnderlying(e.ResolvedType.get());
     return (t && t->Kind == TypeKind::Set) ? setOffsetOf(*t) : 0;
 }
 
 std::optional<std::pair<int64_t, int64_t>>
 SetOps::declaredRangeOf(const ExprNode& e) {
-    const auto& t = e.ResolvedType;
+    const Type* t = schemaUnderlying(e.ResolvedType.get());
     if (!t || t->Kind != TypeKind::Set || !t->ElemType) return std::nullopt;
     return ordinalRange(*t->ElemType);
 }
@@ -172,7 +176,19 @@ llvm::Value* SetOps::emitSetRange(llvm::Value* lo, llvm::Value* hi, int64_t base
 }
 
 llvm::Value* SetOps::emitSetMember(llvm::Value* ordinal, llvm::Value* set, int64_t base,
-                                    std::optional<bool> ordinalSigned) {
+        std::optional<std::pair<int64_t, int64_t>> declaredRange,
+        plang::SourceLocation Loc, std::optional<bool> ordinalSigned) {
+    // Issue #637: checked against the set's own declared base type, the same
+    // guard emitSetSingleton/emitSetRange already give the constructor paths
+    // -- clampOrdinal just below only keeps the ordinal inside the bitmask's
+    // own PHYSICAL width (PlangMaxSetElements), which is wider than most
+    // base types actually declare, so `i in s` for `s: set of 1..100` and
+    // i = 200 cleared that check and silently answered false instead of
+    // trapping under {$R+}.
+    if (declaredRange)
+        RangeGuards.emitRangeCheck(ordinal, declaredRange->first,
+                                    declaredRange->second, /*isIndex=*/false, Loc,
+                                    ordinalSigned);
     auto* st = setTy();
     llvm::Value* inRange = nullptr;
     auto* ord   = clampOrdinal(B, i64Ty(), setBitIndex(ordinal, base, ordinalSigned), inRange);

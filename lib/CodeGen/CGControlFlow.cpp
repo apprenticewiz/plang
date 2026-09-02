@@ -162,7 +162,11 @@ void CGControlFlow::emitForIn(const ForInStmt& s) {
     // The loop variable takes the set's element type, so that a `set of char`
     // yields characters rather than their ordinals.
     llvm::Type* elemTy = I64Ty;
-    if (const auto& st = s.SetExpr->ResolvedType; st && st->ElemType)
+    // Issue #584: a schema-instantiated set (`s(5)`) carries TypeKind::
+    // Schema/SchemaInstance on the expression -- the real ElemType is one
+    // schemaUnderlying hop away, mirroring Sema::checkForIn's own unwrap.
+    if (const Type* st = schemaUnderlying(s.SetExpr->ResolvedType.get());
+        st && st->ElemType)
         elemTy = Types.llvmTypeOfSemaType(*st->ElemType);
     if (!elemTy->isIntegerTy())
         codegenICE("'for ... in' over a set with a non-ordinal element type");

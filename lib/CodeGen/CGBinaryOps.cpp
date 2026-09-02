@@ -18,7 +18,11 @@ bool CGBinaryOps::exprIsStringLike(const ExprNode& e) {
 }
 
 bool CGBinaryOps::exprIsSet(const ExprNode& e) {
-    return e.ResolvedType && e.ResolvedType->Kind == TypeKind::Set;
+    // Issue #584: a schema-instantiated set (`s(5)`) carries TypeKind::
+    // Schema/SchemaInstance on the expression -- the real Set type is one
+    // schemaUnderlying hop away, mirroring Sema's own unwrap.
+    const Type* t = schemaUnderlying(e.ResolvedType.get());
+    return t && t->Kind == TypeKind::Set;
 }
 
 llvm::Value* CGBinaryOps::emitShortCircuit(const BinaryExpr& e, bool isAnd) {
@@ -473,8 +477,7 @@ llvm::Value* CGBinaryOps::emitBinary(const BinaryExpr& e) {
         // since that is the window whoever receives it will read it in; a
         // comparison has no set type of its own, and the lower of the two
         // origins is chosen there because widening a window never drops a bit.
-        const bool ResultIsSet =
-            e.ResolvedType && e.ResolvedType->Kind == TypeKind::Set;
+        const bool ResultIsSet = exprIsSet(e);
         const int64_t Base =
             ResultIsSet ? Sets.setBaseOf(e)
                         : std::min(Sets.setBaseOf(*e.Left), Sets.setBaseOf(*e.Right));
@@ -561,8 +564,13 @@ llvm::Value* CGBinaryOps::emitBinary(const BinaryExpr& e) {
     // ISO §6.7.2.5: membership takes an ordinal on the left, so exprIsSet is
     // only true of the right operand.
     if (e.Op == TokenKind::In)
+        // Issue #637: declaredRangeOf(*e.Right)/e.Loc let this range-check
+        // the left operand against the set's own declared base type under
+        // {$R+}, the same guard the constructor paths (+  [x], Include) get.
         return Sets.emitSetMember(EmitExpr(*e.Left), EmitExpr(*e.Right),
-                             Sets.setBaseOf(*e.Right), operandIsSigned(*e.Left));
+                             Sets.setBaseOf(*e.Right),
+                             Sets.declaredRangeOf(*e.Right), e.Loc,
+                             operandIsSigned(*e.Left));
 
     auto* lv = EmitExpr(*e.Left);
     auto* rv = EmitExpr(*e.Right);
