@@ -209,7 +209,7 @@ BUILTIN(Read,      "read",      Proc, ALL, 0, -1, R_None, AK_Any)
 BUILTIN(Readln,    "readln",    Proc, ALL, 0, -1, R_None, AK_Any)
 BUILTIN(New,       "new",       Proc, ALL, 1, -1, R_None, AK_Any)
 BUILTIN(Dispose,   "dispose",   Proc, ALL, 1, -1, R_None, AK_Any)
-BUILTIN(Page,      "page",      Proc, ISO, 0, -1, R_None, AK_Any)
+BUILTIN(Page,      "page",      Proc, ISO, 0,  1, R_None, AK_Any)
 // reset/rewrite take the file and, at most, an external filename (EP
 // §6.7.5.2 / Turbo's record-size overload) -- CodeGen's lowering (CGProcCall,
 // the reset/rewrite arm) only ever reads args[0] and args[1], so -1 here
@@ -246,9 +246,9 @@ BUILTIN(Rewrite,   "rewrite",   Proc, ALL, 1,  2, R_None, AK_Any)
 // at all: checkCallStmt's own generic fallback (issue #547) already calls
 // checkBuiltinArgKinds for any builtin with no dedicated arm, so tagging
 // these three AK_File is the whole fix.
-BUILTIN(Get,       "get",       Proc, ISO, 1, -1, R_None, AK_File)
-BUILTIN(Put,       "put",       Proc, ISO, 1, -1, R_None, AK_File)
-BUILTIN(Close,     "close",     Proc, ALL, 1, -1, R_None, AK_File)
+BUILTIN(Get,       "get",       Proc, ISO, 1,  1, R_None, AK_File)
+BUILTIN(Put,       "put",       Proc, ISO, 1,  1, R_None, AK_File)
+BUILTIN(Close,     "close",     Proc, ALL, 1,  1, R_None, AK_File)
 BUILTIN(Pack,      "pack",      Proc, ISO, 3,  3, R_None, AK_Any)
 BUILTIN(Unpack,    "unpack",    Proc, ISO, 3,  3, R_None, AK_Any)
 
