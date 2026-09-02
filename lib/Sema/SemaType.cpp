@@ -1757,6 +1757,19 @@ void Sema::checkSetBaseRange(const Type& Base, SourceLocation Loc) {
             // Bounds that Sema could not fold carry a node-address sentinel;
             // codegen clamps such sets at run time instead.
             if (Lo > Hi) return;
+            // Issue #692: -std=turbo requires a NON-NEGATIVE set base (TP7
+            // ordinals valid as a set base are 0..255), unlike EP's own sets
+            // (ISO/IEC 10206), which allow a negative base and are only
+            // ever checked below for the window's WIDTH, not its sign --
+            // see err_set_base_negative_turbo's own comment.  Gated to
+            // Subrange only: the other cases reaching this switch (Enum,
+            // Char, strict Boolean, unsigned Integer) never produce a
+            // negative Lo, and IsSigned Integer/loose-Boolean bases are
+            // already refused above regardless of dialect.
+            if (Opts.turbo() && Lo < 0) {
+                error(Loc, diag::err_set_base_negative_turbo, {Base.Name});
+                return;
+            }
             break;
         case TypeKind::Integer: {
             // Issue #580: `set of Byte` (Width=8, unsigned, ordinal range

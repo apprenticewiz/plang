@@ -32,6 +32,18 @@ llvm::Value* StringCallMarshalling::emitCallArg(const ExprNode& arg,
             && (arg.ResolvedType->Kind == TypeKind::Pointer
                 || arg.ResolvedType->Kind == TypeKind::Nil))
         return EmitExpr(arg);
+    // Issue #702: a string LITERAL passed where a PChar-like value parameter
+    // is expected (Sema::isAssignCompatible's Opts.turbo() && isCharPointerType
+    // (Dst) && Src.Kind==String arm, SemaExpr.cpp) -- `StrComp(p, 'HELLO')`,
+    // the single most common way a Strings-unit call is actually written.
+    // Falling through to the generic `EmitLValue(arg)` arm below (as this
+    // used to, before Sema accepted the pairing at all) crashes: a
+    // StringLitExpr has no address of its own, by design -- see
+    // ClosureAndCallABI::pushConformantArgs's identical comment on why
+    // charLiteralDataPtr (the interned, NUL-terminated C string this family
+    // needs), not EmitLValue, is the one thing that can answer for one.
+    if (!byRef && paramTy == PtrTy && llvm::isa<StringLitExpr>(arg))
+        return charLiteralDataPtr(arg);
     // A string parameter taken by value receives the whole { length, bytes }
     // struct, and its capacity is the callee's, not the argument's.  Build the
     // copy at the callee's width and hand over its value; passing the

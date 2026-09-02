@@ -237,6 +237,12 @@ BRACE_CHECK_EXEMPT = {
     "test/Sema/SemaTurboTypedConst/j-minus-makes-a-typed-constant-immutable.pas",
     "test/Sema/SemaTurboTypedConst/j-plus-keeps-a-typed-constant-writable.pas",
     "test/Sema/SemaTurboTypedConst/j-minus-then-j-plus-only-protects-the-const-declared-while-off.pas",
+    # Same reasoning again, for the issue #643 ShortString range-check
+    # message fix: the header prose quotes the '{$R+}' switch directive the
+    # same way the '{$R+}'/'{$R-}' entries above already do, and this file
+    # only ever compiles under -std=turbo (see its own RUN: line).  Not a
+    # hazard to fix.
+    "test/CodeGen/Turbo/shortstring-range-check-message-includes-index-zero.pas",
 }
 
 

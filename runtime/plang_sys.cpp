@@ -454,13 +454,19 @@ void plang_err_index(int64_t V, int64_t Lo, int64_t Hi) {
     std::exit(PlangRuntimeErrorStatus);
 }
 
-/// EP §6.5.3.2: a string component is selected by an index in 1..length(s), so
-/// the upper bound reported here is the string's length, not its capacity.
-void plang_err_str_index(int64_t V, int64_t Len) {
+/// EP §6.5.3.2: a string component is selected by an index in 1..length(s),
+/// so an EP VarStr caller passes Lo=1 and the upper bound reported is the
+/// string's length, not its capacity.  A Turbo ShortString caller (issue
+/// #643) passes Lo=0 instead -- s[0] is the legal length-byte alias
+/// (CGIndexAccess.cpp's ExprIsShortStr arm), so the message's stated lower
+/// bound has to say 0, not the EP-only 1, or a genuinely out-of-range
+/// ShortString index (e.g. s[-1] or s[cap+1]) reports a range that
+/// excludes an index the SAME error's own dialect actually allows.
+void plang_err_str_index(int64_t V, int64_t Lo, int64_t Hi) {
     std::fflush(stdout);
     std::fprintf(stderr,
                  "plang runtime: string index %" PRId64
-                 " out of bounds 1..%" PRId64 "\n", V, Len);
+                 " out of bounds %" PRId64 "..%" PRId64 "\n", V, Lo, Hi);
     std::exit(PlangRuntimeErrorStatus);
 }
 

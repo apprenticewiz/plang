@@ -430,6 +430,14 @@ DIAG(err_duplicate_field, Error, "duplicate field name '%0' in record")
 DIAG(err_set_base_not_ordinal, Error, "set base type must be ordinal; got '%0'")
 DIAG(err_set_base_too_wide, Error,
      "set base type '%0' exceeds the %1-element limit on sets")
+// Issue #692: -std=turbo only (EP's own sets DO allow a negative base, and
+// keep using err_set_base_too_wide for a too-wide window regardless of
+// sign) -- checked against real `fpc -Mtp`: `set of -5..5` is "illegal type
+// declaration of set elements" even though its 11-element window is well
+// under the 256-element limit, because TP7 ordinals valid as a set base
+// must themselves be 0..255.
+DIAG(err_set_base_negative_turbo, Error,
+     "set base type '%0' must not have a negative lower bound in Turbo Pascal")
 // An untyped set-constructor (no adopting named set type) has no declared
 // base type to check, so its window is read off its own elements instead --
 // see literalSetWindow.  Without this, `x in [0, 300]` or `card([0, 300])`

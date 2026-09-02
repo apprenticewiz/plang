@@ -28,24 +28,32 @@ CHECK-NEXT:byte50.in.bset=FALSE
 *)
 
 program p;
-type TRange = -5..5;
 var s: ShortInt;
     b: Byte;
-    fullset, gapset: set of TRange;
     bset: set of 0..250;
 begin
-  fullset := [-5..5];
+  { Issue #692: a NAMED `set of -5..5` base type is refused outright under
+    -std=turbo (a real TP7/fpc -Mtp restriction: a Turbo set base's own
+    ordinals must be 0..255) -- see
+    test/Sema/SemaTurboBoolReal/negative-based-set-is-refused-under-turbo.pas
+    -- so this test's own negative-range coverage has to go through an
+    UNTYPED set CONSTRUCTOR, `[-5..5]`, instead of a declared `set of
+    TRange` variable the way it originally did.  literalSetWindow
+    (SemaType.cpp), not checkSetBaseRange, derives an untyped constructor's
+    window from its own elements and is not gated the same way -- confirmed
+    against real `fpc -Mtp`, which accepts `s in [-5..5]` for a ShortInt s
+    outright (only warning, not erroring, on the negative literal bound).
+    Exercises the exact same CGBinaryOps' TokenKind::In arm this test was
+    always about. }
   s := -3;
-  write('neg3.in.fullset='); if s in fullset then writeln('TRUE') else writeln('FALSE');
+  write('neg3.in.fullset='); if s in [-5..5] then writeln('TRUE') else writeln('FALSE');
   s := 3;
-  write('pos3.in.fullset='); if s in fullset then writeln('TRUE') else writeln('FALSE');
+  write('pos3.in.fullset='); if s in [-5..5] then writeln('TRUE') else writeln('FALSE');
 
-  gapset := [];
-  gapset := gapset + [-5..-1] + [1..5];
   s := 0;
-  write('zero.in.gapset='); if s in gapset then writeln('TRUE') else writeln('FALSE');
+  write('zero.in.gapset='); if s in [-5..-1, 1..5] then writeln('TRUE') else writeln('FALSE');
   s := -3;
-  write('neg3.in.gapset='); if s in gapset then writeln('TRUE') else writeln('FALSE');
+  write('neg3.in.gapset='); if s in [-5..-1, 1..5] then writeln('TRUE') else writeln('FALSE');
 
   bset := [100..250];
   b := 200;
