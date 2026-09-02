@@ -66,6 +66,8 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <utility>
+#include <vector>
 
 using namespace plang;
 
@@ -117,13 +119,28 @@ constexpr MessageDirective MessageDirectives[] = {
 // skipToNextConditionalMarker (which parses each directive it meets while
 // raw-skipping dead source the same way, without ever routing through
 // dispatchDirective itself -- that would dispatch it for real).
+//
+// AdjacentToName, when non-null, is set to whether Argument's very first
+// character -- BEFORE the leading-whitespace trim below runs -- immediately
+// followed Name with no gap at all.  Only dispatchSwitchDirective's
+// one-letter form ever reads it (issue #604): real Turbo/FPC tell `{$R+}`
+// (the RangeChecks switch) apart from `{$R +}` or `{$R resourcefile}` (an
+// unrelated named directive on the very same letter) purely by whether the
+// sign is adjacent, confirmed against fpc's own scanner source
+// (tscannerfile.handledirectives in scanner.pas) -- so this has to capture
+// that fact before it trims the very whitespace that would otherwise be the
+// only evidence of it.
 void splitDirectiveBody(std::string_view Body, std::string_view& Name,
-                        std::string_view& Argument) {
+                        std::string_view& Argument,
+                        bool* AdjacentToName = nullptr) {
     size_t I = 0;
     while (I < Body.size() && std::isalpha(static_cast<unsigned char>(Body[I])))
         ++I;
     Name = Body.substr(0, I);
     Argument = Body.substr(I);
+    if (AdjacentToName)
+        *AdjacentToName = !Argument.empty() &&
+                          !std::isspace(static_cast<unsigned char>(Argument.front()));
     while (!Argument.empty() &&
            std::isspace(static_cast<unsigned char>(Argument.front())))
         Argument.remove_prefix(1);
@@ -135,18 +152,67 @@ void splitDirectiveBody(std::string_view Body, std::string_view& Name,
 } // namespace
 
 void Scanner::skipDirective(bool Braced) {
-    const size_t CommentStart = Pos;
+    // Both diagnosed positions below are computed up front, while FID still
+    // names the buffer this directive actually opened in: a directive body
+    // that runs off the end of an included buffer may, per the loop below,
+    // pop back through however many includes it takes to keep looking for a
+    // closer (issue #656 -- {$I file} splices its text in "as if pasted",
+    // so a directive opened before the splice point and closed after it is
+    // one continuous directive, not two unrelated fragments), and by the
+    // time that happens FID no longer names this buffer at all.  locAt()
+    // always reads the CURRENT FID, so calling it now, before the loop can
+    // ever pop anything, is what keeps either diagnostic pointing at where
+    // the directive actually opened rather than wherever scanning happened
+    // to end up.
+    const size_t         CommentStart = Pos;
+    const SourceLocation OpenLoc      = locAt(CommentStart);
     Pos += Braced ? 2 : 3; // past '{$' or '(*$'
-    const size_t BodyStart = Pos;
+    const size_t         BodyStart = Pos;
+    const SourceLocation BodyLoc   = locAt(BodyStart);
     bool SawOtherCloser = false;
 
-    while (Pos < Text.size()) {
+    // Stays empty, and is never consulted, unless the directive's closer
+    // turns out to be in a DIFFERENT buffer than BodyStart -- the
+    // overwhelmingly common case (a directive that opens and closes in the
+    // same file) is still one plain Text.substr() view with no copy at all.
+    // Once a buffer boundary is crossed, though, BodyStart and the eventual
+    // closer are offsets into two buffers with no shared address space, so
+    // there is no single string_view that could name both ends; this is
+    // built up piece by piece instead, one segment per buffer the directive
+    // body passes through.
+    std::string SpanningBody;
+    bool        Spanning     = false;
+    size_t      SegmentStart = BodyStart;
+
+    for (;;) {
+        if (Pos >= Text.size()) {
+            // Mirrors skipToNextConditionalMarker's own EOF handling
+            // (issue #651's own comment there): an {$I file} splice means
+            // running out of THIS buffer mid-directive is not necessarily
+            // the directive's own end, only this buffer's -- if an outer
+            // file is waiting to resume, its text is exactly what would
+            // have followed here had the include been pasted by hand, so
+            // popInclude and keep scanning for the real closer there
+            // instead of reporting a spurious unterminated-comment (issue
+            // #656).
+            SpanningBody.append(Text.substr(SegmentStart));
+            Spanning = true;
+            if (popInclude()) {
+                SegmentStart = Pos;
+                continue;
+            }
+            break;
+        }
         const size_t Here = Pos;
         const char   C    = Text[Pos++];
         if (Braced) {
             if (C == '}') {
-                dispatchDirective(Text.substr(BodyStart, Here - BodyStart),
-                                  locAt(BodyStart));
+                if (Spanning) {
+                    SpanningBody.append(Text.substr(SegmentStart, Here - SegmentStart));
+                    dispatchDirective(SpanningBody, BodyLoc);
+                } else {
+                    dispatchDirective(Text.substr(BodyStart, Here - BodyStart), BodyLoc);
+                }
                 return;
             }
             if (C == '*' && Pos < Text.size() && Text[Pos] == ')') {
@@ -156,8 +222,12 @@ void Scanner::skipDirective(bool Braced) {
         } else {
             if (C == '*' && Pos < Text.size() && Text[Pos] == ')') {
                 ++Pos; // consume ')'
-                dispatchDirective(Text.substr(BodyStart, Here - BodyStart),
-                                  locAt(BodyStart));
+                if (Spanning) {
+                    SpanningBody.append(Text.substr(SegmentStart, Here - SegmentStart));
+                    dispatchDirective(SpanningBody, BodyLoc);
+                } else {
+                    dispatchDirective(Text.substr(BodyStart, Here - BodyStart), BodyLoc);
+                }
                 return;
             }
             if (C == '}') SawOtherCloser = true;
@@ -171,21 +241,30 @@ void Scanner::skipDirective(bool Braced) {
     if (SawOtherCloser) {
         const std::string_view Opener = Braced ? "{" : "(*";
         const std::string_view Closer = Braced ? "}" : "*)";
-        emitError(locAt(CommentStart), diag::err_comment_delim_mismatch,
-                  {Opener, Closer});
+        emitError(OpenLoc, diag::err_comment_delim_mismatch, {Opener, Closer});
     } else {
-        emitError(locAt(CommentStart), diag::err_unterminated_comment);
+        emitError(OpenLoc, diag::err_unterminated_comment);
     }
 }
 
 void Scanner::dispatchDirective(std::string_view Body, SourceLocation Loc) {
+    // The comma-separated multi-switch form, `{$R+,I-}`, is tried before
+    // Body is even split into one Name/Argument pair: unlike every other
+    // category here, it is not one directive but several, each its own
+    // one-letter switch spec strung together with no directive-level
+    // grammar of its own to hang a Name off of (issue #658) -- see
+    // dispatchMultiSwitchDirective's own comment for why this has to run
+    // first, and why it costs nothing when Body is not this form at all.
+    if (dispatchMultiSwitchDirective(Body, Loc)) return;
+
     std::string_view Name, Argument;
-    splitDirectiveBody(Body, Name, Argument);
+    bool Adjacent = false;
+    splitDirectiveBody(Body, Name, Argument, &Adjacent);
 
     if (dispatchMessageDirective(Name, Argument, Loc)) return;
     if (dispatchConditionalDirective(Name, Argument, Loc)) return;
     if (dispatchIncludeDirective(Name, Argument, Loc)) return;
-    if (dispatchSwitchDirective(Name, Argument, Loc)) return;
+    if (dispatchSwitchDirective(Name, Argument, Loc, Adjacent)) return;
     if (dispatchIgnoredDirective(Name, Loc)) return;
 
     // Every category above has had its turn, including the accept-and-ignore
@@ -553,6 +632,22 @@ std::optional<std::string> Scanner::resolveIncludePath(std::string_view Filename
     if (const fs::path Candidate = CurDir / FP; isReadableFile(Candidate))
         return Candidate.string();
 
+    // Then the process's current working directory -- confirmed against
+    // `fpc -Mtp` (issue #657): a NESTED {$I} (one reached from inside an
+    // already-included file, so CurDir above is that file's own directory,
+    // not the project root the invocation actually ran from) still resolves
+    // a project-root-relative path fpc accepts, because fpc's own include
+    // search always tries the compiler's cwd as one of its fixed steps,
+    // independent of which file is doing the including.  Skipped when cwd
+    // itself cannot be determined (Ec set) rather than treated as a hard
+    // error -- one failed candidate among several, exactly like a
+    // -Fi<dir> that does not exist either.
+    std::error_code Ec;
+    const fs::path Cwd = fs::current_path(Ec);
+    if (!Ec)
+        if (const fs::path Candidate = Cwd / FP; isReadableFile(Candidate))
+            return Candidate.string();
+
     // Then -Fi<dir>, in the order given -- the same "try each candidate,
     // first hit wins" shape Sema::resolveImports already uses for
     // Opts.ModuleSearchPaths/.pmi.
@@ -674,25 +769,44 @@ bool Scanner::popInclude() {
 // A single directive body is one Name and one Argument in this codebase's
 // existing shape (dispatchMessageDirective, dispatchConditionalDirective and
 // dispatchIncludeDirective all assume it too) -- real FPC additionally lets
-// several switches share one `{$R+,I-}` comment via a comma; that is not
-// implemented here, on the same "keeps the shape every other category
-// already uses" grounds.
+// several switches share one `{$R+,I-}` comment via a comma; that form is
+// recognized separately, by dispatchMultiSwitchDirective, tried before Body
+// is even split into a Name/Argument pair (see its own comment, issue #658).
+//
+// The letter form's adjacency requirement (this section's header comment)
+// is enforced by the caller: Adjacent is dispatchDirective's own
+// splitDirectiveBody() result for whether Argument started immediately
+// after Name with no intervening whitespace (issue #604) -- only consulted
+// when Name is a single letter, since the long-name form's own grammar
+// (bare '+'/'-', or a SPACE then 'ON'/'OFF') never depended on adjacency in
+// the first place, and splitDirectiveBody's trim already collapses `{$RANGECHECKS
+// +}` and `{$RANGECHECKS+}` to the identical Argument either way.
 bool Scanner::dispatchSwitchDirective(std::string_view Name,
                                       std::string_view Argument,
-                                      SourceLocation Loc) {
+                                      SourceLocation Loc,
+                                      bool Adjacent) {
     std::optional<Switch> Sw;
     std::optional<bool>   On;
 
     if (Name.size() == 1) {
-        Sw = switchFromLetter(Name[0]);
-        if (Sw) {
-            if (Argument == "+")      On = true;
-            else if (Argument == "-") On = false;
-            // Anything else (a space, a filename, 'ON'/'OFF' with no '+'/'-')
-            // is not this switch in real Turbo/FPC either -- see this
-            // section's header comment -- so Sw stays set but On does not,
-            // and the function returns false below, same as if Name had
-            // never matched a switch at all.
+        // Not adjacent -- `{$R +}`, `{$R resourcefile}`, anything with a
+        // gap -- is never this switch, no matter what Argument holds: real
+        // Turbo/FPC give the bare-adjacent spelling alone to the switch, and
+        // leave every other shape on this letter to whatever OTHER, unrelated
+        // directive it might be (a Windows resource file for 'R', an object
+        // file for 'L', ...), most of which land in dispatchIgnoredDirective
+        // or the unknown-directive fallback instead -- see this section's
+        // header comment.
+        if (Adjacent) {
+            Sw = switchFromLetter(Name[0]);
+            if (Sw) {
+                if (Argument == "+")      On = true;
+                else if (Argument == "-") On = false;
+                // Anything else (a filename, 'ON'/'OFF' with no '+'/'-') is
+                // not this switch in real Turbo/FPC either -- Sw stays set
+                // but On does not, and the function returns false below,
+                // same as if Name had never matched a switch at all.
+            }
         }
     } else {
         Sw = switchFromLongName(toLower(Name));
@@ -708,18 +822,80 @@ bool Scanner::dispatchSwitchDirective(std::string_view Name,
     }
     if (!Sw || !On) return false;
 
-    // Lazily built: a Turbo file that never writes a switch directive -- the
-    // common case -- never allocates one, and Opts.switchOn (LangOptions.h)
-    // stays on its null-table fast path exactly as it did before this
-    // function existed.  Seeded from Opts.defaultSwitches(), the
-    // command-line state a directive overrides, the first time there is
-    // anything at all to record.
+    applySwitch(*Sw, *On, Loc);
+    return true;
+}
+
+// Records Sw = On at Loc into Switches/CurrentSwitchState, lazily building
+// the table the first time any switch directive is actually recognized --
+// see Switches' own comment in Scanner.h for why null has to mean exactly
+// "never touched" rather than "off".  Shared by dispatchSwitchDirective (one
+// switch per directive) and dispatchMultiSwitchDirective (several switches
+// sharing one `{$R+,I-}` comma-separated directive, issue #658): both
+// dispatch to the exact same underlying state, so a comma form and its
+// single-switch equivalents combine identically either way.
+void Scanner::applySwitch(Switch Sw, bool On, SourceLocation Loc) {
     if (!Switches) {
         Switches = std::make_shared<SwitchTable>();
         CurrentSwitchState = Opts.defaultSwitches();
     }
-    CurrentSwitchState.set(*Sw, *On);
+    CurrentSwitchState.set(Sw, On);
     Switches->record(Loc, CurrentSwitchState);
+}
+
+// The comma-separated multi-switch form, `{$R+,I-}` (issue #658): real
+// Turbo/FPC let several one-letter switches share a single directive
+// comment this way, each comma-separated element its own adjacent
+// Letter+Sign pair -- the exact same adjacency rule the single-switch
+// letter form enforces (this section's header comment, issue #604), just
+// applied once per element instead of once per directive.  Body is the
+// RAW, unsplit directive text (not yet even a Name/Argument pair; there is
+// no single Name for a directive that is really several), so this has to
+// run before splitDirectiveBody() does, and has to fail (return false)
+// cleanly and cheaply for every directive that is not this form -- which is
+// most of them -- so ordinary single-directive dispatch is not slowed down
+// by it.
+//
+// Deliberately strict: every comma-separated element must parse as exactly
+// two characters, an ASCII letter immediately followed by '+' or '-', with
+// only whitespace tolerated around the commas themselves (`{$R+, I-}`) --
+// never inside an element (`{$R +,I-}` is rejected, same as `{$R +}` alone
+// is under issue #604's adjacency rule). One unparseable element fails the
+// WHOLE directive -- nothing is applied, and Body falls through to ordinary
+// single-directive dispatch, which will report it unknown -- rather than
+// applying a partial prefix and silently discarding the rest.
+bool Scanner::dispatchMultiSwitchDirective(std::string_view Body, SourceLocation Loc) {
+    if (Body.find(',') == std::string_view::npos) return false;
+
+    std::vector<std::pair<Switch, bool>> Parsed;
+    size_t Start = 0;
+    while (Start <= Body.size()) {
+        const size_t Comma = Body.find(',', Start);
+        std::string_view Elem = Body.substr(
+            Start, Comma == std::string_view::npos ? std::string_view::npos
+                                                    : Comma - Start);
+        while (!Elem.empty() && std::isspace(static_cast<unsigned char>(Elem.front())))
+            Elem.remove_prefix(1);
+        while (!Elem.empty() && std::isspace(static_cast<unsigned char>(Elem.back())))
+            Elem.remove_suffix(1);
+
+        if (Elem.size() != 2) return false; // not Letter+Sign, adjacent
+        const char Sign = Elem[1];
+        if (Sign != '+' && Sign != '-') return false;
+        const std::optional<Switch> Sw = switchFromLetter(Elem[0]); // case insensitive
+        if (!Sw) return false;
+        Parsed.emplace_back(*Sw, Sign == '+');
+
+        if (Comma == std::string_view::npos) break;
+        Start = Comma + 1;
+    }
+    // Fewer than two elements is not genuinely a comma form at all (an empty
+    // trailing element after a stray comma, say) -- fall through and let
+    // ordinary single-directive dispatch give its own honest answer instead
+    // of this one claiming a directive it was never really written to mean.
+    if (Parsed.size() < 2) return false;
+
+    for (const auto& [Sw, On] : Parsed) applySwitch(Sw, On, Loc);
     return true;
 }
 

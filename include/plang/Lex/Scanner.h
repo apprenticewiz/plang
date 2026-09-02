@@ -417,10 +417,15 @@ private:
     // already absolute, tried as-is with no search at all; otherwise THIS
     // scanner's currently active buffer's own directory first (SM's Name
     // for FID, not the outermost file -- a nested include resolves
-    // relative to its own immediate parent), then Opts.IncludeSearchPaths
-    // (-Fi<dir>) in the order given -- the same "try each candidate, first
-    // hit wins" shape Sema::resolveImports already uses for
-    // Opts.ModuleSearchPaths/.pmi.
+    // relative to its own immediate parent), then the process's current
+    // working directory (issue #657 -- confirmed against `fpc -Mtp`, which
+    // always tries its own cwd as a fixed step regardless of which file is
+    // doing the including, so a NESTED {$I} can still resolve a
+    // project-root-relative path even though CurDir above is the included
+    // file's own directory, not the root the compiler was invoked from),
+    // then Opts.IncludeSearchPaths (-Fi<dir>) in the order given -- the same
+    // "try each candidate, first hit wins" shape Sema::resolveImports
+    // already uses for Opts.ModuleSearchPaths/.pmi.
     [[nodiscard]] std::optional<std::string>
     resolveIncludePath(std::string_view Filename) const;
 
@@ -475,19 +480,52 @@ private:
 
     // Tries the switch-directive family against Name, called from
     // dispatchDirective in dispatchMessageDirective's own (Name, Argument,
-    // Loc) -> bool shape, after dispatchIncludeDirective (whose own comment
-    // explains the one letter, 'I', both this and it can mean).  Recognizes
-    // Name as either a switch's Letter (exactly one character, case
-    // insensitive) or its LongName (folded the same way every other
-    // directive name is); a Name that matches neither, or an Argument that
-    // does not parse for the spelling actually used, is left unclaimed --
-    // returns false, doing nothing -- rather than diagnosed, since a
-    // matching Letter with an unrecognized Argument is real, unimplemented
-    // Borland/FPC syntax on the very same character (`{$R resourcefile}`,
-    // `{$L object.o}`, ...) at least as often as it is a typo, and
-    // warn_directive_unknown is the honest answer to both.
+    // Loc) -> bool shape (plus one extra parameter, see below), after
+    // dispatchIncludeDirective (whose own comment explains the one letter,
+    // 'I', both this and it can mean).  Recognizes Name as either a switch's
+    // Letter (exactly one character, case insensitive) or its LongName
+    // (folded the same way every other directive name is); a Name that
+    // matches neither, or an Argument that does not parse for the spelling
+    // actually used, is left unclaimed -- returns false, doing nothing --
+    // rather than diagnosed, since a matching Letter with an unrecognized
+    // Argument is real, unimplemented Borland/FPC syntax on the very same
+    // character (`{$R resourcefile}`, `{$L object.o}`, ...) at least as
+    // often as it is a typo, and warn_directive_unknown is the honest answer
+    // to both.
+    //
+    // Adjacent is whether Argument, before splitDirectiveBody's own
+    // whitespace trim, started with no gap at all right after Name --
+    // consulted only when Name is a single letter (issue #604): real
+    // Turbo/FPC accept the switch spelling ONLY when the sign is adjacent
+    // (`{$R+}`), and give every other shape on that letter, whitespace
+    // included (`{$R +}`), to whatever unrelated named directive shares it
+    // instead.  The long-name form's own grammar never depended on
+    // adjacency, so Adjacent is not read at all in that branch.
     bool dispatchSwitchDirective(std::string_view Name, std::string_view Argument,
-                                 SourceLocation Loc);
+                                 SourceLocation Loc, bool Adjacent);
+
+    // Records Sw = On at Loc into Switches/CurrentSwitchState, lazily
+    // allocating Switches the first time any switch directive is actually
+    // recognized.  Factored out of dispatchSwitchDirective so
+    // dispatchMultiSwitchDirective's comma form (issue #658) can apply
+    // several switches from one directive through the identical path,
+    // rather than duplicating the lazy-init dance for each.
+    void applySwitch(Switch Sw, bool On, SourceLocation Loc);
+
+    // The comma-separated multi-switch form, `{$R+,I-}` (issue #658): tried
+    // by dispatchDirective against the RAW, unsplit directive body, before
+    // Name/Argument even exist -- a comma form is really several switches,
+    // not one directive with one Name, so there is no single Name to try it
+    // under the Name-Argument-Loc shape every other category here uses.
+    // Returns false, having changed nothing, unless Body contains a comma
+    // AND every comma-separated element parses as its own adjacent
+    // Letter+Sign pair (the identical adjacency rule dispatchSwitchDirective
+    // enforces for the single-switch letter form, issue #604) naming a real
+    // switch -- one bad element fails the whole directive rather than
+    // applying a partial prefix, so Body falls through to ordinary
+    // single-directive dispatch (and its own honest unknown-directive
+    // diagnostic) exactly as if this function had never run.
+    bool dispatchMultiSwitchDirective(std::string_view Body, SourceLocation Loc);
 
     // ---- Accept-and-ignore directives (lib/Lex/Directives.cpp) -------------
     //

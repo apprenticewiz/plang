@@ -217,6 +217,19 @@ BRACE_CHECK_EXEMPT = {
     "test/CodeGen/Turbo/typed-file-read-at-eof-traps-runtime-error-100-under-default-i-plus.pas",
     "test/CodeGen/Turbo/typed-file-read-at-eof-sets-ioresult-100-under-i-minus.pas",
     "test/CodeGen/Turbo/text-file-reset-ignores-filemode-typed-file-reset-still-honors-it.pas",
+    # Same reasoning again (only ever compiles under -std=turbo -- see each
+    # file's own RUN: line -- so the matched-delimiter rule this check
+    # doesn't model is the one that actually applies), for the two directive
+    # edge-case regressions (issues #604 and #655) whose header prose and/or
+    # CHECK blocks discuss '{$R+}'/'{$R-}' syntax in English the same way the
+    # switch-directive files above already do.  Not a hazard to fix.
+    "test/Driver/Turbo/whitespace-adjacency-decides-a-one-letter-switch-vs-an-unrelated-named-directive.pas",
+    "test/Driver/Turbo/a-directive-placed-mid-subscript-governs-that-very-subscripts-own-check.pas",
+    # Same reasoning again, for the comma-separated multi-switch regression
+    # (issue #658): its header prose and CHECK blocks discuss '{$R+,I-}'
+    # syntax in English the same way the switch-directive files above
+    # already do.  Not a hazard to fix.
+    "test/Driver/Turbo/comma-separated-multi-switch-directive-applies-every-switch.pas",
 }
 
 
