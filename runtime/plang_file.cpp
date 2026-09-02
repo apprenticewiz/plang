@@ -781,18 +781,27 @@ void plang_close(PascalFile *F, int8_t IsText) {
 /// a later, unsuppressed Reset with no intervening re-Assign opens exactly
 /// the name this call recorded), unlike every I/O-performing entry point
 /// below it.
+///
+/// Issue #573: Assign on a file that is CURRENTLY OPEN (from an earlier
+/// Reset/Rewrite/Append) now closes that stale stream via the same
+/// closeStream() every other state-changing Turbo entry point in this file
+/// uses, before recording the new Name -- confirmed against `fpc -Mtp`: a
+/// Write/Close issued after a re-Assign over a still-open file reports
+/// InOutRes 103 ("file not open"), not silent success against the old,
+/// now-orphaned stream. This runs UNCONDITIONALLY, with no
+/// tpSuppressedByPendingError gate (matching the note just above: Assign
+/// has to work no matter what state F is in, pending error or not, or a
+/// program could never recover from one) and regardless of F->Mode --
+/// closeStream is itself a no-op when F->Fp is already null, so a file
+/// that was only ever Assign'd, or already Close'd, is unaffected.
 void plang_tp_assign(PascalFile *F, const char *Name) {
+    closeStream(F);
     const std::size_t Cap = static_cast<std::size_t>(PlangFileNameCap) - 1;
     const std::size_t Len = Name ? std::strlen(Name) : 0;
     const std::size_t N   = Len < Cap ? Len : Cap;
     if (N) std::memcpy(F->Name, Name, N);
     F->Name[N] = '\0';
     F->Mode = PlangFmClosed;
-    // F->Fp is deliberately left untouched: real Assign on a file that is
-    // currently open is not a case this item builds any behavior for
-    // (Assign's own job is only to record a name and mark the file
-    // closed); a later {$I+}/InOutRes item is the natural place to decide
-    // whether that should itself be an error.
 }
 
 /// TP Reset(f): opens F->Name (as bound by an earlier Assign) for reading,
@@ -1039,18 +1048,30 @@ void plang_tp_append(PascalFile *F) {
 /// (plang_tp_reset itself would refuse the open regardless, but leaving
 /// F->RecSize unmodified here too keeps this a genuine no-op start to
 /// finish, matching every other suppressed entry point in this file).
+///
+/// Issue #587: the RecSize==0 early return used to skip straight past
+/// plang_tp_reset entirely, so its own closeStream() call never ran --
+/// leaving a file that was ALREADY open from an earlier successful
+/// Reset/Rewrite fully live and usable, as if the rejected Reset(f, 0) had
+/// never been attempted. Real Turbo Pascal/`fpc -Mtp` invalidates f the
+/// instant Reset/Rewrite is called whether or not that particular attempt
+/// succeeds, so this now calls closeStream() itself on the RecSize==0 path
+/// too, before returning -- confirmed against `fpc -Mtp`: a following
+/// BlockRead/BlockWrite against f reports InOutRes 103 ("file not open"),
+/// not silent success against the stale stream.
 void plang_tp_reset_sized(PascalFile *F, int64_t RecSize) {
     if (tpSuppressedByPendingError()) return;
-    if (RecSize == 0) { setInOutResIfClear(2); return; }
+    if (RecSize == 0) { closeStream(F); setInOutResIfClear(2); return; }
     F->RecSize = RecSize;
     plang_tp_reset(F);
 }
 
 /// TP Rewrite's RecSize wiring -- see plang_tp_reset_sized just above for
-/// the full rationale, identical here but for Rewrite.
+/// the full rationale, identical here but for Rewrite, including issue
+/// #587's closeStream() call on the RecSize==0 path.
 void plang_tp_rewrite_sized(PascalFile *F, int64_t RecSize) {
     if (tpSuppressedByPendingError()) return;
-    if (RecSize == 0) { setInOutResIfClear(2); return; }
+    if (RecSize == 0) { closeStream(F); setInOutResIfClear(2); return; }
     F->RecSize = RecSize;
     plang_tp_rewrite(F);
 }
