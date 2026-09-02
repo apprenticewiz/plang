@@ -989,6 +989,23 @@ DIAG(err_unit_name_mismatch, Error,
 // the stack.
 DIAG(err_unit_circular_uses, Error,
      "circular 'uses': unit '%0' is used while it is still being loaded")
+// Issue #709: a 'uses' clause naming the same unit twice (`uses Base,
+// Base;`) brings nothing new the second time -- fpc rejects it outright
+// ('Duplicate identifier') rather than silently accepting the redundant
+// name, and plang now matches that.
+DIAG(err_unit_duplicate_uses, Error,
+     "duplicate 'uses': unit '%0' is already used")
+// Issue #709: a unit naming itself in its own 'uses' clause is not a real
+// import (there is nothing to load that is not already this same
+// compilation) -- an INTERFACE self-use is already caught as a circular
+// load by err_unit_circular_uses above (loadUnitInterfaceExports's own
+// UnitLoading_ guard), but an IMPLEMENTATION self-use reaches
+// pushUnitUsesScopes only after checkUnitInterfaceOnly has already cached
+// this unit's own exports, so it would otherwise be accepted as a
+// (harmless-looking, but nonsensical) cache hit instead of being caught by
+// that same guard.
+DIAG(err_unit_self_uses, Error,
+     "unit '%0' may not use itself")
 // Issue #180/#304: neither a .pmi nor a .tui carries any version/fingerprint
 // metadata that would let a reader detect a mismatch against the source it
 // was published from, so this substitutes the cheap mtime-based check a

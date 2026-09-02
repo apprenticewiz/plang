@@ -25,6 +25,7 @@
 #include <limits>
 #include <optional>
 #include <ranges>
+#include <set>
 #include <sstream>
 
 using namespace plang;
@@ -1171,7 +1172,8 @@ void Sema::processImports(const std::vector<ImportClause>& Imports) {
 // it, because the dotted entry lives in the shadowed unit's own scope,
 // undisturbed by anything pushed on top of it.
 
-size_t Sema::pushUnitUsesScopes(const std::vector<UsedUnit>& Uses) {
+size_t Sema::pushUnitUsesScopes(const std::vector<UsedUnit>& Uses,
+                                 bool CheckDuplicatesAndSelf) {
     // The implicit `System`: every Turbo program and unit gets one, always
     // pushed FIRST (so it ends up the least-recently-pushed, most-easily-
     // shadowed of the group) -- confirmed against real `fpc -Mtp` that a
@@ -1188,6 +1190,16 @@ size_t Sema::pushUnitUsesScopes(const std::vector<UsedUnit>& Uses) {
     Symtab.pushScope(/*IsBlock=*/false);
     size_t Count = 1;
 
+    // Issue #709: every name in THIS SAME 'uses' clause, case-insensitively,
+    // so a repeated name ('uses Base, Base;') is caught instead of silently
+    // loading (and shadowing itself against) the same unit twice -- matching
+    // real `fpc -Mtp`'s "Duplicate identifier".  Deliberately scoped to one
+    // call (one clause) rather than a Sema-wide set: this same function is
+    // called twice over the SAME InterfaceUses list for one unit
+    // (checkUnitInterfaceOnly's own pass, then checkUnit's second pass to
+    // build the implementation's scope stack), and those two calls must not
+    // look like a clash with each other.
+    std::set<std::string> SeenInThisClause;
     for (const auto& U : Uses) {
         // Issue #699: 'System' need not be named at all (it is always
         // implicitly there, just above), but real TP7/fpc also accept it
@@ -1199,9 +1211,27 @@ size_t Sema::pushUnitUsesScopes(const std::vector<UsedUnit>& Uses) {
         // processImports's own isBuiltinModule check short-circuits EP's
         // built-in pseudo-modules.
         if (eqCI(U.Name, "System")) continue;
+        const std::string Lower = toLower(U.Name);
+        // Issue #709: a unit naming itself is not a real import at all --
+        // an INTERFACE self-use is already caught as circular by
+        // loadUnitInterfaceExports's own UnitLoading_ guard (this same
+        // Key is still being loaded when it is reached), but an
+        // IMPLEMENTATION self-use reaches here only after
+        // checkUnitInterfaceOnly has already finished and cached this
+        // unit's own exports in UnitExports_, so loadUnitInterfaceExports
+        // would otherwise return that cache hit -- a real, but nonsensical,
+        // "successful" self-import of a unit still being compiled -- rather
+        // than ever reaching the circularity guard at all.
+        if (CheckDuplicatesAndSelf && !CurrentUnit_.empty() && Lower == CurrentUnit_) {
+            error(U.Loc, diag::err_unit_self_uses, {U.Name});
+            continue;
+        }
+        if (CheckDuplicatesAndSelf && !SeenInThisClause.insert(Lower).second) {
+            error(U.Loc, diag::err_unit_duplicate_uses, {U.Name});
+            continue;
+        }
         Symtab.pushScope(/*IsBlock=*/false);
         ++Count;
-        const std::string Lower = toLower(U.Name);
         for (const Symbol& Sym : loadUnitInterfaceExports(U.Name, U.Loc)) {
             // Fresh scope, one unit's exports only: two exports of the same
             // unit cannot collide here (they didn't collide when the unit's
@@ -1312,10 +1342,65 @@ Sema::loadUnitInterfaceExports(const std::string& UnitName, SourceLocation Loc) 
         }
         return "";
     };
+    // Attempts to load and parse one candidate file found at \p CandidatePath
+    // (a .tui or a companion .pas).  On success, returns the parsed program
+    // (BareUnit set, its name matching \p UnitName).  On failure --
+    // unparseable content, or a unit name that does not match -- returns
+    // nullptr and records the failure in the Failure* variables below,
+    // WITHOUT reporting through Diags: issue #707, a corrupt or misnamed
+    // candidate found in an earlier search directory must not hard-error the
+    // whole compile when a later directory (or this same directory's
+    // companion .pas) has a usable one -- exactly the way a MISSING .tui
+    // already falls through to try the next candidate.  The caller reports
+    // the most recent failure only once every candidate has been exhausted
+    // with nothing usable found, the same "remember and keep going" shape
+    // processImports' own tryCandidate above uses for a broken .pmi.
+    std::string FailureDetail;
+    std::string FailurePath;
+    bool        FailureIsNameMismatch = false;
+    auto tryLoadCandidate =
+        [&](const std::string& CandidatePath) -> std::unique_ptr<ProgramNode> {
+        std::ifstream UnitFile(CandidatePath);
+        if (!UnitFile) return nullptr;
+        std::ostringstream SS;
+        SS << UnitFile.rdbuf();
+
+        // Parsed with its own throwaway Diagnostics/SourceManager, exactly the
+        // way loadPMI parses a .pmi's content just below -- a used unit's own
+        // syntax errors are this unit's problem to report (via err_malformed_
+        // unit, giving the FIRST one as detail), not something the USING
+        // program's own diagnostic stream should carry located Diagnostic
+        // objects for (which would dangle once this throwaway SourceManager
+        // goes out of scope).
+        DiagnosticsEngine UnitDiags;
+        LangOptions       UnitOpts = Opts;
+        UnitOpts.Std = LangOptions::Standard::Turbo; // a unit file is always Turbo syntax
+        SourceManager UnitSrcMgr;
+        Scanner USc(UnitSrcMgr, "<" + CandidatePath + ">", SS.str(), UnitDiags, UnitOpts);
+        Parser  UP(std::move(USc), UnitDiags, UnitOpts);
+        auto    UnitProg = UP.parse();
+        if (!UnitProg || UnitDiags.hasErrors() || !UnitProg->BareUnit) {
+            FailureDetail.clear();
+            for (const auto& D : UnitDiags.diagnostics())
+                if (D.Severity == DiagSeverity::Error) { FailureDetail = D.Message; break; }
+            FailureIsNameMismatch = false;
+            FailurePath = CandidatePath;
+            return nullptr;
+        }
+        if (!eqCI(UnitProg->BareUnit->Name, UnitName)) {
+            FailureDetail = UnitProg->BareUnit->Name;
+            FailureIsNameMismatch = true;
+            FailurePath = CandidatePath;
+            return nullptr;
+        }
+        return UnitProg;
+    };
+
     std::string Path;
     std::string TuiDir;
     bool        Found = false;
     bool        IsTUI = false;
+    std::unique_ptr<ProgramNode> UnitProg;
     std::vector<std::string> SearchDirs = Opts.ModuleSearchPaths;
     SearchDirs.push_back(".");
     // Tier 4, Cluster B item 4: the shipped-RTL default, tried only after a
@@ -1338,17 +1423,37 @@ Sema::loadUnitInterfaceExports(const std::string& UnitName, SourceLocation Loc) 
     // re-parsing its companion source), it just cannot be allowed to reach
     // across directories.
     for (const auto& Dir : SearchDirs) {
-        if (Path = findExact(Dir, Key + ".tui"); !Path.empty()) {
-            Found = true; IsTUI = true; TuiDir = Dir;
-            break;
+        if (const std::string Candidate = findExact(Dir, Key + ".tui");
+            !Candidate.empty()) {
+            if (auto Prog = tryLoadCandidate(Candidate)) {
+                Path = Candidate; TuiDir = Dir; IsTUI = true; Found = true;
+                UnitProg = std::move(Prog);
+                break;
+            }
+            // Issue #707: a candidate .tui EXISTS here but did not parse (or
+            // named a different unit) -- fall through to this same
+            // directory's companion .pas, and then to later directories,
+            // exactly like a candidate that does not exist at all already
+            // does, instead of hard-erroring the whole compile over it.
         }
-        if (Path = findCaseInsensitive(Dir); !Path.empty()) {
-            Found = true;
-            break;
+        if (const std::string Candidate = findCaseInsensitive(Dir);
+            !Candidate.empty()) {
+            if (auto Prog = tryLoadCandidate(Candidate)) {
+                Path = Candidate; IsTUI = false; Found = true;
+                UnitProg = std::move(Prog);
+                break;
+            }
         }
     }
     if (!Found) {
-        error(Loc, diag::err_unknown_unit, {UnitName, Key});
+        if (FailurePath.empty()) {
+            error(Loc, diag::err_unknown_unit, {UnitName, Key});
+        } else if (FailureIsNameMismatch) {
+            error(Loc, diag::err_unit_name_mismatch,
+                  {FailurePath, UnitName, FailureDetail});
+        } else {
+            error(Loc, diag::err_malformed_unit, {UnitName, FailurePath, FailureDetail});
+        }
         UnitLoading_.erase(Key);
         return UnitExports_[Key];
     }
@@ -1359,44 +1464,6 @@ Sema::loadUnitInterfaceExports(const std::string& UnitName, SourceLocation Loc) 
     if (IsTUI) {
         const std::string PasCandidate = findCompanionPas(TuiDir, Key);
         if (!PasCandidate.empty()) warnIfInterfaceStale(Loc, Path, PasCandidate);
-    }
-
-    std::ifstream UnitFile(Path);
-    if (!UnitFile) {
-        error(Loc, diag::err_unknown_unit, {UnitName, Key});
-        UnitLoading_.erase(Key);
-        return UnitExports_[Key];
-    }
-    std::ostringstream SS;
-    SS << UnitFile.rdbuf();
-
-    // Parsed with its own throwaway Diagnostics/SourceManager, exactly the
-    // way loadPMI parses a .pmi's content just below -- a used unit's own
-    // syntax errors are this unit's problem to report (via err_malformed_
-    // unit, giving the FIRST one as detail), not something the USING
-    // program's own diagnostic stream should carry located Diagnostic
-    // objects for (which would dangle once this throwaway SourceManager
-    // goes out of scope).
-    DiagnosticsEngine UnitDiags;
-    LangOptions       UnitOpts = Opts;
-    UnitOpts.Std = LangOptions::Standard::Turbo; // a unit file is always Turbo syntax
-    SourceManager UnitSrcMgr;
-    Scanner USc(UnitSrcMgr, "<" + Path + ">", SS.str(), UnitDiags, UnitOpts);
-    Parser  UP(std::move(USc), UnitDiags, UnitOpts);
-    auto    UnitProg = UP.parse();
-    if (!UnitProg || UnitDiags.hasErrors() || !UnitProg->BareUnit) {
-        std::string Detail;
-        for (const auto& D : UnitDiags.diagnostics())
-            if (D.Severity == DiagSeverity::Error) { Detail = D.Message; break; }
-        error(Loc, diag::err_malformed_unit, {UnitName, Path, Detail});
-        UnitLoading_.erase(Key);
-        return UnitExports_[Key];
-    }
-    if (!eqCI(UnitProg->BareUnit->Name, UnitName)) {
-        error(Loc, diag::err_unit_name_mismatch,
-              {Path, UnitName, UnitProg->BareUnit->Name});
-        UnitLoading_.erase(Key);
-        return UnitExports_[Key];
     }
 
     const UnitNode* UN = UnitProg->BareUnit.get();
@@ -1487,7 +1554,13 @@ bool Sema::checkUnit(const UnitNode& Unit) {
     // ImplementationUses, nested INSIDE (more innermost than) InterfaceUses
     // -- Cluster A item 1's own requirement 3's positive half: the
     // implementation can see what the interface saw, plus more.
-    const size_t IfacePushed = pushUnitUsesScopes(Unit.InterfaceUses);
+    // Issue #709: CheckDuplicatesAndSelf=false -- this is Unit.InterfaceUses'
+    // own SECOND pass (checkUnitInterfaceOnly just above already made the
+    // first), so a name wrong in it was already reported once there;
+    // reporting it again here would just be the same diagnostic twice for
+    // one bad 'uses' clause.
+    const size_t IfacePushed =
+        pushUnitUsesScopes(Unit.InterfaceUses, /*CheckDuplicatesAndSelf=*/false);
     Symtab.pushScope(/*IsBlock=*/false);
     for (const auto& Sym : UnitExports_[Key]) (void)Symtab.define(Sym);
     const size_t ImplPushed = pushUnitUsesScopes(Unit.ImplementationUses);
