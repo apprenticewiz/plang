@@ -92,8 +92,17 @@ llvm::Value* CGIndexAccess::emitConformantElemPtr(const IndexExpr& e) {
             // range are the ones the source actually wrote.
             auto* lo = loOf(d);
             auto* hi = hiOf(d);
+            // subs[d]->Loc, not e.Loc: e.Loc is the whole (possibly nested)
+            // IndexExpr's own location, which for `a[ {$R+} i ]` precedes
+            // the directive lexically even though it lands squarely inside
+            // this dimension's own subscript -- querying the switch state
+            // there instead of at e.Loc is what lets a directive written
+            // mid-subscript still govern that very subscript's own check
+            // (issue #655), the same "applies as soon as lexically
+            // encountered" rule real Turbo/FPC use.
             if (lo && hi)
-                RangeGuards.emitRangeCheckDyn(idx, lo, hi, /*isIndex=*/true, e.Loc);
+                RangeGuards.emitRangeCheckDyn(idx, lo, hi, /*isIndex=*/true,
+                                              subs[d]->Loc);
             if (lo)
                 idx = B.CreateSub(idx, lo, "idx.adj.conf");
         }
@@ -132,7 +141,7 @@ llvm::Value* CGIndexAccess::emitConformantElemPtr(const IndexExpr& e) {
             if (at->IndexType)
                 RangeGuards.emitRangeCheck(idx, at->IndexType->SubLo,
                                             at->IndexType->SubHi,
-                                            /*isIndex=*/true, e.Loc);
+                                            /*isIndex=*/true, subs[d]->Loc);
             if (at->IndexType && at->IndexType->SubLo != 0)
                 idx = B.CreateSub(
                     idx, llvm::ConstantInt::get(I64Ty, at->IndexType->SubLo),
@@ -190,7 +199,10 @@ llvm::Value* CGIndexAccess::emitIndexGEP(const IndexExpr& e) {
         auto [lo, hi] = Schema.schemaArrayBounds(*ref);
         auto* elemTy  = Schema.schemaStorageType(*ref);
         auto* idx     = ToI64(EmitExpr(*e.Index), exprIsSigned(*e.Index));
-        RangeGuards.emitRangeCheckDyn(idx, lo, hi, /*isIndex=*/true, e.Loc);
+        // e.Index->Loc, not e.Loc -- see emitConformantElemPtr's identical
+        // comment (issue #655) for why the switch state has to be queried
+        // at the subscript's own location, not the whole IndexExpr's.
+        RangeGuards.emitRangeCheckDyn(idx, lo, hi, /*isIndex=*/true, e.Index->Loc);
         idx = B.CreateSub(idx, lo, "idx.adj.sch");
         return B.CreateGEP(elemTy, ref->data, {idx}, "elem.ptr");
     }
@@ -218,7 +230,9 @@ llvm::Value* CGIndexAccess::emitIndexGEP(const IndexExpr& e) {
         auto* strPtr = StrCall.emitStrAddr(*e.Array);
         auto* idx    = ToI64(EmitExpr(*e.Index), exprIsSigned(*e.Index));
         const int64_t cap = ExprShortStrCap(*e.Array);
-        if (RangeGuards.rangeChecksAt(e.Loc)) {
+        // e.Index->Loc, not e.Loc -- issue #655, see emitConformantElemPtr's
+        // identical comment.
+        if (RangeGuards.rangeChecksAt(e.Index->Loc)) {
             auto* bad = B.CreateOr(
                 B.CreateICmpSLT(idx, llvm::ConstantInt::get(I64Ty, 0), "sstr.rng.lo"),
                 B.CreateICmpSGT(idx, llvm::ConstantInt::get(I64Ty, cap), "sstr.rng.hi"),
@@ -247,7 +261,9 @@ llvm::Value* CGIndexAccess::emitIndexGEP(const IndexExpr& e) {
     if (ExprIsVarStr(*e.Array)) {
         auto* strPtr = StrCall.emitStrAddr(*e.Array);
         auto* idx    = ToI64(EmitExpr(*e.Index), exprIsSigned(*e.Index));
-        if (RangeGuards.rangeChecksAt(e.Loc)) {
+        // e.Index->Loc, not e.Loc -- issue #655, see emitConformantElemPtr's
+        // identical comment.
+        if (RangeGuards.rangeChecksAt(e.Index->Loc)) {
             auto* len   = Strings.strLoadLen(strPtr);
             auto* one   = llvm::ConstantInt::get(I64Ty, 1);
             auto* bad   = B.CreateOr(
@@ -363,7 +379,10 @@ llvm::Value* CGIndexAccess::emitIndexGEP(const IndexExpr& e) {
     // are the ones the source actually wrote.
     if (auto* at = llvm::dyn_cast_or_null<llvm::ArrayType>(arrTy)) {
         auto n = static_cast<int64_t>(at->getNumElements());
-        if (n > 0) RangeGuards.emitRangeCheck(idx, Low, Low + n - 1, /*isIndex=*/true, e.Loc);
+        // e.Index->Loc, not e.Loc -- issue #655, see emitConformantElemPtr's
+        // identical comment.
+        if (n > 0) RangeGuards.emitRangeCheck(idx, Low, Low + n - 1, /*isIndex=*/true,
+                                              e.Index->Loc);
     }
     if (Low != 0)
         idx = B.CreateSub(idx, llvm::ConstantInt::get(I64Ty, Low), "idx.adj");

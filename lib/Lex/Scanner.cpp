@@ -315,10 +315,25 @@ void Scanner::skipComment(bool Braced) {
 // -- it never makes the wrong-kind sequence act as a terminator, so a
 // harmless one embedded in an otherwise-well-formed comment still compiles.
 void Scanner::skipCommentTurbo(bool Braced) {
-    const size_t CommentStart = Pos;
+    // Captured up front, before the loop below can ever popInclude() and
+    // change what FID (and so locAt()) names -- see skipDirective's
+    // identical OpenLoc comment (issue #656) for why.
+    const size_t         CommentStart = Pos;
+    const SourceLocation OpenLoc      = locAt(CommentStart);
     if (Braced) ++Pos; else Pos += 2;
     bool SawOtherCloser = false;
-    while (Pos < Text.size()) {
+    for (;;) {
+        if (Pos >= Text.size()) {
+            // An {$I file} splice means running out of THIS buffer with
+            // the comment still open is not necessarily the comment's own
+            // end, only this buffer's -- see skipDirective's identical
+            // popInclude branch (issue #656) for the full rationale; a
+            // comment's own contents are discarded either way, so there is
+            // no body to carry across the boundary the way a directive's
+            // is, only the search for the real closer.
+            if (popInclude()) continue;
+            break;
+        }
         const char C = Text[Pos++];
         if (Braced) {
             if (C == '}') return;
@@ -337,10 +352,9 @@ void Scanner::skipCommentTurbo(bool Braced) {
     if (SawOtherCloser) {
         const std::string_view Opener = Braced ? "{" : "(*";
         const std::string_view Closer = Braced ? "}" : "*)";
-        emitError(locAt(CommentStart), diag::err_comment_delim_mismatch,
-                  {Opener, Closer});
+        emitError(OpenLoc, diag::err_comment_delim_mismatch, {Opener, Closer});
     } else {
-        emitError(locAt(CommentStart), diag::err_unterminated_comment);
+        emitError(OpenLoc, diag::err_unterminated_comment);
     }
 }
 
