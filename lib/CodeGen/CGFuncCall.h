@@ -32,7 +32,7 @@
 namespace llvm { class Module; class Value; class GlobalVariable; class Function; }
 namespace plang {
 struct CallExpr; struct ExprNode; struct ProcedureTypeNode; struct MethodCallExpr;
-struct InheritedCallExpr; struct IndirectCallExpr;
+struct InheritedCallExpr; struct IndirectCallExpr; struct FieldExpr;
 struct Type;
 }
 
@@ -95,6 +95,22 @@ public:
     /// item 5): whatever method the ancestor-chain walk below finds is
     /// called directly, whether or not it happens to be declared 'virtual'.
     llvm::Value* emitMethodCallExpr(const plang::MethodCallExpr& e);
+
+    /// Issue #773: 'S.Area' with no parentheses, from OUTSIDE the object's
+    /// own methods -- Sema::checkField's own IsImplicitMethodCall flag says
+    /// \p e.Field named no actual field of \p e.Record's Object type, only a
+    /// parameterless FUNCTION method (Sema::findObjectMethod, the same
+    /// ancestor-chain walk checkMethodCall uses for the parenthesized
+    /// 'S.Area()' spelling). \p SelfPtr is the receiver's own address
+    /// (CGExprCore::emitLValue(*e.Record), computed by the caller the
+    /// identical way emitMethodCallExpr's own comment describes -- it
+    /// already handles both a plain IdentExpr receiver and a 'P^.Area'
+    /// DerefExpr one with no object-specific branch of its own, so nothing
+    /// here needs to re-derive it). A public entry point rather than
+    /// widening the private emitBoundMethodCall's own access, mirroring
+    /// emitMethodCallExpr's identical "private core + public struct-return-
+    /// spilled tail" shape just below.
+    llvm::Value* emitImplicitMethodFieldCall(const plang::FieldExpr& e, llvm::Value* SelfPtr);
 
     /// Turbo Tier 5, issue #509: 'inherited [Method[(args)]]' used as a
     /// VALUE -- the CGFuncCall sibling of CGProcCall::emitInheritedCallStmt

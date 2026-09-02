@@ -171,8 +171,25 @@ struct IdentExpr : ExprNode {
         /// function-typed procedural variable auto-calls" rule it
         /// otherwise applies by default -- see checkIdent's own comment.
         ProcVarRawValue,
+        /// Issue #773: this bare identifier names no ordinary declaration at
+        /// all, but DOES match a parameterless FUNCTION method of the
+        /// currently active implicit receiver (Sema::findImplicitCallMethod
+        /// -- the same lookup checkImplicitMethodCallExpr already uses for
+        /// the parenthesized 'Area()' spelling, reached here instead for the
+        /// bare 'Area' one). ImplicitMethodReceiverType below names which
+        /// receiver matched; codegen reads both to emit the identical
+        /// emitBoundMethodCall call CGFuncCall::emitCallExpr's own
+        /// ImplicitMethodReceiverType branch already emits for the
+        /// parenthesized form.
+        ImplicitMethodCall,
     };
     mutable IdentResolution Resolution{IdentResolution::Ordinary};
+
+    /// Set by Sema::checkImplicitMethodIdent exactly when Resolution is
+    /// ImplicitMethodCall -- the same active receiver Type that matched,
+    /// mirroring CallExpr::ImplicitMethodReceiverType's identical field
+    /// (AstExpr.h's own CallExpr, below) for the parenthesized spelling.
+    mutable std::shared_ptr<Type> ImplicitMethodReceiverType;
 };
 
 // IndexExpr/FieldExpr/DerefExpr/BinaryExpr/SubstringExpr/MethodCallExpr below
@@ -228,6 +245,21 @@ struct FieldExpr : ExprNode {
     ~FieldExpr();
     std::unique_ptr<ExprNode> Record;  /// the record being accessed
     std::string               Field;   /// name of the field
+
+    /// Issue #773: set by Sema::checkField exactly when \c Field named no
+    /// actual field of Record's own Object type, but DID match a
+    /// parameterless FUNCTION method on it (Sema::findObjectMethod, the
+    /// same ancestor-chain walk checkMethodCall itself uses for the
+    /// parenthesized 'S.Area()' spelling) -- 'S.Area' with no parentheses,
+    /// found from OUTSIDE the object's own methods, where there is no
+    /// active implicit receiver for checkImplicitMethodIdent's stack-based
+    /// lookup to consult; Record's own already-resolved Object type supplies
+    /// the receiver directly instead. Read by CGFieldAccess::emitFieldLoad
+    /// to emit a bound method call (CGFuncCall::emitBoundMethodCall) rather
+    /// than an ordinary field GEP+load, and by Sema::isLValue to refuse
+    /// 'S.Area := ...' as an assignment target -- a function's result is not
+    /// itself a variable to write back through.
+    mutable bool IsImplicitMethodCall{false};
 };
 
 struct DerefExpr : ExprNode {

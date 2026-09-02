@@ -316,6 +316,16 @@ std::shared_ptr<Type> Sema::checkIdent(const IdentExpr& E) {
 
     Symbol* Sym = Symtab.lookup(E.Name);
     if (!Sym) {
+        // Issue #773: a bare (no-parens) reference to a parameterless
+        // FUNCTION method of the currently active implicit receiver --
+        // 'A := Area;' inside another method of the same object type, the
+        // exact idiom real fpc -Mtp accepts with no parentheses at all.  A
+        // method is never itself an ordinary Symtab entry (SymbolKind::
+        // Method's own comment below), so the plain lookup just above
+        // always fails first; tried only now, matching
+        // ImplicitCallReceivers_'s own "after plain lookup fails" ordering
+        // checkCallExpr already uses before checkImplicitMethodCallExpr.
+        if (auto T = checkImplicitMethodIdent(E)) return T;
         if (checkRealModeDosName(E.Name, E.Loc)) return TyErr;
         error(E.Loc, diag::err_undefined_identifier, {E.Name});
         return TyErr;
@@ -626,6 +636,31 @@ std::shared_ptr<Type> Sema::checkField(const FieldExpr& E) {
     if (RecTy->Kind == TypeKind::Object) {
         const Type::Field* F = RecTy->fieldByName(E.Field);
         if (!F) {
+            // Issue #773: 'S.Area' with no parentheses, from OUTSIDE the
+            // object's own methods -- the qualified counterpart of
+            // checkImplicitMethodIdent's bare, INSIDE-a-method case just
+            // above.  There is no active implicit receiver to consult here
+            // (this is not an unqualified name at all), but RecTy IS the
+            // receiver, resolved already by checkExpr(*E.Record) above, so
+            // the same ancestor-chain walk checkMethodCall itself uses for
+            // the parenthesized 'S.Area()' spelling finds it directly.
+            const auto ML = findObjectMethod(*RecTy, E.Field);
+            if (ML.M) {
+                if (ML.M->IsPrivate && ML.Owner->DeclaringModule != CurrentUnit_)
+                    error(E.Loc, diag::err_object_private_method, {ML.Owner->Name, E.Field});
+                // Same "bare spelling has no argument-list syntax" rule
+                // checkImplicitMethodIdent applies -- see its own comment.
+                if (!ML.M->IsFunction) {
+                    error(E.Loc, diag::err_proc_as_value, {E.Field});
+                    return TyErr;
+                }
+                if (!ML.M->Params.empty()) {
+                    error(E.Loc, diag::err_function_requires_args, {E.Field});
+                    return TyErr;
+                }
+                E.IsImplicitMethodCall = true;
+                return ML.M->RetType ? ML.M->RetType : TyErr;
+            }
             error(E.Loc, diag::err_object_no_such_field, {RecTy->Name, E.Field});
             return TyErr;
         }
@@ -2368,6 +2403,43 @@ std::shared_ptr<Type> Sema::checkImplicitMethodCallExpr(const CallExpr& E) {
     return checkUserDefinedCall(Indirect, E.Loc, E.Args, /*expectFunction=*/true);
 }
 
+// Issue #773: see this function's own declaration (Sema.h) for when
+// checkIdent tries this and what a null return means.
+std::shared_ptr<Type> Sema::checkImplicitMethodIdent(const IdentExpr& E) {
+    const ImplicitMethodLookup IL = findImplicitCallMethod(E.Name);
+    if (!IL.M) return nullptr;
+
+    // Same private-visibility gate checkImplicitMethodCallExpr/
+    // checkMethodCall apply -- see their own comments.
+    if (IL.M->IsPrivate && IL.Owner->DeclaringModule != CurrentUnit_)
+        error(E.Loc, diag::err_object_private_method, {IL.Owner->Name, E.Name});
+
+    // A bare identifier has no argument-list syntax at all -- ISO §6.7.3's
+    // function-designator with an empty actual-parameter-list, exactly like
+    // checkIdent's own SymbolKind::Proc arm just above (a plain top-level
+    // function's bare name).  A procedure method has no result to read here
+    // (err_proc_as_value, that same arm's identical diagnostic for a plain
+    // procedure), and a function method that takes parameters cannot have
+    // them supplied by a paren-free spelling (err_function_requires_args,
+    // that arm's identical diagnostic too) -- both reported and answered
+    // TyErr rather than nullptr, since a real method of this name WAS
+    // found; nullptr is reserved for "no such implicit method at all", so
+    // checkIdent's caller still reports its own diagnostic for that case
+    // (and only that case), not this one.
+    if (!IL.M->IsFunction) {
+        error(E.Loc, diag::err_proc_as_value, {E.Name});
+        return TyErr;
+    }
+    if (!IL.M->Params.empty()) {
+        error(E.Loc, diag::err_function_requires_args, {E.Name});
+        return TyErr;
+    }
+
+    E.Resolution = IdentExpr::IdentResolution::ImplicitMethodCall;
+    E.ImplicitMethodReceiverType = IL.Receiver;
+    return IL.M->RetType ? IL.M->RetType : TyErr;
+}
+
 std::shared_ptr<Type> Sema::checkTypeCast(const TypeCastExpr& E) {
     // Resolved exactly as an ordinary type-denoter naming this same spelling
     // would be -- a synthetic NamedTypeNode reaches every existing rule
@@ -3904,6 +3976,17 @@ bool Sema::isLValue(const ExprNode& E) const {
     }
     if (auto* Ix  = llvm::dyn_cast<IndexExpr>(&E))  return isLValue(*Ix->Array);
     if (auto* Fld = llvm::dyn_cast<FieldExpr>(&E)) {
+        // Issue #773: 'S.Area' resolved to a parameterless FUNCTION method
+        // (checkField's own IsImplicitMethodCall flag), not a real field --
+        // a function's result is a value, not a variable, so 'S.Area := x'
+        // must be refused exactly like the plain 'Area := x' bare-identifier
+        // spelling already is (Symtab.lookup finds no Var/VarParam Symbol
+        // for a method name at all, so isLValue's IdentExpr case above
+        // already answers false for that one with no special case of its
+        // own -- this is the FieldExpr counterpart, which unlike that case
+        // WOULD otherwise fall through to "isLValue(*Fld->Record)" and
+        // wrongly say true, since S itself is perfectly assignable).
+        if (Fld->IsImplicitMethodCall) return false;
         // EP §6.4.7: a discriminant is a value the schematic variable carries,
         // not a component of it.  It is spelled like a field and reads like
         // one, so `v.n` and `q^.n` were assignable and passable as var

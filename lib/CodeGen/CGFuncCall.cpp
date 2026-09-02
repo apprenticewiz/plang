@@ -1179,6 +1179,16 @@ llvm::Value* CGFuncCall::emitMethodCallExpr(const MethodCallExpr& e) {
     return Marshal.spillStructReturnIfNeeded(e, ret);
 }
 
+// Issue #773: see this method's own declaration (CGFuncCall.h) for the
+// whole design -- the FieldExpr counterpart of emitMethodCallExpr just
+// above, for a receiver.Field spelling with no argument-list syntax at all.
+llvm::Value* CGFuncCall::emitImplicitMethodFieldCall(const FieldExpr& e, llvm::Value* SelfPtr) {
+    if (!e.Record->ResolvedType)
+        codegenICE("implicit method field access has no resolved receiver type");
+    llvm::Value* ret = emitBoundMethodCall(SelfPtr, *e.Record->ResolvedType, e.Field, {});
+    return Marshal.spillStructReturnIfNeeded(e, ret);
+}
+
 // Turbo procedural VALUES (issue #648): see this method's own declaration
 // (CGFuncCall.h) for the whole design.
 llvm::Value* CGFuncCall::emitIndirectCallExpr(const IndirectCallExpr& e) {
