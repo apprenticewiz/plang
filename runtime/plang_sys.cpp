@@ -18,6 +18,27 @@ namespace {
 /// and from the small codes a program is likely to pass to halt itself.
 constexpr int PlangRuntimeErrorStatus = 70;
 
+/// Issue #775: fpc -Mtp's own Halt(ErrNum: Longint) (rtl/inc/system.inc)
+/// clamps ONLY from above -- `if ErrNum > maxExitCode then ExitCode := 255
+/// else ExitCode := ErrNum` -- and Unix's own rtl/unix/sysunixh.inc defines
+/// maxExitCode as exactly this, 255.  A negative ErrNum is NOT >255, so it
+/// passes straight through unclamped (Halt(-1)'s ExitCode really is -1 on
+/// real fpc -Mtp, empirically confirmed): only the OS's own exit()/waitpid
+/// truncation later turns that into the familiar $?=255, the same way it
+/// would for any other negative status.  Both plang_halt and
+/// plang_tp_runerror (whose own Word-truncated code funnels through this
+/// exact rule -- see its own comment) share this one constant so the 255
+/// boundary can never drift between the two.
+constexpr int32_t PlangHaltMaxExitCode = 255;
+
+/// Issue #775: the one clamp-from-above-only rule plang_halt and
+/// plang_tp_runerror both apply to their own (differently-truncated) input,
+/// factored out so the boundary comparison itself -- not just the constant
+/// above -- cannot drift between the two call sites.
+constexpr int32_t plangClampExitCode(int32_t V) {
+    return V > PlangHaltMaxExitCode ? PlangHaltMaxExitCode : V;
+}
+
 /// Module finalisers, in the order the modules were initialized.  A plain
 /// array rather than a std::vector: the runtime is linked into generated
 /// programs without the C++ standard library, and a function-local static
@@ -110,7 +131,20 @@ void plang_halt(int64_t Status) {
     // sees the value Halt was actually given rather than a stale 0 (issue
     // #652) -- same reasoning, and the same "harmless to always compute
     // regardless of dialect" scope, as ErrorAddr just above.
-    plang_tp_exitcode = static_cast<int16_t>(Status);
+    //
+    // Issue #775: ONE canonical value, computed here and reused for both
+    // plang_tp_exitcode and exit()'s own argument below, rather than each
+    // truncating/clamping Status independently (the bug: int16_t here,
+    // int32_t at exit() -- Halt(300) used to leave ExitCode=300 but the real
+    // $?=44, an int32-truncate-to-8-bits nobody had reconciled with
+    // int16_t's own wrap).  Status is first narrowed to int32_t exactly the
+    // way fpc -Mtp's own Halt(ErrNum: Longint) parameter would narrow a
+    // wider argument (Longint is 32 bits), then clamped from above only at
+    // 255 by plangClampExitCode -- its own comment has the fpc rule and the
+    // empirical confirmation that a negative code passes through unclamped.
+    const int32_t ExitVal =
+        plangClampExitCode(static_cast<int32_t>(Status));
+    plang_tp_exitcode = static_cast<int16_t>(ExitVal);
     plang_module_finals_run();
     // NOT fflush(stdout): -std=turbo's own Input/Output (this file's
     // plang_input/plang_output) may have been redirected to a real file by
@@ -122,7 +156,7 @@ void plang_halt(int64_t Status) {
     // stream this runtime opened itself, is what makes a redirected
     // Output's buffered content reliably on disk before the process ends.
     std::fflush(nullptr);
-    std::exit(static_cast<int>(Status));
+    std::exit(static_cast<int>(ExitVal));
 }
 
 /// EP §6.7.5.3: new(p, d1..ds) computes its size from a runtime discriminant
@@ -848,8 +882,34 @@ static void escapeCC(const char *S, std::FILE *Stream) {
     // plang_halt sets it before that same chain (its own comment) -- an
     // ExitProc that reads ExitCode must see the code this call is actually
     // about to exit with, not a stale 0 (issue #652).  fpc -Mtp confirms:
-    // RunError(n)'s ExitCode is n, exactly like Halt(n)'s.
-    plang_tp_exitcode = static_cast<int16_t>(Code);
+    // RunError(n)'s ExitCode is n, exactly like Halt(n)'s -- for n within
+    // Word range and not needing the #775 clamp below; see W's own comment
+    // for what happens outside that range.
+    //
+    // Issue #660 established truncating Code ONCE, here, rather than
+    // separately at the printed message and at exit()'s own argument (an
+    // out-of-bounds write under {$R-} can corrupt plang_tp_inoutres, this
+    // call's most common indirect source for Code, into an arbitrary 64-bit
+    // bit pattern before plang_iocheck ever reads it back through this same
+    // path).  Issue #775 finishes the job: fpc -Mtp's own RunError(w: Word)
+    // (rtl/inc/system.inc) takes an unsigned 16-bit Word, not an int32 --
+    // Code is truncated (wrapped mod 65536, matching an ordinary Word
+    // parameter) to W FIRST, and BOTH the printed diagnostic and the
+    // Halt(errorcode)-equivalent clamp-at-255 below are computed from that
+    // SAME W, never from Code directly.  Printing raw W rather than the
+    // post-clamp ExitVal is deliberate, not a leftover bug: fpc's own
+    // message and ExitCode/$? genuinely disagree once W>255 --
+    // RunError(500) prints "Runtime error 500" but exits 255, empirically
+    // confirmed against fpc -Mtp -- only ExitCode and the real process exit
+    // status are required to agree with EACH OTHER, and plangClampExitCode
+    // (plang_halt's own comment has the fpc rule this mirrors) is what makes
+    // that hold for every W, including ones far outside Word's own range
+    // before the wrap (Code=100000 wraps to W=34464, itself >255, so
+    // ExitCode/$? still land on 255 even though neither Code nor W is
+    // anywhere near it).
+    const std::uint16_t W = static_cast<std::uint16_t>(Code);
+    const int32_t ExitVal = plangClampExitCode(static_cast<int32_t>(W));
+    plang_tp_exitcode = static_cast<int16_t>(ExitVal);
     // EP §6.11.2's finalizers, and -std=turbo's own ExitProc registered
     // alongside them (see plang_tp_run_exitproc's own comment for how) --
     // the same chain plang_halt and emitMain's own end-of-program path
@@ -857,23 +917,9 @@ static void escapeCC(const char *S, std::FILE *Stream) {
     // cleanup every other way this program can end already does.
     plang_module_finals_run();
     std::fflush(stdout);
-    // Issue #660: Code ultimately comes from a Turbo `Integer`-width
-    // (plang_tp_inoutres) or a literal a numbered check already knows is
-    // in range -- both always fit an int32_t -- but under {$R-} an
-    // out-of-bounds write elsewhere in the program can corrupt
-    // plang_tp_inoutres into holding an arbitrary 64-bit bit pattern before
-    // plang_iocheck ever reads it back through this same path.  Truncating
-    // ONCE, here, and using that single truncated value for both the
-    // printed message and the process's actual exit status keeps the two
-    // in agreement even then -- printing "Runtime error 4294967296" while
-    // the OS-visible exit code is really 0 (4294967296 truncates to 0) is
-    // the "spurious error at rc=0" mismatch the issue reported; printing
-    // the SAME int32 value exit() receives cannot disagree with it, however
-    // corrupted Code was.
-    const int32_t Status = static_cast<int32_t>(Code);
-    std::fprintf(stderr, "Runtime error %" PRId32 " at $%016" PRIxPTR "\n",
-                 Status, reinterpret_cast<std::uintptr_t>(Addr));
-    std::exit(Status);
+    std::fprintf(stderr, "Runtime error %u at $%016" PRIxPTR "\n",
+                 static_cast<unsigned>(W), reinterpret_cast<std::uintptr_t>(Addr));
+    std::exit(static_cast<int>(ExitVal));
 }
 
 /// TP `ExitCode: Integer` (Sema::registerBuiltins, -std=turbo only) -- the
