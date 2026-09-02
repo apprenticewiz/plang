@@ -205,6 +205,22 @@ config.substitutions.insert(0,
     ("%plang_unit_dir",
      os.path.join(config.plang_source_dir, "share", "plang", "units")))
 
+# The build tree's OWN compiled unit dir (CMAKE_BINARY_DIR/lib/plang/units --
+# CMakeLists.txt's PLANG_BUILD_UNIT_DIR), where Crt is the one shipped unit
+# actually compiled to a real crt.o/crt.tui as part of the normal build (see
+# that CMake rule's own comment); Dos/Printer/Strings are NOT built here,
+# only copied as source into %plang_unit_dir above. A test that needs both a
+# unit's real compiled object (Crt) AND another shipped unit's source-only
+# fallback (Dos/Strings) in the same invocation has to search THIS
+# directory first (`-I%plang_build_unit_dir -I%plang_unit_dir`, in that
+# order) so Crt resolves coherently to its own built .tui/.o pair rather
+# than to the source-only copy of Crt.pas that also happens to sit in
+# %plang_unit_dir (see issue #700/#708 on why an interface and its object
+# must resolve from the same directory).
+config.substitutions.insert(0,
+    ("%plang_build_unit_dir",
+     os.path.join(config.plang_binary_dir, "lib", "plang", "units")))
+
 # ---- available_features ------------------------------------------------
 #
 # fpc-binary, not bare "fpc": include/plang/Basic/Dialects.def already

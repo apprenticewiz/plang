@@ -201,10 +201,62 @@ static std::vector<std::string> scanUsesClauseUnitNames(const std::string &Path)
     return Names;
 }
 
-/// If \p UnitName has a shipped, already-compiled object file next to its
-/// .tui/.pas on the same search path Sema's own loadUnitInterfaceExports
-/// falls back to (ModulePaths/-I, then ".", then unitSearchPaths()),
-/// returns its path; "" if none is found. The object file's own name is a
+/// Where \p UnitName's own interface file (.tui, or failing that .pas) is
+/// found, searching Sema::loadUnitInterfaceExports's identical three tiers
+/// (ModulePaths/-I, then ".", then unitSearchPaths()) IN THAT ORDER, trying
+/// both extensions in each directory before moving on to the next one --
+/// see loadUnitInterfaceExports's own comment (issue #700) on why a single
+/// per-directory pass, not two separate all-.tui-then-all-.pas passes, is
+/// what actually gives a more specific directory priority over a less
+/// specific one.  Returns the resolved interface file's own path and its
+/// containing directory; both empty if UnitName is not found anywhere.
+///
+/// Issue #708: this is the SAME directory the front end's own Sema will
+/// resolve UnitName's interface from (case sensitivity included: exact
+/// lowercase match for .tui, since a .tui is always machine-written
+/// lowercase; case-insensitive scan for .pas, since a hand-written unit's
+/// source is not) -- deliberately duplicated rather than shared code,
+/// because the driver runs the front end as a separate subprocess (-pc1)
+/// with no channel back for "here is what got resolved and where", but kept
+/// walking the identical tiers in the identical order so the two can never
+/// disagree about which directory a given unit's artifacts live in.
+struct ResolvedUnitInterface {
+    std::string Path; // full path to the .tui or .pas; "" if not found
+    std::string Dir;  // its containing directory; "" if not found
+};
+static ResolvedUnitInterface findUnitInterface(const std::string &UnitName,
+                                                const std::vector<std::string> &ModulePaths,
+                                                const std::string &InstallDir) {
+    const std::string Key = plang::toLower(UnitName);
+    std::vector<std::string> Dirs = ModulePaths;
+    Dirs.push_back(".");
+    for (const auto &P : plang::unitSearchPaths(InstallDir)) Dirs.push_back(P);
+    for (const auto &Dir : Dirs) {
+        const std::string TuiPath = Dir + "/" + Key + ".tui";
+        if (isRegFile(TuiPath)) return {TuiPath, Dir};
+        const std::string FastPas = Dir + "/" + Key + ".pas";
+        if (isRegFile(FastPas)) return {FastPas, Dir};
+        std::error_code EC;
+        for (llvm::sys::fs::directory_iterator It(Dir, EC), End; It != End && !EC;
+             It.increment(EC)) {
+            const llvm::SmallString<64> Stem = llvm::sys::path::filename(It->path());
+            if (llvm::StringRef(Stem).equals_insensitive(Key + ".pas"))
+                return {std::string(It->path()), Dir};
+        }
+    }
+    return {"", ""};
+}
+
+/// If \p UnitName has a shipped, already-compiled object file next to
+/// wherever findUnitInterface (above) resolved its own .tui/.pas, returns
+/// its path; "" if either the interface or the object was not found.
+/// Resolving the object relative to the SAME directory the interface came
+/// from -- rather than independently re-searching the whole tier list for a
+/// same-named .o, which is what let issue #708 happen (a stale d1/foo.o
+/// beating a newer d2/foo.tui's own d2/foo.o just because d1 sorted first)
+/// -- is what keeps this coherent with Sema's own resolution: the object
+/// linked in is always the one that sits beside the interface the program
+/// was actually type-checked against.  The object file's own name is a
 /// fixed convention this item establishes for every shipped unit, mirroring
 /// the .tui's own: lowercase(UnitName) + ".o", written next to a lowercase
 /// .tui the identical way share/plang/units/Crt.pas's own CMake rule
@@ -214,19 +266,12 @@ static std::vector<std::string> scanUsesClauseUnitNames(const std::string &Path)
 /// what this project's existing "name the .o explicitly on the command
 /// line" workflow (every pre-existing Driver/Turbo separate-compilation lit
 /// test) remains for.
-static std::string findShippedUnitObject(const std::string &UnitName,
-                                          const std::vector<std::string> &ModulePaths,
-                                          const std::string &InstallDir) {
+static std::string findShippedUnitObject(const ResolvedUnitInterface &Resolved,
+                                          const std::string &UnitName) {
+    if (Resolved.Dir.empty()) return "";
     const std::string Key = plang::toLower(UnitName);
-    std::vector<std::string> Dirs = ModulePaths;
-    Dirs.push_back(".");
-    for (const auto &P : plang::unitSearchPaths(InstallDir)) Dirs.push_back(P);
-    for (const auto &Dir : Dirs) {
-        const std::string ObjPath = Dir + "/" + Key + ".o";
-        if (llvm::sys::fs::exists(ObjPath) && !llvm::sys::fs::is_directory(ObjPath))
-            return ObjPath;
-    }
-    return "";
+    const std::string ObjPath = Resolved.Dir + "/" + Key + ".o";
+    return isRegFile(ObjPath) ? ObjPath : "";
 }
 
 /// Runs Prog and returns what it wrote to its standard output, with trailing
@@ -1522,26 +1567,48 @@ int Driver::compile(const Options &Opts, bool IsExtraFile) {
     // linker argument, so a user overriding a shipped unit's object (e.g.
     // testing a locally-rebuilt Crt.o) is never fighting this against their
     // own explicit choice.
+    //
+    // Issue #705: this has to be the TRANSITIVE closure, not just the units
+    // named directly by the program's own sources. If unit A `uses` unit B,
+    // a program that only names A still needs B's own object linked in for
+    // anything B contributes that A's own interface re-exports (real `fpc`
+    // resolves this transitively too) -- so the worklist below is seeded
+    // from the program's own sources and then grown from each resolved
+    // unit's own interface file's `uses` clause(s), the same crude-but-
+    // sufficient scanUsesClauseUnitNames scan either way.
     {
-        std::vector<std::string> Sources{Opts.inputFile};
-        for (const auto &E : Opts.extraInputFiles) Sources.push_back(E);
+        std::vector<std::string> Worklist;
+        {
+            std::vector<std::string> Sources{Opts.inputFile};
+            for (const auto &E : Opts.extraInputFiles) Sources.push_back(E);
+            for (const auto &Src : Sources)
+                for (const auto &Unit : scanUsesClauseUnitNames(Src)) Worklist.push_back(Unit);
+        }
         std::vector<std::string> SeenUnits;
-        for (const auto &Src : Sources) {
-            for (const auto &Unit : scanUsesClauseUnitNames(Src)) {
-                const std::string Key = toLower(Unit);
-                if (std::find(SeenUnits.begin(), SeenUnits.end(), Key) != SeenUnits.end())
-                    continue;
-                SeenUnits.push_back(Key);
-                const std::string Obj =
-                    findShippedUnitObject(Unit, Opts.modulePaths, findInstallDir());
-                if (Obj.empty()) continue;
-                bool Already = false;
-                for (const auto &EO : ExtraObjs)
-                    if (sameResolvedFile(EO, Obj)) { Already = true; break; }
-                for (const auto &A : Opts.linkerArgs)
-                    if (sameResolvedFile(A, Obj)) { Already = true; break; }
-                if (!Already) ExtraObjs.push_back(Obj);
-            }
+        for (size_t I = 0; I < Worklist.size(); ++I) {
+            // By value: Worklist itself grows below, which would invalidate
+            // a reference into it.
+            const std::string Unit = Worklist[I];
+            const std::string Key = toLower(Unit);
+            if (std::find(SeenUnits.begin(), SeenUnits.end(), Key) != SeenUnits.end())
+                continue;
+            SeenUnits.push_back(Key);
+
+            const ResolvedUnitInterface Resolved =
+                findUnitInterface(Unit, Opts.modulePaths, findInstallDir());
+            if (Resolved.Dir.empty()) continue;
+
+            for (const auto &Transitive : scanUsesClauseUnitNames(Resolved.Path))
+                Worklist.push_back(Transitive);
+
+            const std::string Obj = findShippedUnitObject(Resolved, Unit);
+            if (Obj.empty()) continue;
+            bool Already = false;
+            for (const auto &EO : ExtraObjs)
+                if (sameResolvedFile(EO, Obj)) { Already = true; break; }
+            for (const auto &A : Opts.linkerArgs)
+                if (sameResolvedFile(A, Obj)) { Already = true; break; }
+            if (!Already) ExtraObjs.push_back(Obj);
         }
     }
 

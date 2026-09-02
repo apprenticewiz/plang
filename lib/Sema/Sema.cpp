@@ -1304,17 +1304,29 @@ Sema::loadUnitInterfaceExports(const std::string& UnitName, SourceLocation Loc) 
     // separate list rather than folded into ModuleSearchPaths above.
     SearchDirs.insert(SearchDirs.end(), Opts.UnitSearchPaths.begin(),
                        Opts.UnitSearchPaths.end());
+    // Issue #700: this has to be ONE pass over SearchDirs, trying both a
+    // .tui and a .pas in each directory before moving on to the next
+    // directory -- not two separate passes (all dirs' .tui, THEN all dirs'
+    // .pas). Two separate passes let a later, less specific directory's
+    // .tui (e.g. the shipped RTL's crt.tui) beat an earlier, more specific
+    // directory's own .pas (e.g. the current directory's own Crt.pas),
+    // inverting the shadowing order UnitSearchPaths's own comment promises
+    // ("the current directory is meant to shadow the shipped RTL, not the
+    // other way around"). Preferring .tui over .pas WITHIN the same
+    // directory is still correct and deliberate (see this function's own
+    // comment above on why a directory's own published interface beats
+    // re-parsing its companion source), it just cannot be allowed to reach
+    // across directories.
     for (const auto& Dir : SearchDirs) {
         if (Path = findExact(Dir, Key + ".tui"); !Path.empty()) {
             Found = true; IsTUI = true; TuiDir = Dir;
             break;
         }
-    }
-    if (!Found)
-        for (const auto& Dir : SearchDirs) {
-            Path = findCaseInsensitive(Dir);
-            if (!Path.empty()) { Found = true; break; }
+        if (Path = findCaseInsensitive(Dir); !Path.empty()) {
+            Found = true;
+            break;
         }
+    }
     if (!Found) {
         error(Loc, diag::err_unknown_unit, {UnitName, Key});
         UnitLoading_.erase(Key);
