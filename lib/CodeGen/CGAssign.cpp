@@ -1,5 +1,7 @@
 #include "CGAssign.h"
 
+#include <algorithm>
+
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DataLayout.h"
 #include "llvm/IR/Module.h"
@@ -270,6 +272,45 @@ void CGAssign::emitAssignValue(const ExprNode& Target, const ExprNode& Value,
         auto* arrAddr = EmitLValue(Value);
         if (!arrAddr) codegenICE("array-to-PChar decay from a non-addressable array");
         B.CreateStore(arrAddr, addr);
+        return;
+    }
+
+    // Turbo: a string LITERAL assigned to a zero-based array of Char copies
+    // its bytes in, zero-filling whatever is left -- `buf := 'hi'` for
+    // `buf: array[0..9] of Char` -- the mirror image of the array-to-PChar
+    // decay just above. Sema::isAssignCompatible (SemaExpr.cpp) is the only
+    // thing that accepts this pairing, and only under -std=turbo -- see its
+    // own comment for why this is checked independently of
+    // isCharStringType's ISO/EP 1-based string-type rule (StringCallMarshalling
+    // ::emitCharStrStore, used for THAT case, requires an EXACT length
+    // match instead and has no zero-fill of its own). Reaching here already
+    // means Sema approved it, and Kind==String never names anything but a
+    // literal (checkExpr's StringLitExpr arm, SemaExpr.cpp -- every other
+    // string-shaped value is VarString/ShortString/Char instead), so the
+    // cast below is not a narrowing assumption.
+    //
+    // Confirmed against real `fpc -Mtp` (issue #641): a literal at least as
+    // long as the array is copied truncated to fit, with NO terminator
+    // written; a shorter one is copied and every remaining byte explicitly
+    // zeroed -- not left as whatever garbage the array held before.
+    if (Target.ResolvedType && Target.ResolvedType->Kind == TypeKind::Array
+            && Target.ResolvedType->ElemType
+            && Target.ResolvedType->ElemType->Kind == TypeKind::Char
+            && Target.ResolvedType->IndexType
+            && Target.ResolvedType->IndexType->Kind == TypeKind::Subrange
+            && Target.ResolvedType->IndexType->SubLo == 0
+            && Value.ResolvedType && Value.ResolvedType->Kind == TypeKind::String) {
+        auto* sl = llvm::dyn_cast<StringLitExpr>(&Value);
+        if (!sl) codegenICE("zero-based char array assigned a non-literal String value");
+        const int64_t cap = Target.ResolvedType->IndexType->SubHi
+                           - Target.ResolvedType->IndexType->SubLo + 1;
+        const int64_t copyLen = std::min<int64_t>(
+            cap, static_cast<int64_t>(sl->Value.size()));
+        B.CreateMemSet(addr, llvm::ConstantInt::get(I8Ty, 0), i64c(cap),
+                       llvm::MaybeAlign());
+        if (copyLen > 0)
+            B.CreateMemCpy(addr, llvm::MaybeAlign(), Strings.internStrPtr(sl->Value),
+                           llvm::MaybeAlign(), i64c(copyLen));
         return;
     }
 

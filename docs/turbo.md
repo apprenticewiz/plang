@@ -364,7 +364,7 @@ regardless of which one fired.
 | 106 | Invalid numeric format | `read`/`readln` into a numeric variable: the whole next token failed to parse, or overflowed `int64_t` |
 | 200 | Division by zero | `div`, `mod` |
 | 201 | Range check error | An out-of-range array index or subrange assignment, under `{$R+}` |
-| 215 | Arithmetic overflow error | `div` where the dividend/divisor pair itself overflows (`minint div -1`) — see "Documented deviations" for a current gap |
+| 215 | Arithmetic overflow error | Not raised by `div`: `minint div -1` wraps silently to `minint` instead, matching `fpc -Mtp` field practice (issue #638) — reachable only via `RunError(215)` itself |
 | 216 | General protection fault | Dereferencing a nil or invalid pointer |
 | 227 | Assertion failed | `Assert(false[, msg])`, under `{$C+}` |
 | *n* | Whatever the program means by it | `RunError(n)` |
@@ -1318,35 +1318,26 @@ procedure call chain runs until the OS stack is exhausted and the process
 receives a raw `SIGSEGV`, not a clean "Runtime error 202" — under `-std=turbo`
 exactly as under every other dialect.
 
-### `RunError`/RTE 215 doesn't fire for a 16-bit `Integer`'s true overflow pair
+### `div` overflow (`minint div -1`) wraps silently instead of trapping
 
 `minint div -1` is the one `div` with a nonzero divisor that still has no
 representable result, since `-minint` doesn't fit a positive integer of the
-same width — real Turbo Pascal reports this as runtime error 215. The guard
-that checks for it (`RangeCheckGuards::emitDivOverflowCheck`) takes the
-width to check *at* as a parameter specifically so it can compare against
-the right `minint` — but `CGBinaryOps`' `Div` case widens both operands to
-`i64` (`ToI64`) *before* calling it, and calls it with no `Width` argument,
-which defaults to 64. So the guard correctly never fires for a genuine
-64-bit overflow, but a 16-bit Turbo `Integer`'s own overflow pair
-(`-32768 div -1`) is invisible by the time the check runs: sign-extended to
-`i64`, neither operand looks like a 64-bit `minint`/`-1` pair, and `SDiv`
-silently computes a wrapped result instead of trapping. Confirmed against
-this build:
-
-```pascal
-program divovf;
-var n, d, r: integer;   { Turbo Integer: 16-bit }
-begin
-  n := -32768; d := -1;
-  r := n div d;
-  writeln(r)             { prints -32768, exit 0 -- no Runtime error 215 }
-end.
-```
-
-This is a narrow, known gap in the current codegen, not a design decision —
-unlike the permanent divergences above, a future change to pass the
-operation's real width through could close it.
+same width. Real Turbo Pascal is documented to report this as runtime error
+215, but `fpc -Mtp` — this project's own field-practice reference — does
+not: confirmed empirically (a local `fpc -Mtp` 3.2.2 build) that
+`MinInt div -1` computes silently and gives `MinInt` right back, at every
+integer width up to `Int64`, even under `{$Q+}` — `fpc`'s own div overflow
+is simply never checked, `{$Q}` or no. `-std=turbo` matches that field
+practice rather than the manual: `CGBinaryOps`' `Div` case forces the
+divisor to `1` in exactly the `minint`/`-1` case, so the division computes
+`minint div 1 == minint`, the same wrapped answer `fpc` gives, in a straight
+line with no branch and no risk of x86 `idiv`'s own overflow trap. This is
+the same silent-wraparound treatment plang's `+`/`-`/`*` already give every
+other Turbo arithmetic overflow (see this document's own note on those).
+ISO 7185 and Extended Pascal are unaffected: their `Integer` is always
+64-bit, so `minint div -1` there still traps
+(`RangeCheckGuards::emitDivOverflowCheck`), unconditionally, the same as
+before.
 
 ### `packed` controls layout; `{$PACKRECORDS}`/`{$ALIGN}`/`{$A}` do not
 
