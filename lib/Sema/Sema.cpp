@@ -1788,6 +1788,19 @@ void Sema::checkBlock(const BlockNode& Block,
                       bool IsGlobalScope,
                       bool IsModuleBlock,
                       bool IsInterfaceBlock) {
+    // See BlockDepth/MaxBlockDepth/StackBaseline (Sema.h, issue #597).
+    // BlockDepthScope is constructed unconditionally, before either check
+    // runs, for the same reason ExprDepthScope/TypeDepthScope's own call
+    // sites are (see TypeDepthLimitHit's comment for why).
+    BlockDepthScope DepthGuard(BlockDepth, BlockDepthLimitHit);
+    if (BlockDepth > MaxBlockDepth || stackNearlyExhausted(StackBaseline)) {
+        if (!BlockDepthLimitHit) {
+            BlockDepthLimitHit = true;
+            error(Block.Loc, diag::err_proc_too_deeply_nested);
+        }
+        return;
+    }
+
     Symtab.pushScope();
 
     // ISO §6.2.2: a procedure or function's formal-parameter-list and its
@@ -2804,6 +2817,24 @@ void Sema::recordModifiedParams(const ProcDecl& Proc) {
 }
 
 void Sema::checkProcBody(const ProcDecl& Proc) {
+    // See ProcBodyDepth/StackBaseline (Sema.h, issue #597) and BlockDepth's
+    // own guard just above checkBlock -- this is checkProcBody's own half
+    // of the same mutual-recursion guard, using its own dedicated counter
+    // (see ProcBodyDepth's comment for why it is not shared with
+    // BlockDepth). Uses MaxBlockDepth as its own ceiling too, since its peak
+    // value tracks the identical nesting depth checkBlock's own counter
+    // does (see ProcBodyDepth's comment). Constructed unconditionally,
+    // before either check runs, for the same reason every other
+    // stackNearlyExhausted-based guard in this file is.
+    ProcBodyDepthScope DepthGuard(ProcBodyDepth, ProcBodyDepthLimitHit);
+    if (ProcBodyDepth > MaxBlockDepth || stackNearlyExhausted(StackBaseline)) {
+        if (!ProcBodyDepthLimitHit) {
+            ProcBodyDepthLimitHit = true;
+            error(Proc.Loc, diag::err_proc_too_deeply_nested);
+        }
+        return;
+    }
+
     const ProcDecl* Outer = CurrentProc;
     CurrentProc = &Proc;
 

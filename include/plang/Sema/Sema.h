@@ -209,6 +209,59 @@ private:
     static constexpr unsigned MaxTypeDepth = 500;
     using TypeDepthScope = RecursionGuard;
 
+    // Live activations of checkBlock/checkProcBody (Sema::BlockDepth). A
+    // procedure/function declaration nested up to (just under) the parser's
+    // own MaxBlockDepth ceiling (Parser::BlockDepth, ParseDecl.cpp, issue
+    // #64) is legal input the parser fully accepts -- but checkProcBody
+    // (Sema.cpp) calls checkBlock for the procedure's own block, which then
+    // calls checkProcBody again for each nested procedure/function in
+    // Block.Procs, an entirely unguarded mutual recursion exactly parallel
+    // to TypeDepth's (resolveType/resolveTypeImpl) shape above, in a
+    // completely different subsystem (declaration/scope checking rather
+    // than type resolution) -- issue #597, found in the same review pass as
+    // #596 immediately above. checkBlock's own per-activation state (a
+    // BeforePop function_ref, a moved-and-restored CurrentBlockLabels
+    // container, several lambdas, and more) is evidently much larger per
+    // stack frame than either checkExpr's or resolveTypeImpl's, so this
+    // crashes at a dramatically smaller nesting depth (~2.5-3 MiB of real
+    // stack) than either of those two siblings. A dedicated counter rather
+    // than sharing ExprDepth/TypeDepth: checkBlock/checkProcBody recurse
+    // over a structurally different tree (BlockNode/ProcDecl) via a wholly
+    // separate call path, mirroring why TypeDepth itself is not shared with
+    // ExprDepth. Both call sites (checkBlock's own entry, and checkProcBody's,
+    // since checkProcBody does real work of its own before ever reaching its
+    // checkBlock call) construct a guard, matching the issue's own
+    // recommendation to guard both mutual-recursion partners.
+    mutable unsigned          BlockDepth{};
+    mutable bool              BlockDepthLimitHit{};
+    // Mirrors Parser::MaxBlockDepth (ParseDecl.cpp, issue #64): a friendlier
+    // diagnostic on an ordinary, large-enough stack, reached before
+    // stackNearlyExhausted ever needs to fire. Every call site below also
+    // checks plang::stackNearlyExhausted(StackBaseline) alongside this term
+    // count, for the identical reason MaxExprDepth/MaxTypeDepth alone are
+    // not sufficient under a small (or, here, even a fairly ordinary
+    // 2.5-3 MiB) stack budget -- see MaxTypeDepth's own comment above.
+    // BlockDepthScope is constructed unconditionally, before either check
+    // runs, for the same reason ExprDepthScope/TypeDepthScope are.
+    static constexpr unsigned MaxBlockDepth = 500;
+    using BlockDepthScope = RecursionGuard;
+
+    // Live activations of checkProcBody specifically -- a SEPARATE counter
+    // from BlockDepth just above, deliberately not shared with it: the two
+    // functions call each other 1:1 per nesting level (checkProcBody calls
+    // checkBlock once for its own body; checkBlock calls checkProcBody once
+    // per nested procedure), so each counter's own peak value already equals
+    // the true nesting depth on its own -- sharing one counter between them
+    // would instead count each level TWICE (once per function), silently
+    // halving the effective ceiling below the parser's own MaxBlockDepth and
+    // rejecting legal input the parser itself accepts. checkProcBody gets
+    // its own guard, rather than relying solely on checkBlock's, because it
+    // does real work of its own (parameter processing, scope setup) on a
+    // sizeable stack frame before ever reaching its own checkBlock call.
+    mutable unsigned          ProcBodyDepth{};
+    mutable bool              ProcBodyDepthLimitHit{};
+    using ProcBodyDepthScope = RecursionGuard;
+
     /// Canonical type store — owns built-in singletons and interns structural
     /// types.  Built from Opts, which is why Opts is declared above it: what an
     /// unqualified `integer` is depends on the dialect, and what a pointer is

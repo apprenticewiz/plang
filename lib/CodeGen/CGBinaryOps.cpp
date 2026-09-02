@@ -670,8 +670,48 @@ llvm::Value* CGBinaryOps::emitBinary(const BinaryExpr& e) {
     // value beats an uninitialized read if that ever stops being true.
     bool uns = true;
     if (!needFP && lv->getType()->isIntegerTy() && rv->getType()->isIntegerTy()) {
-        const unsigned lw = lv->getType()->getIntegerBitWidth();
-        const unsigned rw = rv->getType()->getIntegerBitWidth();
+        unsigned lw = lv->getType()->getIntegerBitWidth();
+        unsigned rw = rv->getType()->getIntegerBitWidth();
+        // Issue #577: an integer LITERAL operand's own LLVM constant is
+        // always i64 (CGExprCore.cpp's IntLitExpr arm -- see its own
+        // comment for why that has to stay true regardless of Sema's own
+        // ResolvedType for the literal, which is always the dialect's
+        // plain default Integer no matter the literal's actual magnitude,
+        // and so is not a safe width to emit the CONSTANT at). Left as-is,
+        // that spurious i64 width would always win this function's
+        // "promote to whichever is WIDER" rule below, silently promoting
+        // e.g. a 16-bit Turbo Integer variable's arithmetic/comparison
+        // against ANY literal up to 64 bits -- unlike the identical
+        // arithmetic against a second 16-bit VARIABLE holding the exact
+        // same value, which stays 16-bit and wraps/compares correctly.
+        // Narrowing a literal operand's WIDTH (for promotion purposes
+        // only; the underlying i64 llvm::Value itself is untouched, so no
+        // precision is lost if this doesn't apply) down to the other,
+        // non-literal operand's own width -- but ONLY when the literal's
+        // actual value still fits there under that operand's own
+        // signedness -- makes a literal participate in width-unification
+        // exactly the way a variable of its own value would: adopts the
+        // narrower type when the value fits it, falls back to its full i64
+        // width (the pre-fix behavior) otherwise, e.g. a 32-bit-or-wider
+        // literal paired with a Byte variable still correctly promotes
+        // past Byte's own width rather than truncating the literal to fit.
+        auto literalFitsWidth = [](int64_t v, unsigned w, bool wUnsigned) {
+            if (w == 0 || w >= 64) return true;
+            if (wUnsigned)
+                return v >= 0 && static_cast<uint64_t>(v) < (uint64_t{1} << w);
+            const int64_t lo = -(static_cast<int64_t>(1) << (w - 1));
+            const int64_t hi = (static_cast<int64_t>(1) << (w - 1)) - 1;
+            return v >= lo && v <= hi;
+        };
+        if (auto* LitL = llvm::dyn_cast<IntLitExpr>(e.Left.get());
+            LitL && !llvm::isa<IntLitExpr>(e.Right.get())) {
+            if (literalFitsWidth(LitL->Value, rw, !operandIsSigned(*e.Right)))
+                lw = rw;
+        } else if (auto* LitR = llvm::dyn_cast<IntLitExpr>(e.Right.get());
+                   LitR && !llvm::isa<IntLitExpr>(e.Left.get())) {
+            if (literalFitsWidth(LitR->Value, lw, !operandIsSigned(*e.Left)))
+                rw = lw;
+        }
         const bool lSigned = operandIsSigned(*e.Left);
         const bool rSigned = operandIsSigned(*e.Right);
         unsigned targetWidth;

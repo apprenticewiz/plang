@@ -30,6 +30,24 @@ llvm::Value* CGExprCore::emitExpr(const ExprNode& e) {
     ExprDepthScope DepthGuard(ExprDepth_);
 
     if (auto* n = llvm::dyn_cast<IntLitExpr>(&e))
+        // Deliberately ALWAYS i64 here, not n->ResolvedType->Width: unlike
+        // every other integral expression kind, an IntLitExpr's own
+        // Sema-resolved type is not a genuine width for ITS value -- Sema
+        // types EVERY integer literal as the dialect's plain default
+        // Integer (16 bits under Turbo) regardless of the literal's actual
+        // magnitude (SemaExpr.cpp's IntLitExpr arm), so a literal like
+        // LongInt's own MinInt (-2147483648, i.e. unary-minus of the
+        // literal 2147483648) would be truncated to garbage at the literal
+        // itself, well before the real target width (LongInt, from the
+        // enclosing assignment/context) is ever consulted, if this emitted
+        // at ResolvedType's width instead. i64 safely holds every literal
+        // this front end accepts; issue #577's actual fix (making a
+        // literal's contribution to CGBinaryOps' width-unification match
+        // an equal-valued variable's) lives in CGBinaryOps.cpp instead,
+        // where the width used for promotion is already a purpose-built
+        // "what should this operand's width behave as" computation, not a
+        // stand-in for "what LLVM type must this value survive being
+        // stored in without loss" the way this call site's is.
         return llvm::ConstantInt::get(I64Ty, static_cast<uint64_t>(n->Value), true);
 
     if (auto* n = llvm::dyn_cast<RealLitExpr>(&e))
