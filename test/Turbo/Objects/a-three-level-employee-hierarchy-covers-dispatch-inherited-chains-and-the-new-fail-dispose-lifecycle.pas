@@ -53,18 +53,13 @@ proved individually:
     type, exactly mirroring the dispatch section's own proof but for
     cleanup instead of behavior.
 
-The two 'method ... hides the inherited method' warnings this file
-compiles with (TManager.Init and TExecutive.Init, at their own
-declarations -- Done is declared 'virtual' at all three levels, so it
-correctly overrides rather than hiding, and warns about nothing) are the
-already-documented, already-accepted cosmetic false positive for
-same-named, differently-signed, non-virtual constructors across levels
-(docs/turbo.md's own "Object types" section; confirmed a local `fpc -Mtp`
-build stays silent on the identical construct) -- not a new finding, not
-suppressed here for the same reason
-fail-inside-a-constructor-leaves-the-callers-pointer-nil.pas
-(test/CodeGen/CodeGenTurboConstructors/) already carries the identical
-warning uncommented-on.
+TManager.Init and TExecutive.Init statically hide TEmployee.Init/
+TManager.Init (same name, no 'virtual' anywhere in the Init chain) but
+compile silently: since issue #792's fix, the hides-inherited warning
+only fires when the ancestor declaration being hidden was itself
+'virtual' -- matching real `fpc -Mtp`, which was always silent on this
+same construct. Done is declared 'virtual' at all three levels, so it
+correctly overrides rather than hiding, and warns about nothing either.
 
 Salary/DirectReports/StockOptions are kept well inside Turbo's 16-bit
 Integer range (TP7's own 'Integer', -32768..32767, is still the plain

@@ -1950,21 +1950,6 @@ limitation general to `record`/`object` alike, not specific to this tier,
 unaffected by this capstone item. Route around it with a pointer or `var`
 parameter instead.
 
-One more, genuinely cosmetic, not counted above: a `method ... hides the
-inherited method of the same name` warning false-positives for same-named,
-differently-signed, non-virtual constructors declared at different levels
-of one hierarchy (the standard `Init`-at-every-level TP7 idiom) —
-confirmed a local `fpc -Mtp` build stays silent on the identical
-construct, but the warning is otherwise harmless, does not affect codegen,
-and every constructor test in this tier (including this capstone's own)
-compiles with it uncommented-on. This capstone item also observed the
-identical false positive surface at a cross-unit **call site** rather than
-only at a declaration
-(`test/Turbo/Units/three-units-cross-unit-new-fail-dispose-lifecycle-and-virtual-destructor-dispatch.pas`)
-— still the same same-named-constructor false positive, just reached
-through the cross-unit "declare if missing" path instead of a direct
-declaration, not a second issue.
-
 ---
 
 ## See also
