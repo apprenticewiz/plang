@@ -9,6 +9,14 @@ read exercises) -- a genuine write failure is reported via IOResult
 regardless of arity, exactly like every other Turbo write entry point in
 this file.
 
+Issue #738 update: the closing `writeln` below is ordinary Turbo I/O, and
+InOutRes is already pending (101) when it starts -- confirmed against
+`fpc -Mtp`: its own leading literal ('ioresult=') is suppressed, since
+IOResult (this statement's SECOND argument) is the first write attempt in
+it to actually clear InOutRes; everything from that argument on (the "101"
+IOResult itself returns, then " amt=" and amt, both now unsuppressed)
+prints normally.
+
 RUN: %plang -std=turbo %s -o %t
 RUN: %run %t | FileCheck %s
 *)
@@ -18,7 +26,7 @@ REQUIRES: dev-full
 *)
 
 (*
-CHECK:ioresult=101 amt=0
+CHECK:101 amt=0
 *)
 
 var

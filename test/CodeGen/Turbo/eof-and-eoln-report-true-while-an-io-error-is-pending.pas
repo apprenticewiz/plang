@@ -36,6 +36,20 @@ one.pas for the check's own dedicated coverage -- Reset/Readln above stay
 unguarded by `{$I-}` since neither can fail against this file (a lit
 fixture the RUN line itself just created).
 
+Issue #738 update: `InOutRes := 5` leaves an error PENDING and UNREAD --
+which now (correctly, per `fpc -Mtp`) suppresses every OTHER Turbo I/O
+call too, not just Eof/Eoln's own read of it. Eof(f)/Eoln(f) themselves
+only ever READ InOutRes, never clear it (only IOResult does), so the two
+`writeln`s that report 'eof-during-error'/'eoln-during-error' are
+THEMSELVES suppressed outright -- confirmed against `fpc -Mtp`: neither
+prints anything at all, not even a blank line, since the suppression
+covers the trailing newline write too. The very next `writeln` (whose
+SECOND argument is the IOResult call that finally clears InOutRes) loses
+only its own leading literal ('cleared-ioresult: ') for the identical
+reason every other test in this item's own fix does; the two 'after-clear'
+writelns that follow run with InOutRes already back at 0 and are
+unaffected.
+
 RUN: printf 'line one\nline two\n' > %t.txt
 RUN: %plang -std=turbo %s -o %t
 RUN: %run %t %t.txt | FileCheck %s
@@ -44,9 +58,7 @@ RUN: %run %t %t.txt | FileCheck %s
 (*
 CHECK:eof-before: false
 CHECK-NEXT:eoln-before: false
-CHECK-NEXT:eof-during-error: true
-CHECK-NEXT:eoln-during-error: true
-CHECK-NEXT:cleared-ioresult: 5
+CHECK-NEXT:5
 CHECK-NEXT:eof-after-clear: false
 CHECK-NEXT:eoln-after-clear: false
 *)

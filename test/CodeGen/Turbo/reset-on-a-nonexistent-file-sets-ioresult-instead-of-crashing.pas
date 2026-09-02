@@ -17,6 +17,14 @@ never actually opened.  IOResult reads 103 there, not 2: Readln's own
 tpFileReady check runs AFTER this program has already read (and so cleared)
 the original 2.
 
+Issue #738 update: each `writeln('...ioresult...=', IOResult)` below starts
+with InOutRes already pending (2, then 103, each set by the statement right
+above it) -- confirmed against `fpc -Mtp`: its own leading literal is
+suppressed both times, since IOResult is the first write attempt in that
+statement to actually clear InOutRes; only the numeric value prints.  The
+final 'did not crash' writeln runs with InOutRes already back at 0 (the
+previous writeln's own IOResult call cleared it) and is unaffected.
+
 `{$I-}` throughout: this file is about the fileReady CHOKE POINT (Reset
 failing sets a sensible InOutRes instead of crashing), not about the
 automatic `{$I+}` check a later part of this same item adds -- under that
@@ -32,8 +40,8 @@ RUN: %run %t | FileCheck %s
 *)
 
 (*
-CHECK:ioresult=2
-CHECK-NEXT:after-readln-ioresult=103
+CHECK:2
+CHECK-NEXT:103
 CHECK-NEXT:did not crash
 *)
 

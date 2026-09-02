@@ -161,16 +161,44 @@ extern int16_t plang_tp_filemode;
 /// SECOND Reset against a perfectly valid, different file) is ALSO
 /// silently skipped for as long as an error remains pending and unread --
 /// not merely prevented from overwriting InOutRes's CODE, but seemingly not
-/// attempted at all.  Reproducing that full latch is a considerably larger
-/// change than this one helper gives for free (Reset/Rewrite/Append's own
-/// fopen calls, guarded by this same helper just below, still ATTEMPT the
-/// open rather than skip it outright, so a Reset against a valid file can
-/// still genuinely succeed even while an earlier failure sits unread) --
-/// this fix's own scope is "do not misreport which error is pending", not
-/// "suppress every operation while one is"; the latter is future work this
-/// item deliberately leaves for whoever next touches this area to pick up.
+/// attempted at all.  That full latch (issue #738) is now implemented by
+/// tpSuppressedByPendingError, just below -- Reset/Rewrite/Append's own
+/// fopen calls, and every other Turbo I/O entry point in this file, now
+/// check it FIRST and skip the open/read/write outright, rather than merely
+/// being protected from having their own failure overwrite a pending code.
 static void setInOutResIfClear(int64_t Code) {
     if (plang_tp_inoutres == 0) plang_tp_inoutres = Code;
+}
+
+/// -std=turbo only: true whenever InOutRes already holds a pending, unread
+/// error -- issue #738's own "EVERY subsequent I/O call is a silent no-op
+/// until IOResult is called" latch, confirmed against the local `fpc -Mtp`
+/// 3.2.2 install (not guessed at): a pending, unread InOutRes from ANY
+/// failing operation (a write to a full disk, a read at EOF, a failed
+/// Reset, ...) suppresses every later Turbo I/O entry point -- including a
+/// plain console Writeln, a Read against a completely unrelated and
+/// perfectly healthy file, Close, BlockRead/BlockWrite, Seek, FilePos/
+/// FileSize, Truncate, Flush, Erase, Rename, and SeekEof/SeekEoln (which,
+/// despite an earlier comment on plang_tp_seekeof/plang_tp_seekeoln
+/// claiming no field-practice evidence either way, DO answer TRUE while
+/// suppressed, exactly like Eof/Eoln) -- not just the file that first
+/// failed.  Called at the very top of every such entry point (mostly via
+/// tpFileReady, which now checks this before its own F/F->Fp openness
+/// check -- ordering confirmed by probing `{$I-} <force InOutRes 100 on
+/// file A>; Read(healthyFileB, x);`: x is left untouched, exactly as if
+/// tpFileReady had reported "not ready" for a completely different reason)
+/// so a caller that fails this check performs NONE of its own work: no
+/// fopen/fread/fwrite attempt, no destination mutation, no position change.
+///
+/// Two functions deliberately do NOT call this: Assign (confirmed against
+/// `fpc -Mtp`: Assign's own name-recording -- pure bookkeeping, no I/O of
+/// any kind -- still takes effect while an error sits pending and unread,
+/// and a later successful Reset/Rewrite finds the name it recorded), and
+/// IOResult itself (plang_tp_ioresult, runtime/plang_sys.cpp) -- IOResult
+/// is specifically the mechanism that ENDS this suppression, so it must
+/// always run.
+static bool tpSuppressedByPendingError() {
+    return plang_tp_inoutres != 0;
 }
 
 /// -std=turbo only: maps a POSIX errno to the InOutRes code real Turbo
@@ -328,7 +356,16 @@ static void abortIfClosed(PascalFile *F, const char *Op) {
 /// abortIfClosed's own signature (every call site already has one to
 /// hand); nothing here prints it, since there is nothing to print -- the
 /// failure is recorded in InOutRes, not on stderr.
+///
+/// Issue #738: checks tpSuppressedByPendingError FIRST, ahead of even the
+/// F/F->Fp openness test -- a pending, unread error from a completely
+/// different (possibly already-closed, possibly still-open) file must
+/// silently no-op THIS call too, without touching InOutRes (it is already
+/// set) and without so much as looking at F.  This one gate is what makes
+/// almost every other Turbo I/O entry point in this file suppressible: each
+/// already called this first and returned a harmless default on false.
 static bool tpFileReady(PascalFile *F, const char * /*Op*/) {
+    if (tpSuppressedByPendingError()) return false;
     if (!F || !F->Fp) {
         setInOutResIfClear(103);
         return false;
@@ -737,6 +774,13 @@ void plang_close(PascalFile *F, int8_t IsText) {
 /// "is this file already in an error state" guard to Reset/Rewrite/Append:
 /// Assign is precisely the operation that has to work no matter what state
 /// F is in, or a program could never recover from one.
+///
+/// Issue #738 confirms this empirically: Assign does NOT call
+/// tpSuppressedByPendingError -- an Assign issued while an unrelated error
+/// sits pending and unread still records Name (checked against `fpc -Mtp`:
+/// a later, unsuppressed Reset with no intervening re-Assign opens exactly
+/// the name this call recorded), unlike every I/O-performing entry point
+/// below it.
 void plang_tp_assign(PascalFile *F, const char *Name) {
     const std::size_t Cap = static_cast<std::size_t>(PlangFileNameCap) - 1;
     const std::size_t Len = Name ? std::strlen(Name) : 0;
@@ -802,7 +846,18 @@ void plang_tp_assign(PascalFile *F, const char *Name) {
 /// plang_tp_reset_sized BEFORE it calls this function for a typed/untyped
 /// file, and never touched at all for a `text`, whose Reset always reaches
 /// this function directly with no _sized wrapper in between.
+///
+/// Issue #738: checks tpSuppressedByPendingError FIRST, before even
+/// closeStream -- confirmed against `fpc -Mtp`: a Reset/Rewrite issued
+/// while an unrelated error sits pending and unread does not merely fail,
+/// it never even ATTEMPTS the open (a target file that did not exist
+/// beforehand still does not exist afterward).  This function (unlike
+/// almost every other Turbo I/O entry point in this file) does not route
+/// through tpFileReady -- Reset's whole job is to open a file that may
+/// currently be closed, so tpFileReady's own "already open" gate does not
+/// apply here -- hence its own explicit check.
 void plang_tp_reset(PascalFile *F) {
+    if (tpSuppressedByPendingError()) return;
     closeStream(F);
     const int16_t EffectiveFileMode =
         (F->RecSize > 0) ? plang_tp_filemode : (int16_t)0;
@@ -886,7 +941,13 @@ void plang_tp_reset(PascalFile *F) {
 /// sets it BEFORE calling this function for a typed/untyped file, and a
 /// `text` Rewrite -- which always reaches this function directly, with no
 /// _sized wrapper in between -- never touches it at all.
+///
+/// Issue #738: see plang_tp_reset's identical note just above -- checks
+/// tpSuppressedByPendingError first and, if suppressed, does not even
+/// attempt the open (confirmed against `fpc -Mtp`: a target file that did
+/// not exist before a suppressed Rewrite still does not exist after it).
 void plang_tp_rewrite(PascalFile *F) {
+    if (tpSuppressedByPendingError()) return;
     closeStream(F);
     const bool ReadWrite = F->RecSize > 0;
     if (F->Name[0] == '\0') {
@@ -923,7 +984,12 @@ void plang_tp_rewrite(PascalFile *F) {
 /// permission failure (e.g. no write access) is still left to fopen's own
 /// failure below, mapped through plang_tp_posix_to_run_error exactly as it
 /// already was.
+///
+/// Issue #738: see plang_tp_reset's identical note above -- checks
+/// tpSuppressedByPendingError first and, while suppressed, does not even
+/// probe for the file's existence.
 void plang_tp_append(PascalFile *F) {
+    if (tpSuppressedByPendingError()) return;
     closeStream(F);
     if (F->Name[0] == '\0') {
         F->Fp      = stdout;
@@ -967,7 +1033,14 @@ void plang_tp_append(PascalFile *F) {
 /// stale 0 haunting a later BlockRead/BlockWrite that has not been wired up
 /// yet (a later Cluster C item's job -- see PascalFileLayout.h's own
 /// RecSize field comment).
+///
+/// Issue #738: checks tpSuppressedByPendingError before even the RecSize==0
+/// special case -- while suppressed, this must not touch F->RecSize at all
+/// (plang_tp_reset itself would refuse the open regardless, but leaving
+/// F->RecSize unmodified here too keeps this a genuine no-op start to
+/// finish, matching every other suppressed entry point in this file).
 void plang_tp_reset_sized(PascalFile *F, int64_t RecSize) {
+    if (tpSuppressedByPendingError()) return;
     if (RecSize == 0) { setInOutResIfClear(2); return; }
     F->RecSize = RecSize;
     plang_tp_reset(F);
@@ -976,6 +1049,7 @@ void plang_tp_reset_sized(PascalFile *F, int64_t RecSize) {
 /// TP Rewrite's RecSize wiring -- see plang_tp_reset_sized just above for
 /// the full rationale, identical here but for Rewrite.
 void plang_tp_rewrite_sized(PascalFile *F, int64_t RecSize) {
+    if (tpSuppressedByPendingError()) return;
     if (RecSize == 0) { setInOutResIfClear(2); return; }
     F->RecSize = RecSize;
     plang_tp_rewrite(F);
@@ -1005,6 +1079,13 @@ void plang_tp_rewrite_sized(PascalFile *F, int64_t RecSize) {
 /// checked-close-catches-a-pending-error-from-an-earlier-deferred-reset-
 /// failure.pas) survives this unchanged, exactly as every other Turbo entry
 /// point's own tpFileReady call already guarantees.
+///
+/// Issue #738: that same tpFileReady call now also means Close is
+/// SUPPRESSED (not just protected from misreporting) while ANY error --
+/// even one from a completely different file -- sits pending and unread,
+/// confirmed against `fpc -Mtp`: F->Mode never reaches PlangFmClosed, so a
+/// following Erase/Rename correctly still refuses with InOutRes 102 rather
+/// than proceeding on a file this call never actually closed.
 void plang_tp_close(PascalFile *F) {
     if (!tpFileReady(F, "Close")) return;
     closeStream(F);
@@ -1205,7 +1286,13 @@ int64_t plang_tp_blockwrite(PascalFile *F, const void *Buf, int64_t Count, int8_
 /// F->Mode's zero-init default, itself outside fmClosed..fmInOut) sets
 /// InOutRes 102 ("file not assigned" -- FPC's own field practice reuses
 /// that code here rather than a dedicated one) and performs nothing.
+///
+/// Issue #738: both check tpSuppressedByPendingError FIRST, ahead of even
+/// the fmClosed test -- confirmed against `fpc -Mtp`: an Erase issued while
+/// an unrelated error is pending and unread leaves the target file in
+/// place (not removed) even though it was properly Closed beforehand.
 void plang_tp_erase(PascalFile *F) {
+    if (tpSuppressedByPendingError()) return;
     if (F->Mode != PlangFmClosed) { setInOutResIfClear(102); return; }
     if (std::remove(F->Name) != 0) {
         const int Err = errno;
@@ -1214,12 +1301,14 @@ void plang_tp_erase(PascalFile *F) {
 }
 
 /// TP Rename(f, newname): see plang_tp_erase's own comment for the shared
-/// fmClosed requirement.  On success, updates F->Name to NewName -- real
-/// Turbo Pascal's own documented behavior (confirmed against `fpc -Mtp`: a
-/// Reset(f) with no intervening Assign, right after a successful Rename,
-/// opens the NEW name) -- so a following Reset/Rewrite/Append on f reaches
-/// the renamed file, not the one that no longer exists under the old name.
+/// fmClosed requirement (and issue #738's shared suppression check).  On
+/// success, updates F->Name to NewName -- real Turbo Pascal's own
+/// documented behavior (confirmed against `fpc -Mtp`: a Reset(f) with no
+/// intervening Assign, right after a successful Rename, opens the NEW
+/// name) -- so a following Reset/Rewrite/Append on f reaches the renamed
+/// file, not the one that no longer exists under the old name.
 void plang_tp_rename(PascalFile *F, const char *NewName) {
+    if (tpSuppressedByPendingError()) return;
     if (F->Mode != PlangFmClosed) { setInOutResIfClear(102); return; }
     if (std::rename(F->Name, NewName) != 0) {
         const int Err = errno;
@@ -1329,7 +1418,7 @@ int8_t plang_eoln_file(PascalFile *F) {
 // the FIRST call still needs its own tpFileReady guard to answer true
 // immediately rather than dereferencing a null F->Fp below.
 int8_t plang_eof_file_turbo(PascalFile *F) {
-    if (plang_tp_inoutres != 0) return 1;
+    if (tpSuppressedByPendingError()) return 1;
     if (!tpFileReady(F, "eof")) return 1;
     // §6.6.5.2: rewrite(f) leaves eof(f) true, and it stays true for as long
     // as f is being generated -- see plang_eof_file's identical comment.
@@ -1352,7 +1441,7 @@ int8_t plang_eof_file_turbo(PascalFile *F) {
 }
 
 int8_t plang_eoln_file_turbo(PascalFile *F) {
-    if (plang_tp_inoutres != 0) return 1;
+    if (tpSuppressedByPendingError()) return 1;
     if (!tpFileReady(F, "eoln")) return 1;
     ensurePrimed(F);
     // Issue #662: real Turbo Pascal/`fpc -Mtp` treats a bare CR as a line
@@ -1375,10 +1464,15 @@ int8_t plang_eoln_file_turbo(PascalFile *F) {
 // only blanks and tabs -- a line marker is what Eoln itself tests for, so
 // SeekEoln stops there rather than crossing it (confirmed: a following
 // Eoln right after SeekEoln is still true, and the newline itself is still
-// there to be read next).  Neither is InOutRes-pending-aware the way Eof/
-// Eoln's own `_turbo` siblings are -- Borland's own manual documents no
-// such behavior for either, and there is no local `fpc -Mtp` field-practice
-// evidence either way to match instead.
+// there to be read next).
+//
+// Issue #738 update: an earlier version of this comment claimed neither was
+// InOutRes-pending-aware, citing no local `fpc -Mtp` field-practice evidence
+// either way -- that has since been checked directly, and both ARE: with an
+// error pending and unread (from any file), `fpc -Mtp` answers SeekEof/
+// SeekEoln TRUE, exactly like plain Eof/Eoln do.  Both already route through
+// tpFileReady below, which now implements that latch (tpSuppressedByPendingError),
+// so no separate check was needed here once that fix landed.
 static void skipTurboWhitespace(PascalFile *F, bool CrossLines) {
     ensurePrimed(F);
     for (;;) {
@@ -2514,9 +2608,23 @@ void plang_read_binary(PascalFile *F, void *Buf, int64_t ElemSize) {
 // setInOutResIfClear rather than an unconditional assignment so an
 // already-pending, more specific error (e.g. tpTrapOnStreamError's own 104
 // from a wrong-direction stream, just above) is not overwritten.
+//
+// Issue #738: tpFileReady is now checked BEFORE the memset, not after --
+// confirmed against `fpc -Mtp` (both for a genuinely never-opened file, and
+// for a healthy, already-open one suppressed by an unrelated pending
+// error): the destination variable is left COMPLETELY untouched in either
+// case, not zeroed.  This is a real behavioral difference from the
+// text-file scalar readers just above (plang_read_file_i64_turbo and
+// siblings), whose own tpFileReady-guarded "not ready" arm DOES zero the
+// destination (`{ *P = 0; return; }`) -- confirmed against `fpc -Mtp` too,
+// so that difference is real Turbo/FPC field practice, not an
+// inconsistency to paper over: this function's caller passes a raw
+// pointer to an arbitrary (possibly large, possibly record-typed) buffer,
+// the same shape BlockRead's own Buf argument has, and BlockRead is
+// likewise confirmed to leave its buffer untouched while suppressed.
 void plang_read_binary_turbo(PascalFile *F, void *Buf, int64_t ElemSize) {
-    if (ElemSize > 0) std::memset(Buf, 0, static_cast<std::size_t>(ElemSize));
     if (!tpFileReady(F, "read")) return;
+    if (ElemSize > 0) std::memset(Buf, 0, static_cast<std::size_t>(ElemSize));
     tpTrapOnWrongDirection(F, 0);
     const std::size_t Got =
         std::fread(Buf, static_cast<std::size_t>(ElemSize), 1, F->Fp);

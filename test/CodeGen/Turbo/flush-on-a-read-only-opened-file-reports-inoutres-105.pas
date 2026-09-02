@@ -10,12 +10,18 @@ BlockWrite direction tests already force it (Tier 3's own gap fix has Reset
 honor FileMode's read-write default of 2, so without this the file would
 be reopened read-write and Flush would genuinely succeed).
 
+Issue #738 update: the closing `writeln` below starts with InOutRes
+already pending (105, just set by the Flush right above it) -- confirmed
+against `fpc -Mtp`: its own leading literal is suppressed, since IOResult
+is the first write attempt in that statement to actually clear InOutRes;
+only the numeric value prints.
+
 RUN: %plang -std=turbo %s -o %t
 RUN: %run %t | FileCheck %s
 *)
 
 (*
-CHECK:flush-on-readonly ioresult=105
+CHECK:105
 *)
 
 var

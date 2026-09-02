@@ -24,6 +24,25 @@ clear, ready to capture the NEXT failure fresh -- checked here too, with a
 third Reset (again against the permission-denied path) now visibly
 reporting 5 once nothing pending remains to protect.
 
+Issue #738 update: the second Reset below (against the permission-denied
+path, issued while the first Reset's InOutRes 2 is still pending and
+unread) is now ITSELF suppressed outright -- confirmed against `fpc -Mtp`:
+it never even attempts the open (this is the "considerably larger change"
+this test's own comment used to describe as future work; issue #738 is
+that work). The net InOutRes this test cares about (2, still surviving) is
+unchanged either way, but every `writeln` here is ALSO ordinary Turbo I/O,
+so any one of them issued while InOutRes sits pending and unread is
+suppressed too -- including its own literal text, not just the numbered
+value -- confirmed against `fpc -Mtp` line for line: the first writeln
+(issued right after the first Reset leaves 2 pending) is a complete no-op,
+and the second/fourth writelns each lose their own leading literal
+("after second Reset...: "/"after a third Reset...: ") because IOResult is
+still the FIRST write attempt in a suppressed writeln's own argument list
+to actually clear InOutRes -- only what comes after it in that same
+statement prints normally. The middle writeln (whose OWN IOResult call
+finds nothing pending, right after the previous statement's IOResult
+already cleared it) is unaffected and keeps its full text.
+
 RUN: rm -rf %t.dir && mkdir -p %t.dir/locked
 RUN: printf 'x\n' > %t.dir/locked/inner.txt
 RUN: chmod 000 %t.dir/locked
@@ -33,10 +52,9 @@ RUN: chmod 755 %t.dir/locked
 *)
 
 (*
-CHECK:after first Reset (missing file): pending
-CHECK-NEXT:after second Reset (denied dir, unread first error survives): 2
+CHECK:2
 CHECK-NEXT:after reading IOResult once, it is clear: 0
-CHECK-NEXT:after a third Reset (denied dir, no pending error left to protect): 5
+CHECK-NEXT:5
 *)
 
 var f: text;

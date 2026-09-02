@@ -11,12 +11,22 @@ write-up).  Everything here runs under `{$I-}`, so this is purely about
 runtime/plang_file.cpp's own InOutRes bookkeeping, not about
 RangeCheckGuards::ioChecksAt or plang_iocheck at all.
 
+Issue #738 update: `read(f, x)` right below is now ITSELF suppressed
+outright while the pending 2 sits unread (confirmed against `fpc -Mtp`: it
+never attempts tpFileReady's own would-be 103 at all) -- a stronger, but
+consistent, way of reaching the same "2 survives, not 103" conclusion this
+test was already proving. The closing `writeln` is ordinary Turbo I/O too:
+its own literal ('ioresult=') is suppressed right along with everything
+else, since IOResult -- evaluated as this statement's SECOND argument -- is
+the first write attempt in it to actually clear InOutRes; only the numeric
+value that call returns still prints.
+
 RUN: %plang -std=turbo %s -o %t
 RUN: %run %t %t.does-not-exist.txt | FileCheck %s
 *)
 
 (*
-CHECK:ioresult=2
+CHECK:2
 *)
 
 var f: text; x: integer;
