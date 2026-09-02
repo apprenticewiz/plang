@@ -247,6 +247,23 @@ llvm::Value* CGExprCore::emitExpr(const ExprNode& e) {
                            + "' used where a value is required");
             return ClosureAbi.emitProcParamCall(*ve, {});
         }
+        // Turbo procedural VALUES (issue #649): mirrors the procedural-
+        // PARAMETER case just above -- a bare read of a FUNCTION-typed
+        // procedural VARIABLE is an implicit zero-argument call, unless
+        // Sema stamped this exact occurrence ProcVarRawValue (checkIdent's
+        // own comment, SemaExpr.cpp): the "f2 := f1" / '@f1' / Assigned(f1)
+        // idioms, which want f1's own stored value read, not called
+        // through. Gated on ve->procType->IsFunction (not just isProcVar)
+        // rather than an ICE on a Procedure-kind mismatch the way the
+        // procParam case above does: Sema's own gate is the identical
+        // IsFunction check, so a Procedure-kind procVar never reaches this
+        // branch with Resolution left at Ordinary in the first place (it
+        // never auto-calls), and falling through to the ordinary load below
+        // is the same value that arm has always produced.
+        if (ve && ve->isProcVar && ve->procType && ve->procType->IsFunction
+                && n->Resolution != IdentExpr::IdentResolution::ProcVarRawValue) {
+            return ClosureAbi.emitProcVarCall(*ve, {});
+        }
         if (!ve && (Mod.getFunction(Linkage.findMangledProc(n->Name))
                     || Linkage.isImportedCallable(n->Name))) {
             // ISO §6.8.2.2: a parameterless function-identifier in an
@@ -426,6 +443,10 @@ llvm::Value* CGExprCore::emitExpr(const ExprNode& e) {
     // never through the VMT; see CGFuncCall::emitInheritedCallExpr's own
     // comment for the whole design.
     if (auto* n = llvm::dyn_cast<InheritedCallExpr>(&e)) return FuncCall.emitInheritedCallExpr(*n);
+
+    // Turbo procedural VALUES (issue #648): 'a[i](args)' / 'p^(args)' used
+    // as a value -- see CGFuncCall::emitIndirectCallExpr's own comment.
+    if (auto* n = llvm::dyn_cast<IndirectCallExpr>(&e)) return FuncCall.emitIndirectCallExpr(*n);
 
     codegenICE("unhandled expression node in emitExpr");
 }

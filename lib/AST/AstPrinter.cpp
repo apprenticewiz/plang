@@ -87,8 +87,8 @@ static void printParams(const std::vector<ParamGroup>& params, std::ostream& os)
 // See NumExprKinds in AstBase.h.  A dump that leaves a construct out reads as
 // a tree that does not contain one, which is the most misleading thing this
 // file could do, and it is what happened to every EP node added after it.
-static_assert(NumExprKinds == 19, "a new expression needs a case in printExpr");
-static_assert(NumStmtKinds == 14, "a new statement needs a case in printStmt");
+static_assert(NumExprKinds == 20, "a new expression needs a case in printExpr");
+static_assert(NumStmtKinds == 15, "a new statement needs a case in printStmt");
 static_assert(NumTypeKinds == 15, "a new type denoter needs a case in printType");
 
 // ---------------------------------------------------------------------------
@@ -417,6 +417,17 @@ static void printExpr(const ExprNode& node, std::ostream& os, int depth) {
         os << ")";
         break;
     }
+    case NodeKind::IndirectCallExpr: {
+        const auto* n = llvm::cast<IndirectCallExpr>(&node);
+        os << "(indirectcall ";
+        printExpr(*n->Callee, os, depth + 1);
+        for (const auto& arg : n->Args) {
+            os << " ";
+            printExpr(*arg, os, depth + 1);
+        }
+        os << ")";
+        break;
+    }
     case NodeKind::SetRangeExpr: {
         const auto* n = llvm::cast<SetRangeExpr>(&node);
         os << "(.. ";
@@ -627,6 +638,17 @@ static void printStmt(const StmtNode* node, std::ostream& os, int depth) {
     case NodeKind::InheritedCallStmt: {
         const auto* n = llvm::cast<InheritedCallStmt>(node);
         os << "(inherited " << n->Method;
+        for (const auto& arg : n->Args) {
+            os << " ";
+            printExpr(*arg, os);
+        }
+        os << ")";
+        break;
+    }
+    case NodeKind::IndirectCallStmt: {
+        const auto* n = llvm::cast<IndirectCallStmt>(node);
+        os << "(indirectcall ";
+        printExpr(*n->Callee, os);
         for (const auto& arg : n->Args) {
             os << " ";
             printExpr(*arg, os);

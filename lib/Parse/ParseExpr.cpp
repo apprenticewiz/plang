@@ -301,6 +301,10 @@ std::unique_ptr<ExprNode> Parser::parseTerm() {
 //   '.' identifier            → FieldExpr
 //   '.' identifier '(' ... ')' → MethodCallExpr (Turbo Tier 5, Cluster A item 3)
 //   '^'                        → DerefExpr
+//   '(' args ')'               → IndirectCallExpr (Turbo procedural VALUES,
+//                                 issue #648), but only once Expr is no
+//                                 longer a bare IdentExpr -- see the LeftParen
+//                                 branch's own comment below for why.
 std::unique_ptr<ExprNode> Parser::parsePostfix(std::unique_ptr<ExprNode> Expr) {
     for (;;) {
         if (check(TokenKind::LeftBracket)) {
@@ -367,6 +371,41 @@ std::unique_ptr<ExprNode> Parser::parsePostfix(std::unique_ptr<ExprNode> Expr) {
             auto Node     = std::make_unique<DerefExpr>();
             Node->Loc     = Loc;
             Node->Pointer = std::move(Expr);
+            Expr = std::move(Node);
+        } else if (check(TokenKind::LeftParen)
+                       && !llvm::isa<IdentExpr>(Expr.get())) {
+            // Turbo procedural VALUES (issue #648): 'a[i](args)' / 'p^(args)'
+            // -- a call through whatever procedural-typed value the postfix
+            // chain built so far, e.g. an array element or a dereferenced
+            // pointer. A bare IdentExpr is deliberately excluded here: a
+            // plain name immediately followed by '(' is ALREADY spoken for --
+            // parseFactor's own Identifier arm builds an ordinary CallExpr
+            // for it (resolved by spelling against the symbol table) before
+            // parsePostfix is ever reached, and Parser::finishLvalueStatement
+            // does the identical thing one level up for a bare identifier in
+            // STATEMENT position (ParseStmt.cpp). Consuming '(' here
+            // unconditionally would intercept EVERY ordinary call statement
+            // ('Foo(1, 2);', 'writeln(x)', ...) before either of those ever
+            // saw it, turning a spelling-based call into an indirect one and
+            // losing the required-procedure/builtin dispatch, SizeOf/High/Low
+            // argument-shape parsing, and every other thing that depends on
+            // Name being a plain string. Once Expr is no longer a bare
+            // IdentExpr -- an IndexExpr/DerefExpr/FieldExpr/MethodCallExpr/
+            // IndirectCallExpr, all built by an EARLIER iteration of this
+            // same loop -- there is no such ambiguity: nothing else a
+            // trailing '(' could mean.
+            Token Loc = Current;
+            advance(); // consume '('
+            auto Node    = std::make_unique<IndirectCallExpr>();
+            Node->Loc    = Loc;
+            Node->Callee = std::move(Expr);
+            if (!check(TokenKind::RightParen)) {
+                Node->Args.push_back(parseExpression());
+                while (match(TokenKind::Comma)) {
+                    Node->Args.push_back(parseExpression());
+                }
+            }
+            expect(TokenKind::RightParen);
             Expr = std::move(Node);
         } else {
             break;

@@ -2,16 +2,18 @@
 //
 // See the big comment on IndexExpr (AstExpr.h, immediately above its own
 // declaration) for the full story of why IndexExpr/FieldExpr/DerefExpr/
-// BinaryExpr/SubstringExpr/MethodCallExpr each declare a hand-written
-// destructor instead of getting the compiler-generated (implicitly
-// recursive) one every other AST node relies on. Short version: each of
-// these six can be built into an arbitrarily deep, flat chain by an
-// iterative parser loop (Parser::parsePostfix for the first five;
-// parseSimpleExpr/parseTerm's addop/mulop folding loops for BinaryExpr's
-// Left, parsePower's own right recursion for BinaryExpr's Right) with no
-// depth limit tied to the AST's own shape, and destroying a chain that deep
-// through the ordinary compiler-generated destructor recurses the real C++
-// call stack one frame per link -- issue #551.
+// BinaryExpr/SubstringExpr/MethodCallExpr/IndirectCallExpr each declare a
+// hand-written destructor instead of getting the compiler-generated
+// (implicitly recursive) one every other AST node relies on. Short
+// version: each of these seven can be built into an arbitrarily deep, flat
+// chain by an iterative parser loop (Parser::parsePostfix for six of the
+// seven -- IndirectCallExpr included, issue #648: 'f()()()...()' chains
+// the same way 'a[1][1]...[1]' or 'p^^^...^' already did; parseSimpleExpr/
+// parseTerm's addop/mulop folding loops for BinaryExpr's Left, parsePower's
+// own right recursion for BinaryExpr's Right) with no depth limit tied to
+// the AST's own shape, and destroying a chain that deep through the
+// ordinary compiler-generated destructor recurses the real C++ call stack
+// one frame per link -- issue #551.
 //
 // This file is the destructor half of that fix. The other half --
 // preventing parsePower's own C++ call recursion from itself overflowing
@@ -53,14 +55,15 @@ namespace {
 
 // Moves N's own "chain" child (or children, for BinaryExpr, which can chain
 // through either operand) onto WorkList, leaving N holding null in its
-// place. Every other field these six types carry -- IndexExpr::Index,
-// SubstringExpr::Low/High, MethodCallExpr::Args, BinaryExpr::Op -- is left
-// untouched: those are ordinary, independently-bounded sub-expressions (or
-// not an owned child at all), not the field a long chain of THIS construct
-// threads through, and are safe to let destruct normally when N itself
-// does, whether that is a leaf, one of these same six kinds (whose own
-// destructor does this same detach-then-destruct step for its own chain
-// field), or a subtree Parser::ExprDepth already keeps under 500 levels.
+// place. Every other field these seven types carry -- IndexExpr::Index,
+// SubstringExpr::Low/High, MethodCallExpr::Args, BinaryExpr::Op,
+// IndirectCallExpr::Args -- is left untouched: those are ordinary,
+// independently-bounded sub-expressions (or not an owned child at all), not
+// the field a long chain of THIS construct threads through, and are safe to
+// let destruct normally when N itself does, whether that is a leaf, one of
+// these same seven kinds (whose own destructor does this same
+// detach-then-destruct step for its own chain field), or a subtree
+// Parser::ExprDepth already keeps under 500 levels.
 void collectChainChildren(ExprNode* N, std::vector<std::unique_ptr<ExprNode>>& WorkList) {
     switch (N->Kind) {
         case NodeKind::IndexExpr: {
@@ -94,8 +97,13 @@ void collectChainChildren(ExprNode* N, std::vector<std::unique_ptr<ExprNode>>& W
             if (M->Receiver) WorkList.push_back(std::move(M->Receiver));
             break;
         }
+        case NodeKind::IndirectCallExpr: {
+            auto* C = llvm::cast<IndirectCallExpr>(N);
+            if (C->Callee) WorkList.push_back(std::move(C->Callee));
+            break;
+        }
         default:
-            // Not one of the six chain-shaped kinds: nothing to detach here,
+            // Not one of the seven chain-shaped kinds: nothing to detach here,
             // N's own (already-safe) destructor handles the rest of it.
             break;
     }
@@ -139,3 +147,4 @@ BinaryExpr::~BinaryExpr() {
 }
 SubstringExpr::~SubstringExpr() { drainExprChain(std::move(Str)); }
 MethodCallExpr::~MethodCallExpr() { drainExprChain(std::move(Receiver)); }
+IndirectCallExpr::~IndirectCallExpr() { drainExprChain(std::move(Callee)); }

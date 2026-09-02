@@ -34,6 +34,7 @@ namespace llvm { class BasicBlock; class Module; class Value; class Function; }
 namespace plang {
 struct CallStmt; struct ExprNode; struct TypeNode;
 struct ProcedureTypeNode; struct MethodCallStmt; struct InheritedCallStmt;
+struct IndirectCallStmt;
 }
 
 class CGProcCall {
@@ -123,6 +124,12 @@ public:
     /// signature check already guarantees the ancestor's own parameter list
     /// is identical; see InheritedCallStmt's own comment (AstStmt.h).
     void emitInheritedCallStmt(const plang::InheritedCallStmt& s);
+
+    /// Turbo procedural VALUES (issue #648): 'a[i](args);' / 'p^(args);'
+    /// used as a STATEMENT -- the CGProcCall sibling of CGFuncCall::
+    /// emitIndirectCallExpr (see its own comment for the whole design);
+    /// its result, if any, is simply discarded.
+    void emitIndirectCallStmt(const plang::IndirectCallStmt& s);
 
     /// Turbo Tier 5, issue #622: allocates a fresh \p Pointee, stamps its own
     /// (and any nested member's) '_vptr', and runs the constructor \p

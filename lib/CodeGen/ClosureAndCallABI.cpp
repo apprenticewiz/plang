@@ -283,6 +283,48 @@ llvm::Function* ClosureAndCallABI::procParamThunk(llvm::Function* target,
     return thunk;
 }
 
+// Issue #647: see this function's own declaration (ClosureAndCallABI.h) for
+// the whole "frame slot smuggles the real entry point across" design.
+llvm::Function* ClosureAndCallABI::procVarRelayThunk(const ProcedureTypeNode& node) {
+    auto* outerTy = procParamFnType(node);
+    if (auto it = procVarRelayThunks_.find(outerTy); it != procVarRelayThunks_.end())
+        return it->second;
+
+    auto* innerTy = procVarFnType(node);
+    auto* thunk = llvm::Function::Create(outerTy, llvm::Function::InternalLinkage,
+                                         "procvar.relay", &Mod);
+
+    // Same reasoning as procParamThunk's own identical DISubprogram
+    // (its own comment, just above): without it, stepping into a call
+    // relayed through a procedural variable vaults over this thunk (and
+    // the real target) entirely instead of stepping into either.
+    llvm::IRBuilderBase::InsertPointGuard guard(B);
+    B.SetInsertPoint(llvm::BasicBlock::Create(Ctx, "entry", thunk));
+    if (auto* SP = DbgInfo.emitThunkStart(thunk, DbgInfo.getFile(), thunk->getName().str()))
+        B.SetCurrentDebugLocation(llvm::DILocation::get(Ctx, 0, 0, SP));
+    else
+        B.SetCurrentDebugLocation(llvm::DebugLoc());
+
+    // arg 0 is nominally "the frame" in outerTy's own shape, but
+    // pushProcParamArgs (just below) never puts a real static-link frame
+    // there for this thunk -- it puts the procedural variable's own loaded
+    // flat pointer instead, i.e. the ACTUAL callee. Every other argument is
+    // forwarded unchanged, called through innerTy (procVarFnType's
+    // no-leading-frame shape, matching the real target's own true ABI).
+    auto argIt = thunk->arg_begin();
+    llvm::Value* target = &*argIt;
+    ++argIt;
+    std::vector<llvm::Value*> args;
+    for (; argIt != thunk->arg_end(); ++argIt) args.push_back(&*argIt);
+
+    auto* call = B.CreateCall(innerTy, target, args);
+    if (outerTy->getReturnType()->isVoidTy()) B.CreateRetVoid();
+    else                                      B.CreateRet(call);
+
+    procVarRelayThunks_[outerTy] = thunk;
+    return thunk;
+}
+
 void ClosureAndCallABI::pushProcParamArgs(std::vector<llvm::Value*>& args,
                                            const ExprNode& arg,
                                            const ProcedureTypeNode& node) {
@@ -296,6 +338,19 @@ void ClosureAndCallABI::pushProcParamArgs(std::vector<llvm::Value*>& args,
         auto [fn, frame] = loadProcPair(ve->ptr);
         args.push_back(fn);
         args.push_back(frame);
+        return;
+    }
+
+    // Issue #647: a procedural-VARIABLE actual -- its own storage is one
+    // flat pointer (no frame; VarEntry::isProcVar's own comment), so it
+    // cannot be handed on as-is the way a received procedural PARAMETER's
+    // already-uniform pair is just above. Wrapped through
+    // procVarRelayThunk instead -- see that function's own comment for how
+    // the frame slot is repurposed to carry the loaded pointer across.
+    if (auto* ve = SymTab.findVar(id->Name); ve && ve->isProcVar) {
+        auto* target = B.CreateLoad(PtrTy, ve->ptr, id->Name + ".procval");
+        args.push_back(procVarRelayThunk(node));
+        args.push_back(target);
         return;
     }
 
@@ -543,6 +598,71 @@ ClosureAndCallABI::emitProcVarCall(const VarEntry& ve,
     const Type* retTy = ve.procType->ReturnType
                        ? ve.procType->ReturnType->ResolvedType.get() : nullptr;
     if (needsStructReturnSpill(retTy) && call->getType()->isStructTy()) {
+        auto* tmp = CreateEntryAlloca(call->getType(), "str.ret");
+        B.CreateStore(call, tmp);
+        return tmp;
+    }
+    return call;
+}
+
+llvm::FunctionType* ClosureAndCallABI::fnTypeFromSemaType(const Type& fnTy) {
+    // Mirrors procVarFnType's own per-parameter shape (pg.IsVar ? PtrTy :
+    // llvmType(...)) exactly, just reading a semantic Type::Param instead of
+    // an AST ParamGroup -- there is no ProcedureTypeNode here in general
+    // (see emitIndirectCall's own comment). Sema::checkIndirectCall has
+    // already refused any P.Ty that is itself callable, so unlike
+    // procVarFnType this never has to build the nested {entry point, frame}
+    // two-pointer shape.
+    std::vector<llvm::Type*> params;
+    for (const auto& p : fnTy.Params) {
+        if (p.IsUntyped || p.IsVar) params.push_back(PtrTy);
+        else                        params.push_back(Types.llvmTypeOfSemaType(*p.Ty));
+    }
+    llvm::Type* ret = fnTy.RetType ? Types.llvmTypeOfSemaType(*fnTy.RetType)
+                                   : llvm::Type::getVoidTy(Ctx);
+    return llvm::FunctionType::get(ret, params, false);
+}
+
+llvm::Value*
+ClosureAndCallABI::emitIndirectCall(llvm::Value* calleeAddr, const Type& fnTy,
+                                     std::span<const std::unique_ptr<ExprNode>> argExprs) {
+    auto* fnLLVMTy = fnTypeFromSemaType(fnTy);
+    // calleeAddr is the callee EXPRESSION's own storage (an ordinary
+    // flat-pointer slot, never a {entry point, frame} cell -- see
+    // emitIndirectCall's own comment, ClosureAndCallABI.h), so the target
+    // address is simply what is stored there -- exactly like
+    // emitProcVarCall's identical read of ve.ptr.
+    auto* callee = B.CreateLoad(PtrTy, calleeAddr, "indirect.fn");
+    // Same RTE 216 nil-pointer-call guard emitProcVarCall's own comment
+    // explains (issue #646): calling through a nil procedural value
+    // segfaults, or worse, with no diagnostic at all otherwise.
+    RangeGuards.emitNilCheck(callee);
+
+    std::vector<llvm::Value*> args;
+    for (size_t i = 0; i < fnTy.Params.size() && i < argExprs.size(); ++i) {
+        const auto& p = fnTy.Params[i];
+        const auto& a = *argExprs[i];
+        if (p.IsUntyped || p.IsVar) {
+            args.push_back(EmitLValue(a));
+        } else {
+            std::optional<int64_t> destSetBase;
+            if (p.Ty && p.Ty->Kind == TypeKind::Set)
+                destSetBase = setOffsetOf(*p.Ty);
+            args.push_back(Sets.alignSetArg(
+                EmitCallArg(a,
+                    args.size() < fnLLVMTy->getNumParams()
+                        ? fnLLVMTy->getParamType(args.size())
+                        : nullptr,
+                    /*byRef=*/false),
+                a, destSetBase));
+        }
+    }
+
+    auto* call = B.CreateCall(fnLLVMTy, callee, args);
+    if (fnLLVMTy->getReturnType()->isVoidTy()) return nullptr;
+    // Same string/ShortString return-value spill emitProcVarCall's own
+    // comment explains (issue #684).
+    if (needsStructReturnSpill(fnTy.RetType.get()) && call->getType()->isStructTy()) {
         auto* tmp = CreateEntryAlloca(call->getType(), "str.ret");
         B.CreateStore(call, tmp);
         return tmp;

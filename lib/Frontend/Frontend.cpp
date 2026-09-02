@@ -55,7 +55,7 @@ namespace plang {
 // a kind exprToString learns to write has to be one canSerializeExpr agrees can
 // be written, or the gate keeps out what the writer could have said, and a kind
 // only the gate learns lets through what the writer will then write as a zero.
-static_assert(NumExprKinds == 19,
+static_assert(NumExprKinds == 20,
               "a new expression may need a case in exprToString and in "
               "canSerializeExpr");
 static_assert(NumTypeKinds == 15,

@@ -1136,6 +1136,16 @@ llvm::Value* CGFuncCall::emitMethodCallExpr(const MethodCallExpr& e) {
     return Marshal.spillStructReturnIfNeeded(e, ret);
 }
 
+// Turbo procedural VALUES (issue #648): see this method's own declaration
+// (CGFuncCall.h) for the whole design.
+llvm::Value* CGFuncCall::emitIndirectCallExpr(const IndirectCallExpr& e) {
+    if (!e.Callee->ResolvedType)
+        codegenICE("indirect call has no resolved callee type");
+    llvm::Value* calleeAddr = EmitLValue(*e.Callee);
+    if (!calleeAddr) codegenICE("indirect call callee has no address");
+    return ClosureAbi.emitIndirectCall(calleeAddr, *e.Callee->ResolvedType, e.Args);
+}
+
 // Turbo Tier 5, issue #509: see this method's own declaration (CGFuncCall.h)
 // for the whole design -- the CGFuncCall sibling of CGProcCall::
 // emitInheritedCallStmt (CGProcCall.cpp), which this otherwise duplicates

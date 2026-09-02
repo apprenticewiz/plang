@@ -32,7 +32,7 @@
 namespace llvm { class Module; class Value; class GlobalVariable; class Function; }
 namespace plang {
 struct CallExpr; struct ExprNode; struct ProcedureTypeNode; struct MethodCallExpr;
-struct InheritedCallExpr;
+struct InheritedCallExpr; struct IndirectCallExpr;
 struct Type;
 }
 
@@ -109,6 +109,15 @@ public:
     /// since an inherited FUNCTION returning one is exactly as reachable
     /// here as through an ordinary call.
     llvm::Value* emitInheritedCallExpr(const plang::InheritedCallExpr& e);
+
+    /// Turbo procedural VALUES (issue #648): 'a[i](args)' / 'p^(args)' used
+    /// as a value -- a call through an arbitrary procedural-typed
+    /// EXPRESSION rather than a bare name or a declared method. Thin
+    /// wrapper over ClosureAndCallABI::emitIndirectCall: e.Callee's own
+    /// address (EmitLValue) is the flat-pointer storage to call through,
+    /// and e.Callee->ResolvedType (Sema::checkIndirectCall's own answer) is
+    /// the signature to build the call from.
+    llvm::Value* emitIndirectCallExpr(const plang::IndirectCallExpr& e);
 
     /// The built-in dispatch chain that used to be emitCallExpr's whole body,
     /// factored out so a call site with no CallExpr of its own -- Turbo

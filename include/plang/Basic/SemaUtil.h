@@ -20,16 +20,16 @@ namespace plang {
 // output, it silently stops reporting a class of error inside it.
 //
 // See NumExprKinds and NumStmtKinds in AstBase.h.
-// Complete as written: of the fourteen statement kinds, the nine that
-// contain a statement appear in walkStmts and the eleven that hang an
-// expression off themselves appear in forEachStmtExpr; of the nineteen
-// expression kinds, six are leaves and the other thirteen appear in
+// Complete as written: of the fifteen statement kinds, the nine that
+// contain a statement appear in walkStmts and the twelve that hang an
+// expression off themselves appear in forEachStmtExpr; of the twenty
+// expression kinds, six are leaves and the other fourteen appear in
 // walkExprs.
-static_assert(NumStmtKinds == 14,
+static_assert(NumStmtKinds == 15,
               "a new statement kind that contains statements needs a branch in "
               "walkStmts, and one that hangs an expression off itself needs a "
               "branch in forEachStmtExpr");
-static_assert(NumExprKinds == 19,
+static_assert(NumExprKinds == 20,
               "a new expression kind that owns a child expression needs a "
               "branch in walkExprs");
 
@@ -213,6 +213,9 @@ void walkExprs(const ExprNode* E, Fn&& F, std::uintptr_t Baseline, unsigned Dept
         // No Receiver to walk -- see InheritedCallExpr's own comment
         // (AstExpr.h): the receiver is always the implicit Self.
         for (const auto& A : N->Args) walkExprs(A.get(), F, Baseline, Depth + 1);
+    } else if (auto* N = llvm::dyn_cast<IndirectCallExpr>(E)) {
+        walkExprs(N->Callee.get(), F, Baseline, Depth + 1);
+        for (const auto& A : N->Args) walkExprs(A.get(), F, Baseline, Depth + 1);
     } else if (auto* N = llvm::dyn_cast<SetRangeExpr>(E)) {
         walkExprs(N->Low.get(), F, Baseline, Depth + 1);
         walkExprs(N->High.get(), F, Baseline, Depth + 1);
@@ -251,6 +254,9 @@ void forEachStmtExpr(const StmtNode* S, Fn&& F) {
         F(N->Receiver.get());
         for (const auto& A : N->Args) F(A.get());
     } else if (auto* N = llvm::dyn_cast<InheritedCallStmt>(S)) {
+        for (const auto& A : N->Args) F(A.get());
+    } else if (auto* N = llvm::dyn_cast<IndirectCallStmt>(S)) {
+        F(N->Callee.get());
         for (const auto& A : N->Args) F(A.get());
     } else if (auto* N = llvm::dyn_cast<IfStmt>(S)) {
         F(N->Cond.get());
