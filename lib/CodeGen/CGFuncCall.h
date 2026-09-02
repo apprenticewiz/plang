@@ -139,6 +139,26 @@ private:
     /// (CGProcCall.h) for the full rationale, shared unchanged here.
     llvm::Value* tryEmitDosFuncCall(const plang::CallExpr& e);
 
+    /// Turbo Tier 5, issues #571/#623: emitMethodCallExpr's own core --
+    /// mangled-symbol resolution, argument marshalling, and the virtual/
+    /// VMT-vs-direct dispatch choice -- factored out so
+    /// emitImplicitMethodCallExpr's own CallExpr::ImplicitMethodReceiverType
+    /// branch can reuse it with a receiver that has no real Receiver
+    /// ExprNode of its own (an unqualified call resolving to the enclosing
+    /// method's own Self or an active with-block's own object, looked up
+    /// under a reserved CGSymbolTable name instead -- see
+    /// implicitCallReceiverVarName, CGSymbolTable.h).  \p RecvTy is the
+    /// STATIC type \p selfPtr's storage was laid out as.  Same fresh-copy
+    /// convention as this file's own methodOwnerType/methodEntryOf helpers
+    /// (matching CGProcCall::emitBoundMethodCall's identical name/shape,
+    /// its own copy for CGProcCall.cpp's statement-context call sites) --
+    /// mirrors, not calls, that one: the two classes share no reference to
+    /// each other.  Returns the call's own (not yet struct-return-spilled)
+    /// result.
+    llvm::Value* emitBoundMethodCall(llvm::Value* selfPtr, const plang::Type& RecvTy,
+                                     const std::string& Method,
+                                     std::span<const std::unique_ptr<plang::ExprNode>> Args);
+
     llvm::LLVMContext& Ctx;
     llvm::Module& Mod;
     llvm::IRBuilder<>& B;

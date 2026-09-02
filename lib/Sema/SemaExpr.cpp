@@ -1473,6 +1473,13 @@ std::shared_ptr<Type> Sema::checkCallExpr(const CallExpr& E) {
         // checkIdent -- an expression-context use just as much as `Mem[...]`
         // is, only spelled with a call instead of an index.
         if (checkRealModeDosName(E.Name, E.Loc)) return TyErr;
+        // Turbo Tier 5, issues #571/#623: see checkCallStmt's own identical
+        // fallback (SemaStmt.cpp) -- an unqualified, PARENTHESIZED call
+        // ('GetX()') may still be one of the current implicit receiver's own
+        // methods.  checkImplicitMethodCallExpr returns nullptr (a real,
+        // distinct sentinel from TyErr) when E.Name matches none, so this
+        // still falls through to the ordinary diagnostic below.
+        if (auto T = checkImplicitMethodCallExpr(E)) return T;
         error(E.Loc, diag::err_undefined_function, {E.Name});
         return TyErr;
     }
@@ -2122,6 +2129,28 @@ std::shared_ptr<Type> Sema::checkCallExpr(const CallExpr& E) {
     // unused despite the call being exactly a use of it.
     if (Sym->Kind == SymbolKind::Var) Sym->Referenced = true;
     return checkUserDefinedCall(*Sym, E.Loc, E.Args, /*expectFunction=*/true);
+}
+
+// Turbo Tier 5, issues #571/#623: see this function's own declaration
+// (Sema.h) for when checkCallExpr tries this and what a null return means.
+std::shared_ptr<Type> Sema::checkImplicitMethodCallExpr(const CallExpr& E) {
+    const ImplicitMethodLookup IL = findImplicitCallMethod(E.Name);
+    if (!IL.M) return nullptr;
+
+    // Turbo Tier 5, Cluster A item 7: same private-visibility gate
+    // checkMethodCall applies -- see its own comment.
+    if (IL.M->IsPrivate && IL.Owner->DeclaringModule != CurrentUnit_)
+        error(E.Loc, diag::err_object_private_method, {IL.Owner->Name, E.Name});
+
+    Symbol Indirect;
+    Indirect.Kind       = SymbolKind::Proc;
+    Indirect.Name       = IL.Owner->Name + "." +
+                           (IL.M->Heading ? IL.M->Heading->Name : E.Name);
+    Indirect.IsFunction = IL.M->IsFunction;
+    Indirect.Params     = IL.M->Params;
+    Indirect.ReturnType = IL.M->RetType;
+    E.ImplicitMethodReceiverType = IL.Receiver;
+    return checkUserDefinedCall(Indirect, E.Loc, E.Args, /*expectFunction=*/true);
 }
 
 std::shared_ptr<Type> Sema::checkTypeCast(const TypeCastExpr& E) {
@@ -2783,19 +2812,14 @@ std::shared_ptr<Type> Sema::checkMethodCall(
     }
 
     // Ancestor-chain walk for a method named Method: the same MRO order
-    // resolveObjectType's own VmtSlots inheritance uses (SemaType.cpp), just
-    // expressed through the public composite-key symbol lookup
-    // (Sema::objectMethodKey) that resolveObjectType itself registered each
-    // TYPE-LEVEL method under, rather than SemaType.cpp's file-local
-    // findMethodInChain helper (which walks Type::ObjectMethods directly and
-    // is not visible outside that translation unit) -- both walk Parent the
-    // same way and would find the same declaration.
-    const Symbol* MethodSym = nullptr;
-    for (const Type* Cur = RecvTy.get(); Cur; Cur = Cur->Parent.get()) {
-        Symbol* S = Symtab.lookup(objectMethodKey(Cur->Name, Method));
-        if (S && S->Kind == SymbolKind::Method) { MethodSym = S; break; }
-    }
-    if (!MethodSym) {
+    // resolveObjectType's own VmtSlots inheritance uses (SemaType.cpp),
+    // walking Type::ObjectMethods directly by Parent (Sema::findObjectMethod)
+    // rather than through the composite-key symbol table -- see that
+    // function's own comment (Sema.h) for why (issue #621: a bare-name key
+    // in the ordinary scope chain gets confused by a same-named but
+    // unrelated type declared elsewhere in the program).
+    const auto ML = findObjectMethod(*RecvTy, Method);
+    if (!ML.M) {
         error(Loc, diag::err_object_method_not_found, {RecvTy->Name, Method});
         for (const auto& A : Args) (void)checkExpr(*A);
         return TyErr;
@@ -2804,12 +2828,12 @@ std::shared_ptr<Type> Sema::checkMethodCall(
     // Turbo Tier 5, Cluster A item 7: private-method visibility -- see
     // err_object_private_field/err_object_private_method's own comment
     // (DiagnosticSemaKinds.def) for the confirmed real (whole-module) scope.
-    // MethodSym->Module already carries "where declared" for a Method
-    // symbol via the same generic unit-export stamping every other symbol
-    // kind gets (Sema.cpp/SemaType.cpp's forEachInCurrentScope loops).
-    if (MethodSym->IsMethodPrivate && MethodSym->Module != CurrentUnit_)
-        error(Loc, diag::err_object_private_method,
-              {MethodSym->MethodOwnerType, Method});
+    // ML.Owner->DeclaringModule is the SAME "where declared" a Method
+    // symbol's own Module field carried, just read off the Type graph
+    // ML.Owner was actually found on instead of a second, shadowing-prone
+    // lookup by name.
+    if (ML.M->IsPrivate && ML.Owner->DeclaringModule != CurrentUnit_)
+        error(Loc, diag::err_object_private_method, {ML.Owner->Name, Method});
 
     // Hand off to the SAME arity/argument-type checking an ordinary
     // procedure/function call gets, via a synthetic SymbolKind::Proc
@@ -2818,11 +2842,11 @@ std::shared_ptr<Type> Sema::checkMethodCall(
     // implementation of argument checking.
     Symbol Indirect;
     Indirect.Kind       = SymbolKind::Proc;
-    Indirect.Name       = MethodSym->MethodOwnerType + "." +
-                           (MethodSym->Decl ? MethodSym->Decl->Name : Method);
-    Indirect.IsFunction = MethodSym->IsFunction;
-    Indirect.Params     = MethodSym->Params;
-    Indirect.ReturnType = MethodSym->ReturnType;
+    Indirect.Name       = ML.Owner->Name + "." +
+                           (ML.M->Heading ? ML.M->Heading->Name : Method);
+    Indirect.IsFunction = ML.M->IsFunction;
+    Indirect.Params     = ML.M->Params;
+    Indirect.ReturnType = ML.M->RetType;
     return checkUserDefinedCall(Indirect, Loc, Args, ExpectFunction);
 }
 
@@ -2869,23 +2893,29 @@ std::shared_ptr<Type> Sema::checkInheritedCall(
     // never fills it in without a following identifier).
     const std::string MethodName = Method.empty() ? CurrentProc->Name : Method;
 
-    // Same ancestor-chain walk checkMethodCall itself uses (composite-key
-    // lookup, resolveObjectType's own registration), just starting one level
-    // up: Parent, never OwnerTy itself, so a method can never 'inherited'
-    // its own body.  Walked through the shared_ptr chain itself (not just
-    // raw Type* observation, as before issue #682) so Owner -- the exact
-    // Type object MethodSym was found on -- can be retained and handed back
-    // through \p ImplementingOwnerType: CodeGen needs the real, resolved
-    // ancestor Type::Method (Params with their own IsVar/set-base shape),
-    // not just its name, once the ancestor's own out-of-line body may live
-    // in a translation unit this compile never sees.
-    const Symbol* MethodSym = nullptr;
+    // Same ancestor-chain walk checkMethodCall itself uses (Sema::
+    // findObjectMethod, issue #621 -- Type::ObjectMethods directly, never a
+    // composite-key symbol lookup), just starting one level up: Parent,
+    // never OwnerTy itself, so a method can never 'inherited' its own body.
+    // Walked through the shared_ptr chain itself (not just raw Type*
+    // observation, as before issue #682) so Owner -- the exact Type object
+    // the method was found on -- can be retained and handed back through
+    // \p ImplementingOwnerType: CodeGen needs the real, resolved ancestor
+    // Type::Method (Params with their own IsVar/set-base shape), not just
+    // its name, once the ancestor's own out-of-line body may live in a
+    // translation unit this compile never sees.
+    const Type::Method* MEntry = nullptr;
     std::shared_ptr<Type> Owner;
     for (std::shared_ptr<Type> Cur = OwnerTy.Parent; Cur; Cur = Cur->Parent) {
-        Symbol* Sy = Symtab.lookup(objectMethodKey(Cur->Name, MethodName));
-        if (Sy && Sy->Kind == SymbolKind::Method) { MethodSym = Sy; Owner = Cur; break; }
+        const auto ML = findObjectMethod(*Cur, MethodName);
+        // findObjectMethod itself would keep walking Cur's OWN Parent chain
+        // (an inherited-but-not-redeclared name), which would silently
+        // widen the search past what 'inherited' means here -- ML.Owner ==
+        // Cur.get() is what limits this to a declaration ON Cur itself,
+        // matching the loop's own one-level-at-a-time stepping.
+        if (ML.M && ML.Owner == Cur.get()) { MEntry = ML.M; Owner = Cur; break; }
     }
-    if (!MethodSym) {
+    if (!MEntry) {
         error(Loc, diag::err_inherited_method_not_found, {OwnerTy.Name, MethodName});
         for (const auto& A : Args) (void)checkExpr(*A);
         return TyErr;
@@ -2893,13 +2923,12 @@ std::shared_ptr<Type> Sema::checkInheritedCall(
 
     // Turbo Tier 5, Cluster A item 7: same private-visibility gate
     // checkMethodCall applies -- see its own comment (SemaExpr.cpp).
-    if (MethodSym->IsMethodPrivate && MethodSym->Module != CurrentUnit_)
-        error(Loc, diag::err_object_private_method,
-              {MethodSym->MethodOwnerType, MethodName});
+    if (MEntry->IsPrivate && Owner->DeclaringModule != CurrentUnit_)
+        error(Loc, diag::err_object_private_method, {Owner->Name, MethodName});
 
     ResolvedMethod       = MethodName;
-    ImplementingType     = MethodSym->MethodOwnerType;
-    ImplementingModule   = MethodSym->Module;
+    ImplementingType     = Owner->Name;
+    ImplementingModule   = Owner->DeclaringModule;
     ImplementingOwnerType = Owner;
 
     // Hand off to the SAME arity/argument-type checking an ordinary
@@ -2908,21 +2937,21 @@ std::shared_ptr<Type> Sema::checkInheritedCall(
     // uses just above.
     Symbol Indirect;
     Indirect.Kind       = SymbolKind::Proc;
-    Indirect.Name       = MethodSym->MethodOwnerType + "." +
-                           (MethodSym->Decl ? MethodSym->Decl->Name : MethodName);
-    Indirect.IsFunction = MethodSym->IsFunction;
-    Indirect.Params     = MethodSym->Params;
-    Indirect.ReturnType = MethodSym->ReturnType;
+    Indirect.Name       = Owner->Name + "." +
+                           (MEntry->Heading ? MEntry->Heading->Name : MethodName);
+    Indirect.IsFunction = MEntry->IsFunction;
+    Indirect.Params     = MEntry->Params;
+    Indirect.ReturnType = MEntry->RetType;
 
     if (Method.empty()) {
         // Bare form: no argument list was ever written down to check arity
         // against -- Args is always empty for this form (see this
         // function's own comment above) -- CodeGen instead forwards THIS
         // ACTIVATION'S OWN actual parameter values, by position, straight
-        // into MethodSym's own parameter list.  That is only well-typed
+        // into MEntry's own parameter list.  That is only well-typed
         // when CurrentProc's own declared signature is IDENTICAL (arity,
-        // per-parameter var-ness/type) to MethodSym's: guaranteed already
-        // when CurrentProc is a true VIRTUAL OVERRIDE of MethodSym
+        // per-parameter var-ness/type) to MEntry's: guaranteed already
+        // when CurrentProc is a true VIRTUAL OVERRIDE of MEntry
         // (resolveObjectType's own err_object_virtual_override_signature_
         // mismatch, SemaType.cpp), but NOT when CurrentProc merely statically
         // HIDES an inherited method of the same name (legal here, and common
@@ -2940,12 +2969,19 @@ std::shared_ptr<Type> Sema::checkInheritedCall(
         // hide differing only in a structured parameter's const-ness passed
         // this check before and reached CodeGen as a struct-vs-pointer
         // verifier failure instead of this same clean diagnostic.
-        const Symbol* OwnSym = Symtab.lookup(objectMethodKey(OwnerTy.Name, CurrentProc->Name));
-        bool SignatureOk = OwnSym != nullptr
-            && OwnSym->IsFunction == Indirect.IsFunction
-            && OwnSym->Params.size() == Indirect.Params.size();
-        for (size_t I = 0; SignatureOk && I < OwnSym->Params.size(); ++I) {
-            const auto& P = OwnSym->Params[I];
+        // Issue #621: OwnerTy is already a resolved Type&, not a name to
+        // re-look-up -- CurrentProc's own signature is found directly on
+        // OwnerTy's own ObjectMethods (ML.Owner == &OwnerTy restricts this
+        // to a declaration ON OwnerTy itself, matching the single composite
+        // key this used to ask for rather than an ancestor's).
+        const auto OwnML = findObjectMethod(OwnerTy, CurrentProc->Name);
+        const Type::Method* OwnEntry =
+            (OwnML.M && OwnML.Owner == &OwnerTy) ? OwnML.M : nullptr;
+        bool SignatureOk = OwnEntry != nullptr
+            && OwnEntry->IsFunction == Indirect.IsFunction
+            && OwnEntry->Params.size() == Indirect.Params.size();
+        for (size_t I = 0; SignatureOk && I < OwnEntry->Params.size(); ++I) {
+            const auto& P = OwnEntry->Params[I];
             const auto& Q = Indirect.Params[I];
             if (P.IsVar != Q.IsVar || P.IsUntyped != Q.IsUntyped
                     || P.IsConst != Q.IsConst) { SignatureOk = false; break; }
@@ -2953,8 +2989,8 @@ std::shared_ptr<Type> Sema::checkInheritedCall(
             if (!P.Ty || !Q.Ty || !sameParamType(P.Ty, Q.Ty)) SignatureOk = false;
         }
         if (SignatureOk && Indirect.IsFunction
-                && (!OwnSym->ReturnType || !Indirect.ReturnType
-                    || !isIdenticalType(OwnSym->ReturnType, Indirect.ReturnType)))
+                && (!OwnEntry->RetType || !Indirect.ReturnType
+                    || !isIdenticalType(OwnEntry->RetType, Indirect.ReturnType)))
             SignatureOk = false;
         if (!SignatureOk) {
             error(Loc, diag::err_inherited_bare_signature_mismatch,

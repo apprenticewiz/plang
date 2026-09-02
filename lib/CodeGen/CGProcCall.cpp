@@ -20,6 +20,26 @@ void CGProcCall::emitIoCheckIfNeeded(plang::SourceLocation Loc) {
 }
 
 void CGProcCall::emitCallStmt(const CallStmt& s) {
+    // Turbo Tier 5, issues #571/#623: an unqualified call Sema resolved to
+    // the CURRENT implicit receiver's own method (the enclosing method
+    // body's own Self, or an active 'with objInstance do' block's own
+    // object) rather than to any ordinary declaration -- see
+    // CallStmt::ImplicitMethodReceiverType's own comment (AstStmt.h).
+    // Delegates to the SAME core emitBoundMethodCall New/Init and
+    // Dispose/Done already use, through the reserved binding
+    // CodeGenProcs.cpp/CGWith.cpp bind alongside 'Self'/the with-target's
+    // own fields.
+    if (s.ImplicitMethodReceiverType) {
+        const VarEntry* recv = SymTab.findVar(implicitCallReceiverVarName());
+        if (!recv)
+            codegenICE("implicit method call '" + s.Name + "' has no "
+                       "receiver bound -- Sema should have refused this "
+                       "already");
+        (void)emitBoundMethodCall(recv->ptr, *s.ImplicitMethodReceiverType,
+                                   s.Name, s.Args);
+        return;
+    }
+
     std::string lo = toLower(s.Name);
 
     // ISO §6.6.3.1: a procedural parameter is called through the pair it

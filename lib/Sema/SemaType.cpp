@@ -955,6 +955,22 @@ std::string Sema::objectMethodKey(const std::string& TypeName,
     return toLower(TypeName) + "." + toLower(MethodName);
 }
 
+// See Sema::findObjectMethod's own declaration (Sema.h) for the whole
+// design; defined here rather than left as SemaExpr.cpp/SemaStmt.cpp's own
+// call-site-local walks (as CGProcCall.cpp/CGFuncCall.cpp each keep a fresh
+// copy of the CodeGen-side equivalent) because every Sema call site needs
+// the IDENTICAL walk and this project's established alternative --
+// Symtab.lookup(objectMethodKey(...)) -- already lived here as one shared
+// static method, not duplicated per caller.
+Sema::MethodLookup Sema::findObjectMethod(const Type& RecvTy,
+                                           const std::string& MethodName) {
+    const std::string Lower = toLower(MethodName);
+    for (const Type* Cur = &RecvTy; Cur; Cur = Cur->Parent.get())
+        for (const auto& M : Cur->ObjectMethods)
+            if (toLower(M.Name) == Lower) return {Cur, &M};
+    return {};
+}
+
 namespace {
 /// Walks \p T's own ancestor chain (starting at T itself) for a Method
 /// named \p LowerName (already lower-cased).  Used to find the signature a
@@ -1063,6 +1079,15 @@ std::shared_ptr<Type> Sema::resolveObjectType(const ObjectTypeNode& Node,
     // end' declaration; see PendingObjectTypeName_'s own comment (Sema.h).
     if (DeclName.empty()) {
         error(Node.Loc, diag::err_object_type_anonymous);
+        return TyErr;
+    }
+    // Turbo Tier 5, issue #617: see err_object_type_local_to_proc's own
+    // comment (DiagnosticSemaKinds.def) and ProcBodyNestingDepth_'s own
+    // comment (Sema.h) for why -- matches fpc's own "Local class
+    // definitions are not allowed" rather than reaching CodeGen with a
+    // shape it cannot lower.
+    if (ProcBodyNestingDepth_ > 0) {
+        error(Node.Loc, diag::err_object_type_local_to_proc, {DeclName});
         return TyErr;
     }
 

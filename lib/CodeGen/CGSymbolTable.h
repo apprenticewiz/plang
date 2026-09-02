@@ -40,6 +40,26 @@ struct ProcedureTypeNode;
 // address taken).  Returns null for anything that is not, eventually, a
 // procedural type -- the overwhelming majority of callers' arguments.
 const ProcedureTypeNode* resolveProcTypeAlias(const TypeNode* tn);
+
+// Turbo Tier 5, issues #571/#623: the reserved CGSymbolTable binding name an
+// unqualified call Sema resolved to an IMPLICIT receiver's own method
+// (CallStmt/CallExpr::ImplicitMethodReceiverType) is found under --
+// defined alongside 'Self' itself at a method's own entry
+// (CodeGenProcs.cpp) and alongside an object with-target's own fields
+// (CGWith.cpp), read back by CGProcCall::emitCallStmt/CGFuncCall::
+// emitCallExpr.  A name distinct from "Self" (an explicit 'Self.Field'
+// written inside a nested 'with objInstance do' must keep reaching the
+// ENCLOSING method's own instance, never the with-target), but bound
+// through the SAME CGSymbolTable scope stack "Self"/an ordinary field
+// already is, so the innermost active receiver (an active with-block's own
+// object, if any, else the enclosing method's own Self) is exactly what an
+// unqualified call reaches -- the same shadowing priority a field of the
+// same name already gets for free by being bound in the same nested
+// scopes, under its own real name.  '$' can never appear in a Pascal
+// identifier, so this can never collide with a name the program itself
+// could write (same reasoning as openArrayLowBoundName/
+// openArrayHighBoundName, AstType.h).
+inline const char* implicitCallReceiverVarName() { return "$implicitcallrecv"; }
 }
 
 class CGSymbolTable {

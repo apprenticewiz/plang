@@ -1084,6 +1084,18 @@ void Codegen::Impl::emitFunctionDef(const ProcDecl& proc, bool declareOnly) {
             codegenICE("method '" + proc.OwnerType + "." + proc.Name
                        + "': its own object type has no struct layout");
         defVar("Self", selfArg, selfStructTy);
+        // Turbo Tier 5, issue #571: also bind Self under the reserved
+        // implicit-call-receiver name (implicitCallReceiverVarName,
+        // CGSymbolTable.h) -- CGProcCall::emitCallStmt/CGFuncCall::
+        // emitCallExpr read this back whenever Sema flagged an unqualified
+        // call as resolving to the enclosing method's own implicit Self
+        // (CallStmt/CallExpr::ImplicitMethodReceiverType).
+        // suppressDebugDecl: an internal alias, not a real Pascal name --
+        // nothing new for a debugger to show (same idiom as the schema
+        // by-value parameter copy just below, in this same function).
+        defVar(implicitCallReceiverVarName(), selfArg, selfStructTy,
+               /*typeNode=*/nullptr, /*debugIndirectPtr=*/nullptr,
+               /*suppressDebugDecl=*/true);
         for (const auto& F : proc.ResolvedOwnerType->RecordFields) {
             llvm::Type* fieldTy = nullptr;
             auto* fp = selfFieldPtr(selfArg, *proc.ResolvedOwnerType, F.Name, fieldTy);

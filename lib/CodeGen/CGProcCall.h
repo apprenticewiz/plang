@@ -130,7 +130,12 @@ private:
     /// New(P, Init(...))'s constructor call and Dispose(P, Done)'s
     /// destructor call, neither of which has a real Receiver ExprNode the
     /// way an ordinary 'Obj.Method(...)' does (P^'s storage did not exist
-    /// as a variable before New allocated it).  Otherwise identical to
+    /// as a variable before New allocated it).  Issues #571/#623: reused by
+    /// emitCallStmt's own CallStmt::ImplicitMethodReceiverType branch for
+    /// exactly the same reason -- an unqualified call resolving to the
+    /// enclosing method's own Self or an active with-block's own object
+    /// has no Receiver ExprNode either, only a runtime pointer looked up
+    /// under a reserved CGSymbolTable name.  Otherwise identical to
     /// emitMethodCallStmt's own marshal-and-dispatch tail -- same fresh-copy
     /// convention as methodOwnerType/methodEntryOf (this file's own
     /// anonymous namespace) rather than a shared helper, see their own

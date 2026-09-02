@@ -239,6 +239,22 @@ void CGWith::emitWith(const WithStmt& s) {
                     codegenICE("'with' object has no field named '" + F.Name + "'");
                 SymTab.defVar(F.Name, fp, fieldTy);
             }
+            // Turbo Tier 5, issue #623: also bind the with-target itself
+            // under the reserved implicit-call-receiver name
+            // (implicitCallReceiverVarName, CGSymbolTable.h), so an
+            // unqualified method call inside this with-block (Sema-flagged
+            // via CallStmt/CallExpr::ImplicitMethodReceiverType) can find
+            // its own Self pointer the same way a method body's own 'Self'
+            // already does (CodeGenProcs.cpp) -- CGSymbolTable's ordinary
+            // scope-stack shadowing (innermost wins) is what then makes a
+            // with-block nested inside a method body correctly take
+            // priority over the enclosing method's own Self.
+            // suppressDebugDecl: an internal alias, nothing new for a
+            // debugger to show.
+            SymTab.defVar(implicitCallReceiverVarName(), objPtr,
+                          Types.llvmTypeOfSemaType(*rec->ResolvedType),
+                          /*typeNode=*/nullptr, /*debugIndirectPtr=*/nullptr,
+                          /*suppressDebugDecl=*/true);
             continue;
         }
 

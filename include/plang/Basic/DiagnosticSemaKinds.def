@@ -515,6 +515,18 @@ DIAG(err_unrecognized_type, Error, "unrecognized type expression")
 DIAG(err_object_type_anonymous, Error,
      "object types must be named by a type declaration; an anonymous "
      "object type is not allowed")
+// Turbo Tier 5, issue #617: real Turbo Pascal (confirmed against a local
+// fpc -Mtp build: "Local class definitions are not allowed") has no
+// procedure-local object type either.  Every method's own out-of-line body
+// is emitted as an ordinary, non-nested function taking only 'Self' and its
+// declared parameters -- never a static-link frame the way a genuinely
+// nested PROCEDURE's own body gets one (CodeGenProcs.cpp's method pre-pass)
+// -- so a method of a procedure-local object type trying to reach that
+// procedure's own locals/parameters has no way to.  Unchecked, this reached
+// CodeGen as an LLVM IR verifier failure ("Incorrect number of arguments
+// passed to called function") instead of a clean diagnostic.
+DIAG(err_object_type_local_to_proc, Error,
+     "object type '%0' may not be declared inside a procedure or function")
 // Turbo Tier 5, Cluster A item 1: an ancestor clause names a type that
 // either was never declared at all, or was declared but is not itself an
 // object type -- confirmed against a local fpc -Mtp build for both
