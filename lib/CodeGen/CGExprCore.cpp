@@ -354,6 +354,23 @@ llvm::Value* CGExprCore::emitExpr(const ExprNode& e) {
     if (auto* n = llvm::dyn_cast<BinaryExpr>(&e))  return BinaryOps.emitBinary(*n);
     if (auto* n = llvm::dyn_cast<UnaryExpr>(&e))   return BinaryOps.emitUnary(*n);
     if (auto* n = llvm::dyn_cast<CallExpr>(&e))    return FuncCall.emitCallExpr(*n);
+    // Issue #786: 'S.Area' (or 'p^.Name') with no parentheses, from OUTSIDE
+    // the object's own methods -- Sema::checkField's own IsImplicitMethodCall
+    // flag says E.Field named no actual field, only a parameterless FUNCTION
+    // method -- has to be checked and routed to emitImplicitMethodFieldCall
+    // BEFORE the ExprIsVarStr/ExprIsShortStr FieldExpr branches just below.
+    // A method returning string/ShortString has e.ResolvedType == that
+    // string type same as a genuine string FIELD would, so if those checks
+    // ran first they would take this FieldExpr for a real field and call
+    // FieldAccess.emitFieldGEP on a field that does not exist -- 'object has
+    // no field named ...' from the IR verifier.  See this same guard's twin
+    // further below (kept, for a non-string-returning method) and emitLValue's
+    // own FieldExpr case for the identical ordering requirement there.
+    if (auto* n = llvm::dyn_cast<FieldExpr>(&e); n && n->IsImplicitMethodCall) {
+        llvm::Value* selfPtr = emitLValue(*n->Record);
+        if (!selfPtr) codegenICE("implicit method field access has no receiver address");
+        return FuncCall.emitImplicitMethodFieldCall(*n, selfPtr);
+    }
     // EP §6.4.3.3: a string(n) is carried by its ADDRESS -- every caller that
     // takes one expects a pointer to the { length, bytes } struct, which is
     // what the IdentExpr branch above hands back.  That contract held for an
@@ -378,23 +395,6 @@ llvm::Value* CGExprCore::emitExpr(const ExprNode& e) {
         if (auto* p = emitLValue(e)) return p;
 
     if (auto* n = llvm::dyn_cast<IndexExpr>(&e))   return IndexAccess.emitIndexLoad(*n);
-    // Issue #773: 'S.Area' with no parentheses, from OUTSIDE the object's
-    // own methods -- Sema::checkField's own IsImplicitMethodCall flag says
-    // E.Field named no actual field, only a parameterless FUNCTION method.
-    // Handled here rather than inside CGFieldAccess::emitFieldLoad because
-    // the bound-method-call sequence (CGFuncCall::emitBoundMethodCall) lives
-    // on CGFuncCall, which CGFieldAccess has no handle on -- exactly the
-    // same layering reason the ordinary MethodCallExpr call
-    // (CGFuncCall::emitMethodCallExpr) is not implemented inside
-    // CGFieldAccess either. EmitLValue(*n->Record) gets the receiver's own
-    // address the identical way emitMethodCallExpr's own comment describes
-    // for 'S.Method(...)': it handles both a plain IdentExpr receiver and a
-    // 'P^.Area' DerefExpr one with no object-specific branch of its own.
-    if (auto* n = llvm::dyn_cast<FieldExpr>(&e); n && n->IsImplicitMethodCall) {
-        llvm::Value* selfPtr = emitLValue(*n->Record);
-        if (!selfPtr) codegenICE("implicit method field access has no receiver address");
-        return FuncCall.emitImplicitMethodFieldCall(*n, selfPtr);
-    }
     if (auto* n = llvm::dyn_cast<FieldExpr>(&e))   return FieldAccess.emitFieldLoad(*n);
     if (auto* n = llvm::dyn_cast<DerefExpr>(&e))   return FieldAccess.emitDerefLoad(*n);
     if (auto* n = llvm::dyn_cast<SetLiteralExpr>(&e)) {
@@ -649,6 +649,16 @@ llvm::Value* CGExprCore::emitLValue(const ExprNode& e) {
         return nullptr;
     }
     if (auto* n = llvm::dyn_cast<IndexExpr>(&e))  return IndexAccess.emitIndexGEP(*n);
+    // Issue #786: same ordering requirement as emitExpr's own FieldExpr
+    // case above it -- an implicit-method-call FieldExpr (e.g. 'p^.Name'
+    // resolving to a parameterless FUNCTION, not a real field) names no
+    // actual field, so emitFieldGEP below must never see it.  A caller that
+    // needs this FieldExpr's ADDRESS (a component read off the call's
+    // result, or emitExpr's own VarStr/ShortStr FieldExpr branch) gets one
+    // the same way any other call result does: emitExpr the call and spill
+    // it to a temporary.
+    if (auto* n = llvm::dyn_cast<FieldExpr>(&e); n && n->IsImplicitMethodCall)
+        return spillToTemporary(e);
     if (auto* n = llvm::dyn_cast<FieldExpr>(&e))  return FieldAccess.emitFieldGEP(*n);
     if (auto* n = llvm::dyn_cast<DerefExpr>(&e)) {
         // ISO §6.5.5: f^ is the file's buffer variable, which lives beside the
