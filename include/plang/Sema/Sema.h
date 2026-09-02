@@ -273,8 +273,13 @@ private:
     /// to have — the type of the denoter or component it is standing for.
     /// Null everywhere a value has to name its own type.
     std::shared_ptr<Type> ExpectedValueType_;
-    /// True while checking a module block for which an interface of the same
-    /// name was read, whose declarations the block is being given.
+    /// True while checking a module OR Turbo unit block for which an
+    /// interface of the same name was read, whose declarations the block is
+    /// being given (one scope further out than the block's own).  Used both
+    /// to resolve a heading repeated only by its bare name (borrowing the
+    /// interface's parameter/result types) and, issue #698, to find the
+    /// interface heading a fully-repeated one is expected to conform to,
+    /// since Symtab.lookupCurrent alone cannot see one scope out.
     bool InModuleImplementation_{false};
 
     // --- EP §6.11: module processing helpers ---
@@ -377,6 +382,15 @@ public:
     /// was seen.  Returns true iff no errors were collected -- same contract
     /// as check().
     [[nodiscard]] bool checkUnit(const UnitNode& Unit);
+
+    /// Issue #698: compares each Proc heading a unit's interface (already
+    /// harvested into UnitExports_[Key]) declares against what its
+    /// implementation actually defined for the same name in the CURRENT
+    /// scope -- see the definition (Sema.cpp) for why that scope, and why
+    /// this must run while it is still open.  Diagnoses a mismatched arity,
+    /// parameter type, or return type, and a heading never given a body at
+    /// all.
+    void checkUnitImplConformance(const std::string& Key);
 
     /// The UnitNode this Sema loaded for \p LowerUnitName (already
     /// lowercased), or null if no 'uses' clause this Sema processed ever

@@ -1189,6 +1189,16 @@ size_t Sema::pushUnitUsesScopes(const std::vector<UsedUnit>& Uses) {
     size_t Count = 1;
 
     for (const auto& U : Uses) {
+        // Issue #699: 'System' need not be named at all (it is always
+        // implicitly there, just above), but real TP7/fpc also accept it
+        // being named explicitly -- confirmed against a local `fpc -Mtp`
+        // build.  There is no "system.tui"/"system.pas" on disk for
+        // loadUnitInterfaceExports to find (its exports already live in
+        // registerBuiltins()'s own global scope, not in any unit file), so
+        // this has to be recognized before that lookup runs, the same way
+        // processImports's own isBuiltinModule check short-circuits EP's
+        // built-in pseudo-modules.
+        if (eqCI(U.Name, "System")) continue;
         Symtab.pushScope(/*IsBlock=*/false);
         ++Count;
         const std::string Lower = toLower(U.Name);
@@ -1414,6 +1424,19 @@ void Sema::checkUnitInterfaceOnly(const UnitNode& Unit) {
             // merely uses the unit can do anything with one.
             if (Sym.Kind == SymbolKind::Label) return;
             Sym.Module = Key;
+            // Issue #694: Pascal identifiers are case-insensitive, so a
+            // caller may spell an export differently from how its own unit
+            // declared it (getdate vs GetDate) and Sema resolves it fine --
+            // but CodeGen's mangled symbol name has to be the SAME string on
+            // both ends of the link, and the only spelling both the defining
+            // unit's own compile and every importer can agree on is the one
+            // the interface itself declared.  Recording it here as LinkName
+            // (left as-is if some earlier step, e.g. a rename-on-import,
+            // already set one -- see the Renames handling just below in
+            // processImports) is what CGLinkage::importLinkName consults;
+            // without it, importLinkName falls back to the call site's own
+            // (possibly differently-cased) spelling instead.
+            if (Sym.LinkName.empty()) Sym.LinkName = Sym.Name;
             Exports.push_back(Sym);
         });
     }, /*IsGlobalScope=*/false, /*IsModuleBlock=*/false, /*IsInterfaceBlock=*/true);
@@ -1455,6 +1478,12 @@ bool Sema::checkUnit(const UnitNode& Unit) {
             // current, rather than after checkBlock returns and has already
             // popped it.
             if (Unit.InitBody) checkCompound(*Unit.InitBody);
+            // Issue #698: compare the implementation's own top-level
+            // declarations against the interface's headings while THIS
+            // scope (the implementation block's own) is still current --
+            // see checkUnitImplConformance's own comment for why that
+            // matters.
+            checkUnitImplConformance(Key);
         });
     else if (Unit.InitBody) {
         // No implementation declarations at all, just 'implementation
@@ -1463,6 +1492,16 @@ bool Sema::checkUnit(const UnitNode& Unit) {
         // locals of its own.
         checkCompound(*Unit.InitBody);
     }
+    // Issue #698: whether or not there was an implementation block at all,
+    // nothing has looked for a matching body for any of the interface's own
+    // headings yet UNLESS checkUnitImplConformance ran just above (inside
+    // checkBlock's BeforePop) -- which needs a real block to run inside of.
+    // With none, no name in the interface can possibly have been given a
+    // body, so every heading is unconditionally unimplemented.
+    if (!Unit.ImplementationBlock)
+        for (const auto& Sym : UnitExports_[Key])
+            if (Sym.Kind == SymbolKind::Proc)
+                error(Sym.DeclLoc, diag::err_unit_impl_never_defined, {Sym.Name});
     popUnitUsesScopes(ImplPushed);
     Symtab.popScope(); // the reinjected-interface-declarations scope
     popUnitUsesScopes(IfacePushed);
@@ -1470,6 +1509,56 @@ bool Sema::checkUnit(const UnitNode& Unit) {
     CurrentUnit_ = SavedUnit;
     Symtab.popScope(); // global scope
     return !hasErrors();
+}
+
+// Issue #698: a unit's interface may declare `procedure Foo(X: Integer);`
+// while its implementation defines `procedure Foo(X: LongInt)` (or omits
+// Foo altogether) with nothing ever comparing the two -- the implementation
+// simply shadows the interface's own Proc symbol, unchecked, in the more
+// deeply nested scope checkBlock gives the implementation's own top-level
+// declarations.  This runs from checkUnit's BeforePop, while that scope --
+// the implementation's own, exactly where Turbo requires a matching body to
+// be a TOP-LEVEL declaration -- is still current, so lookupCurrent alone is
+// enough to find it with no risk of a same-named export of some OTHER used
+// unit (sitting in a scope in between) being found instead. Worded and
+// structured like checkOutOfLineMethodBody's own heading comparison (Turbo
+// Tier 5, Cluster A item 1) just above in this file, which is the same
+// interface-heading-vs-body relationship for an object's method.
+void Sema::checkUnitImplConformance(const std::string& Key) {
+    for (const auto& IfaceSym : UnitExports_[Key]) {
+        if (IfaceSym.Kind != SymbolKind::Proc) continue;
+        const Symbol* Impl = Symtab.lookupCurrent(IfaceSym.Name);
+        if (!Impl || Impl->Kind != SymbolKind::Proc || Impl->IsForward) {
+            error(IfaceSym.DeclLoc, diag::err_unit_impl_never_defined, {IfaceSym.Name});
+            continue;
+        }
+        if (Impl->IsFunction != IfaceSym.IsFunction
+                || Impl->Params.size() != IfaceSym.Params.size()) {
+            error(Impl->DeclLoc, diag::err_unit_impl_param_count,
+                  {IfaceSym.Name, std::to_string(Impl->Params.size()),
+                   std::to_string(IfaceSym.Params.size())});
+            continue;
+        }
+        for (size_t I = 0; I < Impl->Params.size(); ++I) {
+            const auto& ImplP  = Impl->Params[I];
+            const auto& IfaceP = IfaceSym.Params[I];
+            if (ImplP.IsUntyped != IfaceP.IsUntyped) {
+                error(Impl->DeclLoc, diag::err_unit_impl_param_type,
+                      {ImplP.Name, IfaceSym.Name,
+                       ImplP.IsUntyped ? "untyped" : ImplP.Ty->Name,
+                       IfaceP.IsUntyped ? "untyped" : IfaceP.Ty->Name});
+                continue;
+            }
+            if (ImplP.IsUntyped) continue;
+            if (!ImplP.Ty || !IfaceP.Ty) continue;
+            if (!sameParamType(ImplP.Ty, IfaceP.Ty))
+                error(Impl->DeclLoc, diag::err_unit_impl_param_type,
+                      {ImplP.Name, IfaceSym.Name, ImplP.Ty->Name, IfaceP.Ty->Name});
+        }
+        if (IfaceSym.IsFunction && Impl->ReturnType && IfaceSym.ReturnType
+                && !isIdenticalType(Impl->ReturnType, IfaceSym.ReturnType))
+            error(Impl->DeclLoc, diag::err_unit_impl_return_type, {IfaceSym.Name});
+    }
 }
 
 // ---------------------------------------------------------------------------

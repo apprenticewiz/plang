@@ -720,6 +720,28 @@ DIAG(err_forward_never_defined, Error,
      "'%0' is declared 'forward' but is never given a defining declaration "
      "in this block")
 
+// Issue #698: a unit's interface heading and its implementation's body for
+// the same name did not previously have anything comparing them, so a
+// mismatched implementation shadowed the interface's own heading unchecked
+// and only failed to LINK, at every caller, once the interface's heading was
+// never actually defined.  Worded like err_object_method_param_count/
+// _param_type/_return_type/_never_defined just above (Turbo Tier 5, Cluster
+// A item 1's own precedent for the exact same interface/body relationship,
+// just for a method instead of a plain unit-level routine); confirmed
+// against a local fpc -Mtp build ("function header doesn't match",
+// "Forward declaration not solved") that both directions are real fpc
+// diagnostics.
+DIAG(err_unit_impl_param_count, Error,
+     "implementation of '%0' has %1 parameter(s) but its interface heading had %2")
+DIAG(err_unit_impl_param_type, Error,
+     "parameter '%0' of '%1': type '%2' does not match its interface "
+     "heading's type '%3'")
+DIAG(err_unit_impl_return_type, Error,
+     "return type of '%0' does not match its interface heading")
+DIAG(err_unit_impl_never_defined, Error,
+     "'%0' is declared in this unit's interface but is never given a "
+     "defining declaration in the implementation")
+
 // EP Tier 5 — Function/Procedure Enhancements
 DIAG(err_protected_param_assigned, Error, "assignment to protected parameter '%0' (EP §6.7.3.1)")
 // EP §6.7.3.7.1 NOTE 2: a conformant-array bound identifier denotes the
