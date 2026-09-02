@@ -14,7 +14,7 @@
 using namespace plang;
 
 // See NumExprKinds in AstBase.h.
-static_assert(NumExprKinds == 19, "a new expression needs a case in checkExpr");
+static_assert(NumExprKinds == 20, "a new expression needs a case in checkExpr");
 
 // ---------------------------------------------------------------------------
 // Comparisons that one operand's type has already settled
@@ -188,6 +188,7 @@ std::shared_ptr<Type> Sema::checkExpr(const ExprNode& E) {
     else if (auto* N = llvm::dyn_cast<CallExpr>(&E))       T = checkCallExpr(*N);
     else if (auto* N = llvm::dyn_cast<MethodCallExpr>(&E)) T = checkMethodCallExpr(*N);
     else if (auto* N = llvm::dyn_cast<InheritedCallExpr>(&E)) T = checkInheritedCallExpr(*N);
+    else if (auto* N = llvm::dyn_cast<IndirectCallExpr>(&E)) T = checkIndirectCallExpr(*N);
     else if (auto* N = llvm::dyn_cast<SetLiteralExpr>(&E)) T = checkSetLit(*N);
     else if (auto* N = llvm::dyn_cast<StructuredValueExpr>(&E)) T = checkStructuredValue(*N);
     else if (auto* N = llvm::dyn_cast<TypeCastExpr>(&E))   T = checkTypeCast(*N);
@@ -341,6 +342,52 @@ std::shared_ptr<Type> Sema::checkIdent(const IdentExpr& E) {
                              || Sym->Kind == SymbolKind::VarParam)) {
                 error(E.Loc, diag::err_untyped_param_bare_use, {E.Name});
                 return TyErr;
+            }
+            // Turbo procedural VALUES (issue #649): a bare read of a
+            // FUNCTION-typed procedural variable is ISO Sec6.7.3's
+            // function-designator -- an implicit zero-argument call --
+            // exactly the way the SymbolKind::Proc arm just below already
+            // reads a plain function's own bare name; fpc -Mtp auto-calls
+            // it too. Skipped for the handful of occurrences that want the
+            // variable's own STORED value instead:
+            //  - E.Resolution == ProcVarRawValue: checkAssign's "f2 := f1"
+            //    arm, checkUnary's '@f1' arm, and Assigned(f1)'s own
+            //    argument check, each of which marks this exact IdentExpr
+            //    node before ever calling checkExpr on it -- see
+            //    IdentResolution::ProcVarRawValue's own comment (AstExpr.h).
+            //  - &E == CurAssignTargetRoot_: this occurrence IS the target
+            //    of the assignment currently being checked ('f1 := ...'),
+            //    reached through checkAssign's OWN 'auto Dst =
+            //    checkExpr(*S.Target)' -- a WRITE, not a read, and the one
+            //    case ProcVarRawValue's own marking cannot cover because
+            //    checkAssign marks S.Value, never S.Target. Without this,
+            //    'f1 := G' (assigning to a procedural variable AT ALL) read
+            //    Dst as f1's RETURN type instead of its own procedural
+            //    type, silently defeating the very isCallable(*Dst) check
+            //    the "f2 := f1"/RoutineReference disambiguation above
+            //    depends on and storing a call's result over the variable's
+            //    own {8-byte pointer} storage -- confirmed with -emit-llvm,
+            //    a `store i16 ... ptr @pasg_fn` truncating a callee's
+            //    return value into 2 of the slot's 8 bytes, leaving the
+            //    rest stale and turning the NEXT indirect call into a wild
+            //    jump. checkAssign's own resultFrameFor/ResultVariable
+            //    check just above in this same function is the identical
+            //    "this occurrence is the assignment target, not a read"
+            //    guard, reused rather than reimplemented, for exactly this
+            //    reason. A Procedure-kind (no result) procedural variable
+            //    has nothing to call FOR in this value-producing context,
+            //    so it is left exactly as before -- its own declared type,
+            //    which no value-context consumer here (write, an operand,
+            //    ...) accepts anyway.
+            if ((Sym->Kind == SymbolKind::Var || Sym->Kind == SymbolKind::VarParam)
+                    && E.Resolution != IdentExpr::IdentResolution::ProcVarRawValue
+                    && &E != CurAssignTargetRoot_
+                    && Sym->declaredType()->Kind == TypeKind::Function) {
+                if (!Sym->declaredType()->Params.empty()) {
+                    error(E.Loc, diag::err_function_requires_args, {E.Name});
+                    return TyErr;
+                }
+                return Sym->declaredType()->RetType ? Sym->declaredType()->RetType : TyErr;
             }
             return Sym->hasDeclaredType() ? Sym->declaredType() : TyErr;
         case SymbolKind::Proc:
@@ -1147,10 +1194,24 @@ std::shared_ptr<Type> Sema::checkUnary(const UnaryExpr& E) {
     // identifier -- an implicit zero-argument call for a function, or
     // err_proc_as_value outright for a procedure -- to what is written here
     // as this operator's OWN operand, not an ordinary read.
+    //
+    // Issue #649: '@f' where f is ALREADY a procedural variable (rather
+    // than a declared routine) is an ordinary address-of a variable --
+    // '^TFn', the same as '@' on any other variable's type -- and needs the
+    // identical protection from checkIdent's own new auto-call default:
+    // without it, '@f' would take the address of f's CALL RESULT's type
+    // instead of f's own storage.  Marked here (mirroring checkAssign's
+    // identical carve-out, SemaStmt.cpp) rather than resolved directly:
+    // isProcVarNameCandidate's own comment (Sema.h) explains why the
+    // generic checkExpr(*E.Operand) just below already answers correctly
+    // once the flag is set.
     if (E.Op == TokenKind::At) {
-        if (auto* Id = llvm::dyn_cast<IdentExpr>(E.Operand.get());
-                Id && isRoutineNameCandidate(*Id))
-            return checkRoutineValue(*Id);
+        if (auto* Id = llvm::dyn_cast<IdentExpr>(E.Operand.get())) {
+            if (isRoutineNameCandidate(*Id))
+                return checkRoutineValue(*Id);
+            if (isProcVarNameCandidate(*Id))
+                Id->Resolution = IdentExpr::IdentResolution::ProcVarRawValue;
+        }
     }
 
     auto T = checkExpr(*E.Operand);
@@ -1901,7 +1962,19 @@ std::shared_ptr<Type> Sema::checkCallExpr(const CallExpr& E) {
         // shape check just above (issue #261's own class of gap: an argument
         // that type-checked regardless reached codegen with nothing there to
         // lower it correctly).
+        //
+        // Issue #649: Assigned always wants a bare procedural-VARIABLE
+        // argument's own raw pointer value -- never a call through it --
+        // exactly like '@' and the "f2 := f1" assignment idiom just above
+        // do (isProcVarNameCandidate's own comment, Sema.h), so this is
+        // marked ahead of checkExpr the identical way, unconditionally
+        // (Assigned has no destination TYPE of its own the way an
+        // assignment target does, so there is no other reading to
+        // disambiguate against here).
         if (Lo == "assigned" && !E.Args.empty()) {
+            if (auto* Id = llvm::dyn_cast<IdentExpr>(E.Args[0].get());
+                    Id && isProcVarNameCandidate(*Id))
+                Id->Resolution = IdentExpr::IdentResolution::ProcVarRawValue;
             auto ArgTy = checkExpr(*E.Args[0]);
             if (ArgTy->isError()) return TyBool;
             if (ArgTy->Kind != TypeKind::Pointer && !isCallable(*ArgTy)) {
@@ -2939,6 +3012,57 @@ std::shared_ptr<Type> Sema::checkMethodCallExpr(const MethodCallExpr& E) {
     return checkMethodCall(*E.Receiver, E.Method, E.Loc, E.Args, /*ExpectFunction=*/true);
 }
 
+// Turbo procedural VALUES (issue #648): shared logic behind
+// checkIndirectCallExpr (ExpectFunction=true) and checkIndirectCallStmt
+// (SemaStmt.cpp, ExpectFunction=false) -- the same checkMethodCall/
+// checkMethodCallExpr/checkMethodCallStmt split just above, applied to an
+// arbitrary CALLEE EXPRESSION instead of a receiver plus a method name.
+std::shared_ptr<Type> Sema::checkIndirectCall(
+        const ExprNode& Callee, SourceLocation Loc,
+        std::span<const std::unique_ptr<ExprNode>> Args, bool ExpectFunction) {
+    auto CalleeTy = checkExpr(Callee);
+    if (CalleeTy->isError()) {
+        for (const auto& A : Args) (void)checkExpr(*A);
+        return TyErr;
+    }
+    if (!isCallable(*CalleeTy)) {
+        error(Loc, diag::err_not_callable, {CalleeTy->Name});
+        for (const auto& A : Args) (void)checkExpr(*A);
+        return TyErr;
+    }
+    // See checkIndirectCall's own declaration (Sema.h) and
+    // err_indirect_call_nested_proc_param's own comment
+    // (DiagnosticSemaKinds.def) for why this combination is refused
+    // instead of handed to CodeGen, which cannot yet build it.
+    for (const auto& P : CalleeTy->Params) {
+        if (P.Ty && isCallable(*P.Ty)) {
+            error(Loc, diag::err_indirect_call_nested_proc_param, {CalleeTy->Name});
+            for (const auto& A : Args) (void)checkExpr(*A);
+            return TyErr;
+        }
+    }
+    // Hand off to the SAME arity/argument-type checking an ordinary
+    // procedure/function call gets, via a synthetic SymbolKind::Proc
+    // stand-in -- the identical trick checkMethodCall/checkUserDefinedCall's
+    // own procedural-VARIABLE arm already use, so this is not a second
+    // implementation of argument checking.  Name is only ever read back for
+    // a diagnostic (e.g. err_wrong_arg_count), never used to look anything
+    // up -- CalleeTy->Name is whatever describeCallable already produced for
+    // this procedural type ("procedure(integer)"), which reads sensibly
+    // there even with no real routine name behind it.
+    Symbol Indirect;
+    Indirect.Kind       = SymbolKind::Proc;
+    Indirect.Name       = CalleeTy->Name;
+    Indirect.IsFunction  = CalleeTy->Kind == TypeKind::Function;
+    Indirect.Params      = CalleeTy->Params;
+    Indirect.ReturnType  = CalleeTy->RetType;
+    return checkUserDefinedCall(Indirect, Loc, Args, ExpectFunction);
+}
+
+std::shared_ptr<Type> Sema::checkIndirectCallExpr(const IndirectCallExpr& E) {
+    return checkIndirectCall(*E.Callee, E.Loc, E.Args, /*ExpectFunction=*/true);
+}
+
 // Turbo Tier 5, issue #509: the shared ancestor-resolution logic behind
 // checkInheritedCallStmt (SemaStmt.cpp, ExpectFunction = false) and
 // checkInheritedCallExpr (just below, ExpectFunction = true) -- the same
@@ -3308,9 +3432,32 @@ void Sema::checkProcedureActual(const Type& Formal, const std::string& ParamName
         error(Arg.Loc, diag::err_proc_param_needs_proc_name, {ParamName});
         return;
     }
-    const Symbol* S = Symtab.lookup(Id->Name);
+    Symbol* S = Symtab.lookup(Id->Name);
     if (!S) {
         error(Arg.Loc, diag::err_undefined_procedure, {Id->Name});
+        return;
+    }
+    // Turbo procedural VALUES (issue #647): a VARIABLE that already holds a
+    // procedural value is just as valid an actual for a procedural
+    // PARAMETER formal as a bare routine name is -- its own declared type
+    // IS the signature to check congruity against, with no Symbol::Params/
+    // IsFunction/ReturnType stand-in to build the way the SymbolKind::Proc
+    // arm below does, since a Var already carries its whole type as one
+    // Type object.  CodeGen wraps the variable's own flat entry-point
+    // pointer in a thunk that repurposes the {entry point, frame} pair's
+    // frame slot to carry it (ClosureAndCallABI::pushProcParamArgs /
+    // procVarRelayThunk) -- the same pair shape every OTHER actual for this
+    // kind of formal already arrives in, so nothing downstream of Sema
+    // needs to tell the two apart.
+    if ((S->Kind == SymbolKind::Var || S->Kind == SymbolKind::VarParam)
+            && S->hasDeclaredType() && isCallable(*S->declaredType())) {
+        S->Referenced = true;
+        if (!congruousSignature(Formal, *S->declaredType())) {
+            const std::string Want = describeCallable(Formal);
+            const std::string Got  = describeCallable(*S->declaredType());
+            error(Arg.Loc, diag::err_proc_param_not_congruous,
+                  {Id->Name, Got, ParamName, Want});
+        }
         return;
     }
     // ISO §6.6.3.1: a required procedure or function is not an ordinary one —
@@ -3351,6 +3498,12 @@ void Sema::checkProcedureActual(const Type& Formal, const std::string& ParamName
 bool Sema::isRoutineNameCandidate(const IdentExpr& Id) const {
     const Symbol* S = Symtab.lookup(Id.Name);
     return S && S->Kind == SymbolKind::Proc;
+}
+
+bool Sema::isProcVarNameCandidate(const IdentExpr& Id) const {
+    const Symbol* S = Symtab.lookup(Id.Name);
+    return S && (S->Kind == SymbolKind::Var || S->Kind == SymbolKind::VarParam)
+              && S->hasDeclaredType() && isCallable(*S->declaredType());
 }
 
 std::shared_ptr<Type> Sema::checkRoutineValue(const IdentExpr& Id) {

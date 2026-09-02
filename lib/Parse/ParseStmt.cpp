@@ -385,6 +385,23 @@ std::unique_ptr<StmtNode> Parser::finishLvalueStatement(std::unique_ptr<ExprNode
         Node->Method   = Fe->Field;
         return Node;
     }
+    // Turbo procedural VALUES (issue #648): 'a[i](args);' / 'p^(args);' --
+    // Lval is already an IndirectCallExpr (parsePostfix built one the
+    // moment it saw '(' after a non-identifier postfix chain -- see that
+    // function's own comment, ParseExpr.cpp) -- becomes an
+    // IndirectCallStmt the same way MethodCallExpr becomes MethodCallStmt
+    // just above, just with a Callee instead of a Receiver+Method.  Any
+    // further '.', '^' or '[' reaching into this call's own result was
+    // already consumed by that SAME parsePostfix loop before Lval was
+    // ever returned here, unlike CallStmt's own name-based form just
+    // above -- no separate recursive re-entry is needed.
+    if (auto* Ic = llvm::dyn_cast<IndirectCallExpr>(Lval.get())) {
+        auto Node    = std::make_unique<IndirectCallStmt>();
+        Node->Loc    = Ic->Loc;
+        Node->Callee = std::move(Ic->Callee);
+        Node->Args   = std::move(Ic->Args);
+        return Node;
+    }
 
     emitError(Lval->Loc, diag::err_expected_assign_after_var);
     return nullptr;

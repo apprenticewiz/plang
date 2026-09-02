@@ -1105,6 +1105,17 @@ DIAG(err_procval_of_proc_param, Error,
      "'%0' is a procedural parameter and cannot be used as a procedural "
      "value; what routine it is bound to at run time -- possibly a nested "
      "one -- is not known here")
+// Turbo procedural VALUES, issue #648: a call reached through an arbitrary
+// procedural-typed EXPRESSION ('a[i](args)', 'p^(args)') rather than a
+// declared routine name or a procedural PARAMETER -- CodeGen builds this
+// call's signature straight from the callee's resolved Type (there is no
+// single AST ProcedureTypeNode it was declared with in general), which
+// cannot yet build the {entry point, frame} pair a NESTED procedural
+// parameter within that signature would need.  Refused here rather than
+// silently mismarshalled or reaching an internal compiler error.
+DIAG(err_indirect_call_nested_proc_param, Error,
+     "'%0' has a procedural parameter of its own, which is not supported "
+     "when calling through an expression rather than a name")
 // TP-only: Assigned(p) restricts its argument to a pointer or procedural
 // value the same way Card restricts its own to a set (err_set_argument) --
 // an arbitrary expression has no nil to compare against.

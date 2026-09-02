@@ -14,7 +14,7 @@ using namespace plang;
 
 // See NumStmtKinds in AstBase.h.  checkStmt returns quietly for a statement it
 // does not know, which for a checker means the statement was approved.
-static_assert(NumStmtKinds == 14, "a new statement needs a case in checkStmt");
+static_assert(NumStmtKinds == 15, "a new statement needs a case in checkStmt");
 
 // ---------------------------------------------------------------------------
 // Statement checking
@@ -30,6 +30,7 @@ void Sema::checkStmt(const StmtNode* Stmt) {
     if (auto* S = llvm::dyn_cast<CallStmt>(Stmt))      { checkCallStmt(*S); return; }
     if (auto* S = llvm::dyn_cast<MethodCallStmt>(Stmt)) { checkMethodCallStmt(*S); return; }
     if (auto* S = llvm::dyn_cast<InheritedCallStmt>(Stmt)) { checkInheritedCallStmt(*S); return; }
+    if (auto* S = llvm::dyn_cast<IndirectCallStmt>(Stmt)) { checkIndirectCallStmt(*S); return; }
     // Structured statements: push onto StructStack so checkGoto can determine
     // whether a goto would jump INTO this statement from outside it (ISO §6.8.1).
     if (auto* S = llvm::dyn_cast<IfStmt>(Stmt)) {
@@ -308,10 +309,25 @@ void Sema::checkAssign(const AssignStmt& S) {
     // here: checkUnary's own arm resolves it the same way from the operator
     // alone, so checkExpr(*S.Value) below already gets the right answer for
     // that spelling once it recurses into checkUnary.
+    //
+    // Issue #649: the identical disambiguation applies when g is ALREADY a
+    // procedural VARIABLE rather than a declared routine ("f2 := f1" copying
+    // one procedural value into another) -- checkIdent's own new default for
+    // a bare, function-typed procedural variable is to auto-call it
+    // (ISO Sec6.7.3's function-designator, matching a plain function's own
+    // bare name), so without this, "f2 := f1" would call f1 and try to
+    // assign its RESULT to f2 instead of copying f1's value.  Marked here,
+    // ahead of checkExpr, rather than through a checkRoutineValue-shaped
+    // dedicated resolver: isProcVarNameCandidate's own comment (Sema.h)
+    // explains why the ordinary checkExpr/checkIdent path already answers
+    // correctly once Id.Resolution says which reading this occurrence is.
     if (!Src && isCallable(*Dst)) {
-        if (auto* Id = llvm::dyn_cast<IdentExpr>(S.Value.get());
-                Id && isRoutineNameCandidate(*Id))
-            Src = checkRoutineValue(*Id);
+        if (auto* Id = llvm::dyn_cast<IdentExpr>(S.Value.get())) {
+            if (isRoutineNameCandidate(*Id))
+                Src = checkRoutineValue(*Id);
+            else if (isProcVarNameCandidate(*Id))
+                Id->Resolution = IdentExpr::IdentResolution::ProcVarRawValue;
+        }
     }
     if (!Src) Src = checkExpr(*S.Value);
 
@@ -940,8 +956,13 @@ void Sema::checkCallStmt(const CallStmt& S) {
         // result discarded) -- same shape check as checkCallExpr's own arm,
         // duplicated here because checkCallExpr is never reached for a
         // builtin called this way (mirrors eof/eoln/position/... below,
-        // which have the identical split for the same reason).
+        // which have the identical split for the same reason).  Issue #649:
+        // same unconditional ProcVarRawValue marking as checkCallExpr's own
+        // arm (SemaExpr.cpp) -- see its comment there.
         if (Lo == "assigned" && !S.Args.empty()) {
+            if (auto* Id = llvm::dyn_cast<IdentExpr>(S.Args[0].get());
+                    Id && isProcVarNameCandidate(*Id))
+                Id->Resolution = IdentExpr::IdentResolution::ProcVarRawValue;
             auto ArgTy = checkExpr(*S.Args[0]);
             if (!ArgTy->isError() && ArgTy->Kind != TypeKind::Pointer
                     && !isCallable(*ArgTy))
@@ -2254,6 +2275,16 @@ bool Sema::checkImplicitMethodCallStmt(const CallStmt& S) {
 void Sema::checkMethodCallStmt(const MethodCallStmt& S) {
     auto RetTy = checkMethodCall(*S.Receiver, S.Method, S.Loc, S.Args,
                                   /*ExpectFunction=*/false);
+    S.ResolvedType = (RetTy && !RetTy->isError()) ? RetTy : nullptr;
+}
+
+// Turbo procedural VALUES (issue #648): 'a[i](args);' / 'p^(args);' used as
+// a statement -- see Sema::checkIndirectCall's own comment (SemaExpr.cpp)
+// for the shared logic with checkIndirectCallExpr, and
+// IndirectCallStmt::ResolvedType's own comment (AstStmt.h) for the Turbo
+// `{$X+}` result-discard mirror of CallStmt/MethodCallStmt's identical field.
+void Sema::checkIndirectCallStmt(const IndirectCallStmt& S) {
+    auto RetTy = checkIndirectCall(*S.Callee, S.Loc, S.Args, /*ExpectFunction=*/false);
     S.ResolvedType = (RetTy && !RetTy->isError()) ? RetTy : nullptr;
 }
 

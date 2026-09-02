@@ -230,6 +230,28 @@ struct InheritedCallStmt : StmtNode {
     mutable std::shared_ptr<Type> ImplementingOwnerType;
 };
 
+/// Turbo procedural VALUES (issue #648): a call through an arbitrary
+/// procedural-typed EXPRESSION used as a STATEMENT -- 'a[i](args);'
+/// (an array element), 'p^(args);' (a dereferenced pointer to a
+/// procedural value).  See IndirectCallExpr (AstExpr.h) for the
+/// expression-context sibling and for the whole design; this is built by
+/// Parser::finishLvalueStatement the same way MethodCallExpr becomes
+/// MethodCallStmt just above -- Lval already IS an IndirectCallExpr by
+/// the time finishLvalueStatement sees it (parsePostfix built it), so its
+/// two fields are moved across rather than re-parsed.
+struct IndirectCallStmt : StmtNode {
+    static bool classof(const Node* n) { return n->Kind == NodeKind::IndirectCallStmt; }
+    IndirectCallStmt() : StmtNode(NodeKind::IndirectCallStmt) {}
+    std::unique_ptr<ExprNode>              Callee;  /// procedural-typed expression called through
+    std::vector<std::unique_ptr<ExprNode>> Args;    /// actual arguments, in order
+
+    /// Turbo `{$X+}`: mirrors CallStmt::ResolvedType/MethodCallStmt::
+    /// ResolvedType exactly -- the callee's Sema-resolved return type when
+    /// a function was let through as a statement with its result
+    /// discarded, null for a procedure or any error.
+    mutable std::shared_ptr<Type> ResolvedType;
+};
+
 struct WithStmt : StmtNode {
     static bool classof(const Node* n) { return n->Kind == NodeKind::WithStmt; }
     WithStmt() : StmtNode(NodeKind::WithStmt) {}

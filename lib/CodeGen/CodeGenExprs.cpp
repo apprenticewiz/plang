@@ -2,7 +2,7 @@
 using namespace plang;
 
 // See NumExprKinds in AstBase.h.
-static_assert(NumExprKinds == 19, "a new expression needs a case in emitExpr");
+static_assert(NumExprKinds == 20, "a new expression needs a case in emitExpr");
 
 // ====================================================================
 // Type coercion helpers

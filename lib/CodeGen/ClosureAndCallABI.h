@@ -91,8 +91,29 @@ public:
     /// anything.
     llvm::Function* procParamThunk(llvm::Function* target,
                                    const plang::ProcedureTypeNode& node);
+    /// Issue #647: a procedural-VARIABLE actual relayed into a procedural
+    /// PARAMETER formal -- unlike procParamThunk, there is no single
+    /// compile-time \p target to wrap (the variable may hold any routine
+    /// congruous with \p node by the time this call runs), so this is one
+    /// thunk SHARED by every procedural-variable actual of a given
+    /// signature rather than one per (target, signature) pair. Built with
+    /// \p node's own procParamFnType shape (a leading frame parameter, present
+    /// in every procedural-parameter formal's calling convention -- see
+    /// procParamFnType's own comment) but repurposes that frame slot to
+    /// smuggle across the one thing a flat procedural variable actually has
+    /// and a compile-time thunk cannot supply: the real, run-time-only
+    /// entry point. pushProcParamArgs hands this thunk as the "entry point"
+    /// half of the pair and the variable's own loaded flat pointer as the
+    /// "frame" half; this thunk then calls THAT value through \p node's own
+    /// procVarFnType shape (no frame of its own -- a procedural variable is
+    /// never assigned a nested/capturing routine, Sema::checkRoutineValue),
+    /// forwarding every other argument unchanged.
+    llvm::Function* procVarRelayThunk(const plang::ProcedureTypeNode& node);
     /// Pushes the (entry point, frame) pair for a procedure/function named
-    /// as an actual argument.
+    /// as an actual argument -- or, per issue #647, for a procedural
+    /// VARIABLE named as one (wrapped through procVarRelayThunk, its own
+    /// loaded flat pointer riding in the frame slot -- see that function's
+    /// own comment).
     void pushProcParamArgs(std::vector<llvm::Value*>& args, const plang::ExprNode& arg,
                            const plang::ProcedureTypeNode& node);
     /// Emits a call through procedural parameter \p ve.  Returns null for a
@@ -114,6 +135,29 @@ public:
     /// this feature deliberately builds ALONGSIDE rather than reshapes.
     llvm::Value* emitProcVarCall(const VarEntry& ve,
                                  std::span<const std::unique_ptr<plang::ExprNode>> argExprs);
+
+    /// Turbo procedural VALUES (issue #648): a call through an arbitrary
+    /// procedural-typed EXPRESSION -- 'a[i](args)', 'p^(args)' -- rather
+    /// than through a named procedural VARIABLE's own VarEntry
+    /// (emitProcVarCall) or a procedural PARAMETER's {entry point, frame}
+    /// pair (emitProcParamCall). \p calleeAddr is that expression's own
+    /// LVALUE ADDRESS (an ordinary flat-pointer slot, loaded the same way
+    /// emitProcVarCall reads ve.ptr -- there is no frame, for the identical
+    /// reason: Sema::checkRoutineValue never lets a nested/capturing
+    /// routine reach a procedural-typed VALUE in the first place, and that
+    /// is exactly what this expression's own static type denotes). \p fnTy
+    /// is Callee's Sema-resolved Procedure/Function Type. Builds its own
+    /// LLVM FunctionType straight from \p fnTy (fnTypeFromSemaType) rather
+    /// than procVarFnType's ProcedureTypeNode walk, since there is in
+    /// general no single AST ProcedureTypeNode this callee's type was
+    /// declared with (it may have been reached through any number of
+    /// array/pointer layers) -- Sema::checkIndirectCall has already refused
+    /// a \p fnTy with a procedural parameter of its own, so unlike
+    /// procVarFnType/emitProcVarCall this never has to build that
+    /// {entry point, frame} shape for one of \p fnTy's own parameters.
+    /// Returns null for a procedural (void) target.
+    llvm::Value* emitIndirectCall(llvm::Value* calleeAddr, const plang::Type& fnTy,
+                                  std::span<const std::unique_ptr<plang::ExprNode>> argExprs);
 
 private:
     llvm::LLVMContext& Ctx;
@@ -156,6 +200,14 @@ private:
     std::map<std::pair<llvm::Function*, llvm::FunctionType*>, llvm::Function*>
         procParamThunks_;
 
+    /// Issue #647: procVarRelayThunk's own cache, keyed by the OUTER
+    /// (procParamFnType) signature alone -- there is no per-target
+    /// dimension here the way procParamThunks_ has one, since this thunk
+    /// forwards to whatever the frame slot hands it at run time rather than
+    /// to a single compile-time Function*, so one thunk per signature
+    /// serves every procedural-variable actual of that shape.
+    std::map<llvm::FunctionType*, llvm::Function*> procVarRelayThunks_;
+
     /// Discriminants a schema formal of this denoter takes, or 0 (EP
     /// §6.4.7) -- trivial enough to duplicate rather than bridge, reading
     /// only the denoter's own resolved Sema type.
@@ -184,4 +236,13 @@ private:
     static bool needsStructReturnSpill(const plang::Type* T) {
         return varStrTypeOf(T) != nullptr || shortStrTypeOf(T) != nullptr;
     }
+    /// emitIndirectCall's own LLVM FunctionType, built directly from \p fnTy
+    /// (a Procedure/Function semantic Type) rather than from an AST
+    /// ProcedureTypeNode the way procParamFnType/procVarFnType are -- see
+    /// emitIndirectCall's own comment for why there is no single such
+    /// TypeNode to walk here.  \p fnTy's own Params are known (by
+    /// Sema::checkIndirectCall's own refusal) to contain no procedural
+    /// parameter of their own, so unlike procVarFnType this never has to
+    /// build that nested {entry point, frame} shape.
+    llvm::FunctionType* fnTypeFromSemaType(const plang::Type& fnTy);
 };

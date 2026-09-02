@@ -148,6 +148,29 @@ struct IdentExpr : ExprNode {
         /// call" dispatch, so a routine reference is never accidentally
         /// invoked instead of taken.
         RoutineReference,
+        /// Turbo procedural VALUES (issue #649): this identifier names a
+        /// procedural-typed VARIABLE (SymbolKind::Var/VarParam -- an
+        /// ordinary declaration, never SymbolKind::Proc; RoutineReference
+        /// above is that case) and this occurrence wants its own STORED
+        /// value read, not an implicit call through it. checkIdent's
+        /// default for a bare, FUNCTION-typed procedural variable is now to
+        /// auto-call it, exactly like a plain function's own bare name
+        /// already does (ISO Sec6.7.3) -- fpc -Mtp does too, and refusing to
+        /// made 'writeln(fn)' and 'writeln(G)' read the same syntax two
+        /// different ways depending only on whether G's value had been
+        /// materialized into a procedural variable first. This is the one
+        /// carve-out: set (mirroring RoutineReference's identical carve-out
+        /// for a bare routine NAME, just above) by the same few syntactic
+        /// positions that already special-case RoutineReference -- the
+        /// direct RHS of an assignment whose target's type is itself
+        /// callable (checkAssign), the direct operand of `@` (checkUnary)
+        /// -- plus Assigned's own argument (checkCallExpr/checkCallStmt),
+        /// which unlike those two has no destination type of its own to
+        /// disambiguate by and so always wants the raw value. Read by
+        /// codegen (CGExprCore's emitExpr) to skip the "a bare
+        /// function-typed procedural variable auto-calls" rule it
+        /// otherwise applies by default -- see checkIdent's own comment.
+        ProcVarRawValue,
     };
     mutable IdentResolution Resolution{IdentResolution::Ordinary};
 };
@@ -411,6 +434,40 @@ struct InheritedCallExpr : ExprNode {
     /// own comment (AstStmt.h) -- identical purpose and lifetime, just for
     /// the expression form.
     mutable std::shared_ptr<Type> ImplementingOwnerType;
+};
+
+/// Turbo procedural VALUES (issue #648): a call reached through an
+/// arbitrary procedural-typed EXPRESSION -- 'a[i](args)' (an array
+/// element), 'p^(args)' (a dereferenced pointer to a procedural value) --
+/// rather than through a bare NAME (CallExpr, resolved by spelling
+/// against the symbol table) or a genuine object method (MethodCallExpr,
+/// receiver + method name).  Built by Parser::parsePostfix whenever '('
+/// follows a postfix chain that is not itself a bare IdentExpr (still
+/// built as an ordinary CallExpr one token earlier, before postfix
+/// chaining even starts -- parseFactor's own Identifier arm) and not a
+/// '.identifier(' (built as MethodCallExpr instead, by this same
+/// function's own Dot case).  Sema (Sema::checkIndirectCall) confirms
+/// Callee's own resolved type is itself callable (Procedure/Function) the
+/// same way checkUserDefinedCall's procedural-VARIABLE arm already does
+/// for a bare name, and reports err_not_callable otherwise; CodeGen
+/// (ClosureAndCallABI::emitIndirectCall) reads Callee's address the same
+/// way every other indirect access already does (emitLValue) and builds
+/// its own LLVM call signature straight from that resolved Type, since
+/// there is no single AST ProcedureTypeNode this callee's type was
+/// declared with in general.
+///
+/// One of the six/seven "chain-shaped" node kinds a long postfix
+/// expression ('f()()()...()') can build arbitrarily deep through
+/// Parser::parsePostfix's own iterative loop -- AstExprDestroy.cpp tears
+/// this down the same non-recursive way it already does for
+/// IndexExpr/FieldExpr/DerefExpr/BinaryExpr/SubstringExpr/MethodCallExpr,
+/// through its own Callee field, for the identical reason (issue #551).
+struct IndirectCallExpr : ExprNode {
+    static bool classof(const Node* n) { return n->Kind == NodeKind::IndirectCallExpr; }
+    IndirectCallExpr() : ExprNode(NodeKind::IndirectCallExpr) {}
+    ~IndirectCallExpr();
+    std::unique_ptr<ExprNode>              Callee;  /// procedural-typed expression called through
+    std::vector<std::unique_ptr<ExprNode>> Args;    /// actual arguments, in order
 };
 
 } // namespace plang

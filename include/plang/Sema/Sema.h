@@ -1159,6 +1159,20 @@ private:
     // self-guarding with a null return, so every call site is explicit about
     // when it is and is not asking this question.
     [[nodiscard]] std::shared_ptr<Type> checkRoutineValue(const IdentExpr& Id);
+    // Issue #649: isRoutineNameCandidate's own counterpart for a procedural-
+    // typed VARIABLE rather than a declared routine -- true only when
+    // Symtab finds a callable-typed SymbolKind::Var/VarParam under \p Id's
+    // name. A caller that finds this true and wants \p Id's own stored
+    // value (not an implicit call through it -- see checkIdent's own
+    // comment on the auto-call default this is the exception to) marks
+    // \p Id.Resolution = ProcVarRawValue itself, directly (there is no
+    // checkRoutineValue-style dedicated resolver: unlike a routine NAME,
+    // reading a Var's own value never needs a nested/capture refusal --
+    // Sema::checkAssign's own procedural-VALUE arm already refuses a
+    // capturing routine at the assignment that would put one in this
+    // variable -- so the ordinary checkExpr/checkIdent path, once the flag
+    // is set, already answers correctly with no second implementation).
+    [[nodiscard]] bool isProcVarNameCandidate(const IdentExpr& Id) const;
 
     // Folds both bounds of an index type or subrange, reporting ID against
     // whichever is not constant.  Nothing means the type cannot be formed.
@@ -1201,6 +1215,10 @@ private:
     /// search for Method (or, for the bare form, CurrentProc's own name)
     /// starts at that Parent, never at OwnerType itself.
     void checkInheritedCallStmt(const InheritedCallStmt& S);
+    /// Turbo procedural VALUES (issue #648): 'a[i](args);' / 'p^(args);' --
+    /// see checkIndirectCall's own comment for the shared logic with
+    /// checkIndirectCallExpr.
+    void checkIndirectCallStmt(const IndirectCallStmt& S);
     /// Turbo Tier 5, Cluster A item 6: 'new(p, Ctor(args))' where p's
     /// pointee type is Pointee, an object type -- the second argument is
     /// not a schema discriminant or a variant case-constant (the ordinary
@@ -1374,6 +1392,31 @@ private:
         std::string& ResolvedMethod, std::string& ImplementingType,
         std::string& ImplementingModule,
         std::shared_ptr<Type>& ImplementingOwnerType);
+    /// Turbo procedural VALUES (issue #648): 'a[i](args)' / 'p^(args)' used
+    /// as a value.  See checkIndirectCall's own comment (SemaExpr.cpp) for
+    /// the shared logic with checkIndirectCallStmt (SemaStmt.cpp) -- the
+    /// same checkMethodCallExpr/checkMethodCall split above, applied to an
+    /// arbitrary procedural-typed CALLEE EXPRESSION instead of a receiver
+    /// plus a method name.
+    [[nodiscard]] std::shared_ptr<Type> checkIndirectCallExpr(const IndirectCallExpr& E);
+    /// Shared logic behind checkIndirectCallExpr and checkIndirectCallStmt
+    /// (SemaStmt.cpp): type-checks \p Callee, confirms its resolved type is
+    /// itself callable (Procedure/Function), and hands off to
+    /// checkUserDefinedCall through the same synthetic-Symbol trick
+    /// checkMethodCall/checkUserDefinedCall's own procedural-VARIABLE arm
+    /// already use, so arity/congruity/argument-type checking is not a
+    /// second, independent copy.  A parameter that is itself procedural is
+    /// refused (err_indirect_call_nested_proc_param) rather than silently
+    /// mismarshalled: unlike a procedural PARAMETER's or a plain routine
+    /// NAME's own {entry point, frame} machinery (ProcedureTypeNode-shaped,
+    /// ClosureAndCallABI::procParamFnType/pushProcParamArgs), there is no
+    /// single AST ProcedureTypeNode this callee's type was declared with in
+    /// general -- CodeGen (ClosureAndCallABI::emitIndirectCall) builds its
+    /// signature straight from \p Callee's resolved Type instead, which
+    /// cannot yet build that nested shape.
+    [[nodiscard]] std::shared_ptr<Type> checkIndirectCall(
+        const ExprNode& Callee, SourceLocation Loc,
+        std::span<const std::unique_ptr<ExprNode>> Args, bool ExpectFunction);
     /// SizeOf/High/Low's sole argument: either a TYPE NAME -- one of the
     /// five primitive keywords (parsed as a synthetic IdentExpr; see
     /// Parser::parseSizeHighLowArg) or an ordinary user-defined type name

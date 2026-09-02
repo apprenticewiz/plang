@@ -62,7 +62,8 @@ enum class NodeKind {
     TypeCastExpr,         // Turbo: TypeName '(' expr ')' value/variable typecast
     MethodCallExpr,       // Turbo Tier 5: Obj.Method(args) / P^.Method(args), used as a value
     InheritedCallExpr,    // Turbo Tier 5, issue #509: 'inherited [Method[(args)]]' used as a value
-    ExprLast      = InheritedCallExpr,
+    IndirectCallExpr,     // Turbo procedural VALUES, issue #648: a[i](args) / p^(args), used as a value
+    ExprLast      = IndirectCallExpr,
 
     // write/writeln argument wrapper: appears only in write/writeln arg lists.
     // Stored as ExprNode* via C++ inheritance but excluded from ExprFirst..ExprLast
@@ -85,7 +86,8 @@ enum class NodeKind {
     CaseStmt,
     MethodCallStmt,  // Turbo Tier 5: Obj.Method(args) / P^.Method(args), used as a statement
     InheritedCallStmt,  // Turbo Tier 5, Cluster A item 5: 'inherited [Method[(args)]];'
-    StmtLast      = InheritedCallStmt,
+    IndirectCallStmt,  // Turbo procedural VALUES, issue #648: a[i](args); / p^(args);
+    StmtLast      = IndirectCallStmt,
 
     // -- Type expressions --
     TypeFirst,

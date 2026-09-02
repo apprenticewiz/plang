@@ -1345,6 +1345,16 @@ llvm::Value* CGProcCall::emitNewObjectValue(const Type& Pointee,
     return result;
 }
 
+// Turbo procedural VALUES (issue #648): see this method's own declaration
+// (CGProcCall.h) for the whole design.
+void CGProcCall::emitIndirectCallStmt(const IndirectCallStmt& s) {
+    if (!s.Callee->ResolvedType)
+        codegenICE("indirect call has no resolved callee type");
+    llvm::Value* calleeAddr = EmitLValue(*s.Callee);
+    if (!calleeAddr) codegenICE("indirect call callee has no address");
+    (void)ClosureAbi.emitIndirectCall(calleeAddr, *s.Callee->ResolvedType, s.Args);
+}
+
 // Turbo Tier 5, Cluster A item 5: see this method's own declaration
 // (CGProcCall.h) for the whole design.
 void CGProcCall::emitInheritedCallStmt(const InheritedCallStmt& s) {

@@ -65,6 +65,13 @@ void CGStmtCore::emitStmt(const StmtNode* stmt) {
         WithStackScope([&]() -> llvm::Value* { ProcCall.emitInheritedCallStmt(*s); return nullptr; });
         return;
     }
+    // Turbo procedural VALUES (issue #648): 'a[i](args);' / 'p^(args);' --
+    // a call through an arbitrary procedural-typed expression; see
+    // CGProcCall::emitIndirectCallStmt's own comment.
+    if (auto* s = llvm::dyn_cast<IndirectCallStmt>(stmt)) {
+        WithStackScope([&]() -> llvm::Value* { ProcCall.emitIndirectCallStmt(*s); return nullptr; });
+        return;
+    }
     // Falling off the end would drop the statement from the program silently.
     codegenICE("unhandled statement kind in codegen");
 }
