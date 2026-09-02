@@ -931,10 +931,29 @@ void *plang_tp_erroraddr = nullptr;
 /// plang_module_finals_run (plang_halt above, plang_tp_runerror above, and
 /// emitMain's own end-of-program call) already reaches this automatically,
 /// with no separate "and also run ExitProc" step needed at any of the three.
+///
+/// Issue #595: real Turbo Pascal's exit sequence CHAINS -- a handler is
+/// free to assign a NEW ExitProc from inside itself (a documented idiom:
+/// each handler saves the previous value and installs its own, so several
+/// independent units' cleanup routines compose without any one of them
+/// knowing about the others ahead of time), and the exit sequence keeps
+/// consuming and calling whatever ExitProc currently holds until it reads
+/// nil -- confirmed against `fpc -Mtp`.  A single "pop, then call once" (the
+/// former body of this function) runs the FIRST handler but never notices a
+/// second one it installs before returning.  Looping here reproduces the
+/// chain while preserving the exact same "pop before call" no-recursion
+/// property on every iteration: each handler is cleared from
+/// plang_tp_exitproc before it runs, so one that reassigns ExitProc to
+/// itself (or recurses back into a Halt that reaches this function again)
+/// still cannot run the SAME handler twice from the two different call
+/// frames -- only a genuinely new value written after the clear is ever
+/// picked up, by this loop's own next iteration.
 void plang_tp_run_exitproc(void) {
-    auto Fn = reinterpret_cast<void (*)(void)>(plang_tp_exitproc);
-    plang_tp_exitproc = nullptr;
-    if (Fn) Fn();
+    while (plang_tp_exitproc) {
+        auto Fn = reinterpret_cast<void (*)(void)>(plang_tp_exitproc);
+        plang_tp_exitproc = nullptr;
+        Fn();
+    }
 }
 
 /// GetMem(var P: Pointer; Size: Int64) / FreeMem(P: Pointer[, Size: Int64])

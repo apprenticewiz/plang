@@ -215,16 +215,40 @@ void scanTokenTurbo(bool &SawAny) {
 
 /// Strips a Turbo radix prefix from the front of \p Tok, if any, and reports
 /// the radix to parse what is left at.  A sign is deliberately not part of
-/// this: `fpc -Mtp` reports "Runtime error 106" for "-$FF" exactly as it
-/// does for any other malformed token, so a prefix is only ever recognized
-/// at the very front, before any sign -- decimal's own leading -/+ is left
-/// to strtoll/strtod, which already handle it.
+/// this -- see plang_read_i64_turbo's own comment (issue #592) for why a
+/// leading sign before the prefix character is stripped separately, by that
+/// caller, before this ever runs: decimal's own leading -/+ is left to
+/// strtoll/strtod, which already handle it.
 int turboRadixPrefix(const char *&Tok) {
     if (Tok[0] == '$') { ++Tok; return 16; }
     if (Tok[0] == '0' && (Tok[1] == 'x' || Tok[1] == 'X')) { Tok += 2; return 16; }
     if (Tok[0] == '&') { ++Tok; return 8; }
     if (Tok[0] == '%') { ++Tok; return 2; }
     return 10;
+}
+
+/// Issue #592: does \p Tok start with a sign immediately followed by one of
+/// the radix-prefix characters turboRadixPrefix recognizes ($/0x/&/%)?  Real
+/// Turbo Pascal/`fpc -Mtp` recognizes a sign at the very start of a numeric
+/// token independent of which base prefix follows it -- confirmed
+/// empirically: "-$FF" reads as -255, not a malformed token -- so this is
+/// checked SEPARATELY from turboRadixPrefix itself (which only ever sees an
+/// UNSIGNED token, exactly as it did before this fix) rather than folded
+/// into it, so plain decimal's own leading sign keeps flowing straight to
+/// strtoll/strtod unchanged (that path already handles it correctly, and
+/// stripping the sign there too would reject strtoll's own INT64_MIN
+/// parse for a plain, unprefixed negative decimal -- this function is
+/// therefore never consulted for a token with no radix-prefix character
+/// right after its sign).
+bool turboSignedRadixPrefix(const char *Tok, bool &Neg) {
+    if (Tok[0] != '-' && Tok[0] != '+') return false;
+    const char C1 = Tok[1], C2 = Tok[2];
+    if (C1 == '$' || C1 == '&' || C1 == '%' ||
+        (C1 == '0' && (C2 == 'x' || C2 == 'X'))) {
+        Neg = (Tok[0] == '-');
+        return true;
+    }
+    return false;
 }
 
 void consumeLine() {
@@ -459,15 +483,25 @@ void plang_read_u64 (uint64_t *P) {
 // so no range check happens in this function at all; CoerceToType's
 // ordinary truncation on the way into a narrower destination
 // (BuiltinIO.cpp's emitReadArg) reproduces the wraparound on its own.
+//
+// Issue #592: a sign immediately followed by a radix-prefix character
+// (e.g. "-$FF") is stripped by turboSignedRadixPrefix BEFORE Tok ever
+// reaches turboRadixPrefix, and reapplied to the parsed magnitude below --
+// see that helper's own comment for why this is a separate check rather
+// than folded into turboRadixPrefix itself.  A plain decimal token's own
+// sign (with no prefix following it) is left untouched here and reaches
+// strtoll exactly as it always did.
 void plang_read_i64_turbo(int64_t *P) {
     bool SawAny = false;
     scanTokenTurbo(SawAny);
     if (!SawAny) { *P = 0; return; }               // issue #284: past EOF is a defined, consistent zero
     const char *Tok = TokBuf ? TokBuf : "";
+    bool Neg = false;
+    if (turboSignedRadixPrefix(Tok, Neg)) ++Tok;
     const int Radix = turboRadixPrefix(Tok);
     char *End = const_cast<char *>(Tok);
     errno = 0;
-    const long long V = *Tok ? std::strtoll(Tok, &End, Radix) : 0;
+    long long V = *Tok ? std::strtoll(Tok, &End, Radix) : 0;
     // The ENTIRE token must parse -- not just a prefix of it (scanNumber's
     // own ISO/EP rule, reversed here) -- so *End must land on the token's own
     // terminating NUL, not partway through it.
@@ -476,6 +510,7 @@ void plang_read_i64_turbo(int64_t *P) {
         setInOutResIfClear(106);
         return;
     }
+    if (Neg) V = -V;
     *P = static_cast<int64_t>(V);
 }
 
