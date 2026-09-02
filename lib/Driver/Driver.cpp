@@ -260,18 +260,41 @@ static ResolvedUnitInterface findUnitInterface(const std::string &UnitName,
 /// fixed convention this item establishes for every shipped unit, mirroring
 /// the .tui's own: lowercase(UnitName) + ".o", written next to a lowercase
 /// .tui the identical way share/plang/units/Crt.pas's own CMake rule
-/// (top-level CMakeLists.txt) writes crt.o beside crt.tui.  Only that exact
-/// name is ever tried -- a hand-written unit's own separately-compiled .o
-/// with a differently-cased or differently-named object file is exactly
-/// what this project's existing "name the .o explicitly on the command
-/// line" workflow (every pre-existing Driver/Turbo separate-compilation lit
-/// test) remains for.
+/// (top-level CMakeLists.txt) writes crt.o beside crt.tui.  The exact
+/// lowercase name is tried first (cheap, and the only name the shipped RTL's
+/// own CMake rule and every existing lowercase-unit lit test ever produce).
+///
+/// Issue #746: `plang -c` does NOT lowercase its default .o name the way
+/// writeTUIFile lowercases the .tui -- Driver::defaultOutput's stem() keeps
+/// the SOURCE FILE's own case, so `plang -c MathUtils.pas` writes
+/// `MathUtils.o` (capital M) beside the still-lowercase `mathutils.tui`.
+/// Since almost every hand-written unit is normally-capitalized, requiring
+/// an exact lowercase match alone made this auto-linking feature (the
+/// entire point of issue #705) silently fail for essentially all real code.
+/// So when the exact lowercase name is not found, fall back to a case-
+/// insensitive scan of the SAME directory (mirroring findUnitInterface's
+/// own case-insensitive .pas fallback just above) for a same-named .o
+/// however it was actually cased when compiled.  A hand-written unit's own
+/// separately-compiled .o that does not even share the unit's name (a
+/// differently-NAMED, not just differently-cased, object file) is still
+/// exactly what this project's existing "name the .o explicitly on the
+/// command line" workflow remains for.
 static std::string findShippedUnitObject(const ResolvedUnitInterface &Resolved,
                                           const std::string &UnitName) {
     if (Resolved.Dir.empty()) return "";
     const std::string Key = plang::toLower(UnitName);
     const std::string ObjPath = Resolved.Dir + "/" + Key + ".o";
-    return isRegFile(ObjPath) ? ObjPath : "";
+    if (isRegFile(ObjPath)) return ObjPath;
+
+    const std::string WantName = Key + ".o";
+    std::error_code EC;
+    for (llvm::sys::fs::directory_iterator It(Resolved.Dir, EC), End; It != End && !EC;
+         It.increment(EC)) {
+        const llvm::SmallString<64> Stem = llvm::sys::path::filename(It->path());
+        if (llvm::StringRef(Stem).equals_insensitive(WantName))
+            return std::string(It->path());
+    }
+    return "";
 }
 
 /// Runs Prog and returns what it wrote to its standard output, with trailing
