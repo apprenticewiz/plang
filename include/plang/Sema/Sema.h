@@ -710,6 +710,41 @@ private:
     /// that an actual of any capacity is accepted.
     int InPointerDomain_{0};
 
+    /// Issue #791: the in-progress `Type` object that resolveObjectType is
+    /// currently building for a `type Name = object ... end` declaration, or
+    /// null.  Unlike PendingObjectTypeName_ (which resolveObjectType reads
+    /// and clears BEFORE it starts building anything, via resolveTypeImpl's
+    /// top), this is set by resolveObjectType itself, right after it
+    /// allocates its own `T`, and stays set for the rest of that call --
+    /// covering exactly the window in which a method parameter naming the
+    /// enclosing type by name would otherwise find only Phase 3a's
+    /// still-unresolved stub in the symbol table (resolveObjectType mutates
+    /// its own freshly-make_shared'd `T` in place rather than registering it
+    /// anywhere resolveNamed can find it until AFTER this function returns).
+    /// A parameter that captures this shared_ptr directly, instead of the
+    /// stub, already sees the complete type once resolveObjectType finishes
+    /// building it -- nothing reads a method parameter's type during Phase
+    /// 3b, so no later patching (the way fixForwardPtrs patches a pointer's
+    /// domain) is needed.  Object types cannot nest (no Pascal syntax gives
+    /// a local object type; ProcBodyNestingDepth_ already refuses one), so
+    /// this needs no stack, only save/restore around one call.  Consulted by
+    /// resolveNamed only while InSelfObjectParamPosition_ is set (see its own
+    /// comment) -- everywhere else (fields, a method's own return type) the
+    /// forward-reference error still applies, matching this issue's own
+    /// negative case: `Y: TFoo` as a FIELD of TFoo must keep erroring, since
+    /// allowing it would give TFoo infinite size.
+    std::shared_ptr<Type> PendingObjectType_;
+
+    /// Issue #791: nonzero exactly while resolveObjectType is resolving a
+    /// METHOD PARAMETER's type (not a field's, not a return type -- see
+    /// PendingObjectType_'s own comment for why those stay out of scope).
+    /// Managed by AllowSchemaScope, the same RAII idiom InPointerDomain_ and
+    /// AllowUndiscriminatedSchema_ use.  Consulted by resolveNamed: when set
+    /// and the name being resolved is the enclosing object type's own name
+    /// (PendingObjectType_), resolveNamed returns PendingObjectType_ instead
+    /// of raising err_forward_type_reference.
+    int InSelfObjectParamPosition_{0};
+
     /// Turbo Tier 5, Cluster A item 1: the name of the 'type Name = object
     /// ... end' declaration currently being resolved, or empty.  Threaded
     /// through this member rather than a resolveType parameter because
@@ -792,6 +827,21 @@ private:
         int& N;
         explicit AllowSchemaScope(int& Counter) : N(Counter) { ++N; }
         ~AllowSchemaScope() { --N; }
+    };
+
+    /// Issue #791: sets PendingObjectType_ to a `Type` under construction for
+    /// the extent of a scope, restoring whatever it held before (null,
+    /// almost always -- object types can't nest, so Saved_ is only ever
+    /// non-null on a path this codebase's own parser already forbids).  See
+    /// PendingObjectType_'s own comment for what this is for.
+    struct PendingObjectTypeScope {
+        std::shared_ptr<Type>& P;
+        std::shared_ptr<Type> Saved_;
+        PendingObjectTypeScope(std::shared_ptr<Type>& Field, std::shared_ptr<Type> New)
+            : P(Field), Saved_(Field) { P = std::move(New); }
+        ~PendingObjectTypeScope() { P = std::move(Saved_); }
+        PendingObjectTypeScope(const PendingObjectTypeScope&)            = delete;
+        PendingObjectTypeScope& operator=(const PendingObjectTypeScope&) = delete;
     };
 
     // Set by constBound whenever it reads ActiveSchemaBindings_.  Resolving a

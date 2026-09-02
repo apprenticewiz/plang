@@ -1159,6 +1159,18 @@ std::shared_ptr<Type> Sema::resolveObjectType(const ObjectTypeNode& Node,
     }
 
     auto T = std::make_shared<Type>();
+    // Issue #791: from here until this function returns, T is the eventual
+    // real type for DeclName, mutated in place as the loop below walks
+    // members -- but the symbol table still only has Phase 3a's unresolved
+    // stub for DeclName (Sema.cpp's Phase 3b doesn't swap the stub for T
+    // until AFTER this call returns).  A method parameter naming DeclName by
+    // itself (`procedure Copy(Other: TFoo)` inside TFoo's own body) would
+    // otherwise resolve against that stub and hit err_forward_type_reference
+    // even though, by the time anything else reads the parameter's type,
+    // T is already complete.  PendingObjectTypeScope makes T available to
+    // resolveNamed for exactly that case; see InSelfObjectParamPosition_'s
+    // own comment (Sema.h) for why it's scoped to parameters only.
+    PendingObjectTypeScope PendingObjTy(PendingObjectType_, T);
     T->Kind       = TypeKind::Object;
     T->Name       = DeclName;
     T->Anonymous  = false;
@@ -1256,11 +1268,19 @@ std::shared_ptr<Type> Sema::resolveObjectType(const ObjectTypeNode& Node,
         Meth.IsFunction    = PD.IsFunction;
         Meth.Heading       = &PD;
 
-        for (const auto& Pg : PD.Params) {
-            auto Pt = Pg.Type ? resolveParamType(*Pg.Type, Pg.IsVar) : nullptr;
-            for (const auto& Nm : Pg.Names)
-                Meth.Params.push_back({Pg.IsVar, Nm, Pt, Pg.IsConst,
-                                        /*IsUntyped=*/!Pg.Type});
+        {
+            // Issue #791: only around PARAMETER types, not field types
+            // (handled earlier in this same loop, before this guard exists)
+            // or the return type just below -- see
+            // InSelfObjectParamPosition_'s own comment (Sema.h) for why a
+            // self-field or self-return-type must keep erroring.
+            AllowSchemaScope SelfParam(InSelfObjectParamPosition_);
+            for (const auto& Pg : PD.Params) {
+                auto Pt = Pg.Type ? resolveParamType(*Pg.Type, Pg.IsVar) : nullptr;
+                for (const auto& Nm : Pg.Names)
+                    Meth.Params.push_back({Pg.IsVar, Nm, Pt, Pg.IsConst,
+                                            /*IsUntyped=*/!Pg.Type});
+            }
         }
         if (PD.IsFunction && PD.ReturnType) Meth.RetType = resolveType(*PD.ReturnType);
 
@@ -1501,6 +1521,19 @@ std::shared_ptr<Type> Sema::resolveNamedUnrestricted(const NamedTypeNode& N) {
     // 'nosuchtype'" error. A real error was already reported when TyErr was
     // produced, so nothing further is said here.
     if (InPointerDomain_ <= 0 && Sym->hasDeclaredType() && Sym->declaredType()->isUnresolved()) {
+        // Issue #791: a METHOD PARAMETER of the enclosing object type's own
+        // name (`procedure Copy(Other: TFoo)`/`(var Other: TFoo)` inside
+        // TFoo's own body) names the in-progress `T` resolveObjectType is
+        // building, not this stub -- see PendingObjectType_'s own comment
+        // (Sema.h) for why that's safe without any later patching.  Scoped
+        // to InSelfObjectParamPosition_ specifically so a self-FIELD
+        // (`Y: TFoo` inside TFoo) keeps hitting the error just below: that
+        // case is a genuine infinite-size violation, not an over-broad
+        // check.
+        if (InSelfObjectParamPosition_ > 0 && PendingObjectType_
+                && toLower(PendingObjectType_->Name) == toLower(N.Name)) {
+            return PendingObjectType_;
+        }
         error(N.Loc, diag::err_forward_type_reference, {N.Name});
         return TyErr;
     }
