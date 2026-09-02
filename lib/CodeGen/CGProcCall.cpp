@@ -1070,10 +1070,10 @@ bool CGProcCall::tryEmitDosProcCall(const CallStmt& s) {
         // every integer LITERAL (CGExprCore.cpp's IntLitExpr case always
         // materializes i64, unconditionally of context), regardless of
         // plang_dos_findfirst's own `uint16_t attr` parameter just above.
-        // A Word variable or a named constant like Dos.pas's faAnyFile
+        // A Word variable or a named constant like Dos.pas's AnyFile
         // happened to already carry the right (narrower) LLVM type by the
         // time it got here and never tripped this, so `FindFirst('*.*',
-        // faAnyFile, sr)` worked while the equally-legal, and far more
+        // AnyFile, sr)` worked while the equally-legal, and far more
         // idiomatic, `FindFirst('*.*', 63, sr)` was an LLVM IR verifier
         // failure ("i64 63 passed to an i16 parameter") on the single most
         // common call form.  StringCallMarshalling::emitCallArg is the

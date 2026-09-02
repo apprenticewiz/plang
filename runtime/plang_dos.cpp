@@ -160,15 +160,6 @@ void unpackDosTime(int32_t p, int* year, int* month, int* day, int* hour,
 /// second predefined variable Dos.pas's own interface never declares.
 int16_t g_LastDosExitCode = 0;
 
-/// The directory component FindFirst opened, kept for FindNext to
-/// reconstruct each candidate's full path with -- global rather than a
-/// SearchRec field because this project's own SearchRec (Dos.pas) has no
-/// field budget left for it, and real Turbo/FPC programs never run
-/// FindFirst/FindNext concurrently on two different directories from two
-/// different threads, the identical single-threaded assumption
-/// plang_time.cpp's own static buffers already make.
-char g_LastFindDir[1024] = "";
-
 } // namespace
 
 /// Dos.pas's own `var DosError: Integer` -- real storage, defined here and
@@ -340,6 +331,31 @@ static bool attrMatches(uint16_t fileAttr, uint16_t searchMask) {
     return (fileAttr & static_cast<uint16_t>(~searchMask)) == 0;
 }
 
+/// Splits a FindFirst search path (e.g. "sub/dir/*.txt") into its
+/// directory component -- copied into \p dirBuf with a trailing '/' (or
+/// "./" when \p path has no '/' of its own), NUL-terminated within \p
+/// dirCap -- and its wildcard-pattern component, returned as a pointer
+/// into \p path itself.  Used by both FindFirst (to open the directory)
+/// and FindNext (to rebuild each candidate's full path and re-test the
+/// pattern) so that state lives per-SearchRec (in PathPrefix) rather than
+/// in a process-wide global -- otherwise a second, nested FindFirst on a
+/// different directory would silently redirect an outer, still-in-
+/// progress FindNext loop's candidate paths into the inner directory.
+static void splitDirAndPattern(const char* path, char* dirBuf, std::size_t dirCap,
+                                const char** pattern) {
+    const char* slash = std::strrchr(path, '/');
+    if (slash) {
+        std::size_t dirLen = static_cast<std::size_t>(slash - path) + 1;
+        if (dirLen >= dirCap) dirLen = dirCap - 1;
+        std::memcpy(dirBuf, path, dirLen);
+        dirBuf[dirLen] = '\0';
+        *pattern = slash + 1;
+    } else {
+        std::snprintf(dirBuf, dirCap, "./");
+        *pattern = path;
+    }
+}
+
 /// Computes this implementation's own portable subset of the real
 /// attribute bits (Directory/Hidden; ReadOnly from access(2); SysFile/
 /// VolumeID/Archive are not meaningful on POSIX and are never set, the
@@ -367,10 +383,15 @@ void plang_dos_findnext(PlangDosSearchRec* f) PLANG_ASM_NAME("pas_dos$FindNext")
 void plang_dos_findnext(PlangDosSearchRec* f) {
     DIR* d = static_cast<DIR*>(f->dirHandle);
     if (!d) { plang_dos_doserror = 18; return; }
-    // pathPrefix carries the search pattern's own basename half (set by
-    // plang_dos_findfirst below); the directory component itself lives in
-    // g_LastFindDir, and the directory is already open.
-    const char* pattern = cstr(&f->pathPrefix);
+    // pathPrefix carries the ORIGINAL search path verbatim (set by
+    // plang_dos_findfirst below), per-instance rather than through a
+    // shared global -- re-split into directory/pattern here exactly as
+    // findfirst did, so a nested FindFirst on another directory (which
+    // only ever touches ITS OWN SearchRec's fields) cannot disturb an
+    // outer, still-in-progress FindNext loop's own directory or pattern.
+    char dirBuf[1024];
+    const char* pattern;
+    splitDirAndPattern(cstr(&f->pathPrefix), dirBuf, sizeof(dirBuf), &pattern);
     for (;;) {
         struct dirent* de = readdir(d);
         if (!de) { plang_dos_doserror = 18; return; }
@@ -378,7 +399,7 @@ void plang_dos_findnext(PlangDosSearchRec* f) {
             continue;
         if (fnmatch(pattern, de->d_name, 0) != 0) continue;
         char full[1280];
-        std::snprintf(full, sizeof(full), "%s%s", g_LastFindDir, de->d_name);
+        std::snprintf(full, sizeof(full), "%s%s", dirBuf, de->d_name);
         if (statInto(full, de->d_name, f) && attrMatches(f->attr, f->searchAttr)) {
             plang_dos_doserror = 0;
             return;
@@ -424,20 +445,18 @@ extern "C" void plang_dos_findfirst(const char* path, uint16_t attr,
                                      PlangDosSearchRec* f) {
     std::memset(f, 0, sizeof(*f));
     if (!path || !path[0]) { plang_dos_doserror = 3; return; }
-    const char* slash = std::strrchr(path, '/');
-    const char* pattern = slash ? slash + 1 : path;
-    if (slash) {
-        std::size_t dirLen = static_cast<std::size_t>(slash - path) + 1;
-        if (dirLen >= sizeof(g_LastFindDir)) dirLen = sizeof(g_LastFindDir) - 1;
-        std::memcpy(g_LastFindDir, path, dirLen);
-        g_LastFindDir[dirLen] = '\0';
-    } else {
-        std::strcpy(g_LastFindDir, "./");
-    }
-    writeSStr(&f->pathPrefix, 255, pattern);
+    // The ORIGINAL search path is kept verbatim in this SearchRec's own
+    // pathPrefix (not a process-wide global) so that FindNext -- and a
+    // later, nested FindFirst on some OTHER SearchRec in the meantime --
+    // can each re-derive their own directory/pattern independently; see
+    // splitDirAndPattern's own comment.
+    writeSStr(&f->pathPrefix, 255, path);
+    char dirBuf[1024];
+    const char* pattern; // unused here -- FindNext re-derives it itself
+    splitDirAndPattern(path, dirBuf, sizeof(dirBuf), &pattern);
+    (void)pattern;
     f->searchAttr = static_cast<uint16_t>(attr | FaArchive | FaReadOnly);
-    const char* dirToOpen = slash ? g_LastFindDir : ".";
-    DIR* d = opendir(dirToOpen);
+    DIR* d = opendir(dirBuf);
     if (!d) { plang_dos_doserror = 3; return; }
     f->dirHandle = d;
     plang_dos_findnext(f);

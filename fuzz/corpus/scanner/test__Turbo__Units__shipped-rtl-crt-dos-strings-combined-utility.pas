@@ -53,7 +53,7 @@ begin
   Dir := ParamStr(1);
   Count := 0;
   TotalSize := 0;
-  FindFirst(Dir + '/*.txt', faAnyFile, F);
+  FindFirst(Dir + '/*.txt', AnyFile, F);
   while DosError = 0 do
   begin
     Count := Count + 1;
