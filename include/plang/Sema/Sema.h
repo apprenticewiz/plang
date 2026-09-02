@@ -396,7 +396,16 @@ private:
     /// >= 1, for System), so the caller knows how many to pop -- see
     /// popUnitUsesScopes.  Turbo-only; never called under ISO 7185/Extended
     /// Pascal (which use EP's own processImports instead, untouched).
-    size_t pushUnitUsesScopes(const std::vector<UsedUnit>& Uses);
+    ///
+    /// \p CheckDuplicatesAndSelf gates issue #709's diagnostics (a name
+    /// repeated within \p Uses, or \p Uses naming the CURRENT unit itself).
+    /// Default true; checkUnit passes false for its own SECOND pass over
+    /// Unit.InterfaceUses (rebuilding the same scopes again, underneath the
+    /// implementation's), since checkUnitInterfaceOnly's own first pass
+    /// already reported anything wrong with that same list -- a name that
+    /// is not in \p Uses twice does not become so by being processed twice.
+    size_t pushUnitUsesScopes(const std::vector<UsedUnit>& Uses,
+                               bool CheckDuplicatesAndSelf = true);
     /// Pops exactly \p Count scopes pushed by a matching pushUnitUsesScopes.
     void popUnitUsesScopes(size_t Count);
 

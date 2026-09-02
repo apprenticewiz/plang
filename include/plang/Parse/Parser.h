@@ -356,6 +356,42 @@ private:
     // Current must be on 'uses'; consumes through the trailing ';'.
     std::vector<UsedUnit>         parseUsesClause();
 
+    // Issue #701: a cast through a unit-imported type name (`TEnum(2)`,
+    // where TEnum is declared in a used unit's own interface, not this
+    // file) failed to parse as a cast at all -- TypeNames_ (see its own
+    // comment above) is normally populated only from THIS file's own
+    // 'type' sections, so a unit-imported type name was never in it.
+    // Called once per name in a 'uses' clause (-std=turbo only, parseUsesClause's
+    // own caller), this best-effort-loads that unit's published .tui (or
+    // companion .pas, the same search parseUsesClause's own runtime
+    // counterpart -- Sema::loadUnitInterfaceExports -- uses) far enough to
+    // read the NAMES its interface's own 'type' section declares, and adds
+    // them to TypeNames_ so a later `Name(...)` parses as a cast.  Never
+    // reports a diagnostic and never recurses into the found unit's OWN
+    // 'uses' (so it cannot cycle): a unit that cannot be found, or whose
+    // interface cannot be parsed, is simply Sema's problem to report later,
+    // exactly as it already is for every other unit-loading failure.
+    void                          harvestImportedTypeNames(const std::string& UnitName);
+
+    // Issue #701 regression guard: harvestImportedTypeNames spins up its
+    // own NESTED Parser over the found unit's .tui/.pas text, and THAT
+    // nested parse hits parseUsesClause too if the found unit has any
+    // 'uses' of its own -- which, unguarded, calls harvestImportedTypeNames
+    // AGAIN on ITS names, recursively.  Two units that 'uses' each other
+    // (an entirely ordinary, legal shape for their IMPLEMENTATION sections,
+    // and one this project already has a dedicated regression test for --
+    // see circular-interface-uses-is-diagnosed-not-an-infinite-recursion.pas)
+    // therefore recursed forever (harvest A -> parse B -> harvest B's own
+    // 'uses A' -> parse A -> harvest A's own 'uses B' -> ...), a genuine
+    // stack-overflow crash, not merely a wrong answer. A unit that names
+    // itself hits the identical shape one level sooner. harvestImportedTypeNames
+    // sets this false on every NESTED Parser it constructs, so only the
+    // OUTERMOST parse (the file actually being compiled) ever harvests type
+    // names at all -- exactly the "never recurse into the found unit's own
+    // 'uses'" contract harvestImportedTypeNames' own comment above already
+    // promises, now actually enforced rather than merely asserted.
+    bool                          HarvestImportedTypeNames_ = true;
+
     // EP §6.11: module-heading or module-body.
     // 'module' identifier [param-list] ['interface'] ';' ... 'end' '.'
     /// EP §6.11.1: reads one module-declaration, which is a heading, a block,

@@ -1144,7 +1144,7 @@ static std::string buildTUIContent(const UnitNode& Unit) {
 /// through \p Diags (issue #179) rather than a direct std::cerr write, the
 /// same reasoning as writePMIFiles' own matching sites above.
 static bool writeTUIFile(const UnitNode& Unit, const std::string& InputFile,
-                         DiagnosticsEngine& Diags) {
+                         DiagnosticsEngine& Diags, std::string* PublishedPath) {
     std::string TuiDir = ".";
     if (auto Slash = InputFile.rfind('/'); Slash != std::string::npos)
         TuiDir = InputFile.substr(0, Slash);
@@ -1185,6 +1185,7 @@ static bool writeTUIFile(const UnitNode& Unit, const std::string& InputFile,
         llvm::sys::fs::remove(TmpPath);
         return false;
     }
+    if (PublishedPath) *PublishedPath = TuiPath;
     return true;
 }
 
@@ -1343,8 +1344,15 @@ static CompilationResult compileRequest(const CompilationRequest& Request,
 
         // Publish this unit's own .tui before codegen -- see writeTUIFile's
         // own comment for why a compile that is about to fail must not have
-        // left a stale-looking interface file behind.
-        if (!writeTUIFile(Unit, Request.SourceName, Diags))
+        // left a stale-looking interface file behind.  \p TuiPath comes back
+        // set to whatever was actually published (empty if there was no
+        // interface to publish at all), so that if codegen below fails --
+        // issue #706 -- this .tui can be removed again: a failed compile
+        // must never leave a freshly-published .tui trusted by a later
+        // compile, the same all-or-nothing reasoning writePMIFiles' own
+        // cleanupPublished applies to .pmi.
+        std::string TuiPath;
+        if (!writeTUIFile(Unit, Request.SourceName, Diags, &TuiPath))
             return finish(std::nullopt, false);
 
         Codegen Cg(Opts);
@@ -1361,6 +1369,7 @@ static CompilationResult compileRequest(const CompilationRequest& Request,
 
         std::ostringstream OSS;
         const bool EmitOk = Cg.emitUnit(Unit, OSS);
+        if (!EmitOk && !TuiPath.empty()) llvm::sys::fs::remove(TuiPath);
         return finish(OSS.str(), EmitOk);
     }
 

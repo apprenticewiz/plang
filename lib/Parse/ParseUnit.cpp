@@ -34,6 +34,12 @@
 #include "plang/Basic/StringUtil.h"
 #include "plang/Basic/Token.h"
 
+#include "llvm/Support/FileSystem.h"
+#include "llvm/Support/Path.h"
+
+#include <fstream>
+#include <sstream>
+
 using namespace plang;
 
 // unit-file (see grammar above).  Current is on 'unit'.
@@ -105,10 +111,86 @@ std::vector<UsedUnit> Parser::parseUsesClause() {
         U.Loc  = Current;
         U.Name = expect(TokenKind::Identifier).Lexeme;
         QualifiedModules_.insert(toLower(U.Name));
+        // Issue #701: harvestImportedTypeNames' own comment (Parser.h) for
+        // why this has to happen here rather than after Sema resolves
+        // anything -- a cast through a unit-imported type name has to
+        // parse as a cast in the FIRST place.  HarvestImportedTypeNames_
+        // gates it off for a NESTED parse (see that field's own comment)
+        // to keep two mutually-'uses'ing units from recursing forever.
+        if (Opts.turbo() && HarvestImportedTypeNames_) harvestImportedTypeNames(U.Name);
         Units.push_back(std::move(U));
     } while (match(TokenKind::Comma));
     expect(TokenKind::Semicolon);
     return Units;
+}
+
+// Issue #701: see this function's own comment in Parser.h.
+void Parser::harvestImportedTypeNames(const std::string& UnitName) {
+    const std::string Key = toLower(UnitName);
+    // 'System' is a builtin pseudo-unit with no .tui/.pas on disk at all
+    // (Sema::pushUnitUsesScopes' own isBuiltinModule-style check) and
+    // declares no user-visible type an importer could ever cast through.
+    if (Key == "system") return;
+
+    auto findExact = [](const std::string& Dir, const std::string& Name) -> std::string {
+        const std::string Candidate = Dir + "/" + Name;
+        return llvm::sys::fs::exists(Candidate) ? Candidate : std::string();
+    };
+    auto findCaseInsensitive = [&](const std::string& Dir) -> std::string {
+        const std::string Fast = Dir + "/" + Key + ".pas";
+        if (llvm::sys::fs::exists(Fast)) return Fast;
+        std::error_code EC;
+        for (llvm::sys::fs::directory_iterator It(Dir, EC), End;
+                It != End && !EC; It.increment(EC)) {
+            llvm::SmallString<64> Stem = llvm::sys::path::filename(It->path());
+            if (eqCI(std::string(Stem), Key + ".pas")) return std::string(It->path());
+        }
+        return "";
+    };
+
+    // Same search order/shadowing as Sema::loadUnitInterfaceExports (issue
+    // #700's own "one pass, .tui-then-.pas per directory" comment applies
+    // here identically) -- a mismatch here would only ever cost a missed
+    // cast-recognition opportunity (Sema still resolves the real unit
+    // later), never a wrong PARSE of anything that already worked.
+    std::vector<std::string> SearchDirs = Opts.ModuleSearchPaths;
+    SearchDirs.push_back(".");
+    SearchDirs.insert(SearchDirs.end(), Opts.UnitSearchPaths.begin(),
+                       Opts.UnitSearchPaths.end());
+    std::string Path;
+    for (const auto& Dir : SearchDirs) {
+        if (Path = findExact(Dir, Key + ".tui"); !Path.empty()) break;
+        if (Path = findCaseInsensitive(Dir); !Path.empty()) break;
+    }
+    if (Path.empty()) return; // not found -- Sema reports this later
+
+    std::ifstream UnitFile(Path);
+    if (!UnitFile) return;
+    std::ostringstream SS;
+    SS << UnitFile.rdbuf();
+
+    // Parsed with its own throwaway Diagnostics/SourceManager/Scanner --
+    // exactly Sema::loadUnitInterfaceExports' own reasoning for why a used
+    // unit's own syntax problems are not this compile's to report through
+    // (this is purely a best-effort name harvest; a malformed candidate
+    // here just means no names are added, same as "not found").
+    // Deliberately NOT recursive: this unit's OWN 'uses' clause is never
+    // parsed via parseUsesClause here, only its declarations, so a unit
+    // that (validly, or even circularly) uses another can never make this
+    // function recurse.
+    DiagnosticsEngine UnitDiags;
+    LangOptions       UnitOpts = Opts;
+    UnitOpts.Std = LangOptions::Standard::Turbo;
+    SourceManager UnitSrcMgr;
+    Scanner USc(UnitSrcMgr, "<" + Path + ">", SS.str(), UnitDiags, UnitOpts);
+    Parser  UP(std::move(USc), UnitDiags, UnitOpts);
+    UP.HarvestImportedTypeNames_ = false; // see that field's own comment
+    auto    UnitProg = UP.parse();
+    if (!UnitProg || !UnitProg->BareUnit || !UnitProg->BareUnit->InterfaceBlock)
+        return;
+
+    for (const TypeDef& TD : UnitProg->BareUnit->InterfaceBlock->Types)
+        TypeNames_.insert(toLower(TD.Name));
 }
 
 // unit-decl-part, in Turbo's always-free declaration order.  Modeled on
