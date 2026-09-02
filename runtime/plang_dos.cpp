@@ -395,8 +395,11 @@ void plang_dos_findnext(PlangDosSearchRec* f) {
     for (;;) {
         struct dirent* de = readdir(d);
         if (!de) { plang_dos_doserror = 18; return; }
-        if (std::strcmp(de->d_name, ".") == 0 || std::strcmp(de->d_name, "..") == 0)
-            continue;
+        // '.'/'..' are NOT special-cased here: real TP7/fpc -Mtp field
+        // practice (rtl/unix/dos.pp) returns them like any other directory
+        // entry, filtered only by the caller's own attrMatches mask below
+        // (they carry FaHidden via statInto's leading-'.' rule, same as any
+        // other dotfile, plus FaDirectory) -- see issue #582.
         if (fnmatch(pattern, de->d_name, 0) != 0) continue;
         char full[1280];
         std::snprintf(full, sizeof(full), "%s%s", dirBuf, de->d_name);

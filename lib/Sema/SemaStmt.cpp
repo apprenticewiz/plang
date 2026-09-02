@@ -1655,12 +1655,21 @@ void Sema::checkCallStmt(const CallStmt& S) {
         }
         // TP-only: Append(f) -- unlike Assign just above, takes ONLY the
         // file (Builtins.def's own MaxArgs = 1), so its File-kind check is
-        // genuinely uniform and is generic now (Builtins.def's AK_File row,
-        // issue #306's fourth slice) -- split out of the arm it used to
-        // share with Assign into its own, same "check once, no extra
-        // restriction" shape Erase/Flush's own migrated arms below have.
+        // generic (Builtins.def's AK_File row, issue #306's fourth slice) --
+        // split out of the arm it used to share with Assign into its own.
+        //
+        // Issue #670: f must additionally be a Text file (err_line_proc_
+        // not_text, the same restriction SetTextBuf/Eoln/SeekEoln already
+        // have just above/below) -- confirmed against `fpc -Mtp`: Append on
+        // a typed or untyped file is a compile-time error ("Got File,
+        // expected Text"), not something deferred to a runtime InOutRes.
         if (Lo == "append" && !S.Args.empty()) {
-            (void)checkBuiltinArgKinds(Sym->BuiltinKind, Lo, S.Args);
+            auto Types = checkBuiltinArgKinds(Sym->BuiltinKind, Lo, S.Args);
+            auto& FTy = Types[0];
+            if (!FTy->isError() && FTy->Kind == TypeKind::File
+                    && !isTextFile(*FTy, Opts))
+                error(S.Args[0]->Loc, diag::err_line_proc_not_text,
+                      {Lo, FTy->Name});
             return;
         }
 
