@@ -68,14 +68,17 @@ const
   { Bitmasks for file attribute -- real Borland-documented values (TP7
     Language Guide, "SearchRec"/FindFirst); confirmed identical in FPC's
     own dosh.inc (readonly/hidden/sysfile/volumeid/directory/archive/
-    anyfile constants). }
-  faReadOnly  = $01;
-  faHidden    = $02;
-  faSysFile   = $04;
-  faVolumeID  = $08;
-  faDirectory = $10;
-  faArchive   = $20;
-  faAnyFile   = $3F;
+    anyfile constants).  Unprefixed, matching real TP7/`fpc -Mtp` field
+    practice -- NOT the `fa`-prefixed spellings (`faReadOnly` etc.), which
+    are a Delphi/SysUtils (`TSearchRec`) convention this unit does not
+    implement. }
+  ReadOnly  = $01;
+  Hidden    = $02;
+  SysFile   = $04;
+  VolumeID  = $08;
+  Directory = $10;
+  Archive   = $20;
+  AnyFile   = $3F;
 
 type
   { Real TP7/FPC field practice: the Dos unit's own DateTime record, used by
@@ -104,7 +107,12 @@ type
   SearchRec = record
     DirHandle:   Pointer;  { private: opendir()'s DIR*, or Nil }
     SearchAttr:  Word;     { private: the Attr FindFirst was called with }
-    PathPrefix:  string;   { private: search directory, with a trailing / }
+    PathPrefix:  string;   { private: the original FindFirst search path,
+                             verbatim (directory component plus wildcard
+                             pattern) -- kept per-instance, not in a shared
+                             global, so nested/interleaved FindFirst/
+                             FindNext loops over different directories do
+                             not clobber one another's search state }
     Attr:        Byte;
     Time:        LongInt;  { packed DOS-style date/time -- see PackTime/UnpackTime }
     Size:        LongInt;

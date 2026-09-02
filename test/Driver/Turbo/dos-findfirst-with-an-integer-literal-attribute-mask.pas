@@ -2,17 +2,17 @@
 Issue #696: FindFirst(path, <integer-literal>, sr) -- passing an integer
 LITERAL directly as the attribute-mask second argument, rather than a named
 constant (dos-findfirst-findnext-findclose-iterate-a-real-directory.pas's
-own faAnyFile) or a typed variable, used to crash the compiler:
+own AnyFile) or a typed variable, used to crash the compiler:
 CGExprCore.cpp's IntLitExpr case always materializes an integer literal as
 i64, unconditionally of context, and CGProcCall.cpp's own findfirst arm
 passed that straight through with no coercion to plang_dos_findfirst's
 `uint16_t attr` parameter -- an LLVM IR verifier failure ("i64 63 passed to
 an i16 parameter") on the single most idiomatic call form real Turbo
-Pascal code uses (`FindFirst('*.*', faAnyFile, sr)` worked, since a named
+Pascal code uses (`FindFirst('*.*', AnyFile, sr)` worked, since a named
 constant/variable already carried the right narrower LLVM type by the time
 it reached codegen; `FindFirst('*.*', $3F, sr)` did not).  Same fixture
 setup and SET-membership checks as that sibling test, just with $3F written
-directly rather than through faAnyFile.
+directly rather than through AnyFile.
 
 RUN: rm -rf %t.dir && mkdir -p %t.dir
 RUN: printf 'aa' > %t.dir/one.txt
