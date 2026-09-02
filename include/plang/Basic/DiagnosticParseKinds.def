@@ -116,6 +116,16 @@ DIAG(err_turbo_conformant_array, Error,
      "Turbo Pascal has no conformant array parameters (array[lo..hi: T] of "
      "E); use an open array parameter (array of T) instead")
 
+// TP-only: 'const' and 'var' are mutually exclusive parameter-passing
+// mechanisms -- const means read-only, var means a mutable reference --
+// confirmed with a local fpc -Mtp check, which rejects 'const var x: T'
+// with a syntax error ("identifier expected but VAR found").  Accepting
+// both together would make G.IsVar pass the parameter by reference while
+// G.IsConst only blocks a direct assignment, letting mutating builtins
+// (Inc/Dec/Read/etc.) write through what looks like a const parameter.
+DIAG(err_const_var_combined, Error,
+     "'const' and 'var' cannot be combined on the same parameter")
+
 DIAG(err_expected_type_expr, Error, "expected type expression, got %0")
 DIAG(err_expected_label, Error, "expected label (integer or identifier), got %0")
 DIAG(err_expected_goto_label, Error, "expected label after 'goto', got %0")
