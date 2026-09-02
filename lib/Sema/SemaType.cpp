@@ -1330,10 +1330,18 @@ std::shared_ptr<Type> Sema::resolveObjectType(const ObjectTypeNode& Node,
                                         .DeclaringModule = CurrentUnit_});
                 Meth.VmtSlot = static_cast<int>(T->VmtSlots.size()) - 1;
             }
-        } else if (ParentTy && findMethodInChain(ParentTy.get(), Lower)) {
+        } else if (ParentTy) {
             // Static hide of an inherited method (rule 3 above): no slot,
-            // but worth a warning -- easy to write by accident.
-            warning(PD.Loc, diag::warn_object_method_hides_inherited, {PD.Name});
+            // but worth a warning -- easy to write by accident.  Only warn
+            // when the nearest ancestor declaration was itself virtual: that
+            // is the only case that actually breaks a VMT dispatch chain.
+            // A non-virtual ancestor has no chain to break, and real
+            // fpc -Mtp stays silent for it (issue #792) -- confirmed against
+            // a local fpc -Mtp build for both plain-method and constructor
+            // same-name redeclarations, matching or non-matching signature.
+            const Type::Method* Inherited = findMethodInChain(ParentTy.get(), Lower);
+            if (Inherited && Inherited->IsVirtual)
+                warning(PD.Loc, diag::warn_object_method_hides_inherited, {PD.Name});
         }
 
         T->ObjectMethods.push_back(std::move(Meth));

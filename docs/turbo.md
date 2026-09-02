@@ -1934,36 +1934,24 @@ that shape.
 
 ### Known gaps
 
-One restriction a user of this tier's `object` model can actually run
-into, confirmed against a local `fpc -Mtp` build rather than assumed.
-(This capstone item's own integration testing found two more,
-genuinely new bugs while building the tests above — `TypeOf` resolving
-its argument's static type instead of its dynamic one, and `inherited`
-only being usable as a statement, never an expression — both since
-fixed, see issues #508 and #509. A THIRD gap this section used to
-describe — a bare, argument-free method call used as a value not
-resolving in expression position — is also now fixed: see issues #773
-and #781, the latter closing a related silent-wrong-answer edge case a
-fix for the former introduced when the bare call's name happened to
-collide with an inherited field's own name. Both directions — a bare
-call to an ordinary method, and a bare call to one shadowing a field —
-are now correctly resolved and covered by regression tests under
-`test/Turbo/Objects/`.)
-
-One more, genuinely cosmetic, not counted above: a `method ... hides the
-inherited method of the same name` warning false-positives for same-named,
-differently-signed, non-virtual constructors declared at different levels
-of one hierarchy (the standard `Init`-at-every-level TP7 idiom) —
-confirmed a local `fpc -Mtp` build stays silent on the identical
-construct, but the warning is otherwise harmless, does not affect codegen,
-and every constructor test in this tier (including this capstone's own)
-compiles with it uncommented-on. This capstone item also observed the
-identical false positive surface at a cross-unit **call site** rather than
-only at a declaration
-(`test/Turbo/Units/three-units-cross-unit-new-fail-dispose-lifecycle-and-virtual-destructor-dispatch.pas`)
-— still the same same-named-constructor false positive, just reached
-through the cross-unit "declare if missing" path instead of a direct
-declaration, not a second issue.
+None currently open. This capstone item's own integration testing found
+two genuinely new bugs while building the tests above — `TypeOf`
+resolving its argument's static type instead of its dynamic one, and
+`inherited` only being usable as a statement, never an expression — both
+fixed, see issues #508 and #509. Two further gaps this section used to
+describe are also now fixed: a bare, argument-free method call used as a
+value not resolving in expression position (issues #773 and #781, the
+latter closing a related silent-wrong-answer edge case a fix for the
+former introduced when the bare call's name happened to collide with an
+inherited field's own name — both directions are now correctly resolved
+and covered by regression tests under `test/Turbo/Objects/`); a
+`method ... hides the inherited method of the same name` warning
+false-positiving for same-named, differently-signed, non-virtual
+constructors declared at different levels of one hierarchy (issue #792 —
+the warning now correctly fires only when the ancestor declaration being
+hidden was itself `virtual`, matching real `fpc -Mtp`); and a
+record/object type being unable to name itself as a by-value or `var`
+parameter type before its own declaration finished (issue #791).
 
 ---
 
