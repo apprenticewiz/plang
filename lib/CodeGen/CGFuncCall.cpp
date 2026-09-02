@@ -384,9 +384,21 @@ llvm::Value* CGFuncCall::emitBuiltinCall(const std::string& Name,
 
     // ---- Ordinal built-ins — simple enough to keep inline ----
     if (lo == "ord") {
-        auto* v = EmitExpr(*Args[0]);
-        if (v->getType()->isIntegerTy(64)) return v;
-        return B.CreateZExt(v, I64Ty, "ord");
+        // ISO §6.6.6.2: Ord(x) is x's own ordinal number, i.e. x's own
+        // value read as an integer -- for a SIGNED narrow argument (Turbo's
+        // ShortInt/Integer/LongInt rungs; plain ISO/EP Integer is always
+        // Width 64, so it hits ToI64's own no-op fast path instead) that
+        // means SIGN-extending, not zero-extending: Ord(ShortInt(-1)) must
+        // be -1, the same -1 the ShortInt already denotes, not 255.  This
+        // used to CreateZExt unconditionally, so a negative signed narrow
+        // argument's top bit(s) read back as a large POSITIVE i64 instead
+        // (issue #632: `s: shortint; s := -1; writeln(Ord(s))` printed 255,
+        // `fpc -Mtp` prints -1). exprIsSigned(*Args[0]) gives the same "is
+        // this ordinal's own representation signed" answer chr/odd/succ/pred
+        // just below already consult via ToI64 -- correctly zero-extending
+        // Char/Boolean/Enum/Turbo's unsigned rungs (Byte/Word/Cardinal/
+        // LongWord/QWord), and sign-extending only the signed ones.
+        return ToI64(EmitExpr(*Args[0]), exprIsSigned(*Args[0]));
     }
     if (lo == "chr") {
         // ISO §6.6.6.4: chr(x) yields the value whose ordinal number is x,
@@ -602,14 +614,24 @@ llvm::Value* CGFuncCall::emitBuiltinCall(const std::string& Name,
     // width-aware one instead.  See Sema::checkCallExpr's identical note.
     //
     // Sema has already required a real Integer-kind argument at least 16
-    // bits wide, so EmitExpr's own LLVM type IS the argument's own width
-    // (i16/i32/i64) with nothing further to coerce -- Turbo's Integer kind
-    // is lowered at its own declared Width throughout codegen, unlike
-    // ISO/EP's single always-64-bit integer, so no ToI64 round-trip is
-    // needed (or wanted: it would have to be undone again below).
+    // bits wide (Args[0]->ResolvedType->Width).  EmitExpr's own LLVM type
+    // usually already matches it -- Turbo's Integer kind is lowered at its
+    // own declared Width throughout codegen for a VARIABLE operand -- but
+    // NOT reliably for an integer LITERAL operand: every integer literal
+    // lowers to a 64-bit ConstantInt regardless of its resolved (narrower)
+    // type (CGExprCore::emitExpr's IntLitExpr case), so `Swap($1234)` under
+    // Turbo (a 16-bit-resolved literal argument) had v sitting at i64 by
+    // the time control reached here, silently rotating/shifting by 32
+    // instead of 8 (issue #631).  Shl/Shr (CGBinaryOps.cpp) hit the
+    // identical trap and are re-coerced to their own resolved width for the
+    // identical reason; done the same way here rather than trusting
+    // whatever width v arrived in.
     if (lo == "hi" || lo == "lo" || lo == "swap") {
-        auto* v    = EmitExpr(*Args[0]);
-        auto* wTy  = llvm::cast<llvm::IntegerType>(v->getType());
+        auto* v   = EmitExpr(*Args[0]);
+        auto* wTy = llvm::IntegerType::get(Ctx, Args[0]->ResolvedType->Width);
+        if (v->getType() != wTy)
+            v = exprIsSigned(*Args[0]) ? B.CreateSExtOrTrunc(v, wTy, "hilo.arg")
+                                        : B.CreateZExtOrTrunc(v, wTy, "hilo.arg");
         const unsigned Half = wTy->getBitWidth() / 2;
         if (lo == "swap") {
             // A rotate by half the width: at 16 bits this is a byte swap,
