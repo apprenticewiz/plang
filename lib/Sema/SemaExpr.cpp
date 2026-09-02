@@ -2188,6 +2188,24 @@ std::shared_ptr<Type> Sema::checkCallExpr(const CallExpr& E) {
     // so without this, calling f and never otherwise reading it warned f
     // unused despite the call being exactly a use of it.
     if (Sym->Kind == SymbolKind::Var) Sym->Referenced = true;
+    // Issue #730: pushMethodSelfScope registers every field (own and
+    // ancestor-inherited alike) as an ordinary Var symbol, so an unqualified
+    // CALL whose name collides with a self-scope field's name resolves to
+    // the field HERE first -- even though a descendant object type may
+    // legally declare a METHOD reusing an ancestor FIELD's name (only a new
+    // FIELD reusing an inherited name is barred; see resolveObjectType's own
+    // comment, SemaType.cpp).  A field is never itself callable unless it
+    // holds a procedural VALUE (checkUserDefinedCall's own Var/isCallable
+    // arm), so before that call falls through to err_not_callable, give the
+    // implicit-method fallback -- the same one tried above when the plain
+    // lookup finds nothing at all -- a chance to find a sibling method of
+    // the same name first.  checkImplicitMethodCallExpr returns nullptr (a
+    // real, distinct sentinel from TyErr) when no such method exists, so a
+    // field with no same-named method sibling still falls through to the
+    // ordinary err_not_callable diagnosis below, unchanged.
+    if (Sym->IsSelfScopeField && !(Sym->Ty && isCallable(*Sym->Ty))) {
+        if (auto T = checkImplicitMethodCallExpr(E)) return T;
+    }
     return checkUserDefinedCall(*Sym, E.Loc, E.Args, /*expectFunction=*/true);
 }
 

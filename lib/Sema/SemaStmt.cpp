@@ -2193,6 +2193,18 @@ void Sema::checkCallStmt(const CallStmt& S) {
     // SymbolKind::Var, so calling f() as a statement is a use of f the same
     // way calling it in an expression is.
     if (Sym->Kind == SymbolKind::Var) Sym->Referenced = true;
+    // Issue #730: see checkCallExpr's identical gate (SemaExpr.cpp) for the
+    // full story -- a self-scope FIELD symbol (pushMethodSelfScope) can
+    // share a name with a sibling METHOD, and the plain lookup above finds
+    // the (non-callable) field first.  Give the implicit-method fallback a
+    // chance to find that sibling method before falling through to
+    // checkUserDefinedCall's own err_not_callable; checkImplicitMethodCallStmt
+    // returns false, leaving S untouched, when no such method exists, so a
+    // field with no same-named method sibling still reaches the ordinary
+    // diagnosis below, unchanged.
+    if (Sym->IsSelfScopeField && !(Sym->Ty && isCallable(*Sym->Ty))
+            && checkImplicitMethodCallStmt(S))
+        return;
     // Turbo `{$X+}`: when checkUserDefinedCall lets a function through this
     // way, the type it returns is the callee's real result type -- record it
     // on the CallStmt so codegen's own external-declaration fallback
