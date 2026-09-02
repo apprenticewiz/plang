@@ -22,6 +22,22 @@ below abort the whole process instead of setting IOResult 105 under
 `{$I-}`. Fixed alongside #667 itself; this test's own `write io=105` lines
 are what would have aborted instead had that fallout not been fixed too.
 
+Issue #738 update: `{$I-}` is set once here and never turned back on, so
+EVERY `writeln` from the first `fm1: reset` on on is ordinary Turbo I/O
+subject to the pending-error latch too -- confirmed against `fpc -Mtp`.
+Most of these run with InOutRes already back at 0 (the previous writeln's
+own IOResult call cleared it) and print their full text unchanged; the
+three that immediately follow a failing write/read (the two 'fm1: write'/
+'fm2: write' lines, each after a writeln(t, 'world') that fails 105 against
+the read-only-opened text file, and the final 'typed fm1: read' line, after
+a read(f, i) that fails 104 against the write-only-opened typed file) each
+start with InOutRes still pending and lose their own leading literal for
+the same "IOResult is the first write attempt in the statement to actually
+clear InOutRes" reason every other test in this item's fix does -- the
+'typed fm1: read' line keeps its trailing ' i=0' since that write happens
+AFTER the IOResult argument already cleared InOutRes earlier in the same
+statement.
+
 RUN: %plang -std=turbo %s -o %t
 RUN: %run %t | FileCheck %s
 *)
@@ -29,11 +45,11 @@ RUN: %run %t | FileCheck %s
 (*
 CHECK:fm1: reset io=0
 CHECK-NEXT:fm1: read io=0 s=hello
-CHECK-NEXT:fm1: write io=105
+CHECK-NEXT:105
 CHECK-NEXT:fm2: reset io=0
 CHECK-NEXT:fm2: read io=0 s=hello
-CHECK-NEXT:fm2: write io=105
-CHECK-NEXT:typed fm1: read io=104 i=0
+CHECK-NEXT:105
+CHECK-NEXT:104 i=0
 *)
 
 var t: text;

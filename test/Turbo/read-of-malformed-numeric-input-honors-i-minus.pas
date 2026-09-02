@@ -23,8 +23,17 @@ program keep running -- verified directly:
     end.
 
     $ echo "12abc" | ./t
-    ioresult=106
+    106
     i=0
+
+(Issue #738 update: re-run against the same local `fpc -Mtp` install while
+fixing #738 -- the `writeln('ioresult=', IOResult)` line above is ITSELF
+ordinary Turbo I/O, and InOutRes is still 106, pending and unread, when it
+starts, so its own leading literal ('ioresult=') is suppressed too, the
+same as every other Turbo I/O call issued while an error sits unread; only
+the bare "106" IOResult itself returns prints.  This snippet's own older
+transcription showing the full "ioresult=106" predates that finding and
+was never rechecked; corrected here rather than left to mislead.)
 
 plang's own runtime used to NOT do this: plang_read_file_i64_turbo/
 plang_read_file_f64_turbo/plang_read_file_u64_turbo (runtime/plang_file.cpp
@@ -62,7 +71,7 @@ RUN: FileCheck --check-prefix=IPLUS %s < %t.iplus.err
 *)
 
 (*
-IMINUS: ioresult=106
+IMINUS: 106
 IMINUS-NEXT: i=0
 
 IPLUS: Runtime error 106 at $

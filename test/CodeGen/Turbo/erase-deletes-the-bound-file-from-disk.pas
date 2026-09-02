@@ -6,6 +6,13 @@ from inside the SAME program, a following Reset(f) reporting InOutRes 2
 ("file not found") -- proof the deletion is visible immediately, not just
 after the process exits.
 
+Issue #738 update: the first `writeln` runs with InOutRes still 0 (Erase,
+above it, succeeded) and is unaffected; the second starts with InOutRes
+already pending (2, from the failing `reset` right above it, itself under
+checked-I/O-off) -- confirmed against `fpc -Mtp`: its own leading literal is
+suppressed, since IOResult is the first write attempt in that statement to
+actually clear InOutRes; only the numeric value prints.
+
 RUN: %plang -std=turbo %s -o %t
 RUN: %run %t | FileCheck %s
 RUN: not test -f erase-deletes-the-bound-file-from-disk.dat
@@ -13,7 +20,7 @@ RUN: not test -f erase-deletes-the-bound-file-from-disk.dat
 
 (*
 CHECK:erase IOResult=0
-CHECK-NEXT:reset after erase IOResult=2
+CHECK-NEXT:2
 *)
 
 var

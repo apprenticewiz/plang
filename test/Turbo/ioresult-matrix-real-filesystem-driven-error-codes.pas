@@ -80,6 +80,19 @@ test rather than assumed:
   built on a fragile, environment-specific foundation -- see this PR's own
   report for the explicit call-out.
 
+Issue #738 update: every `writeln('codeN=', IOResult)` below starts with
+InOutRes already pending -- each case's own failing operation, right above
+it, is exactly what that writeln means to report -- so, confirmed against
+`fpc -Mtp`, every one of the seven loses its own leading literal
+('codeN='), since IOResult is the first write attempt in each statement to
+actually clear InOutRes; only the bare numeric value prints each time.
+This chains cleanly precisely because it is what this file's own comment
+above already promises: each writeln's OWN IOResult call clears InOutRes
+before the NEXT case's failing operation runs, so no code here leaks into
+the next the way a genuinely unread, still-pending one would.  The closing
+'all seven ran to completion' writeln runs with InOutRes already back at 0
+and is unaffected.
+
 RUN: rm -rf %t.dir && mkdir -p %t.dir/locked
 RUN: printf 'secret\n' > %t.dir/locked/inner.txt
 RUN: chmod 000 %t.dir/locked
@@ -89,13 +102,13 @@ RUN: chmod 755 %t.dir/locked
 *)
 
 (*
-CHECK:code2=2
-CHECK-NEXT:code5=5
-CHECK-NEXT:code100=100
-CHECK-NEXT:code105=105
-CHECK-NEXT:code102=102
-CHECK-NEXT:code103=103
-CHECK-NEXT:code218=218
+CHECK:2
+CHECK-NEXT:5
+CHECK-NEXT:100
+CHECK-NEXT:105
+CHECK-NEXT:102
+CHECK-NEXT:103
+CHECK-NEXT:218
 CHECK-NEXT:all seven ran to completion, none aborted
 *)
 

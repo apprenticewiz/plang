@@ -8,14 +8,23 @@ Reset/Rewrite/Append'ed), or on a file that has already been Close'd once
 the 103 ("file not open") `fpc -Mtp` reports for both -- confirmed against a
 local `fpc -Mtp` 3.2.2 install.
 
+Issue #738 update: each `writeln('ioresult after ...=', IOResult)` below is
+ordinary Turbo I/O -- confirmed against `fpc -Mtp`, whenever InOutRes is
+ALREADY pending (103) when one of these starts (the 1st and 3rd, right
+after a Close that itself just set 103), its own leading literal is
+suppressed too, since IOResult is the first write attempt in that
+statement to actually clear InOutRes; only the numeric value prints. The
+2nd writeln (right after a Close that SUCCEEDED, InOutRes still 0 the
+moment it starts) is unaffected and keeps its full text.
+
 RUN: %plang -std=turbo %s -o %t
 RUN: %run %t | FileCheck --strict-whitespace --match-full-lines %s
 *)
 
 (*
-CHECK:ioresult after close on never-opened file=103
+CHECK:103
 CHECK-NEXT:ioresult after 1st close=0
-CHECK-NEXT:ioresult after 2nd close (double-close)=103
+CHECK-NEXT:103
 *)
 
 var

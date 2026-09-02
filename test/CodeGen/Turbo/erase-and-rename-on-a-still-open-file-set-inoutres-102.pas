@@ -8,13 +8,21 @@ Both builtins share the identical fmClosed check (runtime/plang_file.cpp's
 plang_tp_erase/plang_tp_rename), so this one test covers both rather than
 duplicating the same behavior twice.
 
+Issue #738 update: each `writeln('... IOResult=', IOResult)` below starts
+with InOutRes already pending (102, just set by the Erase/Rename right
+above it) -- confirmed against `fpc -Mtp`: its own leading literal is
+suppressed, since IOResult is the first write attempt in that statement to
+actually clear InOutRes; only the numeric value prints.  The final
+`writeln('value=', v)` runs with checked I/O back on and nothing pending,
+and is unaffected.
+
 RUN: %plang -std=turbo %s -o %t
 RUN: %run %t | FileCheck %s
 *)
 
 (*
-CHECK:erase while open IOResult=102
-CHECK-NEXT:rename while open IOResult=102
+CHECK:102
+CHECK-NEXT:102
 CHECK-NEXT:value=42
 *)
 

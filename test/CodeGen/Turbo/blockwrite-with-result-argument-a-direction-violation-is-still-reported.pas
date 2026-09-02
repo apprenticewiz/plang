@@ -24,12 +24,19 @@ count (0) -- the one place arity actually matters is that turning it off
 is needed to see either value at all, not whether the error itself gets
 reported.
 
+Issue #738 update: the closing `writeln` below is ordinary Turbo I/O, and
+InOutRes is already pending (105) when it starts -- confirmed against
+`fpc -Mtp`: its own leading literal ('IOResult=') is suppressed, since
+IOResult (this statement's SECOND argument) is the first write attempt in
+it to actually clear InOutRes; everything from that argument on prints
+normally.
+
 RUN: %plang -std=turbo %s -o %t
 RUN: %run %t | FileCheck %s
 *)
 
 (*
-CHECK:IOResult=105 result=0
+CHECK:105 result=0
 *)
 
 var

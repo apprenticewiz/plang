@@ -22,12 +22,19 @@ not open, never reaching the CHECK lines this file depends on.  See
 io-plus-aborts-at-the-next-checked-operation-not-the-failing-one.pas for
 the check's own dedicated coverage.
 
+Issue #738 update: the `writeln('ioresult=', IOResult)` below starts with
+InOutRes already pending (103, just set by the Writeln right above it) --
+confirmed against `fpc -Mtp`: its own leading literal is suppressed, since
+IOResult is the first write attempt in that statement to actually clear
+InOutRes; only the numeric value prints.  'did not crash' runs with
+InOutRes already back at 0 and is unaffected.
+
 RUN: %plang -std=turbo %s -o %t
 RUN: %run %t | FileCheck --strict-whitespace --match-full-lines %s
 *)
 
 (*
-CHECK:ioresult=103
+CHECK:103
 CHECK-NEXT:did not crash
 *)
 

@@ -24,6 +24,13 @@ before either CHECK line's writeln ever ran.  See io-plus-aborts-at-the-
 next-checked-operation-not-the-failing-one.pas for the check's own
 dedicated coverage.
 
+Issue #738 update: the first `writeln` below starts with InOutRes already
+pending (5, just set by the failing `reset` right above it) -- confirmed
+against `fpc -Mtp`: its own leading literal is suppressed, since IOResult
+is the first write attempt in that statement to actually clear InOutRes;
+only the numeric value prints.  The 'did not crash' writeln runs with
+InOutRes already back at 0 and is unaffected.
+
 RUN: rm -rf %t.dir && mkdir -p %t.dir/locked
 RUN: printf 'secret\n' > %t.dir/locked/inner.txt
 RUN: chmod 000 %t.dir/locked
@@ -33,7 +40,7 @@ RUN: chmod 755 %t.dir/locked
 *)
 
 (*
-CHECK:ioresult=5
+CHECK:5
 CHECK-NEXT:did not crash
 *)
 
