@@ -2855,6 +2855,26 @@ std::shared_ptr<Type> Sema::checkInheritedCall(
     }
     const Type& OwnerTy = *CurrentProc->ResolvedOwnerType;
     if (!OwnerTy.Parent) {
+        // Issue #624: bare 'inherited;' (Method empty) used as a full
+        // STATEMENT (ExpectFunction=false) in a ROOT object -- one with no
+        // ancestor at all -- is a legal no-op, confirmed against a local
+        // `fpc -Mtp` build: this is the common defensive
+        // "always call inherited at the top of every constructor/
+        // destructor" idiom, written even on the root of a hierarchy where
+        // it has nothing to reach.  The explicit form ('inherited Init;')
+        // still errors here in both statement and expression context (fpc:
+        // "identifier idents no member"), and the bare form still errors in
+        // EXPRESSION context (fpc: an "untyped" value used where a real one
+        // is required) -- neither of those names an ancestor, they just
+        // report differently once one truly doesn't exist, so only this one
+        // combination (bare + statement) is a no-op.  Left with
+        // ResolvedMethod/ImplementingType/ImplementingModule/
+        // ImplementingOwnerType all still empty/null (their default
+        // constructed state); CGProcCall::emitInheritedCallStmt special-
+        // cases exactly that combination (bare Method, empty
+        // ImplementingType) as "nothing to call", rather than the
+        // should-never-happen ICE it stays for every other empty case.
+        if (Method.empty() && !ExpectFunction) return TyErr;
         error(Loc, diag::err_inherited_no_ancestor, {OwnerTy.Name});
         for (const auto& A : Args) (void)checkExpr(*A);
         return TyErr;

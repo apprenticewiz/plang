@@ -151,12 +151,21 @@ Sema::FuncFrame* Sema::resultFrameFor(const std::string& Name) {
     // function's own identifier is deliberately not in the symbol table — that
     // is what leaves a recursive call able to find the function — so anything
     // found there is a nearer declaration.
+    // Issue #626: an object field (own or ancestor-inherited) exposed
+    // unqualified by pushMethodSelfScope shares this scope-lookup with
+    // every genuine local, but must NOT count as a shadowing declaration
+    // here -- fpc -Mtp confirms the method's own implicit result binding
+    // wins a bare `MethodName := value` even when an ancestor field of the
+    // same name is in scope (the assignment sets the result, not the
+    // field); only a REAL local (or nested function's own local, the
+    // ShadowedByPlainVar scenario this already handled) shadows it.
     const Symbol* Sym = Symtab.lookup(Name);
     const bool ShadowedByPlainVar = Sym
         && (Sym->Kind == SymbolKind::Var || Sym->Kind == SymbolKind::VarParam)
-        && !Sym->IsResultVar;
+        && !Sym->IsResultVar && !Sym->IsSelfScopeField;
     const bool Shadowed = Sym && (Sym->Kind == SymbolKind::Var
-                                  || Sym->Kind == SymbolKind::VarParam);
+                                  || Sym->Kind == SymbolKind::VarParam)
+                               && !Sym->IsSelfScopeField;
 
     // Innermost first: a function nested inside one of the same name has its
     // own result meant by it.

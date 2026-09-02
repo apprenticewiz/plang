@@ -2408,6 +2408,10 @@ int Sema::pushMethodSelfScope(const ProcDecl& Proc) {
         FS.Kind = SymbolKind::Var;
         FS.Name = F.Name;
         FS.Ty   = F.Ty;
+        // Issue #626: marks this as a FIELD (own or inherited) rather than
+        // a genuine local -- see Symbol::IsSelfScopeField's own comment for
+        // why resultFrameFor needs to tell the two apart.
+        FS.IsSelfScopeField = true;
         (void)Symtab.define(std::move(FS));
     }
     return 1;
