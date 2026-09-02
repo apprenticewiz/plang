@@ -540,6 +540,20 @@ private:
     // Resolved return type of CurrentProc (null when not inside a function).
     std::shared_ptr<Type> CurrentRetType;
 
+    /// Issue #625: the innermost ENCLOSING method (ProcDecl::OwnerType
+    /// non-empty, ResolvedOwnerType set) whose body checkBlock's Phase 5b is
+    /// currently walking -- unlike CurrentProc, this is NOT overwritten by
+    /// checkProcBody when it descends into a nested (non-method) procedure
+    /// declared inside that method's body, so an 'inherited' call written
+    /// inside such a nested procedure can still see the enclosing method's
+    /// own ancestor-resolution context.  Set/restored only around the
+    /// checkProcBody call for an actual method (Phase 5b, alongside
+    /// pushMethodSelfScope/ImplicitCallReceivers_, which the same nested-proc
+    /// visibility already relies on for 'Self' and implicit-receiver calls);
+    /// left untouched for ordinary (non-method) procedures, including nested
+    /// ones, so it keeps naming the same enclosing method all the way down.
+    const ProcDecl*        CurrentMethodProc{nullptr};
+
     /// Lowercased names checkProcBody just defined into CurrentProc's own
     /// parameter scope -- its formal parameters, EP named result variable, and
     /// any conformant-array bound names -- while that scope is the immediately
@@ -668,6 +682,19 @@ private:
     // are required, so resolveNamed rejects it.  Nonzero inside those two
     // contexts; managed by AllowSchemaScope.
     int AllowUndiscriminatedSchema_{0};
+    /// Issue #691: a LOCAL (procedure/function-body) variable's own
+    /// discriminant-value list (`var v: vec(k);`) need not be a compile-time
+    /// constant -- ISO 10206 §6.4.8 evaluates discriminant-values "within
+    /// the commencement of an activation of a block", i.e. once per
+    /// activation, exactly like an ordinary local's own initializer, and
+    /// plang's heap path (`new(p, k)`) already accepts a run-time value
+    /// there.  Nonzero only while resolving a VarGroup's own Type in
+    /// checkBlock's Phase 4, for a local (never a global, which has no
+    /// activation to evaluate a discriminant "within the commencement of" --
+    /// only ever elaborated once, at program start).  Managed by
+    /// AllowSchemaScope, the same RAII idiom AllowUndiscriminatedSchema_
+    /// uses.
+    int AllowRuntimeSchemaDisc_{0};
     /// Depth of pointer domain-types being resolved.  EP §6.4.3.3's `string`
     /// schema is denoted by a bare `string` HERE and not in a parameter's
     /// type, where resolveParamType already gives it the largest capacity so
@@ -1028,6 +1055,19 @@ private:
     /// if the body cannot be given a run-time representation.
     [[nodiscard]] std::shared_ptr<Type> resolveUndiscriminatedSchema(
         Symbol& Sym, const NamedTypeNode& N);
+    /// The name/loc-taking core resolveUndiscriminatedSchema(NamedTypeNode&)
+    /// forwards to.  Issue #691: also used directly for a LOCAL variable
+    /// declared with a run-time (non-constant) discriminant expression list
+    /// (`var v: vec(k);`) -- see this function's own definition (SemaType.cpp)
+    /// for why the resulting Type is identical either way: a schema
+    /// instantiation whose discriminants are not known until run time has
+    /// exactly one representation regardless of whether they arrive as a
+    /// parameter's actuals or a local's own written (but non-constant)
+    /// discriminant list -- CodeGen evaluates \p N's own Actuals once, at
+    /// the point of declaration, the same way it already evaluates an
+    /// ordinary local's initializer.
+    [[nodiscard]] std::shared_ptr<Type> resolveUndiscriminatedSchema(
+        Symbol& Sym, const std::string& Name, SourceLocation Loc);
     /// EP §6.4.7: resolves Sym's discriminant parameter type names into
     /// SchemaDeclParams (and records SchemaBodyNode/DeclLoc), from the
     /// TypeDef stashed at SchemaDeclTypeDef.  Idempotent -- guarded by

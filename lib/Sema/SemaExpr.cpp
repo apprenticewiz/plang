@@ -3141,13 +3141,29 @@ std::shared_ptr<Type> Sema::checkInheritedCall(
         std::string& ResolvedMethod, std::string& ImplementingType,
         std::string& ImplementingModule,
         std::shared_ptr<Type>& ImplementingOwnerType) {
-    if (!CurrentProc || CurrentProc->OwnerType.empty()
-            || !CurrentProc->ResolvedOwnerType) {
+    // Issue #625: an EXPLICIT 'inherited Method(...)' written inside a
+    // nested procedure declared within a method body still names the
+    // enclosing method's own ancestor-resolution context -- CurrentProc is
+    // the nested procedure itself (OwnerType empty) by the time we get
+    // here, but CurrentMethodProc keeps naming the innermost enclosing
+    // method regardless of nesting (see its own comment, Sema.h), matching
+    // how 'Self' already reaches into a nested procedure through the
+    // symbol-table scope pushMethodSelfScope leaves in place.  The bare
+    // form ('inherited;', Method empty) is deliberately left requiring
+    // CurrentProc itself to be the method -- fpc's own nested-procedure
+    // behavior for the bare form is inconsistent/no-op-like rather than
+    // "reach the enclosing method", so this fix does not extend to it.
+    const ProcDecl* MethodCtx =
+        (CurrentProc && !CurrentProc->OwnerType.empty()
+                && CurrentProc->ResolvedOwnerType)
+            ? CurrentProc
+            : (!Method.empty() ? CurrentMethodProc : nullptr);
+    if (!MethodCtx || !MethodCtx->ResolvedOwnerType) {
         error(Loc, diag::err_inherited_outside_method, {});
         for (const auto& A : Args) (void)checkExpr(*A);
         return TyErr;
     }
-    const Type& OwnerTy = *CurrentProc->ResolvedOwnerType;
+    const Type& OwnerTy = *MethodCtx->ResolvedOwnerType;
     if (!OwnerTy.Parent) {
         // Issue #624: bare 'inherited;' (Method empty) used as a full
         // STATEMENT (ExpectFunction=false) in a ROOT object -- one with no

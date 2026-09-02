@@ -361,6 +361,18 @@ void Sema::flowStmt(const StmtNode* S, FlowState& St) {
             if (Lo == "delete" || Lo == "setlength") return I == 0;
             if (Lo == "insert" || Lo == "str")       return I == 1;
             if (Lo == "val")                         return I == 1 || I == 2;
+            // Issue #673: BlockRead/BlockWrite(f, buf; count[; var amt]) --
+            // amt (argument 3, when given) is an OUT-parameter (runtime/
+            // plang_file.cpp writes the actual count transferred into it),
+            // never read by the call itself.  Missing here, it fell to the
+            // "only looks" default and warned "amt is read here before it
+            // has been given a value" on a variable this statement is
+            // precisely what gives one -- the same class of gap readstr's
+            // own comment, above, already describes.  GetMem(var P: Pointer;
+            // Size: Int64) is the identical shape as its own comment
+            // (SemaStmt.cpp) says: P (argument 0) is written, never read.
+            if (Lo == "blockread" || Lo == "blockwrite") return I == 3;
+            if (Lo == "getmem")                          return I == 0;
             return false;
         };
 
