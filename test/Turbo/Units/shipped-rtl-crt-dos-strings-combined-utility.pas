@@ -22,10 +22,24 @@ install rules" step (.github/workflows/ci.yml) to prove for all three
 together, since lit itself has no install-testing capability (see that
 item's own comment for why, and this test suite's own README).
 
+Issue #700/#708: an interface and its own compiled object now have to
+resolve from the SAME directory, so -I%plang_unit_dir alone is no longer
+enough here -- that directory has only Crt.pas SOURCE (no crt.o/crt.tui;
+those are built one directory over, under %plang_build_unit_dir, by the
+CMake rule %plang_build_unit_dir's own lit.cfg.py comment describes), so
+resolving Crt through it alone would hit the same source-only fallback
+Dos/Strings correctly use (no real Crt.o to link, since Crt's routines are
+NOT baked into libplang.a the way Dos's and Strings's are -- see this
+test's own report). -I%plang_build_unit_dir is searched FIRST so Crt
+resolves to its real, coherent built .tui/.o pair there; -I%plang_unit_dir
+remains second, for Dos/Strings, which are not built in the tree at all
+(only ever resolved via their SOURCE, and satisfied at link time straight
+out of libplang.a).
+
 RUN: rm -rf %t.dir && mkdir -p %t.dir
 RUN: printf 'aa' > %t.dir/report.txt
 RUN: printf 'bbb' > %t.dir/notes.txt
-RUN: %plang -std=turbo -I%plang_unit_dir %s -o %t
+RUN: %plang -std=turbo -I%plang_build_unit_dir -I%plang_unit_dir %s -o %t
 RUN: %run %t %t.dir | tr '\033' 'E' | FileCheck --strict-whitespace --match-full-lines %s
 *)
 
