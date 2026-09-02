@@ -449,3 +449,7 @@ void StringCallMarshalling::emitSstrStore(llvm::Value* dst, llvm::Value* capDst,
     else
         Strings.emitSstrFromCStr(dst, capDst, rhs);
 }
+
+llvm::Value* StringCallMarshalling::charLiteralDataPtr(const ExprNode& e) const {
+    return Strings.internStrPtr(llvm::cast<StringLitExpr>(e).Value);
+}

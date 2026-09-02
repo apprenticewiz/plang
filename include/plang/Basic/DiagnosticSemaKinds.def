@@ -751,7 +751,12 @@ DIAG(err_conformant_bound_assigned, Error,
      "assignment to conformant-array bound '%0' (EP §6.7.3.7.1)")
 DIAG(err_type_of_undefined, Error, "'type of %0': '%0' is not defined")
 DIAG(err_for_in_not_set, Error, "'for ... in' requires a set-type expression, got '%0'")
-DIAG(err_for_in_var_scope, Error, "loop variable '%0' in 'for ... in' must be a new name in this scope")
+// ISO 10206 §6.9.3.9.1 (issue #689): the control variable of a
+// `for v in set do` is an ordinary variable-access, not implicitly
+// declared -- so its type must agree with the set's element type the same
+// way an ordinary for-loop's control variable must agree with its bounds.
+DIAG(err_for_in_var_wrong_type, Error,
+     "loop variable '%0' has type '%1', incompatible with set element type '%2'")
 DIAG(err_conformant_actual_not_array, Error, "conformant array parameter '%0' requires an array argument, got '%1'")
 DIAG(err_conformant_elem_mismatch, Error, "element type mismatch for conformant array parameter '%0': expected '%1', got '%2'")
 // ISO §6.7.3.8 a) and d): the other two ways an array argument can fail to

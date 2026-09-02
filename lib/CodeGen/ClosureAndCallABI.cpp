@@ -12,6 +12,7 @@
 
 #include "CGCallMarshal.h"
 #include "CodegenICE.h"
+#include "StringCallMarshalling.h"
 
 using namespace plang;
 
@@ -41,6 +42,27 @@ ClosureAndCallABI::loadProcPair(llvm::Value* cell) {
 
 void ClosureAndCallABI::pushConformantArgs(std::vector<llvm::Value*>& args,
                                             const ExprNode& arg, size_t dims) {
+    // ISO 7185 §6.4.3.2/§6.6.3.6.2 (issue #687): a char-string literal's
+    // TYPE is "packed array[1..n] of char", but it carries no static Type
+    // recording n or an IndexType the way a real Array does -- its
+    // ResolvedType is the one shared String singleton (TypeContext::
+    // getString()) every literal points at, and n lives only on the
+    // StringLitExpr node itself.  Sema's isConformable (SemaExpr.cpp)
+    // restricts this pairing to exactly one dimension, so there is no
+    // recursion to do here: push the literal's own interned bytes (via
+    // StrCall.charLiteralDataPtr -- NOT EmitLValue, which several OTHER
+    // callers rely on returning null for a StringLitExpr; see that
+    // method's own comment, StringCallMarshalling.h) as its address and
+    // 1..n as its single bound directly, bypassing the ResolvedType-driven
+    // walk below (which would see the String singleton and has no length
+    // to read from it).
+    if (auto* sl = llvm::dyn_cast<StringLitExpr>(&arg)) {
+        args.push_back(StrCall.charLiteralDataPtr(arg));
+        const auto n = static_cast<int64_t>(sl->Value.size());
+        args.push_back(llvm::ConstantInt::get(I64Ty, 1));
+        args.push_back(llvm::ConstantInt::get(I64Ty, n));
+        return;
+    }
     args.push_back(EmitLValue(arg));
 
     // Each dimension reads its bounds from the actual's element type, walking

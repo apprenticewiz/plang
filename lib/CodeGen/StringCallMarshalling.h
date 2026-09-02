@@ -99,6 +99,21 @@ public:
     /// or the other explicitly rather than have a single function decide
     /// which shape \p dst actually has.
     void emitSstrStore(llvm::Value* dst, llvm::Value* capDst, const plang::ExprNode& src);
+    /// The raw bytes address behind a char-string LITERAL actual passed to a
+    /// packed conformant-array-of-char formal (ISO 7185 §6.4.3.2/§6.6.3.6.2,
+    /// issue #687) -- the interned constant backing the literal, with no
+    /// length prefix the way emitCallArg's general VarString path would
+    /// build one.  A dedicated entry point rather than routing this through
+    /// the general-purpose EmitLValue: several OTHER callers of EmitLValue
+    /// (e.g. emitBuiltinReadStr, BuiltinIO.cpp) treat a null result as "try
+    /// EmitExpr instead" for a StringLitExpr, and having EmitLValue itself
+    /// answer for one there instead broke every one of those call sites --
+    /// caught by CodeGen/TextFiles/a-long-numeric-literal-does-not-truncate
+    /// .pas, whose readstr(literal, realVar) silently misread the literal's
+    /// own bytes as a VarString struct's length field once EmitLValue no
+    /// longer returned null for it.  Only pushConformantArgs
+    /// (ClosureAndCallABI.cpp) is meant to see this one.
+    llvm::Value* charLiteralDataPtr(const plang::ExprNode& e) const;
 
 private:
     llvm::LLVMContext& Ctx;

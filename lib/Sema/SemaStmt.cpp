@@ -2907,19 +2907,47 @@ void Sema::checkForIn(const ForInStmt& S) {
     if (!SetTyU->isError() && SetTyU->Kind != TypeKind::Set)
         error(S.Loc, diag::err_for_in_not_set, {SetTy->Name});
 
-    // The loop variable is implicitly declared for the duration of the body.
-    // It has the element type of the set (or integer if we can't determine it).
+    // The set's element type (or integer if we can't determine it), used
+    // below to check the DECLARED control variable's type. Issue #584: a
+    // schema-instantiated set (`s(5)`) is TypeKind::Schema/SchemaInstance,
+    // not Set, until unwrapped via SetTyU.
     auto ElemTy = (SetTyU->Kind == TypeKind::Set && SetTyU->ElemType)
                   ? SetTyU->ElemType : TyInt;
 
-    Symtab.pushScope(/*IsBlock=*/false);
-    Symbol LoopSym;
-    LoopSym.Kind  = SymbolKind::Var;
-    LoopSym.Name  = S.Var;
-    LoopSym.Ty    = ElemTy;
-    LoopSym.DeclLoc = S.Loc;
-    if (!Symtab.define(LoopSym))
-        error(S.Loc, diag::err_for_in_var_scope, {S.Var});
+    // ISO 10206 §6.9.3.9.1 (issue #689): `for v in set do` names an ordinary
+    // variable-access as its control variable -- exactly like checkFor's
+    // to/downto form (ISO §6.8.3.9) -- not one this loop declares on v's
+    // behalf.  This used to push a fresh scope and implicitly `define` v
+    // there every time, which (a) let an UNDECLARED v compile silently,
+    // (b) never checked a declared v's type against the set's element type,
+    // (c) made a declared v's only use (driving the loop) invisible to the
+    // "declared but never used" check, since the shadow, not the real
+    // symbol, was the one marked Referenced, and (d) was internally
+    // inconsistent with CodeGen (CGControlFlow::emitForIn), which already
+    // looks up and writes through the OUTER declared variable when one
+    // exists -- so the value Sema treated as scoped to the loop body in
+    // fact leaked past it at run time.
+    Symbol* Sym = Symtab.lookup(S.Var);
+    if (!Sym) {
+        error(S.Loc, diag::err_for_var_undefined, {S.Var});
+    } else {
+        // Driving a loop is a use, the same as checkFor's identical note.
+        Sym->Referenced = true;
+        const bool IsVar = Sym->Kind == SymbolKind::Var
+                         || Sym->Kind == SymbolKind::VarParam;
+        if (!IsVar) {
+            error(S.Loc, diag::err_for_var_not_variable, {S.Var});
+        } else {
+            if (!SetTy->isError() && !isAssignCompatible(*Sym->declaredType(), *ElemTy))
+                error(S.Loc, diag::err_for_in_var_wrong_type,
+                      {S.Var, Sym->declaredType()->Name, ElemTy->Name});
+            // ISO §6.8.3.9 / §6.9.3.9.1: local to the immediately enclosing
+            // block -- see checkFor's identical check for why
+            // lookupInEnclosingBlock, not lookup, is what "local" means.
+            if (!Symtab.lookupInEnclosingBlock(S.Var))
+                error(S.Loc, diag::err_for_var_not_local, {S.Var});
+        }
+    }
 
     // ISO §6.8.3.9's control-variable restrictions (no reassignment,
     // var-parameter aliasing, or use as a read/readln/readstr/writestr
@@ -2932,5 +2960,4 @@ void Sema::checkForIn(const ForInStmt& S) {
         LoopScope LS(LoopDepth_);
         checkStmt(S.Body.get());
     }
-    Symtab.popScope();
 }

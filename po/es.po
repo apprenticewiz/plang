@@ -898,9 +898,9 @@ msgid "'for ... in' requires a set-type expression, got '%0'"
 msgstr "«for ... in» requiere una expresión de tipo conjunto, se obtuvo «%0»"
 
 #, fuzzy
-msgctxt "diag/err_for_in_var_scope"
-msgid "loop variable '%0' in 'for ... in' must be a new name in this scope"
-msgstr "la variable de bucle «%0» de «for ... in» debe ser un nombre nuevo en este ámbito"
+msgctxt "diag/err_for_in_var_wrong_type"
+msgid "loop variable '%0' has type '%1', incompatible with set element type '%2'"
+msgstr "la variable de bucle «%0» tiene el tipo «%1», incompatible con el tipo de elemento del conjunto «%2»"
 
 #, fuzzy
 msgctxt "diag/err_conformant_actual_not_array"
