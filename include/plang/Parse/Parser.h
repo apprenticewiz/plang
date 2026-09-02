@@ -455,6 +455,23 @@ private:
     // Returns nullptr for the ε production; callers must handle null.
     std::unique_ptr<StmtNode>     parseStatement();
 
+    // Issue #627: the shared "given an already-postfix-chained lvalue
+    // expression at the START of a statement, decide what STATEMENT it
+    // denotes" dispatch parseStatement's own Identifier arm uses -- an
+    // assignment target (':='), a bare/parenthesized procedure call
+    // (IdentExpr), a method call ('.identifier(args)', MethodCallExpr), or
+    // the bare-method form ('.identifier' with no parens, FieldExpr).
+    // Factored out so parseStatement's Identifier arm can call into it a
+    // SECOND time for 'Name(args)' immediately followed by a further '.',
+    // '^', or '[' -- e.g. 'MakeD()^.Speak;' where MakeD returns ^TD -- which
+    // needs a CallExpr built and postfix-chained onto (parsePostfix) before
+    // this same dispatch can apply, exactly the way expression-position
+    // parsing already builds that whole chain in one pass (parseFactor's own
+    // Identifier arm, ParseExpr.cpp).  \p Loc is the token the resulting
+    // statement node's own Loc is stamped with (the leading identifier).
+    std::unique_ptr<StmtNode>     finishLvalueStatement(std::unique_ptr<ExprNode> Lval,
+                                                        Token Loc);
+
     // compound-stmt → 'begin' statement (';' statement)* 'end'
     std::unique_ptr<CompoundStmt> parseCompoundStmt();
 

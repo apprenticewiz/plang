@@ -193,6 +193,19 @@ struct Symbol {
     /// r is a packed record — packed components cannot be passed as var params.
     bool FromPackedWith{false};
 
+    /// Turbo Tier 5, issue #626: set by Sema::pushMethodSelfScope for every
+    /// object field it exposes unqualified inside a method body (own or
+    /// ancestor-inherited -- RecordFields is already the flattened list, see
+    /// pushMethodSelfScope's own comment).  resultFrameFor reads this to tell
+    /// "a field happens to share the enclosing method's own name" apart from
+    /// "a genuine local variable (or nested function's own local) shares
+    /// it" -- only the latter shadows the function-result binding of a bare
+    /// assignment target (`MethodName := value`).  Confirmed against a local
+    /// `fpc -Mtp` build: an inherited field of the same name as the method
+    /// itself does NOT shadow the implicit result variable there either --
+    /// the assignment sets the result, not the field.
+    bool IsSelfScopeField{false};
+
     /// EP §6.7.3.1: set for protected value parameters — assignment inside the
     /// function body is a compile-time error.
     bool IsProtected{false};

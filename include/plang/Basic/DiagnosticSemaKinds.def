@@ -624,8 +624,14 @@ DIAG(err_inherited_outside_method, Error,
      "'inherited' may only be used inside an object method")
 // Turbo Tier 5, Cluster A item 5: the enclosing method's own object type has
 // no ancestor at all ('object type 'T' has no ancestor for 'inherited' to
-// reach') -- confirmed against fpc -Mtp: 'inherited' on a root object type
-// is rejected rather than silently a no-op.
+// reach') -- confirmed against fpc -Mtp for an EXPLICIT 'inherited Name'/
+// 'inherited Name(...)'.  Issue #624: that confirmation did not hold for the
+// BARE 'inherited;' form (Method empty) used as a full STATEMENT -- fpc
+// treats that one combination as a legal no-op instead (the common
+// defensive "always call inherited at the top of every constructor/
+// destructor" idiom, written even on a hierarchy's own root), so
+// Sema::checkInheritedCall never reaches this diagnostic for it -- see that
+// function's own comment for the full three-way split.
 DIAG(err_inherited_no_ancestor, Error,
      "object type '%0' has no ancestor for 'inherited' to reach")
 // Turbo Tier 5, Cluster A item 5: 'inherited Name(...)' where no ancestor in

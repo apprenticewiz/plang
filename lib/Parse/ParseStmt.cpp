@@ -221,98 +221,7 @@ std::unique_ptr<StmtNode> Parser::parseStatement() {
                 Lval = parsePostfix(std::move(Ident));
             }
 
-            if (check(TokenKind::Assign)) {
-                // assignment → lvalue ':=' expression
-                advance();
-                auto Node    = std::make_unique<AssignStmt>();
-                Node->Loc    = Lval->Loc;
-                Node->Target = std::move(Lval);
-                Node->Value  = parseExpression();
-                return Node;
-            }
-
-            if (auto* Id = llvm::dyn_cast<IdentExpr>(Lval.get())) {
-                // Bare identifier followed by ':' → labeled statement (identifier label).
-                if (check(TokenKind::Colon)) {
-                    advance();
-                    auto Node   = std::make_unique<LabeledStmt>();
-                    Node->Loc   = IdentTok;
-                    // canonicalLabel, not Id->Name/IdentTok.Lexeme directly:
-                    // every other site that produces a label spelling (the
-                    // label-section declaration, a goto's target, an integer
-                    // labeled-statement) goes through it too, and it is what
-                    // lower-cases an identifier label so this one still
-                    // matches its declaration's spelling in
-                    // Sema's CurrentBlockLabels/LabelEnclosingStmt and
-                    // CodeGen's LabelGotoEngine, all of which key on this
-                    // string by plain equality.
-                    Node->Label = canonicalLabel(IdentTok.Lexeme);
-                    Node->Stmt  = parseStatement();
-                    return Node;
-                }
-                // Otherwise it's a procedure call.
-                auto Node  = std::make_unique<CallStmt>();
-                Node->Loc  = IdentTok;
-                Node->Name = Id->Name;
-                if (match(TokenKind::LeftParen)) {
-                    if (!check(TokenKind::RightParen)) {
-                        // write/writeln arguments support ':' width/decimal
-                        // specifiers, and so does writestr (EP §6.7.5.5, whose
-                        // parameter list is defined in terms of write-parameters).
-                        std::string Lo = Id->Name;
-                        for (auto& C : Lo) C = static_cast<char>(std::tolower(
-                                                  static_cast<unsigned char>(C)));
-                        // TP-only: Str(x [:width[:decimals]], var s) formats
-                        // its FIRST argument the same way write/writestr's
-                        // value arguments do; the second (destination) never
-                        // has a colon suffix, but parseWriteArg is safe to
-                        // apply to it too since the ':' is only consumed
-                        // when actually present (checked, not assumed).
-                        bool IsWrite = (Lo == "write" || Lo == "writeln"
-                                        || Lo == "writestr" || Lo == "str");
-                        Node->Args.push_back(IsWrite ? parseWriteArg() : parseExpression());
-                        while (match(TokenKind::Comma)) {
-                            Node->Args.push_back(IsWrite ? parseWriteArg() : parseExpression());
-                        }
-                    }
-                    expect(TokenKind::RightParen);
-                }
-                return Node;
-            }
-
-            // Turbo Tier 5, Cluster A item 3: 'Obj.Method(args);' -- Lval is
-            // already a MethodCallExpr (parsePostfix built one the moment it
-            // saw '.identifier(' -- see that function's own comment,
-            // ParseExpr.cpp) -- becomes a MethodCallStmt the same way an
-            // ordinary CallExpr-shaped bare identifier becomes a CallStmt
-            // just above, just with a Receiver instead of a bare Name.
-            if (auto* Mc = llvm::dyn_cast<MethodCallExpr>(Lval.get())) {
-                auto Node      = std::make_unique<MethodCallStmt>();
-                Node->Loc      = Mc->Loc;
-                Node->Receiver = std::move(Mc->Receiver);
-                Node->Method   = std::move(Mc->Method);
-                Node->Args     = std::move(Mc->Args);
-                return Node;
-            }
-            // Turbo Tier 5, Cluster A item 3: the BARE form, 'Obj.Method;'
-            // with no parens at all -- confirmed legal against a local
-            // fpc -Mtp build, the identical relaxation a bare 'Foo;' already
-            // gets for a zero-argument ordinary procedure.  Lval is a plain
-            // FieldExpr here (parsePostfix has no way to know '.identifier'
-            // with nothing after it is a method rather than a field read
-            // used, illegally, as a statement -- there is no such thing as
-            // an expression-statement in this grammar otherwise, so this was
-            // always an error before and Sema now decides which one).
-            if (auto* Fe = llvm::dyn_cast<FieldExpr>(Lval.get())) {
-                auto Node      = std::make_unique<MethodCallStmt>();
-                Node->Loc      = Fe->Loc;
-                Node->Receiver = std::move(Fe->Record);
-                Node->Method   = Fe->Field;
-                return Node;
-            }
-
-            emitError(Lval->Loc, diag::err_expected_assign_after_var);
-            return nullptr;
+            return finishLvalueStatement(std::move(Lval), IdentTok);
         }
 
         // Turbo Tier 5, Cluster A item 5: 'inherited;' (bare) / 'inherited
@@ -351,6 +260,134 @@ std::unique_ptr<StmtNode> Parser::parseStatement() {
             // ε — empty statement; the caller is responsible for handling nullptr.
             return nullptr;
     }
+}
+
+// Issue #627: see this method's own declaration (Parser.h) for why it is
+// factored out of parseStatement's Identifier arm -- the shared "what
+// STATEMENT does this already-postfix-chained lvalue expression denote"
+// dispatch, reachable a second time (recursively) for 'Name(args)'
+// immediately followed by a further '.', '^', or '[' reaching into the
+// call's own result.
+std::unique_ptr<StmtNode> Parser::finishLvalueStatement(std::unique_ptr<ExprNode> Lval,
+                                                        Token Loc) {
+    if (check(TokenKind::Assign)) {
+        // assignment → lvalue ':=' expression
+        advance();
+        auto Node    = std::make_unique<AssignStmt>();
+        Node->Loc    = Lval->Loc;
+        Node->Target = std::move(Lval);
+        Node->Value  = parseExpression();
+        return Node;
+    }
+
+    if (auto* Id = llvm::dyn_cast<IdentExpr>(Lval.get())) {
+        // Bare identifier followed by ':' → labeled statement (identifier label).
+        if (check(TokenKind::Colon)) {
+            advance();
+            auto Node   = std::make_unique<LabeledStmt>();
+            Node->Loc   = Loc;
+            // canonicalLabel, not Id->Name/Loc.Lexeme directly: every other
+            // site that produces a label spelling (the label-section
+            // declaration, a goto's target, an integer labeled-statement)
+            // goes through it too, and it is what lower-cases an identifier
+            // label so this one still matches its declaration's spelling in
+            // Sema's CurrentBlockLabels/LabelEnclosingStmt and CodeGen's
+            // LabelGotoEngine, all of which key on this string by plain
+            // equality.
+            Node->Label = canonicalLabel(Loc.Lexeme);
+            Node->Stmt  = parseStatement();
+            return Node;
+        }
+        // Otherwise it's a procedure call.
+        auto Node  = std::make_unique<CallStmt>();
+        Node->Loc  = Loc;
+        Node->Name = Id->Name;
+        if (match(TokenKind::LeftParen)) {
+            if (!check(TokenKind::RightParen)) {
+                // write/writeln arguments support ':' width/decimal
+                // specifiers, and so does writestr (EP §6.7.5.5, whose
+                // parameter list is defined in terms of write-parameters).
+                std::string Lo = Id->Name;
+                for (auto& C : Lo) C = static_cast<char>(std::tolower(
+                                          static_cast<unsigned char>(C)));
+                // TP-only: Str(x [:width[:decimals]], var s) formats
+                // its FIRST argument the same way write/writestr's
+                // value arguments do; the second (destination) never
+                // has a colon suffix, but parseWriteArg is safe to
+                // apply to it too since the ':' is only consumed
+                // when actually present (checked, not assumed).
+                bool IsWrite = (Lo == "write" || Lo == "writeln"
+                                || Lo == "writestr" || Lo == "str");
+                Node->Args.push_back(IsWrite ? parseWriteArg() : parseExpression());
+                while (match(TokenKind::Comma)) {
+                    Node->Args.push_back(IsWrite ? parseWriteArg() : parseExpression());
+                }
+            }
+            expect(TokenKind::RightParen);
+        }
+        // Issue #627: 'Name(args);' -- or bare 'Name;' with none -- was
+        // always assumed to be the WHOLE statement, but a further '.', '^',
+        // or '[' reaches into the CALL'S OWN RESULT instead: a method call
+        // or field/element access on whatever Name(args) returns, e.g.
+        // 'MakeD()^.Speak;' where MakeD returns ^TD.  Expression-position
+        // parsing already handles this shape uniformly -- parseFactor's own
+        // Identifier arm (ParseExpr.cpp) wraps every 'Name(args)' in
+        // parsePostfix before ever asking what follows it -- reproduced here
+        // only for the rare case something actually DOES follow: rebuild
+        // Node as a CallExpr (identical Name/Args) and hand it through
+        // parsePostfix and back into this SAME dispatch (recursively) rather
+        // than returning a CallStmt that leaves the rest of the chain
+        // unparsed (previously: "expected 'end', got '^'"). A bare
+        // identifier with no '(' at all can never reach this check still
+        // true: parsePostfix already ran on it once, at the call site that
+        // built Lval, before Lval could ever come back here as a plain
+        // IdentExpr -- so this is reachable only right after consuming a
+        // '(args)' just above, which parsePostfix never got a chance to see
+        // coming.
+        if (check(TokenKind::Dot) || check(TokenKind::Caret)
+                || check(TokenKind::LeftBracket)) {
+            auto Ce  = std::make_unique<CallExpr>();
+            Ce->Loc  = Node->Loc;
+            Ce->Name = std::move(Node->Name);
+            Ce->Args = std::move(Node->Args);
+            return finishLvalueStatement(parsePostfix(std::move(Ce)), Loc);
+        }
+        return Node;
+    }
+
+    // Turbo Tier 5, Cluster A item 3: 'Obj.Method(args);' -- Lval is
+    // already a MethodCallExpr (parsePostfix built one the moment it
+    // saw '.identifier(' -- see that function's own comment,
+    // ParseExpr.cpp) -- becomes a MethodCallStmt the same way an
+    // ordinary CallExpr-shaped bare identifier becomes a CallStmt
+    // just above, just with a Receiver instead of a bare Name.
+    if (auto* Mc = llvm::dyn_cast<MethodCallExpr>(Lval.get())) {
+        auto Node      = std::make_unique<MethodCallStmt>();
+        Node->Loc      = Mc->Loc;
+        Node->Receiver = std::move(Mc->Receiver);
+        Node->Method   = std::move(Mc->Method);
+        Node->Args     = std::move(Mc->Args);
+        return Node;
+    }
+    // Turbo Tier 5, Cluster A item 3: the BARE form, 'Obj.Method;'
+    // with no parens at all -- confirmed legal against a local
+    // fpc -Mtp build, the identical relaxation a bare 'Foo;' already
+    // gets for a zero-argument ordinary procedure.  Lval is a plain
+    // FieldExpr here (parsePostfix has no way to know '.identifier'
+    // with nothing after it is a method rather than a field read
+    // used, illegally, as a statement -- there is no such thing as
+    // an expression-statement in this grammar otherwise, so this was
+    // always an error before and Sema now decides which one).
+    if (auto* Fe = llvm::dyn_cast<FieldExpr>(Lval.get())) {
+        auto Node      = std::make_unique<MethodCallStmt>();
+        Node->Loc      = Fe->Loc;
+        Node->Receiver = std::move(Fe->Record);
+        Node->Method   = Fe->Field;
+        return Node;
+    }
+
+    emitError(Lval->Loc, diag::err_expected_assign_after_var);
+    return nullptr;
 }
 
 // compound-stmt → 'begin' statement (';' statement)* 'end'

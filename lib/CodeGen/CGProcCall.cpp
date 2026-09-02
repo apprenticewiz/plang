@@ -1313,6 +1313,14 @@ llvm::Value* CGProcCall::emitBoundMethodCall(
 // Turbo Tier 5, Cluster A item 5: see this method's own declaration
 // (CGProcCall.h) for the whole design.
 void CGProcCall::emitInheritedCallStmt(const InheritedCallStmt& s) {
+    // Issue #624: bare 'inherited;' with no ancestor at all -- Sema
+    // (Sema::checkInheritedCall) leaves ResolvedMethod/ImplementingType
+    // both empty for exactly this one legal combination (see its own
+    // comment) rather than refusing it, so this is not the "should never
+    // happen" case the ICE below still guards for the explicit form (which
+    // Sema always errors out of before CodeGen runs at all). Nothing to
+    // call -- emit nothing.
+    if (s.Method.empty() && s.ImplementingType.empty()) return;
     if (s.ImplementingType.empty() || s.ResolvedMethod.empty())
         codegenICE("'inherited' reached CodeGen unresolved -- "
                    "Sema::checkInheritedCallStmt should have refused this "
