@@ -11,19 +11,21 @@ entry points (plang_write_u64/plang_read_u64 and their _turbo/_file twins),
 and CodeGen has to actually route a QWord destination to them instead of the
 plain _i64/_f64 family.
 
-No QWord literal appears directly in source: an integer literal past
-INT64_MAX is rejected by the lexer's own int64 range check regardless of the
-destination type ("integer literal '...' is out of range" -- a separate,
-known limitation of literal parsing, not of QWord's write/read path this
-test is about), so every boundary value here is built with arithmetic a
+No QWord literal appears directly in source here: this test predates issue
+#795's fix, which lets a literal past INT64_MAX through directly wherever
+the destination is unsigned/QWord-compatible (see
+qword-literal-past-int64-max-issue-795.pas for that direct-literal
+coverage) -- deliberately kept on the typecast-arithmetic construction below
+instead, so it goes on isolating QWord's write/read runtime path from
+literal parsing.  Every boundary value here is built with arithmetic a
 QWord variable can hold: QWord(-1) for the maximum (an all-ones bit pattern,
-constructed the same way `fpc -Mtp` requires -- there is no unsigned literal
-syntax either place), and QWord(9223372036854775807) + 1 -- Int64's own
-maximum, itself in range for a plain literal -- for the value one past it
-(2^63), which sets the i64 sign bit but is otherwise an ordinary small-
-magnitude-relative-to-QWord's-range value.  The same two values are then
-read back from stdin, in full-range decimal, to exercise
-plang_read_u64_turbo.
+constructed the same way `fpc -Mtp` requires whenever a literal isn't used --
+there is no unsigned literal syntax either place), and
+QWord(9223372036854775807) + 1 -- Int64's own maximum, itself in range for a
+plain literal -- for the value one past it (2^63), which sets the i64 sign
+bit but is otherwise an ordinary small-magnitude-relative-to-QWord's-range
+value.  The same two values are then read back from stdin, in full-range
+decimal, to exercise plang_read_u64_turbo.
 
 RUN: split-file %s %t.dir
 RUN: %plang -std=turbo %t.dir/test.pas -o %t

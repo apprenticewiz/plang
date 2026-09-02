@@ -140,8 +140,25 @@ std::shared_ptr<Type> Sema::checkExpr(const ExprNode& E) {
 
     std::shared_ptr<Type> T;
 
-    if (llvm::dyn_cast<IntLitExpr>(&E))
-        T = TyInt;
+    if (auto* IntLit = llvm::dyn_cast<IntLitExpr>(&E))
+        // Issue #795: a literal past Int64::max (ExceedsInt64, set only
+        // when the parser's uint64 fallback succeeded -- ParseExpr.cpp)
+        // needs a full unsigned 64 bits just to represent the value its
+        // own text denotes, so that -- not the dialect's plain default
+        // Integer every other IntLitExpr gets -- is the only type it can
+        // honestly be given here. This is what lets an unconstrained use
+        // (`writeln(18446744073709551615)`, no destination variable at
+        // all) print correctly: BuiltinIO's writesAsUnsigned64 dispatch
+        // keys off exactly this Width==64/IsSigned==false shape. A
+        // constrained use (assigned to a variable, passed as an argument,
+        // ...) is separately re-examined against its actual destination
+        // type by Sema::warnIfConstantOutOfRange, which still hard-rejects
+        // it wherever that destination cannot itself hold the full
+        // unsigned 64-bit range -- this typing alone does not make the
+        // literal assignment-compatible with a narrower or signed one,
+        // since isAssignCompatible only compares TypeKind::Integer by kind,
+        // not by width.
+        T = IntLit->ExceedsInt64 ? Ctx_.getInt(64, /*Signed=*/false) : TyInt;
     else if (llvm::dyn_cast<RealLitExpr>(&E))
         T = TyReal;
     else if (llvm::dyn_cast<NilExpr>(&E))
@@ -3991,6 +4008,22 @@ void Sema::checkCallArgs(const Symbol& Sym, SourceLocation CallLoc,
             // restricted value reaches a formal of the type it restricts —
             // the one use §6.4.2.5 leaves open for it.
             if (At->isRestricted()) At = At->RestrictedOf;
+            // Issue #795: isAssignCompatible only compares TypeKind::Integer
+            // by kind, not by width/signedness, so it alone would accept a
+            // literal past Int64::max at ANY Integer-kind formal (e.g. an
+            // Int64 one) -- silently passing its two's-complement bit
+            // pattern (-1 for UInt64::max) rather than the value the source
+            // text names.  Judged first and separately, the same way
+            // warnIfConstantOutOfRange judges it for an assignment target.
+            if (Param.Ty && !Param.Ty->isError()
+                    && rejectOverflowLiteralUnlessQWordDest(*Param.Ty, ArgNode)) {
+                // Already fully judged (accepted or diagnosed) above; the
+                // ordinary isAssignCompatible check below would be
+                // redundant (Integer-kind vs. Integer-kind always passes)
+                // and typeContainsFile/adoptSetType have nothing to add for
+                // a bare integer literal.
+                continue;
+            }
             if (!At->isError() && !Param.Ty->isError()
                 && !isAssignCompatible(*Param.Ty, *At))
                 error(ArgNode.Loc, diag::err_param_type_mismatch,

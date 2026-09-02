@@ -469,8 +469,31 @@ std::unique_ptr<ExprNode> Parser::parseFactor() {
             const auto& S = Current.Lexeme;
             auto [Ptr, Ec] = std::from_chars(S.data(), S.data() + S.size(), Node->Value);
             if (Ec == std::errc::result_out_of_range) {
-                emitError(Loc.toLoc(), diag::err_int_literal_out_of_range, {S});
-                Node->Value = 0;
+                // Issue #795: past Int64::max, the text may still denote a
+                // value fpc -Mtp accepts directly wherever the destination
+                // is unsigned/QWord-compatible (9223372036854775808 through
+                // 18446744073709551615) -- there is no lexer/parser-level
+                // notion of destination type to decide that here, so a
+                // second attempt into a uint64_t is made before giving up.
+                // On success, Value is given that uint64_t's own
+                // two's-complement bit pattern (value-preserving when later
+                // read back via `static_cast<uint64_t>`, the same
+                // reinterpretation CGExprCore.cpp's codegen already applies
+                // to every IntLitExpr) and ExceedsInt64 records the fact, so
+                // Sema -- the first place a concrete destination type is
+                // available -- can accept or reject it accordingly
+                // (Sema::warnIfConstantOutOfRange). A value past even
+                // UInt64::max still has nothing that can represent it and is
+                // rejected here exactly as before.
+                uint64_t U = 0;
+                auto [UPtr, UEc] = std::from_chars(S.data(), S.data() + S.size(), U);
+                if (UEc == std::errc{} && UPtr == S.data() + S.size()) {
+                    Node->Value = static_cast<int64_t>(U);
+                    Node->ExceedsInt64 = true;
+                } else {
+                    emitError(Loc.toLoc(), diag::err_int_literal_out_of_range, {S});
+                    Node->Value = 0;
+                }
             }
             advance();
             return Node;

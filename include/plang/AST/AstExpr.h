@@ -15,6 +15,21 @@ struct IntLitExpr : ExprNode {
     static bool classof(const Node* n) { return n->Kind == NodeKind::IntLitExpr; }
     IntLitExpr() : ExprNode(NodeKind::IntLitExpr) {}
     int64_t Value{0};          /// numeric value of the integer literal
+
+    /// Issue #795: true when the literal's own text denoted a value past
+    /// Int64::max but no further than UInt64::max -- std::from_chars into
+    /// this node's (necessarily int64_t) Value overflowed, but a second
+    /// attempt into a uint64_t succeeded (Parser::parseFactor,
+    /// ParseExpr.cpp).  Value already holds that uint64_t's two's-complement
+    /// bit pattern (a plain `static_cast<uint64_t>(Value)` recovers it, the
+    /// same reinterpretation CGExprCore.cpp's codegen already performs for
+    /// every IntLitExpr), so nothing downstream that only reads Value is
+    /// affected.  Sema consults this flag at the few sites that know a
+    /// concrete destination type (assignment, var/const initializers, ...)
+    /// to accept the literal ONLY where that destination can itself hold
+    /// the full unsigned 64-bit range (QWord), and to keep reporting
+    /// out-of-range everywhere else -- see Sema::warnIfConstantOutOfRange.
+    bool ExceedsInt64{false};
 };
 
 struct RealLitExpr : ExprNode {
