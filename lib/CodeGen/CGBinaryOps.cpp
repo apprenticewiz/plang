@@ -341,10 +341,37 @@ llvm::Value* CGBinaryOps::emitBinary(const BinaryExpr& e) {
     // whole work item exists to avoid, here in a second place.  A
     // comparison with NO ShortString operand at all leaves this condition
     // false and reaches the EP block exactly as before.
+    //
+    // Issue #636: under -std=turbo, a multi-character string LITERAL is
+    // typed Kind::String (SemaExpr.cpp's checkExpr — TyStr is what such a
+    // literal resolves to outside EP, same as ISO 7185's), never
+    // Kind::ShortString, since a literal carries no variable of its own to
+    // stamp with a ShortString capacity.  So a comparison between two
+    // literals (or a Char literal and a multi-char one, e.g. 'a' = 'a ')
+    // has NEITHER operand ExprIsShortStr, even though Turbo has no EP
+    // string semantics at all to fall back on -- there is no ShortString
+    // variable anywhere in sight for the EP block below to be a correct
+    // fallback FROM.  isTurboCmpKind mirrors Sema::checkBinary's own
+    // isShortStrLike twin of exprIsStringLike (SemaExpr.cpp) that decided
+    // this comparison was legal in the first place; requiring one side to
+    // be Kind::String (an actual literal) keeps a same-dialect Char-vs-Char
+    // comparison (e.g. 'a' = 'b') on its existing ordinal-compare path
+    // instead of routing it through the ShortString runtime for no reason.
+    auto isTurboCmpKind = [](const ExprNode& expr) {
+        return expr.ResolvedType
+            && (expr.ResolvedType->Kind == TypeKind::ShortString
+                || expr.ResolvedType->Kind == TypeKind::Char
+                || expr.ResolvedType->Kind == TypeKind::String);
+    };
+    const bool eitherIsStrLit =
+        (e.Left->ResolvedType  && e.Left->ResolvedType->Kind  == TypeKind::String)
+     || (e.Right->ResolvedType && e.Right->ResolvedType->Kind == TypeKind::String);
     if ((e.Op == TokenKind::Equal || e.Op == TokenKind::NotEqual
          || e.Op == TokenKind::LessThan || e.Op == TokenKind::LessThanOrEqual
          || e.Op == TokenKind::GreaterThan || e.Op == TokenKind::GreaterThanOrEqual)
-            && (ExprIsShortStr(*e.Left) || ExprIsShortStr(*e.Right))) {
+            && (ExprIsShortStr(*e.Left) || ExprIsShortStr(*e.Right)
+                || (RangeGuards.isTurbo() && eitherIsStrLit
+                    && isTurboCmpKind(*e.Left) && isTurboCmpKind(*e.Right)))) {
         const char* fnName =
             e.Op == TokenKind::Equal           ? "plang_sstr_eq" :
             e.Op == TokenKind::NotEqual        ? "plang_sstr_ne" :
@@ -485,14 +512,14 @@ llvm::Value* CGBinaryOps::emitBinary(const BinaryExpr& e) {
                 // this path.
                 //
                 // Result width: FPC's own answer here is Longint (32-bit
-                // signed), which plang cannot name yet -- the Turbo sized-
-                // integer ladder (Byte/Word/ShortInt/LongInt) is separate,
-                // concurrent work that has not landed.  This yields plang's
-                // `integer` instead (Turbo's 16-bit Integer -- the exact TyInt
-                // Sema::checkBinary's own p1-p2 case returns, see its
-                // comment), a documented interim choice to widen once the
-                // ladder lands rather than mint an unnamed wider type here
-                // that Sema's declared result type would not match.
+                // signed) -- confirmed against fpc -Mtp (issue #713: a real
+                // 40000-Char span came back truncated and wrapped through
+                // plang's 16-bit Integer instead).  Sema::checkBinary's own
+                // p1-p2 case now returns that same LongInt (Ctx_.getInt(32,
+                // true), see its comment) instead of TyInt, so resTy below --
+                // derived from e.ResolvedType, not hardcoded -- follows
+                // automatically; nothing here needed to change once the
+                // Turbo sized-integer ladder made LongInt nameable.
                 auto* lp = EmitExpr(*e.Left);
                 auto* rp = EmitExpr(*e.Right);
                 auto* li = B.CreatePtrToInt(lp, I64Ty, "pdiff.l");

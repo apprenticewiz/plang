@@ -672,16 +672,28 @@ void BuiltinIO::emitReadArg(const ExprNode& arg, llvm::Value* fp) {
     llvm::Type* readTy  = I64Ty;
     if (base && base->Kind == TypeKind::Real)      { suffix = "_f64";  readTy = DblTy; }
     else if (base && base->Kind == TypeKind::Char) { suffix = "_char"; readTy = I8Ty;  }
-    // Turbo's QWord (Integer, Width 64, unsigned) is the one ordinal whose
-    // full range does not fit a signed 64-bit parse: reading
-    // "18446744073709551615" through plang_read_i64's strtoll ERANGEs.  Only
-    // Width 64 needs its own reader -- Word/Cardinal/LongWord's unsigned
-    // ranges all fit comfortably inside int64_t, so plang_read_i64's ordinary
-    // signed parse (followed by CoerceToType's truncation into the narrower
-    // destination below) already reads them correctly.  readTy stays I64Ty:
-    // plang_read_u64 stores through a uint64_t*, the same 8 bytes at the same
-    // address a plang_read_i64 destination would use.
-    else if (base && base->Kind == TypeKind::Integer && base->Width == 64 && !base->IsSigned)
+    // Every unsigned Turbo ordinal (Byte/Word/Cardinal/LongWord/QWord) needs
+    // the UNSIGNED reader, not just QWord: QWord's full range does not fit a
+    // signed 64-bit parse at all ("18446744073709551615" through
+    // plang_read_i64's strtoll ERANGEs), which is why this arm was here
+    // first, but a narrower unsigned type has the identical needs-'-'-
+    // rejected problem plang_read_u64/_turbo already solves for QWord --
+    // plang_read_i64_turbo's strtoll happily parses a LEADING '-' and hands
+    // back a negative int64_t*, which CoerceToType's truncation below then
+    // wraps into the unsigned destination with no trap at all (issue #672:
+    // "-1" into a Word silently became 65535, io=0; fpc -Mtp instead sets
+    // InOutRes 106, exactly like it already does for a negative QWord).  A
+    // value that fits the unsigned range but overflows the destination's OWN
+    // narrower width (e.g. 70000 into a Word) is a separate, pre-existing,
+    // and -- confirmed against fpc -Mtp -- CORRECT silent-wraparound case
+    // that CoerceToType's truncation below still handles exactly as before;
+    // only the sign needs to be rejected, not the width.  readTy stays
+    // I64Ty regardless of the destination's own width: plang_read_u64 stores
+    // through a uint64_t*, the same 8 bytes at the same address a
+    // plang_read_i64 destination would use, and the narrowing into the
+    // actual (possibly < 64-bit) destination is CoerceToType's job below,
+    // the same as it already was for a signed narrow destination.
+    else if (base && base->Kind == TypeKind::Integer && !base->IsSigned)
         suffix = "_u64";
 
     // Turbo reverses the numeric scanners entirely (whole-token, the entire

@@ -416,6 +416,30 @@ void Codegen::Impl::registerUsedUnitConsts() {
     }
 }
 
+// See the declaration (CodeGenImpl.h) for the full contract; this is
+// emitGlobals's own helper for a program-scope 'absolute's target address.
+llvm::Constant* Codegen::Impl::globalAbsoluteAddr(const ExprNode& target) {
+    if (auto* id = llvm::dyn_cast<IdentExpr>(&target)) {
+        const VarEntry* v = findVar(id->Name);
+        return v ? llvm::dyn_cast<llvm::Constant>(v->ptr) : nullptr;
+    }
+    auto* ix = llvm::dyn_cast<IndexExpr>(&target);
+    if (!ix) return nullptr;
+    llvm::Constant* base = globalAbsoluteAddr(*ix->Array);
+    const Type* arrTy = ix->Array->ResolvedType.get();
+    if (!base || !arrTy || arrTy->Kind != TypeKind::Array
+            || !arrTy->ElemType || !arrTy->IndexType || !ix->Index->ConstVal)
+        return nullptr;
+    const auto range = ordinalRange(*arrTy->IndexType);
+    const int64_t lo = range ? range->first : 0;
+    llvm::Type* arrLlvmTy = llvmTypeOfSemaType(*arrTy);
+    auto* zero = llvm::ConstantInt::get(i64Ty, 0);
+    auto* idx  = llvm::ConstantInt::get(i64Ty,
+                     static_cast<uint64_t>(*ix->Index->ConstVal - lo), true);
+    llvm::Constant* gepIdx[] = {zero, idx};
+    return llvm::ConstantExpr::getGetElementPtr(arrLlvmTy, base, gepIdx);
+}
+
 void Codegen::Impl::emitGlobals(const BlockNode& block) {
     // Register user-defined type aliases so llvmTypeOfName can resolve them.
     // These come first because a structured constant names one of them.
@@ -468,27 +492,27 @@ void Codegen::Impl::emitGlobals(const BlockNode& block) {
         llvm::Type* ty = llvmTypeOf(vg.Type.get(), nullptr);
 
         // TP-only: 'absolute' at program scope.  Sema (checkBlock's Phase 4)
-        // has already required exactly one name and an addressable target;
-        // what CodeGen still has to do is find that target's ADDRESS with no
-        // builder to emit instructions through -- this runs before any
-        // function (including main) exists, the same reason emitPredefinedGlobals
-        // and friends never call emitLValue either.  A bare variable name
-        // costs nothing to address (its VarEntry::ptr already IS the
-        // address, whether a GlobalVariable or -- for a module -- an
-        // imported declaration), so that one case is supported directly;
-        // 'absolute' naming a COMPONENT of a global ('absolute B[2]') is not
-        // yet, and is refused with an internal error rather than silently
-        // doing the wrong thing.  The identical local case (emitBlockAllocas,
-        // above) has no such limit: it runs with a real entry block already
-        // open, so emitLValue there can address any designator.
+        // has already required exactly one name and an addressable target,
+        // and -- issue #639 -- restricted a COMPONENT target ('absolute
+        // B[2]', as opposed to a bare 'absolute B') to a shape
+        // globalAbsoluteAddr can fold to a compile-time-constant address
+        // with no builder to emit instructions through: this runs before
+        // any function (including main) exists, the same reason
+        // emitPredefinedGlobals and friends never call emitLValue either.
+        // globalAbsoluteAddr returning null here would mean Sema let
+        // through a designator it did not actually fold -- an internal
+        // error, not a normal compile failure, the same as it always was
+        // for a target that was not even a variable at all.  The identical
+        // LOCAL case (emitBlockAllocas, above) has no such limit: it runs
+        // with a real entry block already open, so emitLValue there can
+        // address any designator, constant or not.
         if (vg.AbsoluteExpr) {
-            auto* id = llvm::dyn_cast<IdentExpr>(vg.AbsoluteExpr.get());
-            const VarEntry* target = id ? findVar(id->Name) : nullptr;
-            if (!target)
-                codegenICE("'absolute' at program scope currently supports only "
-                           "a bare variable name as its target, not a component "
-                           "of one");
-            defVar(vg.Names[0], target->ptr, ty, vg.Type.get());
+            llvm::Constant* addr = globalAbsoluteAddr(*vg.AbsoluteExpr);
+            if (!addr)
+                codegenICE("'absolute' at program scope failed to resolve its "
+                           "target to a compile-time-constant address "
+                           "(Sema should have refused this designator)");
+            defVar(vg.Names[0], addr, ty, vg.Type.get());
             continue;
         }
 

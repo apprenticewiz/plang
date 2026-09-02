@@ -2108,8 +2108,46 @@ void Sema::checkBlock(const BlockNode& Block,
             if (Vg.Names.size() != 1)
                 error(Vg.AbsoluteExpr->Loc, diag::err_absolute_multiple_names);
             (void)checkExpr(*Vg.AbsoluteExpr);
-            if (!isLValue(*Vg.AbsoluteExpr))
+            const bool IsTargetLValue = isLValue(*Vg.AbsoluteExpr);
+            if (!IsTargetLValue)
                 error(Vg.AbsoluteExpr->Loc, diag::err_absolute_target_not_variable);
+            // Issue #639: a program-scope 'absolute' has to be wired to its
+            // target's ADDRESS before any function (including main) exists
+            // to run instructions in (CodeGenProcs.cpp's emitGlobals,
+            // globalAbsoluteAddr) -- unlike the identical LOCAL case
+            // (emitBlockAllocas), which has a real entry block open and can
+            // just call emitLValue on any designator, constant or not.  So
+            // a COMPONENT target ('absolute B[2]', as opposed to a bare
+            // 'absolute B') is restricted here to exactly the shapes
+            // globalAbsoluteAddr can fold to a compile-time constant: an
+            // IdentExpr base under any number of IndexExpr layers, each
+            // with a compile-time-constant index -- fpc -Mtp enforces the
+            // identical restriction ("Illegal expression" for a
+            // non-constant index), confirmed empirically.  Without this,
+            // CodeGen used to hit an internal error (LLVM ERROR, no source
+            // location) on exactly this shape instead of a located
+            // diagnostic.  A record FieldExpr is deliberately NOT accepted
+            // yet either (no test coverage for its own struct-GEP path);
+            // isLValue above already refused anything not addressable at
+            // all (a DerefExpr's pointer VALUE is itself only known at run
+            // time, so it stays refused here too).
+            if (IsTargetLValue && IsGlobalScope
+                    && !llvm::isa<IdentExpr>(Vg.AbsoluteExpr.get())) {
+                std::function<void(const ExprNode&)> checkConstComponent =
+                    [&](const ExprNode& Target) {
+                        if (llvm::isa<IdentExpr>(&Target)) return;
+                        if (auto* Ix = llvm::dyn_cast<IndexExpr>(&Target)) {
+                            checkConstComponent(*Ix->Array);
+                            if (!constBound(*Ix->Index))
+                                error(Ix->Index->Loc,
+                                      diag::err_absolute_global_component_not_const);
+                            return;
+                        }
+                        error(Target.Loc,
+                              diag::err_absolute_global_component_not_const);
+                    };
+                checkConstComponent(*Vg.AbsoluteExpr);
+            }
         }
         // EP §6.4.1: optional 'value' initializer.
         if (Vg.InitExpr) {
