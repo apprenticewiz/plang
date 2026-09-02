@@ -280,7 +280,7 @@ BUILTIN(Eof,       "eof",       Func, ALL, 0,  1, R_Bool, AK_File)
 BUILTIN(Eoln,      "eoln",      Func, ALL, 0,  1, R_Bool, AK_File)
 
 // ISO 10206 §6.7.5.7
-BUILTIN(Halt,      "halt",      Proc, EP | TP, 0, 1, R_None, AK_Any)
+BUILTIN(Halt,      "halt",      Proc, EP | TP, 0, 1, R_None, AK_Integer)
 // EP §6.7.6.3
 BUILTIN(Card,      "card",      Func, EP,  1,  1, R_Int, AK_Any)
 // EP §6.7.6.7: strings
@@ -375,7 +375,7 @@ BUILTIN(Assert,       "assert",       Proc, TP, 1, 2, R_None, AK_Any)
 // codegen" path every other builtin without a special shape already takes
 // (Halt(n) is the closest precedent: same 0-or-1 Integer argument shape)
 // is all this needs.
-BUILTIN(RunError,     "runerror",     Proc, TP, 0, 1, R_None, AK_Any)
+BUILTIN(RunError,     "runerror",     Proc, TP, 0, 1, R_None, AK_Integer)
 
 // -std=turbo only: Exit/Break/Continue, TP's three statement-level
 // control-transfer builtins -- no ISO 7185/EP §6.6.5 or §6.7.5 equivalent.
@@ -736,7 +736,7 @@ BUILTIN(SetTextBuf,   "settextbuf",   Proc, TP, 2, 3, R_None, AK_Any)
 // ReadKey follow that exact, already-established precedent rather than
 // inventing a new one. A documented, deliberate simplification -- not an
 // oversight -- see this item's own report for the full reasoning.
-BUILTIN(Delay,        "delay",        Proc, TP, 1, 1, R_None, AK_Any)
+BUILTIN(Delay,        "delay",        Proc, TP, 1, 1, R_None, AK_Integer)
 BUILTIN(KeyPressed,   "keypressed",   Func, TP, 0, 0, R_Bool, AK_Any)
 BUILTIN(ReadKey,      "readkey",      Func, TP, 0, 0, R_Char, AK_Any)
 
