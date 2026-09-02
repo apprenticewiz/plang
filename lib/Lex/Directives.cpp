@@ -312,10 +312,71 @@ void Scanner::skipToNextConditionalMarker(CondFrame& Frame) {
 
     for (;;) {
         if (Pos >= Text.size()) {
+            // Mirrors next()'s own EOF handling (Scanner.cpp): an {$I file}/
+            // {$INCLUDE file} splices the included text in "as if" it had
+            // been pasted at the directive itself (Scanner.h's own promise
+            // for live scanning), so a dead branch opened inside an include
+            // whose own matching {$ENDIF} is back in the includer -- past
+            // the {$I} that opened this buffer -- must keep skipping in the
+            // parent buffer once the included one runs out, not treat the
+            // included buffer's own end as Frame's end (issue #651). Only
+            // once there is no parent left to pop back to (popInclude
+            // returns false) is this genuinely the end of the token stream,
+            // exactly as it already was before this file ever had includes.
+            if (popInclude()) continue;
             emitError(Frame.OpenLoc, diag::err_directive_unterminated_conditional,
                       {Frame.OpenName});
             CondStack.pop_back();
             return;
+        }
+
+        // A single-quoted string literal's own content is never inspected
+        // for a {$/(*$-looking substring (issue #644): 's := 'dead {$ENDIF}
+        // text';' must not end Frame's branch on the string's own text, the
+        // same way live scanning never looks inside a string for one
+        // either. Bounded to a single line, the same as a real string
+        // literal (scanQuotedFragment): a `'` with no closing `'` before the
+        // next newline is not treated as a real string here, so this
+        // quietly gives up and lets the raw byte scan continue from the
+        // SAME opening quote instead of risking a false match against some
+        // unrelated later quote -- see skipToNextConditionalMarker's own
+        // comment (Scanner.h) for why this never diagnoses anything either
+        // way.
+        if (Text[Pos] == '\'') {
+            size_t Look = Pos + 1;
+            bool   Closed = false;
+            while (Look < Text.size() && Text[Look] != '\n') {
+                if (Text[Look] == '\'') {
+                    // Doubled '' escape (a literal quote): the string keeps
+                    // going, exactly like scanQuotedFragment's own rule.
+                    if (Look + 1 < Text.size() && Text[Look + 1] == '\'') {
+                        Look += 2;
+                        continue;
+                    }
+                    Closed = true;
+                    ++Look;
+                    break;
+                }
+                ++Look;
+            }
+            if (Closed) {
+                Pos = Look; // skip the whole 'literal', quotes included
+                continue;
+            }
+            ++Pos; // no closing quote on this line: not a real string here
+            continue;
+        }
+
+        // A `//` line comment's own content gets the identical treatment
+        // (issue #644's other repro shape, `{$IFDEF X} // {$ENDIF}`).
+        // Unlike a string literal this always succeeds: a line comment has
+        // no closing delimiter to fail to find, only the next newline or
+        // end of file, both of which raw-skipping already stops at safely.
+        if (Opts.turbo() && Text[Pos] == '/' && Pos + 1 < Text.size() &&
+                Text[Pos + 1] == '/') {
+            while (Pos < Text.size() && Text[Pos] != '\n')
+                ++Pos;
+            continue;
         }
 
         bool Braced;

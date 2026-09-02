@@ -174,6 +174,41 @@ private:
     // check has already decided not to reject.
     using ExprDepthScope = RecursionGuard;
 
+    // Live activations of resolveType (Sema::TypeDepth).  A pointer/array/
+    // record-field/set-of/file-of type denoter nested up to (just under) the
+    // parser's own MaxTypeDepth ceiling (Parser::TypeDepth, ParseType.cpp,
+    // issue #63) is legal input the parser fully accepts -- but resolveType
+    // and its mutual-recursion partner resolveTypeImpl (SemaType.cpp) then
+    // walk that exact same structure again with no guard of any kind, a
+    // previously-unaudited gap in the stack-headroom-guard family (issue
+    // #596; contrast checkExpr's own ExprDepth/MaxExprDepth pair just above,
+    // and Parser::TypeDepth/MaxTypeDepth, the parser-side sibling this
+    // mirrors). A dedicated counter rather than sharing ExprDepth: unlike
+    // constBound/buildExtentForm (issue #204), which share ExprDepth because
+    // they recurse over the same kind of AST checkExpr already walks (an
+    // expression bound chain), resolveType/resolveTypeImpl recurse over a
+    // structurally different tree (TypeNode, not ExprNode) via a wholly
+    // separate call path, so it gets its own budget the same way the
+    // parser's ExprDepth and TypeDepth are two separate counters rather than
+    // one shared one.
+    mutable unsigned          TypeDepth{};
+    mutable bool              TypeDepthLimitHit{};
+    // Mirrors Parser::MaxTypeDepth (ParseType.cpp): a friendlier diagnostic
+    // on an ordinary, large-enough stack, reached before stackNearlyExhausted
+    // ever needs to fire. Every call site below also checks
+    // plang::stackNearlyExhausted(StackBaseline) alongside this term count,
+    // for the identical reason MaxExprDepth alone is not sufficient under a
+    // small platform stack budget (see MaxExprDepth's own comment above) --
+    // resolveTypeImpl's own per-frame stack cost is high enough that a 499-
+    // level pointer-type chain crashes at a much LARGER, more "ordinary"
+    // stack size than the already-known parser-side gaps do (measured in
+    // issue #596 itself). TypeDepthScope is constructed unconditionally,
+    // before either check runs, for the same reason ExprDepthScope
+    // (checkExpr, SemaExpr.cpp) is: the headroom check can fire on the very
+    // first activation, before any Guard for TypeDepth has ever existed.
+    static constexpr unsigned MaxTypeDepth = 500;
+    using TypeDepthScope = RecursionGuard;
+
     /// Canonical type store — owns built-in singletons and interns structural
     /// types.  Built from Opts, which is why Opts is declared above it: what an
     /// unqualified `integer` is depends on the dialect, and what a pointer is

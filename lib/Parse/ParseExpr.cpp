@@ -88,6 +88,25 @@ static bool isExpop(TokenKind K) {
 // Extended Pascal program nests expressions anywhere close to this deep.
 // Without a ceiling here, a source file built specifically to nest deeply (or
 // a generated/fuzzed one) drives the real call stack instead of a diagnostic.
+//
+// This term-count ceiling alone is not sufficient, though: it was sized for
+// an "8MB default stack", but a small-but-real platform stack budget (a
+// constrained container, a hardened deployment, a fuzzing worker's explicit
+// per-thread stack) can exhaust the real C++ call stack well before 500
+// levels are reached (issue #572, the direct sibling of parsePower's own
+// stack-headroom gap, issue #550/#551 below). parseFactor is the single
+// choke point every recursive re-entry into expression parsing funnels
+// through -- '(' calling back into parseExpression, and 'not'/'@' calling
+// parseFactor directly -- so checking plang::stackNearlyExhausted alongside
+// ExprDepth here, at that one choke point, covers all of them. Unlike
+// PowerDepth's own dedicated RecursionGuard (parsePower, below), which can
+// fire on its very first activation before any Guard for that counter
+// exists, ExprDepthScope is already constructed unconditionally on every
+// non-limit-hit parseFactor activation, so by the time enough nesting has
+// happened for the real stack to run low, ExprDepthScope guards from every
+// shallower level are already alive to reset ExprDepthLimitHit as they
+// unwind -- the same guarantee the pre-existing `ExprDepth >= MaxExprDepth`
+// early-return already relies on.
 static constexpr unsigned MaxExprDepth = 500;
 
 // True once continuing to recurse into parsePower (below) would risk
@@ -365,7 +384,7 @@ std::unique_ptr<ExprNode> Parser::parseFactor() {
     // a ceiling bounds the whole cycle.  Checked before the RAII bump a few
     // lines down: a caller already sitting at the ceiling must return without
     // recursing again, not recurse once more and only then stop.
-    if (ExprDepth >= MaxExprDepth) {
+    if (ExprDepth >= MaxExprDepth || plang::stackNearlyExhausted(StackBaseline)) {
         if (!ExprDepthLimitHit) {
             ExprDepthLimitHit = true;
             emitError(Current.toLoc(), diag::err_expr_too_deeply_nested);
