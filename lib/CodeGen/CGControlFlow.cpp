@@ -196,7 +196,23 @@ void CGControlFlow::emitForIn(const ForInStmt& s) {
     // itself silently stopped tracking the loop at all.
     llvm::Value* loopVar   = nullptr;
     llvm::Type*  loopVarTy = elemTy;
-    if (const auto* ve = SymTab.findVar(s.Var); ve && ve->ptr && ve->type->isIntegerTy()) {
+    // Issue #588: an outer variable of SET type (not the set's ELEMENT type)
+    // can share the loop's control-variable name -- `for c in other do` where
+    // `c: set of char` is itself already declared outside.  Sema's checkForIn
+    // (SemaStmt.cpp) always binds a FRESH, element-typed Symbol for the loop
+    // regardless, but this lookup is CodeGen's own raw name search, unscoped
+    // by Sema's rules, and a Set's own LLVM storage (Sets.setTy(), a flat
+    // PlangMaxSetElements-bit integer) is still `isIntegerTy()` -- so without
+    // this exclusion the check just below wrongly treated "same name happens
+    // to be a Set variable" as "this IS the declared, merely-differently-
+    // sized loop variable" (the #217 case this guard exists for), reused the
+    // Set's own far-wider storage as loopVar/loopVarTy, and a later
+    // zext-to-i64 (e.g. `ord(c)`) of that over-wide value failed LLVM's IR
+    // verifier ("zext too small") instead of ever running.  A genuine #217
+    // case never has this shape: the set's ELEMENT type is what the loop
+    // variable would take, never the set TYPE itself.
+    if (const auto* ve = SymTab.findVar(s.Var);
+        ve && ve->ptr && ve->type->isIntegerTy() && ve->type != Sets.setTy()) {
         loopVar   = ve->ptr;
         loopVarTy = ve->type;
     }

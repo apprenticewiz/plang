@@ -112,7 +112,22 @@ uint64_t SchemaLayoutEngine::rtAlignOfTypeNode(const TypeNode* tn) {
     // declaration serves every instantiation and carries whichever was resolved
     // last, so inside a run-time layout walk that annotation is some other
     // instance's and not this one's.  Nothing here reads it any more.
-    if (llvm::isa<StringTypeNode>(d)) return 8;
+    // Issue #591: a StringTypeNode covers BOTH spellings -- EP's own
+    // string(cap) schema type (a varying-length string with an i64 length
+    // header, i64-aligned for every cap) AND, when IsShortString is set,
+    // Turbo's string[N]/ShortString (a 1-byte length prefix followed by raw
+    // character data, alignment 1 -- see plang_dos.cpp's own
+    // PlangSStr255 { uint8_t len; char data[255]; } __attribute__((packed))
+    // and the sizeof-shortstring-10 test's own "the record's own alignment
+    // is 1"). Answering 8 for BOTH, as this used to, made a preceding
+    // scalar field's offset get padded up to a multiple of 8 here while the
+    // static LLVM layout (layoutOfRecord/llvmTypeOfNode, which already gets
+    // Turbo ShortString's alignment right) never did -- the two walks then
+    // disagreed on any record where a string[N] field followed a scalar
+    // field whose own end offset wasn't already a multiple of 8, and
+    // checkFieldOffsetAgreement's cross-check (correctly) fired codegenICE.
+    if (auto* st = llvm::dyn_cast<StringTypeNode>(d))
+        return st->IsShortString ? 1 : 8;
     if (auto* at = llvm::dyn_cast<ArrayTypeNode>(d))
         return rtAlignOfTypeNode(at->Element.get());
     if (auto* rt = llvm::dyn_cast<RecordTypeNode>(d)) {
