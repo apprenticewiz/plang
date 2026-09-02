@@ -1352,6 +1352,26 @@ void Sema::checkCallStmt(const CallStmt& S) {
         // here.
         if (Lo == "read" && !S.Args.empty()) {
             const auto& T = S.Args[0]->ResolvedType;
+            // Issue #674: `read(f)` on a typed file, with no value argument
+            // at all, used to fall through both the FromText path above (a
+            // typed file is not text) and this arm's own T->ElemType-gated
+            // loop below (it never runs for S.Args.size() == 1) with no
+            // diagnostic either way -- so BuiltinIO.cpp's emitBuiltinRead
+            // loop simply never ran, silently compiling `read(f)` to a
+            // no-op.  Confirmed against `fpc -Mtp`: it refuses this with
+            // "Wrong number of parameters specified for call to Read", the
+            // same message an ordinary call arity mismatch gets --
+            // read(g) on a TEXT file with no value argument is a
+            // deliberate, field-practice-confirmed no-op (a line is not
+            // consumed the way readln's would be), so this is gated to the
+            // typed-file case only, matching FromText's own text/binary
+            // split above.
+            if (T && T->Kind == TypeKind::File && T->ElemType && S.Args.size() < 2) {
+                error(S.Loc, diag::err_wrong_arg_count,
+                      {std::string_view(Lo), std::string_view("2 or more"),
+                       std::string_view(std::to_string(S.Args.size()))});
+                return;
+            }
             if (T && T->Kind == TypeKind::File && T->ElemType && S.Args.size() >= 2) {
                 for (size_t I = 1; I < S.Args.size(); ++I) {
                     const auto& At = S.Args[I]->ResolvedType;
@@ -1777,11 +1797,20 @@ void Sema::checkCallStmt(const CallStmt& S) {
                 error(S.Args[1]->Loc, diag::err_string_fn_arg_type, {Lo, NTy->Name});
             return;
         }
-        // TP-only: Flush(f) -- flush f's buffered output.  No Text/binary
-        // restriction (confirmed against `fpc -Mtp`: both accept it).  One
-        // argument, one kind: generic now (Builtins.def's AK_File row).
+        // TP-only: Flush(f) -- flush f's buffered output.  Issue #739: a
+        // same-day sibling PR (#559) had claimed no Text/binary restriction
+        // here ("confirmed against fpc -Mtp: both accept it"), but
+        // re-checking against a local fpc -Mtp 3.2.2 install shows that was
+        // wrong -- fpc refuses Flush on both typed and untyped files
+        // ("Call by var for arg no. 1 has to match exactly: ... expected
+        // 'Text'"), accepting only Text, the same restriction
+        // Eoln/SeekEoln/SetTextBuf already enforce via err_line_proc_not_text.
         if (Lo == "flush" && !S.Args.empty()) {
-            (void)checkBuiltinArgKinds(Sym->BuiltinKind, Lo, S.Args);
+            auto Types = checkBuiltinArgKinds(Sym->BuiltinKind, Lo, S.Args);
+            if (!Types.empty() && Types[0] && !Types[0]->isError()
+                    && Types[0]->Kind == TypeKind::File && !isTextFile(*Types[0], Opts))
+                error(S.Args[0]->Loc, diag::err_line_proc_not_text,
+                      {Lo, Types[0]->Name});
             return;
         }
         // TP-only: SetTextBuf(var f: Text; var buf[; size]).  f must be
