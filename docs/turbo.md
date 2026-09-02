@@ -311,6 +311,25 @@ A plain `-std=turbo` with no flag and no `{$R+}` anywhere lets an
 out-of-range index or subrange assignment through silently, exactly like
 real Turbo Pascal.
 
+### `{$R-}` is genuine undefined behavior, not just "unchecked"
+
+With range checking off, an out-of-bounds array/string write is ordinary C++
+undefined behavior: it can land anywhere in the process's address space,
+including the runtime's own global state (`ExitCode`/`InOutRes`/`ErrorAddr`
+and friends, `runtime/plang_sys.cpp`), the same as it could corrupt any other
+global a program declares. This is not specific to plang — real Turbo
+Pascal/FPC with `{$R-}` has the identical exposure — and there is no
+layout/placement scheme that makes an ordinary writable global immune to an
+OOB write elsewhere in the same address space. One narrow consequence has a
+real, low-risk fix: `plang_tp_runerror` used to print a corrupted 64-bit code
+in full while exiting with that same value truncated to the process's 32-bit
+exit status, so a badly-corrupted `InOutRes` could print a nonsensical
+"Runtime error 4294967296" alongside an actual exit code of 0 (issue #660).
+It now truncates once and uses that single value for both, so the printed
+message and the real exit status can never disagree — but the underlying
+corruption that produced a garbage code in the first place is still exactly
+the `{$R-}` UB it always was.
+
 ## Accept-and-ignore directives
 
 Every other real Turbo/Borland/FPC directive this milestone does not act on
@@ -1337,7 +1356,9 @@ other Turbo arithmetic overflow (see this document's own note on those).
 ISO 7185 and Extended Pascal are unaffected: their `Integer` is always
 64-bit, so `minint div -1` there still traps
 (`RangeCheckGuards::emitDivOverflowCheck`), unconditionally, the same as
-before.
+before. Regression coverage for both the 16-bit unstored/stored distinction
+and the Int64 divisor-forced-to-1 path lives in
+`test/Driver/Turbo/minint-div-negative-one-on-a-16-bit-integer-wraps-silently-issue-638.pas`.
 
 ### `packed` controls layout; `{$PACKRECORDS}`/`{$ALIGN}`/`{$A}` do not
 

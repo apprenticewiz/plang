@@ -835,9 +835,23 @@ static void escapeCC(const char *S, std::FILE *Stream) {
     // cleanup every other way this program can end already does.
     plang_module_finals_run();
     std::fflush(stdout);
-    std::fprintf(stderr, "Runtime error %" PRId64 " at $%016" PRIxPTR "\n",
-                 Code, reinterpret_cast<std::uintptr_t>(Addr));
-    std::exit(static_cast<int>(Code));
+    // Issue #660: Code ultimately comes from a Turbo `Integer`-width
+    // (plang_tp_inoutres) or a literal a numbered check already knows is
+    // in range -- both always fit an int32_t -- but under {$R-} an
+    // out-of-bounds write elsewhere in the program can corrupt
+    // plang_tp_inoutres into holding an arbitrary 64-bit bit pattern before
+    // plang_iocheck ever reads it back through this same path.  Truncating
+    // ONCE, here, and using that single truncated value for both the
+    // printed message and the process's actual exit status keeps the two
+    // in agreement even then -- printing "Runtime error 4294967296" while
+    // the OS-visible exit code is really 0 (4294967296 truncates to 0) is
+    // the "spurious error at rc=0" mismatch the issue reported; printing
+    // the SAME int32 value exit() receives cannot disagree with it, however
+    // corrupted Code was.
+    const int32_t Status = static_cast<int32_t>(Code);
+    std::fprintf(stderr, "Runtime error %" PRId32 " at $%016" PRIxPTR "\n",
+                 Status, reinterpret_cast<std::uintptr_t>(Addr));
+    std::exit(Status);
 }
 
 /// TP `ExitCode: Integer` (Sema::registerBuiltins, -std=turbo only) -- the
