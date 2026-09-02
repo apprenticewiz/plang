@@ -1247,6 +1247,18 @@ void CGProcCall::emitMethodCallStmt(const MethodCallStmt& s) {
 llvm::Value* CGProcCall::emitBoundMethodCall(
         llvm::Value* selfPtr, const Type& RecvTy, const std::string& Method,
         std::span<const std::unique_ptr<ExprNode>> Args) {
+    // Issue #579: New/Init's own call (above) hands this a pointer just
+    // freshly allocated by plang_new, never nil -- but Dispose(P, Done)'s
+    // call (also above) hands this P's own raw value directly, which a
+    // caller may perfectly legally have set to nil first.  Unlike ordinary
+    // `P^.M;`, which nil-checks P via EmitLValue's dereference handling
+    // before any field/vptr GEP is built, this entry point took selfPtr
+    // as a bare llvm::Value with no such check upstream -- so both the
+    // virtual branch's vptr GEP+load just below AND a non-virtual
+    // destructor's own Self-touching body would otherwise fault on a nil
+    // Self before ever reaching the vptr-nil check (which only guards
+    // issue #514's *unstamped* case, not a nil selfPtr itself).
+    RangeGuards.emitNilCheck(selfPtr);
     const Type* Owner = methodOwnerType(RecvTy, Method);
     if (!Owner)
         codegenICE("'" + Method + "' has no owning type in '" + RecvTy.Name
