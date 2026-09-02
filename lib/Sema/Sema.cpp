@@ -2761,7 +2761,17 @@ void Sema::checkProcSignature(const ProcDecl& Proc) {
                               || (Opts.turbo()
                                   && (Ret->Kind == TypeKind::Record
                                       || (Ret->Kind == TypeKind::Array
-                                          && !Ret->IsOpenArray)));
+                                          && !Ret->IsOpenArray)
+                                      // Turbo also allows a function to
+                                      // return a set type -- ordinary,
+                                      // idiomatic TP7 (confirmed against
+                                      // `fpc -Mtp`, issue #787).  A set is
+                                      // lowered to a plain integer bitmask
+                                      // (SetOps::setTy), not an LLVM struct,
+                                      // so it needs none of the by-value
+                                      // struct-return spill treatment
+                                      // Record/Array results get.
+                                      || Ret->Kind == TypeKind::Set));
             if (AnyFile || (!Simple && !Opts.extendedPascal()))
                 error(Proc.Loc, diag::err_function_result_type, {Ret->Name});
         }
