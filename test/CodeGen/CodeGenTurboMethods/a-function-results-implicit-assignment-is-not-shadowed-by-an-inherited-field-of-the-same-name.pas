@@ -6,11 +6,15 @@ inside the method body, and a bare 'Count := 999;' assignment-target lookup
 used to find that FIELD symbol first, both misdirecting the write (it set
 the field, not the function's own result) and then failing the "function
 does not assign to its result variable" audit outright, since -- as far as
-Sema could tell -- nothing had.  Confirmed against a local `fpc -Mtp`
-build: the function-result binding wins a bare assignment-target of the
-same name as the method itself, even with an inherited field of that exact
-name in scope; the field itself is untouched (still its zero-initialized
-default), reachable only through an explicit 'Self.Count'.
+Sema could tell -- nothing had.
+
+Issue #781 corrected this test's own outside-the-method expectation: a bare,
+qualified read of the same name ('D.Count', no parens) ALSO calls the
+METHOD, not the field -- confirmed against a local `fpc -Mtp` build, which
+prints 999 for both 'D.Count()' and bare 'D.Count' (even 'Self.Count' from
+inside another method of TD calls the method, not the field; a same-named
+method entirely shadows an inherited field for every unqualified spelling,
+with no bare syntax left to reach the field once shadowed).
 *)
 
 (*
@@ -43,5 +47,5 @@ end.
 
 (*
 CHECK:999
-CHECK-NEXT:0
+CHECK-NEXT:999
 *)
