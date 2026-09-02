@@ -39,6 +39,15 @@ inline void plangOutCh(int C) {
 /// the capture path and the stdout path produce identical text.
 void plangOutFmt(const char* Fmt, ...) __attribute__((format(printf, 1, 2)));
 
+/// Issue #704: advances the Crt unit's own tracked cursor column/row
+/// (plang_io.cpp) for N bytes of real console output -- see that function's
+/// own definition for the full reasoning.  Declared here, not just defined
+/// in plang_io.cpp, because plang_file.cpp's own turbo char/string file
+/// writers call it too, for the plain (no explicit file argument)
+/// `Write`/`Writeln` case -- see plang_io.cpp's own comment on why that
+/// second call site is the one that actually fires under -std=turbo.
+void plangCrtTrackOutput(const char* Data, std::size_t N);
+
 // ---- input -----------------------------------------------------------------
 
 /// When PlangInBuf is non-null, input is taken from it instead of stdin.

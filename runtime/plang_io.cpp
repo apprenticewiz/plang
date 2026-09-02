@@ -83,9 +83,84 @@ void capReserve(CapFrame& F, std::size_t Need) {
 
 } // namespace
 
+// ---- Crt cursor tracking (issue #704) --------------------------------------
+//
+// The Crt unit's WhereX/WhereY (share/plang/units/Crt.pas) model a software
+// cursor rather than reading a live hardware/terminal one -- see that file's
+// own header comment for why (real TP's own WhereX/WhereY are pure state
+// reads too).  GotoXY/ClrScr already kept that model in sync for explicit
+// cursor MOVES (via the CrtSyncCursor builtin, CGProcCall.cpp), but ordinary
+// Write/Writeln output was never accounted for: writing text moved the
+// terminal's REAL cursor forward without the model ever finding out.
+// plangCrtTrackOutput (declared in plang_stream.h) is the fix: called from
+// here (every unqualified Write/Writeln/WriteStr argument NOT itself being
+// captured by writestr, see this file's own CapDepth just above) AND from
+// plang_file.cpp's own turbo char/string file writers when their target is
+// stdout (a plain `Write`/`Writeln` -- no explicit file argument -- is, under
+// -std=turbo, ALWAYS lowered through the implicit Output file variable, see
+// BuiltinIO.cpp's own turboStdFilePtr, so that second call site is not an
+// optional extra, it is the one that actually fires for ordinary Crt
+// programs).  Crt's own WhereX/WhereY (the CrtTrackedX/CrtTrackedY builtins,
+// CGFuncCall.cpp) read the tracked result back.
+//
+// ANSI/VT100 escape sequences -- GotoXY's own cursor-move, ApplyAttr's own
+// SGR color codes, ClrScr's own erase codes, all plain Pascal Writes from
+// Crt.pas's own point of view -- must NOT be counted as ordinary text (a
+// real terminal does not advance its cursor for the escape bytes
+// themselves), so a small CSI (ESC '[' ... final-byte) state machine skips
+// them entirely.  That state has to persist ACROSS calls, not just within
+// one: one Pascal `Write(a, b, c)` lowers to one runtime call PER ARGUMENT,
+// so GotoXY's own Write(Chr(27), '[', AbsY, ';', AbsX, 'H') arrives here as
+// six separate calls, not one.
+namespace {
+enum class CrtEscState : uint8_t { Normal, SawEsc, InCsi };
+CrtEscState CrtEsc        = CrtEscState::Normal;
+int64_t     CrtCursorCol  = 1;  // 1-based, window-relative -- see Crt.pas
+int64_t     CrtCursorRow  = 1;
+} // namespace
+
+void plangCrtTrackOutput(const char* Data, std::size_t N) {
+    for (std::size_t I = 0; I < N; ++I) {
+        const auto C = static_cast<unsigned char>(Data[I]);
+        switch (CrtEsc) {
+        case CrtEscState::Normal:
+            if (C == 0x1B)      { CrtEsc = CrtEscState::SawEsc; }
+            else if (C == '\n') { CrtCursorCol = 1; ++CrtCursorRow; }
+            else if (C == '\r') { CrtCursorCol = 1; }
+            else                { ++CrtCursorCol; }
+            break;
+        case CrtEscState::SawEsc:
+            // Every escape Crt.pas itself ever writes is CSI ("ESC[...");
+            // an unrecognized shape is simply abandoned rather than
+            // mis-tracked as ordinary text.
+            CrtEsc = (C == '[') ? CrtEscState::InCsi : CrtEscState::Normal;
+            break;
+        case CrtEscState::InCsi:
+            // Parameter/intermediate bytes are 0x20-0x3F; the sequence's
+            // own final byte is 0x40-0x7E (ECMA-48 §5.4) -- neither ever
+            // advances the cursor on a real terminal.
+            if (C >= 0x40 && C <= 0x7E) CrtEsc = CrtEscState::Normal;
+            break;
+        }
+    }
+}
+
+extern "C" {
+void plang_crt_sync_cursor(int64_t X, int64_t Y) {
+    CrtCursorCol = X;
+    CrtCursorRow = Y;
+}
+int64_t plang_crt_tracked_x() { return CrtCursorCol; }
+int64_t plang_crt_tracked_y() { return CrtCursorRow; }
+} // extern "C"
+
 void plangOutN(const char* Data, std::size_t N) {
     if (N == 0) return;
-    if (CapDepth == 0) { std::fwrite(Data, 1, N, stdout); return; }
+    if (CapDepth == 0) {
+        std::fwrite(Data, 1, N, stdout);
+        plangCrtTrackOutput(Data, N);
+        return;
+    }
     CapFrame& F = CapStack[CapDepth - 1];
     capReserve(F, F.Len + N);
     if (F.Len + N > F.Cap) return;   // allocation failed; drop the excess

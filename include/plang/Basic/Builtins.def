@@ -740,6 +740,29 @@ BUILTIN(Delay,        "delay",        Proc, TP, 1, 1, R_None, AK_Any)
 BUILTIN(KeyPressed,   "keypressed",   Func, TP, 0, 0, R_Bool, AK_Any)
 BUILTIN(ReadKey,      "readkey",      Func, TP, 0, 0, R_Char, AK_Any)
 
+// Issue #704: WhereX/WhereY only tracked GotoXY/ClrScr, never ordinary
+// Write/Writeln output.  The fix keeps a software cursor model in the
+// RUNTIME (runtime/plang_io.cpp's own plangOutN, the one place all
+// unqualified Write/Writeln output funnels through), since only the
+// runtime ever sees the actual bytes written -- Crt.pas itself has no way
+// to intercept a plain `Write` call.  These three are NOT real Turbo
+// Pascal identifiers (unlike Delay/KeyPressed/ReadKey just above, which
+// mirror real TP's own dialect-wide System-unit routines): they exist
+// purely so share/plang/units/Crt.pas's own GotoXY/ClrScr/WhereX/WhereY
+// can reach that runtime state at all, for the exact "no mechanism for a
+// unit interface declaration to bind to a NEW runtime entry point" reason
+// documented on Delay/KeyPressed/ReadKey above -- deliberately obscure
+// spellings so a real program's own identifiers are in no realistic danger
+// of colliding.  CrtSyncCursor(X, Y) is called from GotoXY/ClrScr with the
+// exact window-relative coordinates Crt.pas already computes, whenever
+// those explicitly move the cursor; CrtTrackedX/CrtTrackedY read the
+// tracked column/row back (Int64, like ParamCount/IOResult above; Crt.pas
+// truncates into its own Byte-returning WhereX/WhereY the same way it
+// already truncated its own Integer-typed CursorX/CursorY into them).
+BUILTIN(CrtSyncCursor, "crtsynccursor", Proc, TP, 2, 2, R_None, AK_Any)
+BUILTIN(CrtTrackedX,   "crttrackedx",   Func, TP, 0, 0, R_Int,  AK_Any)
+BUILTIN(CrtTrackedY,   "crttrackedy",   Func, TP, 0, 0, R_Int,  AK_Any)
+
 #undef ALL
 #undef TP
 #undef EP

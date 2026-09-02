@@ -172,6 +172,16 @@ config.substitutions.insert(0,
     ("%run_under_pty",
      f"{sys.executable} " + os.path.join(config.plang_source_dir, "test", "tools", "run-under-pty.py")))
 
+# %kill_under_pty: issue #703's own regression coverage -- a fatal signal
+# (SIGINT/SIGTERM/SIGHUP) sent to a program blocked in raw mode (Crt's own
+# ReadKey) under a real pseudo-terminal, checking the pty's own terminal
+# settings are restored afterward. Same python3-pty gating and "needs a
+# REAL tty" reasoning as %run_under_pty just above.
+config.substitutions.insert(0,
+    ("%kill_under_pty",
+     f"{sys.executable} " + os.path.join(config.plang_source_dir, "test", "tools",
+                                          "kill-under-pty-and-check-terminal.py")))
+
 # Issue #130's gdb pretty-printer -- referenced straight from the source
 # tree (share/plang/gdb/), not the installed copy, same as every other
 # %substitution here points at the just-built binary rather than anything

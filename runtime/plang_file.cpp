@@ -26,6 +26,7 @@
 /// always the position of f^ itself, and not one component past it.
 
 #include "plang_real.h"
+#include "plang_stream.h" // issue #704: plangCrtTrackOutput
 
 #include "plang/Basic/PascalFileLayout.h"
 #include "plang/Basic/RequiredRecordLayouts.h"
@@ -1709,6 +1710,10 @@ void plang_writeln_file_turbo(PascalFile *F) {
     if (!tpFileReady(F, "writeln")) return;
     tpTrapOnWrongDirection(F, 1);
     std::fputc('\n', F->Fp);
+    // Issue #704: see plang_write_file_char_turbo's own comment -- this is
+    // the trailing newline after every console `Write`/`Writeln` value, and
+    // Writeln's own bare newline.
+    if (F->Fp == stdout) plangCrtTrackOutput("\n", 1);
     tpTrapOnStreamError(F, 1);
 }
 
@@ -2370,9 +2375,32 @@ void plang_write_file_bool_turbo(PascalFile *F, int8_t V, int8_t Upper) {
     tpTrapOnStreamError(F, 1);
 }
 void plang_write_file_char(PascalFile *F, int8_t      V) { abortIfClosed(F,"write"); trapOnWrongDirection(F, "write", 1); std::fputc(static_cast<unsigned char>(V), F->Fp); trapOnStreamError(F, "write"); }
-void plang_write_file_char_turbo(PascalFile *F, int8_t V) { if (!tpFileReady(F,"write")) return; tpTrapOnWrongDirection(F, 1); std::fputc(static_cast<unsigned char>(V), F->Fp); tpTrapOnStreamError(F, 1); }
+// Issue #704: a plain `Write`/`Writeln` (no explicit file argument) is,
+// under -std=turbo, ALWAYS lowered through the implicit Output file
+// variable (BuiltinIO.cpp's own turboStdFilePtr), so THIS is the call site
+// real Crt programs' own console output actually reaches -- plangOutN's
+// own tracking (plang_io.cpp) never fires for them at all.  F->Fp == stdout
+// is the same "really the console, not redirected by Assign/Rewrite" test
+// plang_crt.cpp's own raw-mode code implicitly relies on (a real terminal).
+void plang_write_file_char_turbo(PascalFile *F, int8_t V) {
+    if (!tpFileReady(F,"write")) return;
+    tpTrapOnWrongDirection(F, 1);
+    const char C = static_cast<char>(V);
+    std::fputc(static_cast<unsigned char>(C), F->Fp);
+    if (F->Fp == stdout) plangCrtTrackOutput(&C, 1);
+    tpTrapOnStreamError(F, 1);
+}
 void plang_write_file_str (PascalFile *F, const char *S) { abortIfClosed(F,"write"); trapOnWrongDirection(F, "write", 1); std::fputs(S ? S : "", F->Fp); trapOnStreamError(F, "write"); }
-void plang_write_file_str_turbo (PascalFile *F, const char *S) { if (!tpFileReady(F,"write")) return; tpTrapOnWrongDirection(F, 1); std::fputs(S ? S : "", F->Fp); tpTrapOnStreamError(F, 1); }
+// See plang_write_file_char_turbo's own comment just above for why this
+// (not plangOutN) is the real console-tracking call site under -std=turbo.
+void plang_write_file_str_turbo (PascalFile *F, const char *S) {
+    if (!tpFileReady(F,"write")) return;
+    tpTrapOnWrongDirection(F, 1);
+    const char *Str = S ? S : "";
+    std::fputs(Str, F->Fp);
+    if (F->Fp == stdout) plangCrtTrackOutput(Str, std::strlen(Str));
+    tpTrapOnStreamError(F, 1);
+}
 
 // ---- typed write with a field width (ISO §6.9.3.1) ----
 //
