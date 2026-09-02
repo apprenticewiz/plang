@@ -1445,6 +1445,27 @@ private:
     /// resolved type (TyErr on a checked-but-failing call, e.g. a private
     /// method) otherwise.
     [[nodiscard]] std::shared_ptr<Type> checkImplicitMethodCallExpr(const CallExpr& E);
+    /// Issue #773: checkImplicitMethodCallExpr's own sibling for a BARE
+    /// (no-call-syntax) identifier -- 'A := Area;' inside another method of
+    /// the same object type, with no parentheses and so no CallExpr node at
+    /// all for checkImplicitMethodCallExpr to be reached through.  Tried by
+    /// checkIdent only once an ordinary Symtab.lookup(E.Name) has already
+    /// failed (a method is never itself an ordinary Symtab entry -- see
+    /// ImplicitCallReceivers_'s own comment), exactly the same "tried only
+    /// after plain lookup fails" ordering checkCallExpr already uses before
+    /// calling checkImplicitMethodCallExpr.  Returns nullptr (a real,
+    /// distinct sentinel from TyErr) when E.Name does not match any
+    /// currently active implicit receiver's own FUNCTION method at all -- so
+    /// checkIdent's own caller falls through to its ordinary
+    /// err_undefined_identifier diagnostic -- or a fully-checked resolved
+    /// type (TyErr on a checked-but-failing reference, e.g. a private method
+    /// or one that takes parameters a bare, paren-free identifier cannot
+    /// supply) otherwise.  On success, marks E.Resolution
+    /// ImplicitMethodCall and E.ImplicitMethodReceiverType, the identical
+    /// pair CGExprCore reads to emit the same emitBoundMethodCall
+    /// CGFuncCall::emitCallExpr's own ImplicitMethodReceiverType branch
+    /// already uses for the parenthesized spelling.
+    [[nodiscard]] std::shared_ptr<Type> checkImplicitMethodIdent(const IdentExpr& E);
     /// Turbo Tier 5, Cluster A item 3: 'Obj.Method(args)' / 'P^.Method(args)'
     /// used as a value.  See checkMethodCall's own comment (SemaExpr.cpp)
     /// for the shared logic with checkMethodCallStmt (Args-only-statement

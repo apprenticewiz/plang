@@ -234,6 +234,28 @@ llvm::Value* CGExprCore::emitExpr(const ExprNode& e) {
             Call.ResolvedType = e.ResolvedType;
             return FuncCall.emitCallExpr(Call);
         }
+        // Issue #773: a bare (no-parens) reference to a parameterless
+        // FUNCTION method of the currently active implicit receiver --
+        // Sema::checkImplicitMethodIdent already decided which one and
+        // recorded it on this node.  Reuses CGFuncCall::emitCallExpr's own
+        // CallExpr::ImplicitMethodReceiverType branch (the SAME one the
+        // parenthesized 'Area()' spelling already goes through) via an
+        // empty-Args synthetic CallExpr, exactly the way the RecursiveCall
+        // branch just above reuses that same function for a plain
+        // recursive call -- not a second implementation of the bound-method
+        // call sequence.
+        if (n->Resolution == IdentExpr::IdentResolution::ImplicitMethodCall) {
+            if (!n->ImplicitMethodReceiverType)
+                codegenICE("implicit method identifier '" + n->Name + "' has "
+                           "no receiver type -- Sema should have refused "
+                           "this already");
+            CallExpr Call;
+            Call.Name                     = n->Name;
+            Call.Loc                      = n->Loc;
+            Call.ResolvedType             = e.ResolvedType;
+            Call.ImplicitMethodReceiverType = n->ImplicitMethodReceiverType;
+            return FuncCall.emitCallExpr(Call);
+        }
         // Variable table.
         auto* ve = SymTab.findVar(n->Name);
         // Constant table.  A required constant stands only where the program
@@ -356,6 +378,23 @@ llvm::Value* CGExprCore::emitExpr(const ExprNode& e) {
         if (auto* p = emitLValue(e)) return p;
 
     if (auto* n = llvm::dyn_cast<IndexExpr>(&e))   return IndexAccess.emitIndexLoad(*n);
+    // Issue #773: 'S.Area' with no parentheses, from OUTSIDE the object's
+    // own methods -- Sema::checkField's own IsImplicitMethodCall flag says
+    // E.Field named no actual field, only a parameterless FUNCTION method.
+    // Handled here rather than inside CGFieldAccess::emitFieldLoad because
+    // the bound-method-call sequence (CGFuncCall::emitBoundMethodCall) lives
+    // on CGFuncCall, which CGFieldAccess has no handle on -- exactly the
+    // same layering reason the ordinary MethodCallExpr call
+    // (CGFuncCall::emitMethodCallExpr) is not implemented inside
+    // CGFieldAccess either. EmitLValue(*n->Record) gets the receiver's own
+    // address the identical way emitMethodCallExpr's own comment describes
+    // for 'S.Method(...)': it handles both a plain IdentExpr receiver and a
+    // 'P^.Area' DerefExpr one with no object-specific branch of its own.
+    if (auto* n = llvm::dyn_cast<FieldExpr>(&e); n && n->IsImplicitMethodCall) {
+        llvm::Value* selfPtr = emitLValue(*n->Record);
+        if (!selfPtr) codegenICE("implicit method field access has no receiver address");
+        return FuncCall.emitImplicitMethodFieldCall(*n, selfPtr);
+    }
     if (auto* n = llvm::dyn_cast<FieldExpr>(&e))   return FieldAccess.emitFieldLoad(*n);
     if (auto* n = llvm::dyn_cast<DerefExpr>(&e))   return FieldAccess.emitDerefLoad(*n);
     if (auto* n = llvm::dyn_cast<SetLiteralExpr>(&e)) {
@@ -578,6 +617,14 @@ llvm::Value* CGExprCore::emitLValue(const ExprNode& e) {
         // var-parameter actual) would read raw, wrong-phase storage instead
         // of calling through and spilling the call's result.
         if (n->Resolution == IdentExpr::IdentResolution::RecursiveCall)
+            return spillToTemporary(e);
+        // Issue #773: same reasoning as RecursiveCall just above -- Sema's
+        // own isLValue already refuses this resolution as an assignment
+        // TARGET (Symtab.lookup finds no Var/VarParam Symbol for a method
+        // name), but a component of its result (e.g. an implicit method
+        // returning a record, read as 'Area.Field') needs an address to GEP
+        // through, which only a spilled temporary can give a call result.
+        if (n->Resolution == IdentExpr::IdentResolution::ImplicitMethodCall)
             return spillToTemporary(e);
         auto* ve = SymTab.findVar(n->Name);
         if (ve) return ve->ptr;
