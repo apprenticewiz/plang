@@ -133,6 +133,26 @@ bool Sema::boundsShareOrdinalType(const Type& LoTy, const ExprNode& High,
 }
 
 std::shared_ptr<Type> Sema::resolveType(const TypeNode& Node) {
+    // See TypeDepth/MaxTypeDepth/StackBaseline (Sema.h, issue #596). Every
+    // recursive re-entry into type resolution -- a pointer's base, an
+    // array's element, a record field's own type, a set-of/file-of's
+    // component type -- funnels through this function (resolveTypeImpl
+    // recurses back into resolveType, not itself, for each of those), so
+    // this is the one place a guard bounds the whole mutually-recursive
+    // cycle, mirroring checkExpr's own role for expression checking
+    // (SemaExpr.cpp). TypeDepthScope is constructed unconditionally, before
+    // either check runs, for the same reason ExprDepthScope's own call site
+    // is (see TypeDepthLimitHit's own comment for why).
+    TypeDepthScope DepthGuard(TypeDepth, TypeDepthLimitHit);
+    if (TypeDepth > MaxTypeDepth || stackNearlyExhausted(StackBaseline)) {
+        if (!TypeDepthLimitHit) {
+            TypeDepthLimitHit = true;
+            error(Node.Loc, diag::err_type_too_deeply_nested);
+        }
+        Node.ResolvedType = TyErr;
+        return TyErr;
+    }
+
     auto T = resolveTypeImpl(Node);
     // Record the result on the node so codegen can lower type denoters whose
     // meaning is not recoverable from the syntax alone.

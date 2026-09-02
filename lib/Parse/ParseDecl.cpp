@@ -201,11 +201,21 @@ ConstDef Parser::parseConstDef() {
     if (Opts.turbo() && check(TokenKind::Colon)) {
         advance(); // ':'
         Def.Type = parseTypeExpr();
+        // See Scanner::allowCaretControlCharNext's own comment (issue #600):
+        // this '=' always introduces a value, never a type, so a `^letter`
+        // right after it (`const CR: char = ^M;`) has to read as a
+        // control-character literal rather than Caret.
+        Lex.allowCaretControlCharNext();
         expect(TokenKind::Equal);
         Def.Value = parseTurboConstValue();
         expect(TokenKind::Semicolon);
         return Def;
     }
+    // Same reasoning as just above: an untyped const-definition's '=' always
+    // introduces a value too (`const CR = ^M;`), unlike a type-definition's
+    // '=' (parseTypeDef), which always introduces a type-denoter and must
+    // NOT get this override.
+    Lex.allowCaretControlCharNext();
     expect(TokenKind::Equal);
     Def.Value = Opts.has(LangOptions::Feature::ConstantExpressions) ? parseExpression()
                                                           : parseSimpleExpr();

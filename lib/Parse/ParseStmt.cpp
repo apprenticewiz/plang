@@ -525,6 +525,13 @@ std::unique_ptr<CaseStmt> Parser::parseCaseStmt() {
     Node->Loc = Current;
     expect(TokenKind::Case);
     Node->Selector = parseExpression();
+    // See Scanner::allowCaretControlCharNext's own comment (issue #600): a
+    // case-statement's 'of' always introduces case-labels/'else'/'end', never
+    // a type-denoter -- unlike `array of`/`set of`/`file of`'s own 'of'
+    // (ParseType.cpp), which must NOT get this override -- so a `^letter`
+    // case-label (`case c of ^M: ...`) has to read as a control-character
+    // literal rather than Caret.
+    Lex.allowCaretControlCharNext();
     expect(TokenKind::Of);
 
     while (!check(TokenKind::End) && !check(TokenKind::Eof)) {
@@ -575,13 +582,28 @@ std::unique_ptr<CaseStmt> Parser::parseCaseStmt() {
             if (check(TokenKind::DotDot)) {
                 if (!Opts.has(LangOptions::Feature::CaseConstantRanges))
                     emitError(Current.toLoc(), diag::err_ep_case_range);
+                // See Scanner::allowCaretControlCharNext's own comment
+                // (issue #600): '..' here always introduces the range's own
+                // high bound, so `^A..^Z` needs the identical override its
+                // low bound already gets below.
+                Lex.allowCaretControlCharNext();
                 advance();
                 Lbl.High = parseCaseConstant();
             }
             return Lbl;
         };
         Arm.Labels.push_back(parseCaseLabel());
-        while (match(TokenKind::Comma)) {
+        // Precise check-then-advance rather than match(): the override has
+        // to be armed IMMEDIATELY before the specific advance() that fetches
+        // a new label's own leading token, not before merely attempting to
+        // match one -- match() only calls advance() when the comma is
+        // actually there, and arming it unconditionally first would leak
+        // into whatever unrelated token some LATER advance() call fetches
+        // whenever a comma turns out not to follow (see
+        // allowCaretControlCharNext's own one-shot contract, Scanner.h).
+        while (check(TokenKind::Comma)) {
+            Lex.allowCaretControlCharNext();
+            advance();
             Arm.Labels.push_back(parseCaseLabel());
         }
         expect(TokenKind::Colon);
@@ -595,12 +617,20 @@ std::unique_ptr<CaseStmt> Parser::parseCaseStmt() {
         // ('otherwise'/'else').  Loop back without requiring one when that's
         // what follows, so the check at the top of the loop gets a chance to
         // fire instead of unconditionally breaking to expect(End) below.
-        if (!match(TokenKind::Semicolon)) {
+        if (check(TokenKind::Semicolon)) {
+            // A semicolon-separated arm's own label needs the identical
+            // override its predecessor's already got from 'of'/','/'..'
+            // above (issue #600: `case c of ^A: ...; ^M: ...; end` --
+            // without this, only the FIRST arm's labels could ever spell a
+            // `^letter` constant).
+            Lex.allowCaretControlCharNext();
+            advance();
+            // A trailing semicolon before 'end' is fine — just loop around.
+        } else {
             if (check(TokenKind::Otherwise) || check(TokenKind::Else))
                 continue;
             break;
         }
-        // A trailing semicolon before 'end' is fine — just loop around.
     }
 
     expect(TokenKind::End);

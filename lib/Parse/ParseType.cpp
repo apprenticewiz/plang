@@ -921,6 +921,13 @@ std::unique_ptr<VariantPart> Parser::parseVariantPart() {
     } else {
         Part->TagType = parseTypeExpr();
     }
+    // See Scanner::allowCaretControlCharNext's own comment (issue #600): this
+    // 'of' always introduces case-constant labels, never a type-denoter --
+    // unlike `array of`/`set of`/`file of`'s own 'of' just above and
+    // elsewhere in this file, which must NOT get this override -- so a
+    // `^letter` variant label reads as a control-character literal rather
+    // than Caret, the same as a case-statement's own label list (ParseStmt.cpp).
+    Lex.allowCaretControlCharNext();
     expect(TokenKind::Of);
 
     // Parse variant cases until 'end' (which belongs to the enclosing record).
@@ -928,7 +935,14 @@ std::unique_ptr<VariantPart> Parser::parseVariantPart() {
         VariantCase Vc;
         // Case label list.  ISO §6.4.3.3 / §6.3: a case-constant may carry a sign.
         Vc.Labels.push_back(parseCaseConstant());
-        while (match(TokenKind::Comma)) {
+        // Precise check-then-advance rather than match(): see the identical
+        // comment on the case-statement's own label loop (ParseStmt.cpp,
+        // issue #600) for why the override has to be armed immediately
+        // before the specific advance() that fetches a new label's leading
+        // token, not before merely attempting to match one.
+        while (check(TokenKind::Comma)) {
+            Lex.allowCaretControlCharNext();
+            advance();
             Vc.Labels.push_back(parseCaseConstant());
         }
         expect(TokenKind::Colon);
@@ -956,7 +970,16 @@ std::unique_ptr<VariantPart> Parser::parseVariantPart() {
         expect(TokenKind::RightParen);
         Part->Cases.push_back(std::move(Vc));
 
-        if (!match(TokenKind::Semicolon)) break;
+        // A semicolon-separated variant case's own label needs the
+        // identical override its predecessor's already got above (issue
+        // #600), the same reason the case-statement's own trailing-';'
+        // handling does (ParseStmt.cpp).
+        if (check(TokenKind::Semicolon)) {
+            Lex.allowCaretControlCharNext();
+            advance();
+        } else {
+            break;
+        }
         // Stop if next is 'end' (trailing semicolon before 'end' is allowed).
         if (check(TokenKind::End)) break;
     }

@@ -220,12 +220,18 @@ Token Scanner::next() {
             Tok = scanHexLiteral(TokenStart);
         // Turbo `^ctrl` control-character literal.  Unlike '#' and '$', '^'
         // is already Caret, so this is only the start of a new literal when
-        // it has the right shape (see caretLooksLikeControlChar()) AND the
-        // token just before it is one that can only begin an expression --
-        // see PrevKind's comment in Scanner.h for why that second condition
-        // is what keeps `type PM = ^Integer` a pointer type. Anywhere this
-        // doesn't hold, '^' falls through to scanSymbol exactly as before.
-        else if (Opts.turbo() && caretLooksLikeControlChar() && startsExpression(PrevKind))
+        // it has the right shape (see caretLooksLikeControlChar()) AND
+        // either the token just before it is one that can only begin an
+        // expression -- see PrevKind's comment in Scanner.h for why that
+        // second condition is what keeps `type PM = ^Integer` a pointer
+        // type -- OR the parser has explicitly overridden that for this one
+        // token via allowCaretControlCharNext() (issue #600: '=' and 'of'
+        // are each genuinely ambiguous by token kind alone, so PrevKind's
+        // own allow-list cannot safely include them; see that method's own
+        // comment). Anywhere neither holds, '^' falls through to scanSymbol
+        // exactly as before.
+        else if (Opts.turbo() && caretLooksLikeControlChar() &&
+                 (startsExpression(PrevKind) || ForceExprStartOnce))
             Tok = scanString(TokenStart);
         else
             Tok = scanSymbol(TokenStart);
@@ -233,6 +239,9 @@ Token Scanner::next() {
         // Skip Error tokens so the Parser never sees them.
         if (Tok.Kind != TokenKind::Error) {
             PrevKind = Tok.Kind;
+            // One-shot: governs only the token just produced, whether or not
+            // it actually took the caret-literal path above.
+            ForceExprStartOnce = false;
             return Tok;
         }
     }

@@ -44,6 +44,23 @@ public:
     /// subsequent call.
     Token next();
 
+    /// One-shot override of startsExpression(PrevKind)'s allow-list (see
+    /// PrevKind's own comment) for the very next call to next(): the parser
+    /// calls this immediately before that call, at a point the grammar
+    /// itself already guarantees the upcoming token begins an expression
+    /// even though the token just consumed -- '=' or 'of' -- is not on
+    /// PrevKind's allow-list. Both are genuinely ambiguous by token kind
+    /// alone: '=' also introduces a type-definition's type-denoter (`type P
+    /// = ^Integer`) and 'of' also introduces `array of`/`set of`/`file of`'s
+    /// element type, so the allow-list itself can't simply add them without
+    /// breaking those -- only the parser, at the specific production it is
+    /// currently in (a const-declaration's value, a case-statement's label
+    /// list), knows an expression is what has to follow (issue #600).
+    /// Consumed by the very next next() call whether or not that call
+    /// actually reads a `^letter` literal, so it can never leak into some
+    /// later, unrelated '^'.
+    void allowCaretControlCharNext() { ForceExprStartOnce = true; }
+
     /// The buffer this scanner is reading, for a caller that needs it after
     /// construction but before the scanner itself is moved from (-g's
     /// Codegen::setSourceManager, which needs the main file's FileID).
@@ -94,6 +111,11 @@ private:
     // Colon/Equal/Of, which is how `type PM = ^Integer` keeps meaning a
     // pointer type instead of being misread as a control-character literal.
     TokenKind            PrevKind = TokenKind::Eof;
+
+    // Set by allowCaretControlCharNext() (see its own comment, above); read
+    // and unconditionally cleared alongside PrevKind at the bottom of next(),
+    // so it governs exactly one upcoming token.
+    bool                 ForceExprStartOnce = false;
 
     // The position of byte Offset in the buffer.  Line and column are the
     // SourceManager's business, which is why the scanner tracks neither.
@@ -269,6 +291,27 @@ private:
     // syntax error nested in the dead source (an unterminated string, a
     // mismatched comment delimiter, an unexpected character): none of it is
     // ever tokenized, so none of it is ever diagnosed.
+    //
+    // A single-quoted string literal and a `//` line comment ARE each
+    // recognized as opaque spans while raw-skipping (issue #644): a
+    // {$/(*$-looking substring INSIDE one of those -- 's := 'dead {$ENDIF}
+    // text';' or '// {$ENDIF}' -- must not be mistaken for one of Frame's
+    // own markers, the same way it already isn't for live source (next()'s
+    // own dispatch never looks inside a string or line comment for one
+    // either). This recognition never diagnoses anything, matching the
+    // paragraph above: an apparent string with no closing quote before the
+    // next newline is not treated as a real string here at all (silently --
+    // the malformed-content contract still holds), and the raw byte scan
+    // simply continues from its own opening quote as if this recognition
+    // did not exist. A `{`/`(*`-opened ordinary (non-`$`) comment is
+    // deliberately NOT given the same treatment: unlike a string or a `//`
+    // comment, its own extent cannot always be told apart from "this is
+    // genuinely unterminated, and the very next {$ENDIF}-looking text is a
+    // REAL marker" without diagnosing the difference, which would break the
+    // no-diagnostic contract above (confirmed against
+    // dead-conditional-branch-malformed-content-produces-no-diagnostic.pas's
+    // own deliberately-unterminated `{` comment, whose following {$ENDIF}
+    // that test requires still be found).
     void skipToNextConditionalMarker(CondFrame& Frame);
 
     // Scans a directive body the same way skipDirective does -- same opener
