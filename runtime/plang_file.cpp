@@ -701,9 +701,11 @@ void plang_close(PascalFile *F, int8_t IsText) {
 // captured IMMEDIATELY after the failing fopen, before anything else
 // (including std::fclose in Reset's directory-guard arm) has a chance to
 // clobber it.  None of Assign/Reset/Rewrite/Append below range-checks
-// F->Mode against fmClosed..fmInOut before proceeding, and Close is left
-// entirely alone (it cannot itself fail) -- both remain a later item's job,
-// exactly as PascalFileLayout.h's own RecSize field comment says.
+// F->Mode against fmClosed..fmInOut before proceeding -- that remains a
+// later item's job, exactly as PascalFileLayout.h's own RecSize field
+// comment says.  Close (below) DOES now guard its own openness (issue
+// #575's tpFileReady check) -- it can fail, reporting 103, exactly like
+// every other Turbo entry point in this file.
 
 /// TP Assign(f, name): binds F to an external filename (or, for an empty
 /// name, to "the console" -- see the Reset/Rewrite/Append functions below
@@ -847,17 +849,33 @@ void plang_tp_rewrite(PascalFile *F) {
     unloadComponent(F);
 }
 
-/// TP Append(f): opens F->Name for writing at its current end (creating it
-/// if absent), or -- for an empty bound name -- attaches F to stdout.  Real
-/// Turbo Pascal sets Mode to fmOutput here too, the same as Rewrite --
-/// confirmed against `fpc -Mtp` (TextRec(f).Mode reads identically after
-/// either call) -- Append is not a fourth, distinct mode of its own.
+/// TP Append(f): opens F->Name for writing at its current end, or -- for an
+/// empty bound name -- attaches F to stdout.  Real Turbo Pascal sets Mode
+/// to fmOutput here too, the same as Rewrite -- confirmed against
+/// `fpc -Mtp` (TextRec(f).Mode reads identically after either call) --
+/// Append is not a fourth, distinct mode of its own.
+///
+/// Issue #576: unlike Rewrite, Append does NOT create a missing file --
+/// confirmed against `fpc -Mtp` (InOutRes 2, "file not found", and nothing
+/// created).  C's fopen(Name, "a") itself creates a missing target, so a
+/// missing-file check has to run BEFORE that open -- `::access` here, the
+/// same existence-probe idiom real Turbo Pascal's own Append documents,
+/// rather than opening and then trying to undo the creation afterward.
+/// This is a plain existence check, not a permissions one: a subsequent
+/// permission failure (e.g. no write access) is still left to fopen's own
+/// failure below, mapped through plang_tp_posix_to_run_error exactly as it
+/// already was.
 void plang_tp_append(PascalFile *F) {
     closeStream(F);
     if (F->Name[0] == '\0') {
         F->Fp      = stdout;
         F->Binding = PlangBindStd;
     } else {
+        if (::access(F->Name, F_OK) != 0) {
+            const int Err = errno;
+            setInOutResIfClear(plang_tp_posix_to_run_error(Err));
+            return;
+        }
         F->Fp = std::fopen(F->Name, "a");
         if (!F->Fp) {
             const int Err = errno;
@@ -917,7 +935,20 @@ void plang_tp_rewrite_sized(PascalFile *F, int64_t RecSize) {
 /// with no intervening Assign after a Close reopen the same name), so a
 /// following Reset/Rewrite/Append with no new Assign call correctly reopens
 /// what was already bound.
+///
+/// Issue #575: unlike every sibling Turbo entry point in this file, this
+/// used to skip the tpFileReady openness check entirely -- closeStream is
+/// itself a silent no-op when F->Fp is already null, so Close on a file
+/// that was only ever Assign'd (never Reset/Rewrite/Append'ed), or on a
+/// file that has already been Close'd once, "succeeded" with InOutRes left
+/// at 0 instead of reporting the 103 ("file not open") `fpc -Mtp` reports
+/// for both.  tpFileReady itself already routes through setInOutResIfClear,
+/// so a pending, unread InOutRes from an earlier failed Reset (see
+/// checked-close-catches-a-pending-error-from-an-earlier-deferred-reset-
+/// failure.pas) survives this unchanged, exactly as every other Turbo entry
+/// point's own tpFileReady call already guarantees.
 void plang_tp_close(PascalFile *F) {
+    if (!tpFileReady(F, "Close")) return;
     closeStream(F);
     F->Buf      = PlangFileUninit;
     F->Readable = 0;
@@ -1026,9 +1057,28 @@ void plang_tp_truncate(PascalFile *F) {
 /// records and is never itself an error (Count <= 0 legitimately means "read
 /// nothing"; RecSize <= 0 cannot happen after a real Reset -- Reset itself
 /// already refuses a zero RecSize -- so this is defense in depth only).
+///
+/// Issue #679: a NEGATIVE RecSize (Reset/Rewrite(f, -1), which -- unlike 0
+/// -- neither function rejects; see plang_tp_reset_sized/
+/// plang_tp_rewrite_sized's own comment) is a genuinely different case from
+/// RecSize 0, and the comment above was wrong to lump the two together:
+/// confirmed against `fpc -Mtp`, Reset/Rewrite(f, -1) itself succeeds
+/// silently (InOutRes 0, matching plang's own existing behavior), but a
+/// SUBSEQUENT BlockRead/BlockWrite against that file traps with "Runtime
+/// error 217", not a quiet zero-record no-op -- so this checks F->RecSize <
+/// 0 separately, ONLY once Count is already known to be positive (`fpc
+/// -Mtp`: BlockRead/BlockWrite with Count 0 against a negative-RecSize file
+/// does NOT trap -- there is nothing to transfer either way), and traps
+/// through the same plang_tp_runerror numbered-abort every other Turbo
+/// runtime check in this file already uses.  RecSize == 0 keeps the
+/// existing quiet no-op: it cannot occur against a genuinely open file in
+/// practice (Reset/Rewrite(f, 0) refuse to open at all), so this remains
+/// defense in depth only, exactly as before.
 int64_t plang_tp_blockread(PascalFile *F, void *Buf, int64_t Count, int8_t HasResult) {
     if (!tpFileReady(F, "BlockRead")) return 0;
-    if (Count <= 0 || F->RecSize <= 0) return 0;
+    if (Count <= 0) return 0;
+    if (F->RecSize < 0) plang_tp_runerror(217);
+    if (F->RecSize == 0) return 0;
     const std::size_t Want = (std::size_t)Count * (std::size_t)F->RecSize;
     const std::size_t Got  = std::fread(Buf, 1, Want, F->Fp);
     const int64_t Actual = (int64_t)(Got / (std::size_t)F->RecSize);
@@ -1039,12 +1089,14 @@ int64_t plang_tp_blockread(PascalFile *F, void *Buf, int64_t Count, int8_t HasRe
 }
 
 /// TP BlockWrite(f, buf, count, hasResult): the write-side twin of
-/// BlockRead just above -- see its own comment for the shared shape.  A
-/// short write without a result argument sets InOutRes 101 ("disk write
-/// error") instead of 100.
+/// BlockRead just above -- see its own comment for the shared shape,
+/// including issue #679's negative-RecSize trap.  A short write without a
+/// result argument sets InOutRes 101 ("disk write error") instead of 100.
 int64_t plang_tp_blockwrite(PascalFile *F, const void *Buf, int64_t Count, int8_t HasResult) {
     if (!tpFileReady(F, "BlockWrite")) return 0;
-    if (Count <= 0 || F->RecSize <= 0) return 0;
+    if (Count <= 0) return 0;
+    if (F->RecSize < 0) plang_tp_runerror(217);
+    if (F->RecSize == 0) return 0;
     const std::size_t Want = (std::size_t)Count * (std::size_t)F->RecSize;
     const std::size_t Got  = std::fwrite(Buf, 1, Want, F->Fp);
     const int64_t Actual = (int64_t)(Got / (std::size_t)F->RecSize);
@@ -1511,6 +1563,19 @@ static int turboRadixPrefixFile(const char *&Tok) {
     return 10;
 }
 
+/// The file-runtime twin of plang_io.cpp's turboSignedRadixPrefix (issue
+/// #592); see its own comment for the full rationale.
+static bool turboSignedRadixPrefixFile(const char *Tok, bool &Neg) {
+    if (Tok[0] != '-' && Tok[0] != '+') return false;
+    const char C1 = Tok[1], C2 = Tok[2];
+    if (C1 == '$' || C1 == '&' || C1 == '%' ||
+        (C1 == '0' && (C2 == 'x' || C2 == 'X'))) {
+        Neg = (Tok[0] == '-');
+        return true;
+    }
+    return false;
+}
+
 void plang_read_file_i64(PascalFile *F, int64_t *P) {
     abortIfClosed(F, "read");
     trapOnWrongDirection(F, "read", 0);
@@ -1608,6 +1673,11 @@ void plang_read_file_char_turbo(PascalFile *F, int8_t *P) {
 // -std=turbo and always calls the plang_read_file_*_turbo family, never
 // plang_io.cpp's plang_read_*_turbo siblings -- confirmed by inspecting the
 // IR a bare `read(i)` under -std=turbo actually emits.
+//
+// Issue #592: see plang_io.cpp's plang_read_i64_turbo for the full
+// rationale -- a sign immediately followed by a radix-prefix character is
+// stripped by turboSignedRadixPrefixFile before Digits ever reaches
+// turboRadixPrefixFile, and reapplied to the parsed magnitude below.
 void plang_read_file_i64_turbo(PascalFile *F, int64_t *P) {
     if (!tpFileReady(F, "read")) { *P = 0; return; }
     tpTrapOnWrongDirection(F, 0);
@@ -1616,10 +1686,12 @@ void plang_read_file_i64_turbo(PascalFile *F, int64_t *P) {
     unloadComponent(F);
     if (!SawAny) { *P = 0; return; }                                // issue #284
     const char *Digits = Tok ? Tok : "";
+    bool Neg = false;
+    if (turboSignedRadixPrefixFile(Digits, Neg)) ++Digits;
     const int Radix = turboRadixPrefixFile(Digits);
     char *End = const_cast<char *>(Digits);
     errno = 0;
-    const long long V = *Digits ? std::strtoll(Digits, &End, Radix) : 0;
+    long long V = *Digits ? std::strtoll(Digits, &End, Radix) : 0;
     // See plang_io.cpp's plang_read_i64_turbo for why ERANGE gets the same
     // error as a malformed token, and why a value that fits int64_t but
     // overflows Turbo's own 16-bit Integer is not checked here at all.
@@ -1628,6 +1700,7 @@ void plang_read_file_i64_turbo(PascalFile *F, int64_t *P) {
         setInOutResIfClear(106);
         return;
     }
+    if (Neg) V = -V;
     *P = static_cast<int64_t>(V);
 }
 
