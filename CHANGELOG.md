@@ -10,6 +10,17 @@ version numbers follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 
 ### Added
 
+- **`-std=turbo`: `{$IFOPT switch+}`/`{$IFOPT switch-}`.** Tests the CURRENT
+  state of a compiler switch at the point it appears -- `{$R+} ... {$IFOPT
+  R+}` takes its branch, a later `{$R-}` flips it -- reusing the existing
+  `CondFrame`/`{$ELSE}`/`{$ELSEIF}`/`{$ENDIF}` machinery `{$IFDEF}`/
+  `{$IFNDEF}` already had, and `Scanner::CurrentSwitchState` (falling back to
+  `Opts.defaultSwitches()` before any switch directive has run) that
+  `SwitchTable` was built to answer in the first place. Only the letter
+  spelling is accepted, matching `fpc -Mtp`: a long-name switch, or a switch
+  with no letter at all (`ObjectChecks`/`Goto`), is a real, reported error
+  (`err_directive_ifopt_bad_switch`) rather than a silent branch (issue
+  #794).
 - **`-std=turbo`: `const` parameters, untyped parameters, and open-array
   parameters.** `procedure P(const x: SomeRecord)` reads like an ordinary
   parameter but may not be assigned to (`err_const_param_assigned`,

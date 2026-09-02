@@ -20,7 +20,7 @@
 //
 // The message-directive category ({$MESSAGE}/{$INFO}/{$NOTE}/{$HINT}/
 // {$WARNING}/{$ERROR}/{$FATAL}), conditional compilation ({$DEFINE}/
-// {$UNDEF}/{$IFDEF}/{$IFNDEF}/{$ELSE}/{$ELSEIF}/{$ENDIF}),
+// {$UNDEF}/{$IFDEF}/{$IFNDEF}/{$IFOPT}/{$ELSE}/{$ELSEIF}/{$ENDIF}),
 // {$I file}/{$INCLUDE file} source inclusion, {$R+}-style switches
 // (CompilerSwitches.def's SWITCH table, letter or long name, recorded
 // position-keyed into a SwitchTable -- see dispatchSwitchDirective's own
@@ -288,23 +288,29 @@ bool Scanner::dispatchMessageDirective(std::string_view Name,
 }
 
 // ---------------------------------------------------------------------------
-// Conditional compilation: {$DEFINE}/{$UNDEF}/{$IFDEF}/{$IFNDEF}/{$ELSE}/
-// {$ELSEIF}/{$ENDIF}
+// Conditional compilation: {$DEFINE}/{$UNDEF}/{$IFDEF}/{$IFNDEF}/{$IFOPT}/
+// {$ELSE}/{$ELSEIF}/{$ENDIF}
 // ---------------------------------------------------------------------------
 //
 // {$DEFINE}/{$UNDEF} just mutate CurrentDefines and return -- see its own
 // comment in Scanner.h for why that alone, with no SwitchTable-style
 // position-indexed table, is enough.
 //
-// {$IFDEF}/{$IFNDEF} push a CondFrame and, if the condition fails, hand off
-// to skipToNextConditionalMarker to find wherever this chain's next live
-// branch (or its {$ENDIF}) actually is.  {$ELSE}/{$ELSEIF} reached here --
-// through ordinary, live scanning -- mean the branch just finished WAS live,
-// so this chain has already taken a branch and nothing after this point can
-// ever be live again; they hand off to the same skip function purely to
-// find the matching {$ENDIF} (still validating directive-syntax errors --
-// duplicate {$ELSE}, {$ELSEIF} after {$ELSE} -- along the way). {$ENDIF}
-// just pops.
+// {$IFDEF}/{$IFNDEF}/{$IFOPT} push a CondFrame and, if the condition fails,
+// hand off to skipToNextConditionalMarker to find wherever this chain's next
+// live branch (or its {$ENDIF}) actually is. {$IFOPT switch+}/
+// {$IFOPT switch-} tests the CURRENT state of a compiler switch -- exactly
+// what CurrentSwitchState (or, before any switch directive has run,
+// Opts.defaultSwitches()) already answers, no separate query mechanism
+// needed -- and otherwise pushes/skips through the identical CondFrame
+// machinery as {$IFDEF}/{$IFNDEF}, since {$ELSE}/{$ELSEIF}/{$ENDIF} and
+// skipToNextConditionalMarker are already generic over what pushed the
+// frame. {$ELSE}/{$ELSEIF} reached here -- through ordinary, live scanning
+// -- mean the branch just finished WAS live, so this chain has already
+// taken a branch and nothing after this point can ever be live again; they
+// hand off to the same skip function purely to find the matching {$ENDIF}
+// (still validating directive-syntax errors -- duplicate {$ELSE}, {$ELSEIF}
+// after {$ELSE} -- along the way). {$ENDIF} just pops.
 
 bool Scanner::dispatchConditionalDirective(std::string_view Name,
                                            std::string_view Argument,
@@ -333,6 +339,38 @@ bool Scanner::dispatchConditionalDirective(std::string_view Name,
         } else {
             const bool Defined = CurrentDefines.count(toLower(Argument)) != 0;
             Cond = (Folded == "ifdef") ? Defined : !Defined;
+        }
+        CondStack.push_back(CondFrame{Cond, /*SeenElse=*/false, Loc, std::string(Name)});
+        if (!Cond) skipToNextConditionalMarker(CondStack.back());
+        return true;
+    }
+
+    if (Folded == "ifopt") {
+        bool Cond;
+        // `{$IFOPT R+}`/`{$IFOPT R-}`: exactly one letter immediately
+        // followed by '+' or '-', no space, no long name -- confirmed
+        // against `fpc -Mtp`, which rejects anything else (including a
+        // perfectly valid long-name switch spelling) as "Illegal compiler
+        // switch". ObjectChecks/Goto (CompilerSwitches.def's own '\0'
+        // letter) can never match here either, exactly as fpc rejects
+        // `{$IFOPT OBJECTCHECKS}`/`{$IFOPT GOTO}` outright.
+        std::optional<Switch> Sw;
+        std::optional<bool>   Want;
+        if (Argument.size() == 2) {
+            Sw = switchFromLetter(Argument[0]);
+            if (Argument[1] == '+')      Want = true;
+            else if (Argument[1] == '-') Want = false;
+        }
+        if (!Sw || !Want) {
+            emitError(Loc, diag::err_directive_ifopt_bad_switch, {Argument});
+            // No real switch to test either way; treat the branch as not
+            // satisfied so {$ELSE}/{$ENDIF} below still balance correctly
+            // rather than cascading into an unmatched-directive error too.
+            Cond = false;
+        } else {
+            const bool Actual = Switches ? CurrentSwitchState.on(*Sw)
+                                          : Opts.defaultSwitches().on(*Sw);
+            Cond = (Actual == *Want);
         }
         CondStack.push_back(CondFrame{Cond, /*SeenElse=*/false, Loc, std::string(Name)});
         if (!Cond) skipToNextConditionalMarker(CondStack.back());
@@ -492,7 +530,7 @@ void Scanner::skipToNextConditionalMarker(CondFrame& Frame) {
         const std::string Folded = toLower(Name);
         const SourceLocation DirLoc = locAt(BodyStart);
 
-        if (Folded == "ifdef" || Folded == "ifndef") {
+        if (Folded == "ifdef" || Folded == "ifndef" || Folded == "ifopt") {
             ++Depth;
             continue;
         }
