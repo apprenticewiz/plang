@@ -109,6 +109,23 @@ struct CallStmt : StmtNode {
     /// Turbo Tier 5, Cluster A item 6: NewInitMethod's mirror for
     /// 'dispose(p, Dtor[(args)])', set by Sema::checkDisposeDone.
     mutable std::string DisposeDoneMethod;
+
+    /// Turbo Tier 5, issues #571/#623: set by Sema::checkImplicitMethodCallStmt
+    /// only when Name did not resolve to any ordinary declaration at all but
+    /// DOES match a method of the innermost currently active IMPLICIT
+    /// receiver -- the enclosing method body's own 'Self' (#571's bare
+    /// 'Who;'/'Who();' meaning 'Self.Who;'/'Self.Who();') or an active 'with
+    /// anObjectInstance do' block's own object (#623's bare 'Speak;' meaning
+    /// 'anObjectInstance.Speak;').  Holds that receiver's own resolved,
+    /// STATIC Type (Sema::ImplicitCallReceivers_'s own comment, Sema.h) --
+    /// CodeGen (CGProcCall::emitCallStmt) re-derives the declaring ancestor
+    /// and emits this exactly as the equivalent qualified method call would,
+    /// via CGProcCall::emitBoundMethodCall, using the matching runtime
+    /// pointer its OWN, identically-nested scope stack is tracking under the
+    /// reserved binding implicitCallReceiverVarName() (CGSymbolTable.h;
+    /// defined alongside 'Self'/a with-target's own fields by
+    /// CodeGenProcs.cpp/CGWith.cpp).  Null for an ordinary call.
+    mutable std::shared_ptr<Type> ImplicitMethodReceiverType;
 };
 
 /// Turbo Tier 5, Cluster A item 3: a method call used as a STATEMENT --

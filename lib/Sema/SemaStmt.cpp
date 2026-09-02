@@ -878,6 +878,14 @@ void Sema::checkCallStmt(const CallStmt& S) {
         // needs its own check: checkIdent's (SemaExpr.cpp) never runs for
         // `Intr($21, Regs);` written as a bare statement.
         if (checkRealModeDosName(S.Name, S.Loc)) return;
+        // Turbo Tier 5, issues #571/#623: an unqualified name with no
+        // ordinary declaration anywhere in scope may still be one of the
+        // CURRENT implicit receiver's own methods -- 'Who;' inside
+        // 'procedure TA.Test1' meaning 'Self.Who;' (#571), or 'Speak;'
+        // inside 'with d do' meaning 'd.Speak;' (#623).  See
+        // checkImplicitMethodCallStmt's own comment (Sema.h) for why this is
+        // tried only here, after an ordinary lookup already failed.
+        if (checkImplicitMethodCallStmt(S)) return;
         error(S.Loc, diag::err_undefined_procedure, {S.Name});
         return;
     }
@@ -2195,6 +2203,36 @@ void Sema::checkCallStmt(const CallStmt& S) {
     S.ResolvedType = (RetTy && !RetTy->isError()) ? RetTy : nullptr;
 }
 
+// Turbo Tier 5, issues #571/#623: see this function's own declaration
+// (Sema.h) for when checkCallStmt tries this.
+bool Sema::checkImplicitMethodCallStmt(const CallStmt& S) {
+    const ImplicitMethodLookup IL = findImplicitCallMethod(S.Name);
+    if (!IL.M) return false;
+
+    // Turbo Tier 5, Cluster A item 7: same private-visibility gate
+    // checkMethodCall applies -- see its own comment (SemaExpr.cpp).
+    if (IL.M->IsPrivate && IL.Owner->DeclaringModule != CurrentUnit_)
+        error(S.Loc, diag::err_object_private_method, {IL.Owner->Name, S.Name});
+
+    // Hand off to the SAME arity/argument-type checking an ordinary
+    // procedure/function call gets -- the identical synthetic-Proc-stand-in
+    // trick checkMethodCall's own tail uses.
+    Symbol Indirect;
+    Indirect.Kind       = SymbolKind::Proc;
+    Indirect.Name       = IL.Owner->Name + "." +
+                           (IL.M->Heading ? IL.M->Heading->Name : S.Name);
+    Indirect.IsFunction = IL.M->IsFunction;
+    Indirect.Params     = IL.M->Params;
+    Indirect.ReturnType = IL.M->RetType;
+    // Turbo `{$X+}`: mirrors checkCallStmt's own identical CallStmt::
+    // ResolvedType annotation just above, for a function method let through
+    // as a statement with its result discarded.
+    auto RetTy = checkUserDefinedCall(Indirect, S.Loc, S.Args, /*ExpectFunction=*/false);
+    S.ResolvedType = (RetTy && !RetTy->isError()) ? RetTy : nullptr;
+    S.ImplicitMethodReceiverType = IL.Receiver;
+    return true;
+}
+
 // Turbo Tier 5, Cluster A item 3: 'Obj.Method(args);' / 'P^.Method(args);' /
 // the bare-call form 'Obj.Method;' used as a statement -- see
 // Sema::checkMethodCall's own comment (SemaExpr.cpp) for the shared logic
@@ -2268,23 +2306,19 @@ void Sema::checkNewInit(const CallStmt& S, const Type& Pointee) {
         return;
     }
 
-    // Same ancestor-chain composite-key walk checkMethodCall/
-    // checkInheritedCallStmt both use -- a constructor need not be
+    // Same ancestor-chain walk checkMethodCall/checkInheritedCallStmt both
+    // use (Sema::findObjectMethod, issue #621) -- a constructor need not be
     // declared directly on Pointee itself (an unmodified inherited one is
     // legal: 'new(pDog, Init)' where TDog declares no Init of its own but
     // TAnimal does).
-    const Symbol* MethodSym = nullptr;
-    for (const Type* Cur = &Pointee; Cur; Cur = Cur->Parent.get()) {
-        Symbol* Sy = Symtab.lookup(objectMethodKey(Cur->Name, CtorName));
-        if (Sy && Sy->Kind == SymbolKind::Method) { MethodSym = Sy; break; }
-    }
-    if (!MethodSym) {
+    const auto ML = findObjectMethod(Pointee, CtorName);
+    if (!ML.M) {
         error(S.Args[1]->Loc, diag::err_object_method_not_found,
               {Pointee.Name, CtorName});
         for (const auto& A : CtorArgs) (void)checkExpr(*A);
         return;
     }
-    if (!MethodSym->IsMethodConstructor) {
+    if (!ML.M->IsConstructor) {
         error(S.Args[1]->Loc, diag::err_new_init_not_constructor,
               {Pointee.Name, CtorName});
         for (const auto& A : CtorArgs) (void)checkExpr(*A);
@@ -2292,17 +2326,17 @@ void Sema::checkNewInit(const CallStmt& S, const Type& Pointee) {
     }
     // Turbo Tier 5, Cluster A item 7: same private-visibility gate
     // checkMethodCall applies -- see its own comment (SemaExpr.cpp).
-    if (MethodSym->IsMethodPrivate && MethodSym->Module != CurrentUnit_)
+    if (ML.M->IsPrivate && ML.Owner->DeclaringModule != CurrentUnit_)
         error(S.Args[1]->Loc, diag::err_object_private_method,
-              {MethodSym->MethodOwnerType, CtorName});
+              {ML.Owner->Name, CtorName});
 
     Symbol Indirect;
     Indirect.Kind       = SymbolKind::Proc;
-    Indirect.Name       = MethodSym->MethodOwnerType + "." +
-                           (MethodSym->Decl ? MethodSym->Decl->Name : CtorName);
-    Indirect.IsFunction = MethodSym->IsFunction;
-    Indirect.Params     = MethodSym->Params;
-    Indirect.ReturnType = MethodSym->ReturnType;
+    Indirect.Name       = ML.Owner->Name + "." +
+                           (ML.M->Heading ? ML.M->Heading->Name : CtorName);
+    Indirect.IsFunction = ML.M->IsFunction;
+    Indirect.Params     = ML.M->Params;
+    Indirect.ReturnType = ML.M->RetType;
     (void)checkUserDefinedCall(Indirect, S.Args[1]->Loc, CtorArgs,
                                /*ExpectFunction=*/false);
     S.NewInitMethod = CtorName;
@@ -2370,18 +2404,16 @@ void Sema::checkDisposeDone(const CallStmt& S, const Type& Pointee) {
         return;
     }
 
-    const Symbol* MethodSym = nullptr;
-    for (const Type* Cur = &Pointee; Cur; Cur = Cur->Parent.get()) {
-        Symbol* Sy = Symtab.lookup(objectMethodKey(Cur->Name, DtorName));
-        if (Sy && Sy->Kind == SymbolKind::Method) { MethodSym = Sy; break; }
-    }
-    if (!MethodSym) {
+    // Same ancestor-chain walk checkNewInit uses just above (Sema::
+    // findObjectMethod, issue #621).
+    const auto ML = findObjectMethod(Pointee, DtorName);
+    if (!ML.M) {
         error(S.Args[1]->Loc, diag::err_object_method_not_found,
               {Pointee.Name, DtorName});
         for (const auto& A : DtorArgs) (void)checkExpr(*A);
         return;
     }
-    if (!MethodSym->IsMethodDestructor) {
+    if (!ML.M->IsDestructor) {
         error(S.Args[1]->Loc, diag::err_dispose_done_not_destructor,
               {Pointee.Name, DtorName});
         for (const auto& A : DtorArgs) (void)checkExpr(*A);
@@ -2389,17 +2421,17 @@ void Sema::checkDisposeDone(const CallStmt& S, const Type& Pointee) {
     }
     // Turbo Tier 5, Cluster A item 7: same private-visibility gate
     // checkMethodCall applies -- see its own comment (SemaExpr.cpp).
-    if (MethodSym->IsMethodPrivate && MethodSym->Module != CurrentUnit_)
+    if (ML.M->IsPrivate && ML.Owner->DeclaringModule != CurrentUnit_)
         error(S.Args[1]->Loc, diag::err_object_private_method,
-              {MethodSym->MethodOwnerType, DtorName});
+              {ML.Owner->Name, DtorName});
 
     Symbol Indirect;
     Indirect.Kind       = SymbolKind::Proc;
-    Indirect.Name       = MethodSym->MethodOwnerType + "." +
-                           (MethodSym->Decl ? MethodSym->Decl->Name : DtorName);
-    Indirect.IsFunction = MethodSym->IsFunction;
-    Indirect.Params     = MethodSym->Params;
-    Indirect.ReturnType = MethodSym->ReturnType;
+    Indirect.Name       = ML.Owner->Name + "." +
+                           (ML.M->Heading ? ML.M->Heading->Name : DtorName);
+    Indirect.IsFunction = ML.M->IsFunction;
+    Indirect.Params     = ML.M->Params;
+    Indirect.ReturnType = ML.M->RetType;
     (void)checkUserDefinedCall(Indirect, S.Args[1]->Loc, DtorArgs,
                                /*ExpectFunction=*/false);
     S.DisposeDoneMethod = DtorName;
@@ -2412,7 +2444,13 @@ void Sema::checkWith(const WithStmt& S) {
     checkStmt(S.Body.get());
     // Restore bindings (removes any schema discriminants added by pushWithScope).
     ActiveSchemaBindings_ = std::move(SavedBindings);
-    for (int I = 0; I < Pushed; ++I) Symtab.popScope();
+    // Issues #571/#623: ImplicitCallReceivers_ popped in the same lockstep
+    // pushWithScope's own comment describes -- one entry per Symtab scope
+    // this loop pushed, Object or not.
+    for (int I = 0; I < Pushed; ++I) {
+        Symtab.popScope();
+        ImplicitCallReceivers_.pop_back();
+    }
 }
 
 int Sema::pushWithScope(const WithStmt& S) {
@@ -2460,6 +2498,12 @@ int Sema::pushWithScope(const WithStmt& S) {
                 && schemaUnderlying(T->SchemaBody)->Kind == TypeKind::Record) {
             Symtab.pushScope(/*IsBlock=*/false);
             ++Count;
+            // Issues #571/#623: a schema/record with-target has no methods
+            // of its own to offer an implicit call -- see
+            // ImplicitCallReceivers_'s own comment for why this still pushes
+            // a (null) placeholder, kept in exact 1:1 lockstep with Count/
+            // each Symtab.pushScope() call this loop makes.
+            ImplicitCallReceivers_.push_back(nullptr);
             for (const auto& D : T->SchemaDiscs) {
                 Symbol DS;
                 // Const, as the discriminated branch below already has it.
@@ -2494,6 +2538,9 @@ int Sema::pushWithScope(const WithStmt& S) {
         if (T->Kind == TypeKind::SchemaInstance) {
             Symtab.pushScope(/*IsBlock=*/false);
             ++Count;
+            // Issues #571/#623: see the identical placeholder push in the
+            // undiscriminated-Schema branch just above.
+            ImplicitCallReceivers_.push_back(nullptr);
             // Expose discriminants as constants of their declared type in both
             // the symbol table and ActiveSchemaBindings_ (for constBound
             // inside the with body).
@@ -2538,6 +2585,14 @@ int Sema::pushWithScope(const WithStmt& S) {
         if (T->Kind == TypeKind::Object) {
             Symtab.pushScope(/*IsBlock=*/false);
             ++Count;
+            // Issue #623: 'with anObjectInstance do' as an IMPLICIT-CALL
+            // receiver too, so an unqualified method call inside this
+            // with-block resolves -- see ImplicitCallReceivers_'s own
+            // comment for the whole design.  Pushed AFTER Symtab.pushScope()
+            // above, same ordering pushMethodSelfScope's own identical push
+            // uses, so the two stacks stay in the same relative nesting
+            // order everywhere both are consulted.
+            ImplicitCallReceivers_.push_back(T);
             for (const auto& F : T->RecordFields) {
                 if (F.IsPrivate && F.DeclaringModule != CurrentUnit_) continue;
                 Symbol FS;
@@ -2555,6 +2610,10 @@ int Sema::pushWithScope(const WithStmt& S) {
         }
         Symtab.pushScope(/*IsBlock=*/false);
         ++Count;
+        // Issues #571/#623: see the identical placeholder push in the
+        // undiscriminated-Schema branch above -- a plain record has no
+        // methods of its own either.
+        ImplicitCallReceivers_.push_back(nullptr);
         for (const auto& F : T->RecordFields) {
             Symbol FS;
             FS.Kind           = SymbolKind::Var;

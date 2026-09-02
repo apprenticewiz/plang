@@ -456,6 +456,70 @@ private:
     /// parameter scope of its own to collide with.
     std::set<std::string> EnclosingParamNames_;
 
+    /// Turbo Tier 5, issue #617: how many procedure/function bodies are
+    /// currently being checked, outermost counted too -- incremented/
+    /// decremented by checkProcBody around its own call to checkBlock, so
+    /// resolveObjectType (SemaType.cpp) can tell "this 'type X = object ...
+    /// end' is declared inside SOME procedure or function" (> 0) from "this
+    /// is a program/module/unit top-level declaration" (== 0), regardless of
+    /// how many levels of procedure nesting separate it from the outermost
+    /// block -- see err_object_type_local_to_proc's own comment for why real
+    /// Turbo Pascal refuses the former outright.  Deliberately NOT
+    /// checkBlock's own IsGlobalScope parameter: that one means something
+    /// unrelated (global vs. stack variable STORAGE) and is already false
+    /// for a unit's own top-level interface/implementation block, where an
+    /// object type is perfectly legal.
+    int ProcBodyNestingDepth_{0};
+
+    /// Turbo Tier 5, issues #571/#623: stack of resolved object TYPES an
+    /// unqualified call's own IMPLICIT receiver may currently be -- pushed
+    /// one entry (Proc.ResolvedOwnerType, or nullptr) per pushMethodSelfScope
+    /// success and one entry (the with-target's own Type, or nullptr for a
+    /// non-Object with-target) per pushWithScope Symtab.pushScope() call, so
+    /// this stays in exact 1:1 lockstep with each of those functions' own
+    /// return count and can be popped alongside Symtab's own scopes by their
+    /// callers.  A null entry (a with-target that is a record/schema, which
+    /// has no methods of its own to offer) is skipped over during a search,
+    /// not treated as blocking one -- see findImplicitCallMethod.
+    ///
+    /// Searched innermost (back()) first, matching ordinary Pascal
+    /// with-shadowing order: an active with-block's own method takes
+    /// priority over the enclosing method's own Self, exactly like a
+    /// with-bound FIELD of the same name already takes priority over Self's
+    /// own same-named field through Symtab's identical innermost-first scope
+    /// search -- fields get that priority for free by being registered
+    /// directly into the correspondingly-nested Symtab scope; a method,
+    /// never registered as an ordinary Symtab entry at all (SymbolKind::
+    /// Method's own comment, SymbolTable.h), needs this separate,
+    /// identically-nested stack to get the same answer.
+    ///
+    /// Tried only AFTER an ordinary Symtab.lookup of the bare name has
+    /// already failed (checkCallStmt/checkCallExpr's own callers) -- unlike
+    /// a field, a method occupying this exact scope-priority slot the way
+    /// the fix sketch in issue #571 first proposed would need a NEW
+    /// SymbolKind::Method registration convention (a bare-named entry
+    /// alongside the EXISTING composite-keyed one resolveObjectType already
+    /// registers under the same Kind, in a different scope) with no
+    /// generally-useful upside over this simpler, self-contained stack: none
+    /// of the four issues this fixes exercises a same-named ordinary
+    /// declaration competing with an implicit method for priority.
+    std::vector<std::shared_ptr<Type>> ImplicitCallReceivers_;
+
+    /// Turbo Tier 5, issues #571/#623: ImplicitCallReceivers_'s own answer
+    /// for a name ordinary lookup has already failed on -- \p Receiver is
+    /// whichever active implicit receiver actually matched (the SAME Type
+    /// stored in ImplicitCallReceivers_, for CallStmt/CallExpr::
+    /// ImplicitMethodReceiverType), and Owner/M are findObjectMethod's own
+    /// answer walking Receiver's own ancestor chain.  All null when no
+    /// currently active implicit receiver has a method of this name.
+    struct ImplicitMethodLookup {
+        std::shared_ptr<Type> Receiver;
+        const Type* Owner{nullptr};
+        const Type::Method* M{nullptr};
+    };
+    [[nodiscard]] ImplicitMethodLookup
+    findImplicitCallMethod(const std::string& Name) const;
+
     /// Every function whose block contains the statement being checked,
     /// outermost first.
     ///
@@ -755,6 +819,39 @@ private:
     /// (SymbolTable.h) for the whole design.
     static std::string objectMethodKey(const std::string& TypeName,
                                         const std::string& MethodName);
+    /// Turbo Tier 5, issue #621: the answer of an ancestor-chain method
+    /// lookup rooted at a specific, already-RESOLVED Type -- \p Owner is
+    /// the type (RecvTy itself, or an ancestor reached through Parent) whose
+    /// OWN Type::ObjectMethods actually declares the method, and \p M is
+    /// that declaration.  Both null when no type in the chain declares a
+    /// method of the name asked for.
+    struct MethodLookup {
+        const Type* Owner{nullptr};
+        const Type::Method* M{nullptr};
+    };
+    /// Walks \p RecvTy's own ancestor chain (RecvTy itself first, then
+    /// Parent, Parent->Parent, ...) directly over each level's own,
+    /// already-resolved Type::ObjectMethods, for a method named
+    /// \p MethodName (case-insensitively) -- the SAME graph walk CodeGen's
+    /// own methodOwnerType/methodEntryOf helpers (CGProcCall.cpp/
+    /// CGFuncCall.cpp) already use to re-derive a call's real target.
+    ///
+    /// Deliberately NOT a Symtab.lookup(objectMethodKey(...)): that composite
+    /// key is a bare STRING built from Cur->Name, looked up through the
+    /// ordinary scope chain at the CALL SITE -- and two unrelated object
+    /// types sharing a name (a program re-declaring a type a used unit
+    /// already declared) register under the identical key, so a lookup from
+    /// the call site's own ambient scope can find the WRONG type's method
+    /// (issue #621: a program's own re-declared 'TA' shadowed a used unit's
+    /// 'TA' in the symbol table, and a call through a variable of the
+    /// UNIT's TA was checked against the PROGRAM's TA's signature instead).
+    /// This walk starts from RecvTy's own RESOLVED Type pointer and follows
+    /// Parent, so it can never be confused by a same-spelled but unrelated
+    /// type declared anywhere else in the program -- identity, not
+    /// spelling, the same fix direction CodeGen's own re-derivation already
+    /// took for the identical reason.
+    static MethodLookup findObjectMethod(const Type& RecvTy,
+                                          const std::string& MethodName);
     /// Turbo Tier 5, Cluster A item 1: resolves an object-type denoter --
     /// ancestor lookup, flattened field list, VMT slot assignment -- and
     /// registers each of its methods (in-class headings) under their own
@@ -1052,6 +1149,15 @@ private:
     void checkFor       (const ForStmt&      S);
     void checkRepeat    (const RepeatStmt&   S);
     void checkCallStmt  (const CallStmt&     S);
+    /// Turbo Tier 5, issues #571/#623: tried by checkCallStmt only once an
+    /// ordinary Symtab.lookup(S.Name) has already failed.  Handles the call
+    /// in full (private-visibility, arity/argument checking,
+    /// ImplicitMethodReceiverType annotation) and returns true when S.Name
+    /// matched a method of some currently active implicit receiver
+    /// (findImplicitCallMethod); returns false, leaving S untouched, when it
+    /// does not, so checkCallStmt's own caller falls through to its ordinary
+    /// err_undefined_procedure diagnostic.
+    bool checkImplicitMethodCallStmt(const CallStmt& S);
     void checkMethodCallStmt(const MethodCallStmt& S);
     /// Turbo Tier 5, Cluster A item 5: 'inherited [Method[(args)]];' -- see
     /// InheritedCallStmt's own comment (AstStmt.h) for the whole design.
@@ -1160,6 +1266,16 @@ private:
     [[nodiscard]] std::shared_ptr<Type> checkBinary  (const BinaryExpr& E);
     [[nodiscard]] std::shared_ptr<Type> checkUnary   (const UnaryExpr& E);
     [[nodiscard]] std::shared_ptr<Type> checkCallExpr(const CallExpr& E);
+    /// Turbo Tier 5, issues #571/#623: checkImplicitMethodCallStmt's own
+    /// expression-context mirror, tried by checkCallExpr only once an
+    /// ordinary Symtab.lookup(E.Name) has already failed.  Returns nullptr
+    /// (a real, distinct sentinel from TyErr) when E.Name does not match any
+    /// currently active implicit receiver's own method at all -- so
+    /// checkCallExpr's own caller falls through to its ordinary
+    /// err_undefined_function diagnostic -- or the call's fully-checked
+    /// resolved type (TyErr on a checked-but-failing call, e.g. a private
+    /// method) otherwise.
+    [[nodiscard]] std::shared_ptr<Type> checkImplicitMethodCallExpr(const CallExpr& E);
     /// Turbo Tier 5, Cluster A item 3: 'Obj.Method(args)' / 'P^.Method(args)'
     /// used as a value.  See checkMethodCall's own comment (SemaExpr.cpp)
     /// for the shared logic with checkMethodCallStmt (Args-only-statement

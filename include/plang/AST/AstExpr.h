@@ -245,6 +245,12 @@ struct CallExpr : ExprNode {
     /// Mutable so that Sema can annotate through a const reference, as it does
     /// for TypeNode::ResolvedType.
     mutable BuiltinID ResolvedBuiltin{BuiltinID::None};
+
+    /// Turbo Tier 5, issues #571/#623: CallStmt::ImplicitMethodReceiverType's
+    /// own expression-context mirror, set by
+    /// Sema::checkImplicitMethodCallExpr -- see that field's own comment
+    /// (AstStmt.h) for the whole design.  Null for an ordinary call.
+    mutable std::shared_ptr<Type> ImplicitMethodReceiverType;
 };
 
 struct SetRangeExpr : ExprNode {

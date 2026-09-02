@@ -2170,6 +2170,9 @@ void Sema::checkBlock(const BlockNode& Block,
             if (Pushed > 0) {
                 checkProcBody(*Proc);
                 Symtab.popScope();
+                // Turbo Tier 5, issue #571: pop pushMethodSelfScope's own
+                // ImplicitCallReceivers_ entry, pushed in the same call.
+                ImplicitCallReceivers_.pop_back();
             }
             // Pushed == 0: Phase 5a's own heading lookup already failed and
             // reported a diagnostic (err_object_method_body_without_heading
@@ -2414,7 +2417,23 @@ int Sema::pushMethodSelfScope(const ProcDecl& Proc) {
         FS.IsSelfScopeField = true;
         (void)Symtab.define(std::move(FS));
     }
+    // Turbo Tier 5, issue #571: 'Self' itself as an IMPLICIT-CALL receiver
+    // too -- see ImplicitCallReceivers_'s own comment for the whole design.
+    // The sole caller (checkBlock's Phase 5b) pops this in lockstep with the
+    // Symtab scope just pushed above, right after checkProcBody returns.
+    ImplicitCallReceivers_.push_back(Proc.ResolvedOwnerType);
     return 1;
+}
+
+Sema::ImplicitMethodLookup
+Sema::findImplicitCallMethod(const std::string& Name) const {
+    for (auto It = ImplicitCallReceivers_.rbegin();
+            It != ImplicitCallReceivers_.rend(); ++It) {
+        if (!*It) continue; // a with-target with no methods of its own (record/schema)
+        const MethodLookup ML = findObjectMethod(**It, Name);
+        if (ML.M) return {*It, ML.Owner, ML.M};
+    }
+    return {};
 }
 
 void Sema::checkProcSignature(const ProcDecl& Proc) {
@@ -2823,7 +2842,14 @@ void Sema::checkProcBody(const ProcDecl& Proc) {
         EnclosingParamNames_.insert(toLower(S.Name));
     });
 
-    if (Proc.Body) checkBlock(*Proc.Body);
+    // Turbo Tier 5, issue #617: see ProcBodyNestingDepth_'s own comment
+    // (Sema.h) for why this brackets the SAME checkBlock call rather than
+    // reusing IsGlobalScope or EnclosingParamNames_.
+    if (Proc.Body) {
+        ++ProcBodyNestingDepth_;
+        checkBlock(*Proc.Body);
+        --ProcBodyNestingDepth_;
+    }
 
     EnclosingParamNames_ = std::move(SavedEnclosingParamNames);
 

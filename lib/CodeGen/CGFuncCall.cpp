@@ -45,6 +45,21 @@ llvm::IntegerType* absSqrTargetIntTy(llvm::LLVMContext& Ctx, unsigned Width, boo
 } // namespace
 
 llvm::Value* CGFuncCall::emitCallExpr(const CallExpr& e) {
+    // Turbo Tier 5, issues #571/#623: see CGProcCall::emitCallStmt's
+    // identical branch for the whole design -- an unqualified, parenthesized
+    // call ('GetX()') Sema resolved to the current implicit receiver's own
+    // method rather than to any ordinary declaration.
+    if (e.ImplicitMethodReceiverType) {
+        const VarEntry* recv = SymTab.findVar(implicitCallReceiverVarName());
+        if (!recv)
+            codegenICE("implicit method call '" + e.Name + "' has no "
+                       "receiver bound -- Sema should have refused this "
+                       "already");
+        llvm::Value* ret = emitBoundMethodCall(recv->ptr, *e.ImplicitMethodReceiverType,
+                                               e.Name, e.Args);
+        return Marshal.spillStructReturnIfNeeded(e, ret);
+    }
+
     // ISO §6.2.2.10: a required function identifier may be redeclared, and
     // then it denotes what the program declared and not the required one.  The
     // chain below dispatches on spelling alone, so without this a program that
@@ -1021,34 +1036,29 @@ llvm::Function* declareForeignMethod(llvm::Module& Mod, llvm::LLVMContext& Ctx,
 }
 } // namespace
 
-llvm::Value* CGFuncCall::emitMethodCallExpr(const MethodCallExpr& e) {
-    if (!e.Receiver->ResolvedType)
-        codegenICE("method call has no resolved receiver type");
-    const Type* Owner = methodOwnerType(*e.Receiver->ResolvedType, e.Method);
+// Turbo Tier 5, issues #571/#623: see this method's own declaration
+// (CGFuncCall.h) for why this is a separate, reusable core rather than
+// staying inline in emitMethodCallExpr -- everything below is unchanged
+// from before that extraction.
+llvm::Value* CGFuncCall::emitBoundMethodCall(
+        llvm::Value* selfPtr, const Type& RecvTy, const std::string& Method,
+        std::span<const std::unique_ptr<ExprNode>> Args) {
+    const Type* Owner = methodOwnerType(RecvTy, Method);
     if (!Owner)
-        codegenICE("method '" + e.Method + "' has no owning type in its "
+        codegenICE("method '" + Method + "' has no owning type in its "
                    "receiver's own ancestor chain -- Sema should have "
                    "refused this call already");
-    std::string mangledName = Linkage.mangledMethod(Owner->Name, e.Method, Owner->DeclaringModule);
-
-    // The receiver's own address: EmitLValue already handles both shapes --
-    // a plain IdentExpr ('Obj.Method(...)') through the ordinary variable
-    // table, and a DerefExpr ('P^.Method(...)') by reading P's own pointer
-    // value, which IS the address of what it points to -- with no
-    // object-specific branch needed in either case (CGExprCore.cpp's
-    // generic emitLValue).
-    llvm::Value* selfPtr = EmitLValue(*e.Receiver);
-    if (!selfPtr) codegenICE("method call receiver has no address");
+    std::string mangledName = Linkage.mangledMethod(Owner->Name, Method, Owner->DeclaringModule);
 
     // Turbo Tier 5, Cluster B item 8: see CGProcCall::emitMethodCallStmt's
     // identical fix for why guessing the callee's parameter types from the
-    // CALL SITE's own argument expressions (e.Args' ResolvedType) is wrong
+    // CALL SITE's own argument expressions (Args' ResolvedType) is wrong
     // -- dead code before this item, and wrong the first time it actually
     // fired, for the same "a string literal is not a `string` formal"
     // reason. Declared from Owner's own resolved Method entry instead.
     auto* callee = Mod.getFunction(mangledName);
     if (!callee) {
-        const Type::Method* MEntry = methodEntryOf(*Owner, e.Method);
+        const Type::Method* MEntry = methodEntryOf(*Owner, Method);
         if (!MEntry)
             codegenICE("method '" + mangledName + "' reached CodeGen "
                        "unresolved -- Sema should have refused this call "
@@ -1064,7 +1074,7 @@ llvm::Value* CGFuncCall::emitMethodCallExpr(const MethodCallExpr& e) {
     // CGCallMarshal.h.  conformant/schema/proc-param/plain-value argument
     // shapes apply identically to a method's own parameters -- just
     // starting pi/args after Self instead of after a static-link frame.
-    Marshal.marshalArgs(mangledName, callee->getFunctionType(), e.Args, args);
+    Marshal.marshalArgs(mangledName, callee->getFunctionType(), Args, args);
     // Turbo Tier 5, Cluster A item 5: a virtual method is called INDIRECTLY,
     // through the receiver's own `_vptr` and Owner's own VmtSlot index --
     // never the direct call to Owner's mangled symbol every OTHER call still
@@ -1074,12 +1084,11 @@ llvm::Value* CGFuncCall::emitMethodCallExpr(const MethodCallExpr& e) {
     // resolveObjectType's own sameMethodSignature check) even when the
     // function actually invoked at run time is a different override
     // entirely.
-    const Type::Method* MEntry = methodEntryOf(*Owner, e.Method);
-    llvm::Value* ret;
+    const Type::Method* MEntry = methodEntryOf(*Owner, Method);
     if (MEntry && MEntry->IsVirtual) {
-        auto vptrOff = Types.vptrOffsetOf(*e.Receiver->ResolvedType);
+        auto vptrOff = Types.vptrOffsetOf(RecvTy);
         if (!vptrOff)
-            codegenICE("virtual method '" + e.Method + "' call has a "
+            codegenICE("virtual method '" + Method + "' call has a "
                        "receiver type with no `_vptr` -- Sema should have "
                        "refused a virtual method on a hierarchy with none");
         auto* vptrSlot = B.CreateGEP(I8Ty, selfPtr,
@@ -1104,10 +1113,24 @@ llvm::Value* CGFuncCall::emitMethodCallExpr(const MethodCallExpr& e) {
         auto* slotAddr = B.CreateGEP(PtrTy, vmt,
             {llvm::ConstantInt::get(I64Ty, MEntry->VmtSlot)}, "vmt.slot.addr");
         auto* fnPtr = B.CreateLoad(PtrTy, slotAddr, "vmt.fn");
-        ret = B.CreateCall(callee->getFunctionType(), fnPtr, args, "mcall.v");
-    } else {
-        ret = B.CreateCall(callee, args, "mcall");
+        return B.CreateCall(callee->getFunctionType(), fnPtr, args, "mcall.v");
     }
+    return B.CreateCall(callee, args, "mcall");
+}
+
+llvm::Value* CGFuncCall::emitMethodCallExpr(const MethodCallExpr& e) {
+    if (!e.Receiver->ResolvedType)
+        codegenICE("method call has no resolved receiver type");
+    // The receiver's own address: EmitLValue already handles both shapes --
+    // a plain IdentExpr ('Obj.Method(...)') through the ordinary variable
+    // table, and a DerefExpr ('P^.Method(...)') by reading P's own pointer
+    // value, which IS the address of what it points to -- with no
+    // object-specific branch needed in either case (CGExprCore.cpp's
+    // generic emitLValue).
+    llvm::Value* selfPtr = EmitLValue(*e.Receiver);
+    if (!selfPtr) codegenICE("method call receiver has no address");
+    llvm::Value* ret = emitBoundMethodCall(selfPtr, *e.Receiver->ResolvedType,
+                                           e.Method, e.Args);
     // Issue #299 Phase 1: the struct-return spill shared with
     // emitUserFuncCall -- see CGCallMarshal.h.
     return Marshal.spillStructReturnIfNeeded(e, ret);
