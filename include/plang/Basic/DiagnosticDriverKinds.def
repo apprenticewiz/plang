@@ -49,6 +49,13 @@ DIAG(err_arg_requires_value, Error, "%0 requires an argument")
 // back to the default output name.  Wording matches gcc's own refusal of the
 // same command line.
 DIAG(err_empty_output_filename, Error, "output filename may not be empty")
+// -c with more than one .pas input and an explicit -o (issue #612): -c
+// produces one object per source, so a single -o name cannot receive all of
+// them.  Checked before any input is compiled, matching gcc/clang's own
+// "cannot specify -o with -c ... with multiple files" refusal of the same
+// command line (wording adapted since plang's -c never fans out to -S/-E).
+DIAG(err_output_with_multiple_compile_only_inputs, Error,
+     "cannot specify -o with -c when compiling multiple files")
 DIAG(err_unknown_dialect, Error,
      "unknown Pascal dialect '%0'; valid dialects: %1")
 DIAG(err_dialect_not_implemented, Error,
