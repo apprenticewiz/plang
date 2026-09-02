@@ -2,10 +2,52 @@
 
 #include "plang_real.h"
 
+#include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 namespace plang {
+
+// issue #677: see plang_real.h's own comment on PlangRealFixedShape/
+// plangRealFixedNeedsCap for the full rationale.  V must be finite -- every
+// caller checks std::isfinite itself before reaching here (see that
+// comment's own note on why Inf/NaN keep using printf's `%*.*f` directly
+// instead).
+bool plangRealFixedNeedsCap(double V, int64_t FracDigits, PlangRealFixedShape* Shape) {
+    const double AbsV = std::fabs(V);
+    // A cheap, ONE-significant-digit rounding of |V| -- enough to know V's
+    // decimal exponent (correctly rounded: %e's own rounding, not a raw
+    // truncation, so e.g. 9.99e2 reports Exp=3, not 2) without yet paying
+    // for the full 17-digit rounding below, which only the capped path
+    // (rare -- every "normal" write takes the early return just below)
+    // actually needs.
+    char Probe[16];
+    std::snprintf(Probe, sizeof Probe, "%.0e", AbsV);
+    const char* PE = std::strchr(Probe, 'e');
+    const int64_t Exp0 = PE ? std::strtol(PE + 1, nullptr, 10) : 0;
+    // The number of significant digits a request spanning from V's own
+    // leading digit (weight Exp0) down through its FracDigits-th decimal
+    // place (weight -FracDigits) would show.  FracDigits is always >= 0
+    // here (every call site's own D < 0 case takes a different, exponential
+    // path before ever reaching this) and already bounded well below
+    // INT64_MAX (checkedWidth/wrapWidthTP's own INT32_MAX ceiling), so this
+    // add cannot overflow.
+    if (Exp0 + FracDigits + 1 <= 17) return false;
+
+    Shape->Negative = std::signbit(V);
+    // "%.16e": one digit, '.', sixteen more -- seventeen significant digits
+    // total, rounded the same way plangFormatReal's own %e call above
+    // rounds -- of |V|'s decimal value, e.g. "1.0000000000000000e+30".
+    char Tmp[32];
+    std::snprintf(Tmp, sizeof Tmp, "%.16e", AbsV);
+    const char* E = std::strchr(Tmp, 'e');
+    if (!E) return false; // defensive only: every caller filters Inf/NaN out first
+    Shape->Digits[0] = Tmp[0];                  // the one digit before '.'
+    std::memcpy(Shape->Digits + 1, Tmp + 2, 16); // the sixteen after it
+    Shape->Exp = std::atoi(E + 1);
+    return true;
+}
 
 std::size_t plangFormatReal(char* Buf, double V, int64_t TotalWidth,
                              const PlangRealProfile& Profile, int MaxDecPlaces) {

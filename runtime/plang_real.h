@@ -123,4 +123,79 @@ std::size_t plangFormatReal(char* Buf, double V, int64_t TotalWidth,
                              const PlangRealProfile& Profile = PlangRealProfileISO,
                              int MaxDecPlaces = -1);
 
+/// issue #677: `write`/`Str`'s FIXED-point form (`v:W:D`, §6.9.3.4.2, printf's
+/// `%*.*f` before this) used to hand V straight to printf, which prints a
+/// double's EXACT binary value out to however many decimals D asks for --
+/// correct arithmetic, but not what any Pascal reader expects, since a
+/// double's own precision runs out at 15-17 significant decimal digits: past
+/// that point printf is not revealing more of the VALUE the program wrote, it
+/// is revealing bits of the binary REPRESENTATION nothing meaningful chose
+/// (`str(1e30:3:2, s)` used to answer '...19884624838656.00', not
+/// '...00000000000.00').  `fpc -Mtp` does not do this either -- it stops
+/// short of the exact expansion -- so a request whose OWN significant-digit
+/// span exceeds 17 (the Steele & White round-trip count PlangRealWidth's own
+/// comment already cites for the exponential form) is capped to that many,
+/// with every digit position beyond treated as 0 -- the same "do not invent
+/// precision a double never had" rule plangFormatReal's own MaxDecPlaces
+/// already applies to a promoted Single.
+///
+/// plangRealFixedNeedsCap decides whether THIS particular (V, FracDigits)
+/// pair needs that capping at all: whenever Exp(V) + FracDigits + 1 -- the
+/// number of significant digits a request spanning from V's own leading
+/// digit down through its FracDigits-th decimal place would show -- is 17 or
+/// fewer, plain printf's `%*.*f` already gets it exactly right, INCLUDING
+/// correctly ROUNDING at the FracDigits-th place even when FracDigits asks
+/// for a COARSER position than V's own leading digit (`0.06:1:1` must answer
+/// "0.1", not "0.0" -- only %.*f's own rounding gets that right; recomputing
+/// it via a FIXED-significant-digit %.*e independent of FracDigits would not
+/// even see the digit the rounding decision depends on).  It returns false
+/// in that case, touching \p Shape not at all -- every call site's existing
+/// `%*.*f` call stays completely unchanged for it, which is also every
+/// "normal", non-pathological write.  Only once the span exceeds 17 --
+/// exactly the regime where the exact-binary-expansion noise this item
+/// fixes can appear at all -- does it return true, with \p Shape rounded to
+/// 17 significant digits (via `%.16e`) for plangRealFixedDigitAt below to
+/// answer from.
+///
+/// plangRealFixedDigitAt answers the decimal digit at a given power-of-ten
+/// \p Weight (0 = units, -1 = the first digit after the point, 1 = tens,
+/// ...) -- a significant digit where \p Weight falls within the rounded
+/// value's own 17-digit span, '0' everywhere else.  Split into "decide/
+/// compute" and "query" rather than building a formatted string directly:
+/// each of this project's three fixed-point call sites (stdout, ISO/EP
+/// file, Turbo file) writes to a different destination (plangOutCh, two
+/// different PascalFile*s) with its own existing field-width/padding loop
+/// already in place, so the capped path only needs to supply the DIGITS
+/// each loop asks for, not a second copy of the loop itself -- and needs no
+/// buffer sized for an arbitrary TotalWidth/FracDigits (unlike
+/// plangFormatReal's PlangRealMaxChars) since a digit is produced one query
+/// at a time, however wide the field goes, exactly the way each caller's
+/// OWN loop already paces its padding one character at a time (issue #247's
+/// guard).
+///
+/// Not used for non-finite V (Inf/NaN): every call site keeps its original
+/// `%*.*f` for that case, checked with std::isfinite before ever calling
+/// this -- "extending Inf/NaN's own precision" is not a meaningful question
+/// in the first place.
+struct PlangRealFixedShape {
+    bool Negative;    // std::signbit(V); an all-zero Digits does not imply +0.
+    int  Exp;         // Digits[k]'s own decimal weight is Exp - k.
+    char Digits[17];  // V's 17-significant-digit rounding, most significant first.
+};
+
+bool plangRealFixedNeedsCap(double V, int64_t FracDigits, PlangRealFixedShape* Shape);
+
+inline char plangRealFixedDigitAt(const PlangRealFixedShape& Shape, int64_t Weight) {
+    const int64_t K = Shape.Exp - Weight;
+    return (K >= 0 && K <= 16) ? Shape.Digits[static_cast<std::size_t>(K)] : '0';
+}
+
+/// The number of digits the shape's integer part (weights >= 0) has: always
+/// at least 1, so a value under 1.0 still gets its leading "0" -- the same
+/// convention std::isfinite's %f fallback (and every dialect's own field
+/// practice) already uses.
+inline int64_t plangRealFixedIntDigits(const PlangRealFixedShape& Shape) {
+    return Shape.Exp >= 0 ? static_cast<int64_t>(Shape.Exp) + 1 : 1;
+}
+
 } // namespace plang

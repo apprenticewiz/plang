@@ -16,6 +16,7 @@
 #include <cctype>
 #include <cerrno>
 #include <cinttypes>
+#include <cmath>
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
@@ -629,9 +630,49 @@ void plang_write_f32_e (double  V, int64_t W, int8_t Upper) {
 // A negative FracDigits falls back to the same exponential format omitting
 // the decimals clause entirely produces, exactly as plang_write_cplx_w's own
 // per-component formatting already did before it started calling this.
+//
+// -std=turbo only: issue #677.  V used to go straight into printf's
+// `%*.*f`, which prints a double's EXACT binary value out to D decimals --
+// correct arithmetic, but not what a Pascal reader expects once D asks for
+// more digits than a double actually carries (15-17 significant decimals):
+// the tail past that point is the binary REPRESENTATION showing through,
+// not the VALUE the program wrote.  See plang_real.h's PlangRealFixedShape
+// for the full rationale and the `fpc -Mtp` field practice this matches.
+//
+// \p Upper is the same CodeGen-resolved isTurbo() flag every OTHER
+// dialect-sensitive parameter in this file already is (see plang_write_bool
+// for the convention) -- there is no `_turbo` sibling for THIS function the
+// way plang_file.cpp's own writers get one (Write/Writeln to stdout have no
+// PascalFile* to dispatch a dialect-specific runtime symbol from at the
+// CodeGen call site the way a file destination does), so the dialect check
+// has to happen here, at runtime, gated on that flag instead.  Capping is
+// Turbo-only and deliberately does NOT apply to ISO/EP: EP's own
+// iso7185pat.pas acceptance test (test/Acceptance/) exercises exactly this
+// "precision dropoff" exact-binary-expansion behavior on purpose
+// (`writeln(i+0.234...:1:i)` for i up to 20), so capping ISO/EP's own
+// output the same way would be a real conformance regression, not a fix --
+// confirmed by actually breaking that acceptance test during this item's
+// development.  Inf/NaN keep the original printf call untouched (rounding
+// "to 17 significant digits" is not a meaningful question for either).
 void plang_write_f64_f (double  V, int64_t W, int64_t D, int8_t Upper) {
     if (D < 0) { plang_write_f64_e(V, W, Upper); return; }
-    plangOutFmt("%*.*f", checkedWidth(W), checkedWidth(D), V);
+    const int Dc = checkedWidth(D);
+    PlangRealFixedShape Shape;
+    if (!Upper || !std::isfinite(V) || !plangRealFixedNeedsCap(V, Dc, &Shape)) {
+        plangOutFmt("%*.*f", checkedWidth(W), Dc, V);
+        return;
+    }
+    const int64_t IntDigits = plangRealFixedIntDigits(Shape);
+    const int64_t Len = (Shape.Negative ? 1 : 0) + IntDigits + (Dc > 0 ? 1 + Dc : 0);
+    for (int64_t I = Len; I < checkedWidth(W); ++I) plangOutCh(' ');
+    if (Shape.Negative) plangOutCh('-');
+    for (int64_t Wt = IntDigits - 1; Wt >= 0; --Wt)
+        plangOutCh(plangRealFixedDigitAt(Shape, Wt));
+    if (Dc > 0) {
+        plangOutCh('.');
+        for (int64_t Wt = -1; Wt >= -Dc; --Wt)
+            plangOutCh(plangRealFixedDigitAt(Shape, Wt));
+    }
 }
 // §6.9.3.6: the field is exactly TotalWidth characters wide, so a string
 // longer than the field loses its tail rather than widening it — the `%*s` a
