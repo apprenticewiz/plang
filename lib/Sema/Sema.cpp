@@ -1694,7 +1694,17 @@ void Sema::checkBindingCall(const std::string& LowerName, SourceLocation Loc,
     }
 
     // The first parameter is a bindable-variable-access: an entire variable,
-    // not a component of one and not an expression.
+    // not a component of one and not an expression.  checkExpr still has to
+    // run over it (its return value, the ordinary per-expression checks it
+    // performs, is not what is used below -- Sym is), because it is what
+    // annotates the node's ResolvedType; CodeGen's own global-variable
+    // registration walk (needed for a MODULE-IMPORTED variable, which has
+    // no local declaration of its own to have already registered it) keys
+    // off that annotation, so skipping it here left an imported bindable
+    // variable's address never materialized: `bind(F, B)` for an imported
+    // F reached CodeGen with a null pointer for F and crashed the LLVM IR
+    // verifier instead of emitting a real call.
+    (void)checkExpr(*Args[0]);
     const auto* Id = llvm::dyn_cast<IdentExpr>(Args[0].get());
     const Symbol* Sym = Id ? Symtab.lookup(Id->Name) : nullptr;
     const bool IsVar = Sym && (Sym->Kind == SymbolKind::Var

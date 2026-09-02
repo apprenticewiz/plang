@@ -115,6 +115,20 @@ public:
     /// time.
     SchemaRef emitNewSchema(const plang::ExprNode& ptrArg, const plang::Type& schema,
                        std::span<const std::unique_ptr<plang::ExprNode>> discArgs);
+    /// Issue #688: 'dispose(p, e1,...,es)' on a schema pointee re-supplies
+    /// its discriminants.  \p base is the ALREADY-EVALUATED pointer value
+    /// (the caller needs its own copy right after, for the runtime free
+    /// call, and evaluating p's own access path a second time here would
+    /// run any side effect in it twice).  Reads the instance's actual
+    /// discriminants from the header the same way schemaRefOf's own p^ arm
+    /// does, evaluates every discArgs expression regardless of whether its
+    /// value is ever compared to anything (Sema::checkStmt's dispose arm,
+    /// SemaStmt.cpp, already confirmed the count and each one's type -- but
+    /// an expression argument's own side effects still have to run), and
+    /// traps through emitSchemaDiscMatch's plang_err_schema_disc path on
+    /// the first one that disagrees with what the instance actually has.
+    void emitDisposeSchemaDiscCheck(llvm::Value* base, const plang::Type& schema,
+                       std::span<const std::unique_ptr<plang::ExprNode>> discArgs);
     llvm::Value* exprStrCapV(const plang::ExprNode& e);
     /// R5: the address AND the capacity of a string from ONE walk of its
     /// access path.

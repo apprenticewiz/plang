@@ -876,6 +876,16 @@ DIAG(err_dispose_done_not_destructor, Error,
 // err_inherited_outside_method already gives 'inherited'.
 DIAG(err_fail_outside_constructor, Error,
      "'Fail' may only be used inside a constructor")
+// ISO 10206 §6.6.5.3: 'dispose(p, e1,...,es)' where p's domain-type is a
+// schema-name may re-supply the discriminants; new's own
+// err_schema_new_needs_discs mirror -- dispose's own ToSchema case was
+// missing entirely (issue #688), so neither a wrong count nor a
+// non-ordinal/incompatible discriminant expression was ever diagnosed.
+DIAG(err_schema_dispose_needs_discs, Error,
+     "'dispose' for a pointer to schema '%0' needs 0 or %1 discriminant(s), "
+     "got %2")
+DIAG(err_schema_dispose_disc_type, Error,
+     "discriminant '%0' of schema '%1' needs an ordinal value")
 DIAG(err_schema_not_a_discriminant, Error, "schema '%0' has no discriminant '%1'")
 DIAG(err_schema_arg_not_schematic, Error,
      "argument for parameter '%0' must be a '%1', got '%2'")

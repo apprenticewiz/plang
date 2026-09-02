@@ -1524,16 +1524,17 @@ void Sema::checkCallStmt(const CallStmt& S) {
             return;
         }
 
-        // ISO §6.6.5.3: dispose's extra arguments are new's, read the same
-        // way -- case-constants selecting a path through a variant record's
-        // nesting, each checked against that level's own tag type.  dispose
-        // had no argument checking of any kind before this, schema or
-        // variant: arity aside, `dispose(p, 42)` was accepted whatever
+        // ISO §6.6.5.3 / EP §6.7.5.3: dispose's extra arguments either select
+        // a path through a variant record's nesting (case-constants), read
+        // the same way new's own are, or re-supply a schema's discriminants.
+        // dispose had no argument checking of any kind before this, schema
+        // or variant: arity aside, `dispose(p, 42)` was accepted whatever
         // `p`'s domain type was and whatever 42 was supposed to select.
-        // Schema discriminants are deliberately not re-checked here: unlike
-        // a variant's case-constants, they are not re-supplied to dispose at
-        // all (the instance already carries them from new), so there is
-        // nothing here for them to be checked against.
+        // Issue #688: even after that first fix, the schema arm was still
+        // missing entirely -- a schema Pointee took neither branch below
+        // (ToVariant needs a Record, not a Schema), so every discriminant
+        // expression given to dispose was type-checked for its own sake and
+        // then silently ignored, with no count or type check at all.
         if (Lo == "dispose" && !S.Args.empty()) {
             auto PtrTy = checkExpr(*S.Args[0]);
             // Mirrors new's own check just above (issue #206): every check
@@ -1546,20 +1547,50 @@ void Sema::checkCallStmt(const CallStmt& S) {
                 error(S.Args[0]->Loc, diag::err_dispose_arg_not_pointer, {PtrTy->Name});
             const Type* Pointee = PtrTy->Kind == TypeKind::Pointer
                                       ? PtrTy->PointeeType.get() : nullptr;
-            const bool ToVariant = Pointee && Pointee->Kind == TypeKind::Record
+            const bool ToSchema = Pointee && Pointee->Kind == TypeKind::Schema;
+            const bool ToVariant = !ToSchema && Pointee && Pointee->Kind == TypeKind::Record
                                     && Pointee->RecordDecl && Pointee->RecordDecl->Variant;
             // Turbo Tier 5, Cluster A item 6: dispose(p, Dtor[(args)]) --
             // checkNewInit's mirror.  Gated the same way: a bare
             // 'dispose(p)' for an object pointee is unaffected.
-            if (!ToVariant && Pointee && Pointee->Kind == TypeKind::Object
+            if (!ToSchema && !ToVariant && Pointee && Pointee->Kind == TypeKind::Object
                     && S.Args.size() > 1) {
                 checkDisposeDone(S, *Pointee);
                 return;
             }
+            // EP §6.7.5.3: unlike new, dispose's discriminant-expression-list
+            // is OPTIONAL for a schema pointee -- the instance already
+            // carries its own discriminants, so a bare 'dispose(q)' is
+            // legal.  If given at all, though, there must be exactly one
+            // per discriminant, each ordinal and assignment-compatible with
+            // its declared type -- the same rule new()'s own args enforce.
+            if (ToSchema && S.Args.size() > 1
+                    && S.Args.size() - 1 != Pointee->SchemaDiscs.size())
+                error(S.Loc, diag::err_schema_dispose_needs_discs,
+                      {Pointee->SchemaName,
+                       std::to_string(Pointee->SchemaDiscs.size()),
+                       std::to_string(S.Args.size() - 1)});
             const VariantPart* Vp = ToVariant ? Pointee->RecordDecl->Variant.get() : nullptr;
             bool ExtraReported = false;
             for (size_t I = 1; I < S.Args.size(); ++I) {
+                // Every discriminant/case-constant expression is checked
+                // (and, per CGProcCall.cpp's dispose arm, EVALUATED) whether
+                // or not its value ends up compared to anything below --
+                // 'dispose(q, sideEffect())' has to run sideEffect().
                 auto At = checkExpr(*S.Args[I]);
+                if (ToSchema) {
+                    if (At->isError() || I - 1 >= Pointee->SchemaDiscs.size())
+                        continue;
+                    const auto& Disc = Pointee->SchemaDiscs[I - 1];
+                    if (!At->isOrdinal())
+                        error(S.Args[I]->Loc, diag::err_schema_dispose_disc_type,
+                              {Disc.Name, Pointee->SchemaName});
+                    else if (Disc.Ty && !Disc.Ty->isError()
+                                 && !isAssignCompatible(*Disc.Ty, *At))
+                        error(S.Args[I]->Loc, diag::err_assign_mismatch,
+                              {At->Name, Disc.Ty->Name});
+                    continue;
+                }
                 if (!ToVariant) continue;
                 if (Vp) {
                     Vp = checkVariantTagArg(Lo, *S.Args[I], *At, *Vp);
