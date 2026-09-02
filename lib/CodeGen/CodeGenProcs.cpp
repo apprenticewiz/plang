@@ -339,6 +339,18 @@ void Codegen::Impl::registerUsedUnitConsts() {
     for (const UnitNode* Unit : usedUnits_) {
         if (!Unit->InterfaceBlock) continue;
         const std::string UnitLower = toLower(Unit->Name);
+        // Issue #695: an enumerated type declared in the interface exports
+        // its enumerators the same way any other unit exports a constant --
+        // ISO §6.4.2.3, "the identifiers of an enumerated type denote
+        // constants of it".  registerEnumValues folds each one into `consts`
+        // exactly as emitBlockDecls/registerInterfaceTypes already do for a
+        // same-file or EP-module type; without this loop an importer's own
+        // reference to the enumerator falls through to the generic imported-
+        // global fallback and looks for storage (pasg_<Enumerator>) that was
+        // never emitted anywhere, because an enum constant is never a global
+        // at all -- it is always a compile-time-folded ordinal.
+        for (const auto& td : Unit->InterfaceBlock->Types)
+            registerEnumValues(td.Type.get());
         for (const auto& cd : Unit->InterfaceBlock->Consts) {
             // TP typed constant: real static storage, handled generically
             // through resolveImportedVar instead -- see this function's own
