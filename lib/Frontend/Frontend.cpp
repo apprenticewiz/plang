@@ -1319,7 +1319,7 @@ static CompilationResult compileRequest(const CompilationRequest& Request,
     if (Request.DumpParseTree) {
         std::ostringstream OSS;
         printAst(*Program, OSS);
-        return finish(OSS.str(), true);
+        return finish(OSS.str(), !Diags.hasErrors());
     }
 
     // Turbo Tier 4, Cluster A item 2: a standalone unit file runs through

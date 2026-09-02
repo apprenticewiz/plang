@@ -84,7 +84,7 @@ struct BuiltinArity { int Min, Max; };
 /// builtin not yet migrated to this column keeps whatever hand-written check
 /// (or lack of one) it already had in checkCallExpr/checkCallStmt.
 enum class BuiltinArgKind {
-    Any, Numeric, NumericNonComplex, Complex, Ordinal,
+    Any, Numeric, NumericNonComplex, Complex, Ordinal, Integer,
     StringLike, EPStringLike, TurboStringLike, File
 };
 
@@ -94,6 +94,7 @@ enum class BuiltinArgKind {
 #define AK_NumericNonComplex  BuiltinArgKind::NumericNonComplex
 #define AK_Complex            BuiltinArgKind::Complex
 #define AK_Ordinal            BuiltinArgKind::Ordinal
+#define AK_Integer            BuiltinArgKind::Integer
 #define AK_StringLike         BuiltinArgKind::StringLike
 #define AK_EPStringLike       BuiltinArgKind::EPStringLike
 #define AK_TurboStringLike    BuiltinArgKind::TurboStringLike
@@ -109,6 +110,7 @@ enum class BuiltinArgKind {
 #undef AK_TurboStringLike
 #undef AK_EPStringLike
 #undef AK_StringLike
+#undef AK_Integer
 #undef AK_Ordinal
 #undef AK_Complex
 #undef AK_NumericNonComplex

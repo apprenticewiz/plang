@@ -158,6 +158,11 @@ DIAG(err_numeric_argument, Error, "'%0' requires a numeric argument, got '%1'")
 // from err_numeric_argument's, which would otherwise wrongly call an
 // already-numeric argument "not numeric."
 DIAG(err_complex_argument, Error, "'%0' requires a complex argument, got '%1'")
+// issues #602/#653: Halt, RunError and Delay take an integer-type error/exit
+// code or millisecond count (fpc -Mtp: "Incompatible type for arg no. 1:
+// Got Extended, expected LongInt"/Word) -- narrower than err_ordinal_argument
+// above, which would wrongly accept Boolean/Char/Enum here.
+DIAG(err_integer_argument, Error, "'%0' requires an integer argument, got '%1'")
 // issue #261: eof/eoln read a file's status, so their (optional) argument
 // names the file to test.
 DIAG(err_file_argument, Error, "'%0' requires a file argument, got '%1'")

@@ -1378,6 +1378,15 @@ std::vector<std::shared_ptr<Type>> Sema::checkBuiltinArgKinds(
             if (!T->isOrdinal())
                 error(Arg->Loc, diag::err_ordinal_argument, {LowerName, T->Name});
             break;
+        // issues #602/#653: Halt/RunError's exit code and Delay's
+        // millisecond count are Turbo integer-typed arguments -- narrower
+        // than Ordinal just above (which would wrongly accept Boolean/Char/
+        // Enum) and narrower than Numeric below (which would wrongly accept
+        // Real) -- isIntegral() is exactly Integer-or-subrange-of-it.
+        case BuiltinArgKind::Integer:
+            if (!T->isIntegral())
+                error(Arg->Loc, diag::err_integer_argument, {LowerName, T->Name});
+            break;
         // length/index: the UNION of every dialect's string-like shape --
         // see Builtins.def's header comment on why a union rather than one
         // of the two narrower kinds just below.

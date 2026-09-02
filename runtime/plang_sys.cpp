@@ -68,6 +68,14 @@ void plang_module_finals_run(void);
 /// nonzero status before that section's own definition appears in the file.
 extern void *plang_tp_erroraddr;
 
+/// -std=turbo only: Turbo's ExitCode, defined (and fully documented) in this
+/// file's own "-std=turbo" section far below -- forward-declared here for
+/// the same reason plang_tp_erroraddr just above is: plang_halt and
+/// plang_tp_runerror both have to set it before plang_module_finals_run
+/// runs the finaliser/ExitProc chain (issue #652), which is above that
+/// section's own definition in the file.
+extern int16_t plang_tp_exitcode;
+
 /// Run every registered module finaliser, flush stdout, then terminate
 /// (EP §6.7.5.7 \c halt).  The standard's halt takes no argument; \p Status
 /// carries the common extension halt(n), and is zero for a bare halt.
@@ -96,6 +104,13 @@ void plang_halt(int64_t Status) {
     // under -std=turbo.
     if (Status != 0)
         plang_tp_erroraddr = const_cast<void*>(__builtin_return_address(0));
+    // -std=turbo only: ExitCode, set BEFORE the finaliser/ExitProc chain
+    // below runs, so a custom ExitProc reading ExitCode (real Turbo Pascal
+    // field practice: "what status is this program about to exit with?")
+    // sees the value Halt was actually given rather than a stale 0 (issue
+    // #652) -- same reasoning, and the same "harmless to always compute
+    // regardless of dialect" scope, as ErrorAddr just above.
+    plang_tp_exitcode = static_cast<int16_t>(Status);
     plang_module_finals_run();
     // NOT fflush(stdout): -std=turbo's own Input/Output (this file's
     // plang_input/plang_output) may have been redirected to a real file by
@@ -828,6 +843,13 @@ static void escapeCC(const char *S, std::FILE *Stream) {
     // ErrorAddr from an ExitProc is real Turbo Pascal field practice's most
     // common reason to read it at all.
     plang_tp_erroraddr = const_cast<void*>(Addr);
+    // -std=turbo only: ExitCode, set BEFORE the finaliser chain below runs
+    // for the same reason ErrorAddr just above is, and the same reason
+    // plang_halt sets it before that same chain (its own comment) -- an
+    // ExitProc that reads ExitCode must see the code this call is actually
+    // about to exit with, not a stale 0 (issue #652).  fpc -Mtp confirms:
+    // RunError(n)'s ExitCode is n, exactly like Halt(n)'s.
+    plang_tp_exitcode = static_cast<int16_t>(Code);
     // EP §6.11.2's finalizers, and -std=turbo's own ExitProc registered
     // alongside them (see plang_tp_run_exitproc's own comment for how) --
     // the same chain plang_halt and emitMain's own end-of-program path
