@@ -1943,13 +1943,6 @@ call to an ordinary method, and a bare call to one shadowing a field —
 are now correctly resolved and covered by regression tests under
 `test/Turbo/Objects/`.)
 
-**A record/object type cannot be its own by-value parameter type before
-its own declaration finishes.** `procedure Copy(Other: TFoo)` inside
-`TFoo`'s own declaration is refused — a pre-existing forward-reference
-limitation general to `record`/`object` alike, not specific to this tier,
-unaffected by this capstone item. Route around it with a pointer or `var`
-parameter instead.
-
 One more, genuinely cosmetic, not counted above: a `method ... hides the
 inherited method of the same name` warning false-positives for same-named,
 differently-signed, non-virtual constructors declared at different levels
