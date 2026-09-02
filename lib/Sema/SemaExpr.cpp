@@ -331,6 +331,22 @@ std::shared_ptr<Type> Sema::checkIdent(const IdentExpr& E) {
         return TyErr;
     }
     Sym->Referenced = true;
+    // Issue #781: the exact #730 guard checkCallExpr already applies (see its
+    // own comment just above its call to checkImplicitMethodCallExpr, this
+    // same file), but for the BARE (no-parens) path #773 added here: a
+    // same-named inherited FIELD resolves via the plain Symtab.lookup above
+    // before this switch is ever reached, so without this, a field-shadowing
+    // FUNCTION method called bare ('v := X;') silently read the stale field
+    // value instead of calling the method -- no diagnostic at all, since a
+    // field IS a legal bare read in every other case. Tried only when the
+    // found symbol is a self-scope field that does not itself hold a
+    // callable (procedural-value) type, exactly like checkCallExpr's own
+    // gate; a genuine field with no same-named method sibling falls through
+    // unchanged (checkImplicitMethodIdent's nullptr sentinel, its own
+    // comment below).
+    if (Sym->IsSelfScopeField && !(Sym->Ty && isCallable(*Sym->Ty))) {
+        if (auto T = checkImplicitMethodIdent(E)) return T;
+    }
     switch (Sym->Kind) {
         case SymbolKind::Var:
         case SymbolKind::VarParam:
@@ -663,6 +679,34 @@ std::shared_ptr<Type> Sema::checkField(const FieldExpr& E) {
             }
             error(E.Loc, diag::err_object_no_such_field, {RecTy->Name, E.Field});
             return TyErr;
+        }
+        // Issue #781: the same #730 guard checkCallExpr/checkIdent apply
+        // (their own comments) -- a same-named METHOD can legally shadow an
+        // ancestor FIELD (only the reverse, a new field reusing an inherited
+        // method's name, is barred; see resolveObjectType's own comment,
+        // SemaType.cpp), so fieldByName finding F here does not settle
+        // 'C.X': if F itself is not callable (an ordinary field, not a
+        // procedural-value field), a sibling method of the same name still
+        // takes precedence and must be tried before falling back to the
+        // field's stale value. findObjectMethod returns a null ML.M when no
+        // such method exists, so a genuine field with no same-named method
+        // sibling reads exactly as before.
+        if (!(F->Ty && isCallable(*F->Ty))) {
+            const auto ML = findObjectMethod(*RecTy, E.Field);
+            if (ML.M) {
+                if (ML.M->IsPrivate && ML.Owner->DeclaringModule != CurrentUnit_)
+                    error(E.Loc, diag::err_object_private_method, {ML.Owner->Name, E.Field});
+                if (!ML.M->IsFunction) {
+                    error(E.Loc, diag::err_proc_as_value, {E.Field});
+                    return TyErr;
+                }
+                if (!ML.M->Params.empty()) {
+                    error(E.Loc, diag::err_function_requires_args, {E.Field});
+                    return TyErr;
+                }
+                E.IsImplicitMethodCall = true;
+                return ML.M->RetType ? ML.M->RetType : TyErr;
+            }
         }
         if (F->IsPrivate && F->DeclaringModule != CurrentUnit_)
             error(E.Loc, diag::err_object_private_field, {RecTy->Name, E.Field});
