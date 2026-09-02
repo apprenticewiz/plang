@@ -208,6 +208,15 @@ BRACE_CHECK_EXEMPT = {
     # in-English-prose shape the switch-directive files above already cover.
     # Not a hazard to fix.
     "test/CodeGen/Turbo/inc-and-dec-on-a-negative-shortint-do-not-spuriously-range-trap-issue-177.pas",
+    # Same reasoning again (only ever compiles under -std=turbo -- see each
+    # file's own RUN: line -- so the matched-delimiter rule this check
+    # doesn't model is the one that actually applies), for the #661/#667
+    # typed/text-file EOF and open-mode fix cluster: their header prose
+    # discusses '{$I+}'/'{$I-}' syntax in English the same way the
+    # pending-InOutRes entries above already do.  Not a hazard to fix.
+    "test/CodeGen/Turbo/typed-file-read-at-eof-traps-runtime-error-100-under-default-i-plus.pas",
+    "test/CodeGen/Turbo/typed-file-read-at-eof-sets-ioresult-100-under-i-minus.pas",
+    "test/CodeGen/Turbo/text-file-reset-ignores-filemode-typed-file-reset-still-honors-it.pas",
 }
 
 
