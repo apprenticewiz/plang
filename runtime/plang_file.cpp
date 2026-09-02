@@ -899,10 +899,12 @@ void plang_tp_reset(PascalFile *F) {
         F->Readable = 0;
     } else {
         // FileMode 0 (read-only) or 2 (read-write, the documented default)
-        // -- and anything else out-of-range collapses to the same read-write
-        // handling FileMode 2 gets, the closest honest match with no `fpc
-        // -Mtp` field practice to confirm a different fallback against.
-        const bool ReadWrite = EffectiveFileMode != 0;
+        // -- and anything else out-of-range collapses to the same read-only
+        // handling FileMode 0 gets. Issue #589: confirmed against `fpc
+        // -Mtp` -- an out-of-range FileMode (e.g. -1, 3, 99, 255) opens
+        // read-only, not read-write, so only the exact value 2 takes the
+        // read-write branch.
+        const bool ReadWrite = EffectiveFileMode == 2;
         F->Fp = std::fopen(F->Name, ReadWrite ? "r+" : "r");
         if (!F->Fp) {
             const int Err = errno; // captured before anything else can clobber it
@@ -1198,8 +1200,20 @@ void plang_tp_seek(PascalFile *F, int64_t N) {
 /// call -- holding whatever byte used to sit right there -- would otherwise
 /// survive the truncate and answer a following Eof/Eoln with stale data
 /// from a byte that, after this call, no longer exists in the file at all.
+///
+/// Issue #593: a read-only-opened file (F->Readable == 1) traps up front
+/// with InOutRes 103 ("file not open") -- confirmed against `fpc -Mtp` --
+/// rather than falling through to the raw ftruncate(2) call, which on
+/// Linux fails with EINVAL against a read-only fd and would otherwise
+/// surface as plang_tp_posix_to_run_error's field-practice-mismatched 218.
+/// F->Readable is checked directly here rather than through
+/// tpTrapOnWrongDirection/tpTrapOnStreamError (both ferror()-based, and
+/// keyed to Write's own 105/104 pair) for the same reason tpFlushWrongDirection
+/// (further down, in this same file) checks it directly: there is no
+/// ferror() signal to catch this on the read side.
 void plang_tp_truncate(PascalFile *F) {
     if (!tpFileReady(F, "Truncate")) return;
+    if (F->Readable == 1) { setInOutResIfClear(103); return; }
     std::fflush(F->Fp);
     const long Pos = std::ftell(F->Fp);
     if (Pos < 0 || ftruncate(fileno(F->Fp), (off_t)Pos) != 0) {
