@@ -427,8 +427,11 @@ std::shared_ptr<Type> Sema::resolveTypeImpl(const TypeNode& Node) {
             // get -- rather than sharing ArrayCache_'s slot for this shape
             // with every anonymous `array[idx] of ...` elsewhere in the
             // program.  See PendingArrayTypeIsNamed_'s own comment (Sema.h).
-            if (ResolvingNamedArrayBody)
-                return Ctx_.makeArrayUncached(Index, Elem, N->Packed);
+            if (ResolvingNamedArrayBody) {
+                auto T      = Ctx_.makeArrayUncached(Index, Elem, N->Packed);
+                T->ArrayDecl = N;
+                return T;
+            }
             return Ctx_.getArray(Index, Elem, N->Packed);
         }
         // Determine the ordinal base type of the index from the declared bounds.
@@ -461,8 +464,11 @@ std::shared_ptr<Type> Sema::resolveTypeImpl(const TypeNode& Node) {
         }
         // Issue #178: see the identical check in the named-index-type arm
         // just above for why this bypasses the interning cache.
-        if (ResolvingNamedArrayBody)
-            return Ctx_.makeArrayUncached(Index, Elem, N->Packed);
+        if (ResolvingNamedArrayBody) {
+            auto T      = Ctx_.makeArrayUncached(Index, Elem, N->Packed);
+            T->ArrayDecl = N;
+            return T;
+        }
         return Ctx_.getArray(Index, Elem, N->Packed);
     }
     // R3: a denoter written inside a schema body records its extents as closed
@@ -502,6 +508,7 @@ std::shared_ptr<Type> Sema::resolveTypeImpl(const TypeNode& Node) {
         T->Anonymous  = true;   // until a declaration names it
         T->Name       = describeValueList(N->Values);
         T->EnumValues = N->Values;
+        T->EnumDecl   = N;
         // ISO §6.4.2.2 numbers an enumeration's values from zero, so none is
         // negative; IsSigned is explicitly false rather than left at the
         // struct default (true), the same fix makeBoolean/makeChar (Type.h)

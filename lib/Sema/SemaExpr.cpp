@@ -4101,7 +4101,20 @@ bool Sema::isAssignCompatible(const Type& Dst, const Type& Src,
             case TypeKind::Enum:
                 if (isAnonymousNominal(Dst) || isAnonymousNominal(Src))
                     return &Dst == &Src;
-                return Dst.Name == Src.Name && Dst.EnumValues == Src.EnumValues;
+                if (Dst.Name != Src.Name) return false;
+                // A NAME is not an identity (issue #598): an enum type is
+                // NEVER interned/shared across declarations (every
+                // EnumTypeNode resolution mints its own Type object -- see
+                // the EnumTypeNode arm, SemaType.cpp), so EnumDecl is set
+                // unconditionally and, once both sides have one, disagreeing
+                // decls settle the question outright -- a `type T =
+                // (a,b)` declared in one scope and an unrelated `type T =
+                // (a,b)` declared in a different (e.g. nested-procedure)
+                // scope share a spelling and a value list but are not one
+                // another.
+                if (Dst.EnumDecl && Src.EnumDecl && Dst.EnumDecl != Src.EnumDecl)
+                    return false;
+                return Dst.EnumValues == Src.EnumValues;
 
             // ISO §6.4.5 b): two subranges are compatible when they are
             // subranges of the one host type, whatever bounds each was written
@@ -4152,6 +4165,21 @@ bool Sema::isAssignCompatible(const Type& Dst, const Type& Src,
                 if ((!isAnonymousNominal(Dst) || !isAnonymousNominal(Src))
                         && Dst.Name != Src.Name)
                     return false;
+                // A NAME is not an identity either (issue #598): where BOTH
+                // sides are a NAMED array's own uncached, one-per-declaration
+                // Type object (Type::ArrayDecl, set only on that path -- see
+                // its own comment), disagreeing decls settle the question
+                // outright, the same way disagreeing RecordDecl/EnumDecl do
+                // just below/above -- a `type T = array[1..2] of integer`
+                // declared in one scope and an unrelated `type T = array
+                // [1..2] of integer` declared in a different (e.g.
+                // nested-procedure) scope share a spelling and a shape but
+                // are not one another (fpc -Mtp agrees).  Where either side
+                // lacks one (anonymous, or the ExtentVaries probe path),
+                // fall through to the structural checks below exactly as
+                // before.
+                if (Dst.ArrayDecl && Src.ArrayDecl && Dst.ArrayDecl != Src.ArrayDecl)
+                    return false;
                 if (!isAssignCompatible(*Dst.ElemType, *Src.ElemType,
                                         /*ExactBounds=*/true)) return false;
                 if (Dst.IndexType && Src.IndexType)
@@ -4178,9 +4206,18 @@ bool Sema::isAssignCompatible(const Type& Dst, const Type& Src,
                 // sufficient.
                 if (!isAnonymousNominal(Dst) || !isAnonymousNominal(Src)) {
                     if (Dst.Name != Src.Name) return false;
-                    if (Dst.RecordDecl && Src.RecordDecl
-                            && Dst.RecordDecl == Src.RecordDecl)
-                        return true;
+                    if (Dst.RecordDecl && Src.RecordDecl) {
+                        // Both sides know their declaration, so it settles
+                        // the question outright either way (issue #598): a
+                        // `type T = record ... end` declared in one scope
+                        // and an unrelated `type T = record ... end`
+                        // declared in a different (e.g. nested-procedure)
+                        // scope share a spelling and, possibly, a shape, but
+                        // are not one another -- falling through to the
+                        // structural comparison below let that pair compare
+                        // equal whenever the fields happened to match.
+                        return Dst.RecordDecl == Src.RecordDecl;
+                    }
                 }
                 // The cap exists so a record reachable from itself only
                 // through a chain of distinct anonymous record types (no
