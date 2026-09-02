@@ -517,36 +517,33 @@ void Sema::flowStmt(const StmtNode* S, FlowState& St) {
 
     if (auto* N = llvm::dyn_cast<ForInStmt>(S)) {
         flowRead(N->SetExpr.get(), St);
-        // EP §6.9.3.9.3: for-in declares its control variable implicitly, for
-        // the body only, and the loop gives it a value on every iteration.
-        // This arm did not say so, and the flow state is keyed by NAME with no
-        // scopes, so every read of the variable in the body was reported as a
-        // read of something never given a value -- on the one program shape the
-        // feature exists for.
-        //
-        // The variable is a FRESH one that shadows any outer variable of the
-        // same spelling for the body's duration, so unlike an ordinary for-loop
-        // its assignment must not survive the loop: whatever the outer one's
-        // state was, it is still that afterwards.
+        // Issue #689: checkForIn (SemaStmt.cpp) no longer implicitly
+        // declares a fresh shadow for the control variable -- it is now the
+        // DECLARED variable-access ISO 10206 §6.9.3.9.1 requires, exactly
+        // like ForStmt's own to/downto control variable (ISO §6.8.3.9). So
+        // it is tracked the identical way: assigned inside the body, and
+        // undefined after falling off the loop's natural end (exhausting the
+        // set is exhausting the range), unless a Break intervenes -- see
+        // ForStmt's arm just above for the fuller account of why.
         const std::string Key = toLower(N->Var);
-        const bool OuterAssigned = St.Assigned.count(Key) != 0;
-        const bool OuterUndef    = St.UndefAfterFor.count(Key) != 0;
 
         FlowState Body = St;
         Body.Assigned.insert(Key);
         Body.UndefAfterFor.erase(Key);
-        // See WhileStmt above: for-in has no control-variable question a
-        // Break here would answer (its own control variable never survives
-        // the loop either way, break or no), but the scope is still reset so
-        // one does not leak to an enclosing for-loop's.
         const bool SavedBroke = FlowLoopBroke_;
         FlowLoopBroke_ = false;
         flowStmt(N->Body.get(), Body);
-        FlowLoopBroke_ = SavedBroke;
+        const bool Broke = FlowLoopBroke_;
+        FlowLoopBroke_  = SavedBroke;
 
         St.UndefAfterFor = unite(St.UndefAfterFor, Body.UndefAfterFor);
-        if (!OuterAssigned) St.Assigned.erase(Key);
-        if (!OuterUndef)    St.UndefAfterFor.erase(Key);
+        if (Broke && FlowTracked_.contains(Key)) {
+            St.Assigned.insert(Key);
+            St.UndefAfterFor.erase(Key);
+        } else {
+            St.Assigned.erase(Key);
+            if (FlowTracked_.contains(Key)) St.UndefAfterFor.insert(Key);
+        }
         return;
     }
 

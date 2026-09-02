@@ -190,6 +190,19 @@ std::unique_ptr<ExprNode> Parser::parseSimpleExpr() {
         Node->Loc  = Current;
         Node->Op   = Current.Kind;
         advance();
+        // ISO 10206 §6.1.2/§6.8.3.3 (issue #690): 'or else' is TWO adjacent
+        // word-symbols, not one lexeme -- unlike 'or_else', this codebase's
+        // own non-standard underscored spelling, which the scanner already
+        // hands back as a single OrElse token (TokenKinds.def).  The
+        // standard's own two-word form is recognized here instead, by
+        // looking one token past 'or' for 'else': 'else' can never start a
+        // factor, so this is unambiguous with any other use of 'or'.  Gated
+        // to EP the same way OrElse itself already is.
+        if (Node->Op == TokenKind::Or && Current.Kind == TokenKind::Else
+                && Opts.extendedPascal()) {
+            Node->Op = TokenKind::OrElse;
+            advance();
+        }
         Node->Left  = std::move(Left);
         Node->Right = parseTerm();
         Left = std::move(Node);
@@ -288,6 +301,15 @@ std::unique_ptr<ExprNode> Parser::parseTerm() {
         Node->Loc  = Current;
         Node->Op   = Current.Kind;
         advance();
+        // ISO 10206 §6.1.2/§6.8.3.3 (issue #690): 'and then' is TWO
+        // adjacent word-symbols -- see parseSimpleExpr's identical 'or
+        // else' comment just above for the full account; the same
+        // reasoning applies here with 'and'/'then' in place of 'or'/'else'.
+        if (Node->Op == TokenKind::And && Current.Kind == TokenKind::Then
+                && Opts.extendedPascal()) {
+            Node->Op = TokenKind::AndThen;
+            advance();
+        }
         Node->Left  = std::move(Left);
         Node->Right = parsePower();
         Left = std::move(Node);

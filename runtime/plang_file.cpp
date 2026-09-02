@@ -2885,7 +2885,11 @@ int8_t plang_empty(PascalFile *F, int64_t ElemSize) {
     long end = std::ftell(F->Fp);
     if (saved >= 0) std::fseek(F->Fp, saved, SEEK_SET);
     (void)ElemSize;
-    return (saved >= end) ? 1 : 0;
+    // ISO 10206 §6.7.6.5: empty(f) answers whether f has no components at
+    // all, not whether the file is currently positioned at end-of-file.  A
+    // file with N > 0 components is never "empty", even after every
+    // component has been read (see issue #686).
+    return (end == 0) ? 1 : 0;
 }
 
 // ---- EP §6.4.3.4 BindingType ----

@@ -3835,6 +3835,21 @@ bool Sema::isLValue(const ExprNode& E) const {
 
 bool Sema::isConformable(const Type& Formal, const Type& Actual) const {
     if (Formal.Kind != TypeKind::ConformantArray) return false;
+    // ISO 7185 §6.4.3.2: a char-string literal's type is "packed
+    // array[1..n] of char", derived rather than written out as a real
+    // Array type (Actual.Kind is TypeKind::String here) -- so it needs its
+    // own conformance check against a packed single-dimension
+    // conformant-array-of-char schema instead of falling into
+    // conformantStructuralWalk, which expects a genuine Array/
+    // ConformantArray actual (see issue #687).
+    if (Actual.Kind == TypeKind::String) {
+        if (!Formal.Packed || Formal.ConformantBounds.size() != 1
+                || !Formal.ElemType || Formal.ElemType->Kind != TypeKind::Char)
+            return false;
+        const auto& FormalOrdTy = Formal.ConformantBounds[0].OrdType;
+        return FormalOrdTy && !FormalOrdTy->isError()
+            && isAssignCompatible(*FormalOrdTy, *TyInt);
+    }
     if (Actual.Kind != TypeKind::Array
             && Actual.Kind != TypeKind::ConformantArray)
         return false;
