@@ -1344,7 +1344,18 @@ int Driver::compile(const Options &Opts, bool IsExtraFile) {
     // them into Opts.linkerArgs).  There is no source to run the front end
     // or assembler on -- go straight to the link step, matching the standard
     // "compile with -c, link separately" workflow every C toolchain supports.
+    //
+    // But only when Opts.mode actually links (Executable): under -c, -S,
+    // -emit-llvm or a -dump-* mode there is nothing to compile (no .pas
+    // input) and nothing to link either (issue #611) -- those modes stop
+    // before the link step for a real .pas input, and a linker-only
+    // invocation must not be the one combination that reaches link()
+    // anyway.  Driver::run() has already warned (or, under -Werror, failed)
+    // that every .o/.a on the command line goes unused in that case, so
+    // there is nothing left to do here but report success with no output
+    // produced -- matching gcc's own "plang -c foo.o" response.
     if (Opts.inputFile.empty()) {
+        if (Opts.mode != OutputMode::Executable) return 0;
         std::string RuntimeLib;
         if (!resolveRuntimeLib(*this, Opts, ExePath_, RuntimeLib)) return 1;
         return link(*this, Opts, /*ObjFile=*/"", OutFile,
@@ -1413,17 +1424,29 @@ int Driver::compile(const Options &Opts, bool IsExtraFile) {
         ExtraOpts.inputFile       = ExtraFile;
         ExtraOpts.mode            = OutputMode::Object;
 
-        if (Opts.saveTemps) {
-            // A visible intermediate the user asked to keep: flattenedStem,
-            // not stem, so two extra files sharing a basename in different
-            // directories (issue #20) do not both default to the same
-            // "foo.o" in the cwd.  flattenedStem's '/'->'_' folding is
-            // itself not injective, though -- "unitA/b_c.pas" and
-            // "unitA_b/c.pas" both flatten to "unitA_b_c" -- so a second
-            // file landing on a name an earlier one already claimed
-            // (checked against ExtraObjs, which holds every prior extra
-            // file's own final name) gets a numeric suffix instead of
-            // silently overwriting the first file's object (issue #170).
+        // Object mode (-c) never reaches the link step below that would
+        // otherwise consume these as intermediates -- each one IS the
+        // requested output, one real .o per source (issue #612).  Before
+        // this fix every extra file's object was unconditionally treated as
+        // a link-only temporary and deleted once compile() returned, even
+        // though -c never linked it into anything: only the main file's own
+        // "first.o" survived, and "second.o", "third.o", etc. were silently
+        // discarded.  Given the same permanent, collision-proof naming
+        // -save-temps already used for its own different reason (keeping a
+        // human-visible intermediate around) so the two paths share one
+        // naming scheme instead of two.
+        const bool KeepExtraObj = Opts.saveTemps || Opts.mode == OutputMode::Object;
+        if (KeepExtraObj) {
+            // A visible, permanent artifact: flattenedStem, not stem, so two
+            // extra files sharing a basename in different directories
+            // (issue #20) do not both default to the same "foo.o" in the
+            // cwd.  flattenedStem's '/'->'_' folding is itself not
+            // injective, though -- "unitA/b_c.pas" and "unitA_b/c.pas" both
+            // flatten to "unitA_b_c" -- so a second file landing on a name
+            // an earlier one already claimed (checked against ExtraObjs,
+            // which holds every prior extra file's own final name) gets a
+            // numeric suffix instead of silently overwriting the first
+            // file's object (issue #170).
             const std::string Base = flattenedStem(ExtraFile);
             std::string Name = Base + ".o";
             for (int N = 2; std::find(ExtraObjs.begin(), ExtraObjs.end(), Name) != ExtraObjs.end(); ++N)
@@ -1719,6 +1742,17 @@ int Driver::run(int Argc, char *Argv[]) {
         }
     }
 
+    // -c with multiple .pas inputs and an explicit -o (issue #612): -c now
+    // writes one real object per source (see the extra-file compile loop in
+    // compile()), so a single -o name has nowhere to put all of them.
+    // Checked up front, before compiling anything, matching every other
+    // check in this block.
+    if (Opts.mode == OutputMode::Object && !Opts.extraInputFiles.empty() &&
+        !Opts.outputFile.empty()) {
+        diag(diag::err_output_with_multiple_compile_only_inputs);
+        return 1;
+    }
+
     // Both names and both lists come from Dialects.def, so the driver and the
     // front end cannot disagree about what -std= takes.
     if (!Opts.std.empty()) {
@@ -1737,15 +1771,19 @@ int Driver::run(int Argc, char *Argv[]) {
     // -c/-S/-emit-llvm/-dump-* alongside a precompiled .o/.a (issue #277):
     // none of those modes ever reaches the link step where linkerArgs would
     // otherwise be consumed, so name what is about to be silently ignored.
-    // Skipped for a linker-only invocation (no .pas input at all): compile()
-    // sends that straight to link() regardless of Opts.mode, so the file is
-    // not actually unused there. Only bare .o/.a filenames are named -- the
-    // same subset the input/output-collision check above already isolates --
-    // since -l/-L/-Wl,/-Xlinker are recognized linker flags in their own
-    // right, not files that look like this one was meant to be consumed and
-    // was not; neither gcc nor clang warns about those in -c mode either
-    // (verified empirically against both).
-    if (!Opts.inputFile.empty() && Opts.mode != OutputMode::Executable) {
+    // Also fires for a linker-only invocation (no .pas input at all, e.g.
+    // "plang -c foo.o -o result", issue #611): compile()'s linker-only
+    // branch used to send that straight to link() regardless of Opts.mode,
+    // which actually performed the forbidden link instead of leaving the
+    // object unused -- now it mirrors every other non-linking mode and
+    // does not link, so the object genuinely is unused here too. Only bare
+    // .o/.a filenames are named -- the same subset the input/output-
+    // collision check above already isolates -- since -l/-L/-Wl,/-Xlinker
+    // are recognized linker flags in their own right, not files that look
+    // like this one was meant to be consumed and was not; neither gcc nor
+    // clang warns about those in -c mode either (verified empirically
+    // against both).
+    if (Opts.mode != OutputMode::Executable) {
         for (const auto &A : Opts.linkerArgs) {
             if (A.empty() || A[0] == '-' || A.size() < 2) continue;
             const std::string_view Ext(A.data() + A.size() - 2, 2);
