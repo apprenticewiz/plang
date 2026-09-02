@@ -57,9 +57,20 @@ Parser::Parser(Scanner Sc, DiagnosticsEngine& Diags, LangOptions Opts)
     // convenience.  Extended/Comp are deliberately excluded: commit 359256e
     // rejects both outright, so they name no type a cast could ever target.
     if (Opts.turbo()) {
+        // 'pchar'/'pansichar' (issue #634): the same predefined-Sema-symbol
+        // situation as the rest of this ladder -- Sema::registerBuiltins
+        // defines both PChar and PAnsiChar as TypeAlias symbols the parser
+        // never sees declared anywhere (Sema.cpp), so without seeding them
+        // here `PChar(x)`/`PAnsiChar(x)` fell through to the ordinary
+        // CallExpr path instead of parsing as a cast, and Sema then
+        // rejected 'PChar' as "not callable" -- a user-declared alias
+        // (`type M = PChar; ... M(x)`) parsed fine, confirming the seeding
+        // mechanism itself was never the problem, just this list's missing
+        // two entries.
         static constexpr const char* SizedIntegerLadder[] = {
             "shortint", "byte", "smallint", "word", "cardinal",
-            "longint",  "longword", "int64", "qword", "ansichar", "pointer"};
+            "longint",  "longword", "int64", "qword", "ansichar", "pointer",
+            "pchar", "pansichar"};
         for (const char* Name : SizedIntegerLadder) TypeNames_.insert(Name);
         static constexpr const char* BoolAndSingle[] = {
             "bytebool", "wordbool", "longbool", "single"};

@@ -472,7 +472,25 @@ llvm::Value* CGExprCore::emitTypeCastValue(const TypeCastExpr& n) {
         // operand into a wider destination otherwise guessed sign- vs.
         // zero-extension from the operand's own LLVM width (issue #177's
         // sibling audit).
-        return CoerceToType(emitExpr(*n.Operand), dstLlvmTy, exprIsSigned(*n.Operand));
+        llvm::Value* srcVal = emitExpr(*n.Operand);
+        // Boolean(x) is a special case of the above: a strict Boolean
+        // destination lowers to i1 (CGTypes::llvmTypeOfSemaTypeImpl), and
+        // CoerceToType's ordinal path below is a plain *ExtOrTrunc, which
+        // for an i1 destination keeps only the LOW BIT of an ordinal source
+        // -- so `Boolean(2)`/`Boolean(4)` truncated to False instead of
+        // True.  Real TP7/fpc field practice (confirmed against `fpc
+        // -Mtp`) treats ANY nonzero value as True on a Boolean value cast,
+        // exactly like Turbo's loose ByteBool/WordBool/LongBool family
+        // already does (issue #633) -- so an ordinal source routes through
+        // the same "nonzero" test every other Boolean-producing value
+        // already goes through, rather than through CoerceToType's
+        // truncation.  Guarded to an ORDINAL source only: a Real source
+        // (`Boolean(SomeReal)`, also BothScalar-legal) keeps its existing
+        // FPToSI behavior below, unchanged, since EnsureI1's own nonzero
+        // test assumes an integer operand.
+        if (dstLlvmTy->isIntegerTy(1) && srcVal->getType()->isIntegerTy())
+            return EnsureI1(srcVal);
+        return CoerceToType(srcVal, dstLlvmTy, exprIsSigned(*n.Operand));
     }
     // Not both ordinal-or-real: Sema only accepts this when the two types
     // are exactly the same size, so it is a VARIABLE-style reinterpretation
