@@ -1574,6 +1574,25 @@ struct Codegen::Impl {
     /// The same for a variant part and the variants nested in it.
     void registerVariantEnumValues(const VariantPart& vp);
     void emitBlockDecls(const BlockNode& block);
+    /// Issue #639: a program-scope 'absolute's target, as a compile-time
+    /// constant address -- see emitGlobals's own comment (CodeGenProcs.cpp)
+    /// for why a global overlay needs one (no builder/instructions exist yet
+    /// when globals are declared) where the identical LOCAL case just calls
+    /// emitLValue.  Handles exactly the designator shapes Sema::checkBlock's
+    /// Phase 4 restricted a global 'absolute' component to (an IdentExpr
+    /// base, and any number of IndexExpr layers over a plain Array type
+    /// with a compile-time-constant, Sema-folded index -- see checkBlock's
+    /// own checkConstComponent lambda, Sema.cpp): a bare variable name
+    /// costs nothing (its VarEntry::ptr already IS a constant address), and
+    /// an array element folds to a `getelementptr` CONSTANT EXPRESSION
+    /// (llvm::ConstantExpr, never a real instruction) the exact same shape
+    /// emitIndexGEP's own plain-array branch builds at runtime
+    /// (CGIndexAccess.cpp) -- [zero, idx-lo] into the array's own LLVM type.
+    /// Returns null for any other shape (a FieldExpr, a DerefExpr, a
+    /// non-constant index, ...): supplied only as a last-resort safety net,
+    /// since Sema already refuses every one of those for a global target,
+    /// so a null return here would mean that contract was violated.
+    llvm::Constant* globalAbsoluteAddr(const ExprNode& target);
     /// The value a named constant stands for; null when it can only be
     /// computed inside a basic block.
     llvm::Value* constantValueOf(const ConstDef& cd);

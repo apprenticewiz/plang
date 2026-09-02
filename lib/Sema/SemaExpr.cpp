@@ -796,7 +796,14 @@ std::shared_ptr<Type> Sema::checkBinary(const BinaryExpr& E) {
                 if (E.Op == TokenKind::Plus) {
                     if (LPtr && !RPtr && Rt->isIntegral()) return Lt;
                 } else { // Minus
-                    if (LPtr && RPtr) return TyInt; // p1 - p2: element count
+                    // Issue #713: p1 - p2 is an element COUNT, which can run
+                    // well past +/-32767 for a span longer than Turbo's own
+                    // 16-bit Integer -- confirmed against fpc -Mtp, which
+                    // answers a genuine 40000-Char span correctly (no
+                    // truncation) rather than wrapping it through Integer's
+                    // width the way TyInt here used to.  LongInt (32-bit
+                    // signed), not TyInt, matches that field practice.
+                    if (LPtr && RPtr) return Ctx_.getInt(32, /*Signed=*/true);
                     if (LPtr && !RPtr && Rt->isIntegral()) return Lt; // p - n
                 }
                 error(E.Loc, diag::err_op_numeric,

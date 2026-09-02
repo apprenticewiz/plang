@@ -1148,6 +1148,15 @@ DIAG(err_absolute_multiple_names, Error,
      "'absolute' may overlay only a single variable, not a name list")
 DIAG(err_absolute_target_not_variable, Error,
      "'absolute' must name a variable or a component of one")
+// Issue #639: a program-scope 'absolute' has to resolve its target to a
+// compile-time-constant ADDRESS (Sema.cpp's checkBlock, CodeGenProcs.cpp's
+// globalAbsoluteAddr) -- fpc -Mtp enforces the identical restriction
+// ("Illegal expression" for a non-constant index), confirmed empirically.
+// The LOCAL case has no such limit (a real entry block is already open by
+// the time it runs, so any designator's address can be computed there).
+DIAG(err_absolute_global_component_not_const, Error,
+     "'absolute' at program scope can only overlay a component reached by "
+     "compile-time-constant array indices")
 
 // TP-only: Extended (80-bit) and Comp (64-bit, fixed-point "currency")
 // are real Turbo Pascal floating-family type names -- unlike a misspelled
