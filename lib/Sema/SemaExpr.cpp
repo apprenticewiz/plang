@@ -862,8 +862,15 @@ std::shared_ptr<Type> Sema::checkBinary(const BinaryExpr& E) {
         case TokenKind::Times:
             // ISO §6.7.2.4: '+' is set union, '-' set difference and '*' set
             // intersection when both operands are sets.
-            if (Lt->Kind == TypeKind::Set || Rt->Kind == TypeKind::Set) {
-                if (Lt->Kind != TypeKind::Set || Rt->Kind != TypeKind::Set) {
+            //
+            // Issue #584: a schema-instantiated set type (`type s(n: integer)
+            // = set of 1..n`) reaches here as TypeKind::Schema/SchemaInstance,
+            // never TypeKind::Set itself -- schemaUnderlying is the same hop
+            // every other set-shaped Kind check in this function now takes,
+            // rather than comparing the raw (possibly schema-wrapped) Kind.
+            if (auto LtSet = schemaUnderlying(Lt), RtSet = schemaUnderlying(Rt);
+                LtSet->Kind == TypeKind::Set || RtSet->Kind == TypeKind::Set) {
+                if (LtSet->Kind != TypeKind::Set || RtSet->Kind != TypeKind::Set) {
                     error(E.Loc, diag::err_op_set_mixed,
                           {opSpelling(E.Op), Lt->Name, Rt->Name});
                     return TyErr;
@@ -871,9 +878,12 @@ std::shared_ptr<Type> Sema::checkBinary(const BinaryExpr& E) {
                 // Unify before comparing bases: a set-constructor's element
                 // type is whatever its elements happened to be, so comparing
                 // it against the other operand would reject `s + [1]`.
-                unifyLooseSets(*E.Left, *E.Right, Lt, Rt);
-                const auto& Lu = E.Left->ResolvedType;
-                const auto& Ru = E.Right->ResolvedType;
+                // Unified against the schema-unwrapped Set type, not the
+                // schema wrapper itself -- a wrapper has no ElemType of its
+                // own for a loose literal to adopt.
+                unifyLooseSets(*E.Left, *E.Right, LtSet, RtSet);
+                const auto Lu = isLooseSet(*E.Left) ? E.Left->ResolvedType : LtSet;
+                const auto Ru = isLooseSet(*E.Right) ? E.Right->ResolvedType : RtSet;
                 // The empty set literal [] has no element type and unifies
                 // with any set, so only compare when both bases are known.
                 if (Lu->ElemType && Ru->ElemType
@@ -1021,15 +1031,21 @@ std::shared_ptr<Type> Sema::checkBinary(const BinaryExpr& E) {
             return TyReal;
 
         case TokenKind::SymDiff:  // EP §6.8.3.4: >< — symmetric set difference
-            if (Lt->Kind != TypeKind::Set || Rt->Kind != TypeKind::Set) {
+            // Issue #584: unwrap a schema-instantiated set the same way the
+            // '+'/'-'/'*' case just above does.
+            if (auto LtSet = schemaUnderlying(Lt), RtSet = schemaUnderlying(Rt);
+                LtSet->Kind != TypeKind::Set || RtSet->Kind != TypeKind::Set) {
                 error(E.Loc, diag::err_op_symdiff_set, {Lt->Name, Rt->Name});
                 return TyErr;
+            } else {
+                unifyLooseSets(*E.Left, *E.Right, LtSet, RtSet);
+                const auto Lu = isLooseSet(*E.Left) ? E.Left->ResolvedType : LtSet;
+                const auto Ru = isLooseSet(*E.Right) ? E.Right->ResolvedType : RtSet;
+                // A><B is (A∪B)-(A∩B): it can hold a member from EITHER side
+                // alone, the identical reason '+' needs widenSetResult rather
+                // than just one operand's own window (issue #681).
+                return widenSetResult(Lu, Ru);
             }
-            unifyLooseSets(*E.Left, *E.Right, Lt, Rt);
-            // A><B is (A∪B)-(A∩B): it can hold a member from EITHER side
-            // alone, the identical reason '+' needs widenSetResult rather
-            // than just one operand's own window (issue #681).
-            return widenSetResult(E.Left->ResolvedType, E.Right->ResolvedType);
 
         case TokenKind::Equal:
         case TokenKind::NotEqual:
@@ -1058,14 +1074,18 @@ std::shared_ptr<Type> Sema::checkBinary(const BinaryExpr& E) {
             };
             // ISO §6.7.2.5: sets support = <> <= >= only; '<' and '>' are not
             // set operators, and comparing a set against a non-set is invalid.
-            if (Lt->Kind == TypeKind::Set || Rt->Kind == TypeKind::Set) {
-                if (Lt->Kind != TypeKind::Set || Rt->Kind != TypeKind::Set) {
+            //
+            // Issue #584: unwrap a schema-instantiated set the same way the
+            // set-operator cases above do.
+            if (auto LtSet = schemaUnderlying(Lt), RtSet = schemaUnderlying(Rt);
+                LtSet->Kind == TypeKind::Set || RtSet->Kind == TypeKind::Set) {
+                if (LtSet->Kind != TypeKind::Set || RtSet->Kind != TypeKind::Set) {
                     error(E.Loc, diag::err_cannot_compare, {Lt->Name, Rt->Name});
                 } else if (E.Op == TokenKind::LessThan
                         || E.Op == TokenKind::GreaterThan) {
                     error(E.Loc, diag::err_op_set_ordering, {opSpelling(E.Op)});
                 } else {
-                    unifyLooseSets(*E.Left, *E.Right, Lt, Rt);
+                    unifyLooseSets(*E.Left, *E.Right, LtSet, RtSet);
                 }
                 return TyBool;
             }
@@ -1148,7 +1168,11 @@ std::shared_ptr<Type> Sema::checkBinary(const BinaryExpr& E) {
             if (!Lt->isOrdinal()) {
                 error(E.Left->Loc, diag::err_in_lhs_not_ordinal, {Lt->Name});
             }
-            if (Rt->Kind != TypeKind::Set) {
+            // Issue #584: a schema-instantiated set (`s(5)`) reaches here as
+            // TypeKind::Schema/SchemaInstance, never Set itself -- unwrap the
+            // same way the other set-operator cases in this function do.
+            auto RtSet = schemaUnderlying(Rt);
+            if (RtSet->Kind != TypeKind::Set) {
                 error(E.Right->Loc, diag::err_in_rhs_not_set, {Rt->Name});
             } else if (isLooseSet(*E.Right) && Lt->isOrdinal() && !Lt->isError()
                        && Lt->Kind != TypeKind::Integer) {
@@ -1168,11 +1192,11 @@ std::shared_ptr<Type> Sema::checkBinary(const BinaryExpr& E) {
                 // being reported: `e in [v256]` read as false for e = v256.
                 checkSetBaseRange(*Lt, E.Loc);
                 adoptSetType(*E.Right, Ctx_.getSet(Lt, false));
-            } else if (!Lt->isError() && Rt->ElemType && !Rt->ElemType->isError()) {
+            } else if (!Lt->isError() && RtSet->ElemType && !RtSet->ElemType->isError()) {
                 // Check base type compatibility.
-                if (!isAssignCompatible(*Rt->ElemType, *Lt))
+                if (!isAssignCompatible(*RtSet->ElemType, *Lt))
                     error(E.Loc, diag::err_in_incompatible,
-                          {Lt->Name, Rt->ElemType->Name});
+                          {Lt->Name, RtSet->ElemType->Name});
             }
             return TyBool;
         }
@@ -1951,7 +1975,9 @@ std::shared_ptr<Type> Sema::checkCallExpr(const CallExpr& E) {
         if (Lo == "card" && !E.Args.empty()) {
             auto ArgTy = checkExpr(*E.Args[0]);
             if (ArgTy->isError()) return TyErr;
-            if (ArgTy->Kind != TypeKind::Set) {
+            // Issue #584: a schema-instantiated set (`s(5)`) is TypeKind::
+            // Schema/SchemaInstance, not Set, until unwrapped.
+            if (schemaUnderlying(ArgTy)->Kind != TypeKind::Set) {
                 error(E.Args[0]->Loc, diag::err_set_argument, {Lo, ArgTy->Name});
                 return TyErr;
             }
@@ -2653,13 +2679,39 @@ std::shared_ptr<Type> Sema::checkStructuredValue(const StructuredValueExpr& E) {
     if (!E.TypeName.empty() || !T) {
         // Look up the type name as a TypeAlias in the symbol table.
         Symbol* Sym = Symtab.lookup(E.TypeName);
-        if (!Sym || Sym->Kind != SymbolKind::TypeAlias || !Sym->hasDeclaredType()
+        // Issue #590: a schema type (`type row(n: integer) = array[1..n] of
+        // integer;`) is registered as SymbolKind::Schema, not TypeAlias --
+        // the check just below rejected it outright as "not found" even
+        // though it plainly IS a declared type (it works fine as a
+        // variable's declared type one line earlier in the same program).
+        // EP §6.8.7.1's TypeName spelling names the schema itself, though,
+        // which carries no discriminants of its own -- 'row[...]' has no
+        // syntax of its own to supply them, unlike 'new(p, 5)' or a variable
+        // declaration.  The only source of a concrete instantiation is the
+        // context this constructor already sits in: ExpectedValueType_,
+        // exactly what the untyped '[...]' form above relies on for a
+        // schema target.  Reusing err_schema_undiscriminated (rather than
+        // a bespoke diagnostic) matches what a bare schema-name used
+        // anywhere else undiscriminated already reports (resolveNamed,
+        // SemaType.cpp).
+        if (Sym && Sym->Kind == SymbolKind::Schema) {
+            if (T && (T->Kind == TypeKind::SchemaInstance
+                      || T->Kind == TypeKind::Schema)
+                  && toLower(T->SchemaName) == toLower(Sym->Name)) {
+                // T already names this schema's own instantiation -- keep it.
+            } else {
+                error(E.Loc, diag::err_schema_undiscriminated, {E.TypeName});
+                checkAllArms();
+                return TyErr;
+            }
+        } else if (!Sym || Sym->Kind != SymbolKind::TypeAlias || !Sym->hasDeclaredType()
                  || Sym->declaredType()->isError()) {
             error(E.Loc, diag::err_constructor_type_not_found, {E.TypeName});
             checkAllArms();
             return TyErr;
+        } else {
+            T = Sym->declaredType();
         }
-        T = Sym->declaredType();
     }
     // What is expected of an arm is settled by the arm, not by the value it
     // belongs to, so it does not carry on down.
@@ -2669,6 +2721,15 @@ std::shared_ptr<Type> Sema::checkStructuredValue(const StructuredValueExpr& E) {
         std::shared_ptr<Type>& Slot; std::shared_ptr<Type> Old;
         ~Restore() { Slot = Old; }
     } RestoreExpected{ExpectedValueType_, SavedExpected};
+
+    // Issue #590: T may still be a schema instantiation here (either handed
+    // in through ExpectedValueType_, or matched against one just above) --
+    // unwrap to the real Array/Record/Set body every check and CodeGen's own
+    // lowering (CGStructuredValue.cpp, which asks the identical three Kinds
+    // with no schema hop of its own) already expects.  The value this
+    // constructor builds is the body's shape either way; nothing here reads
+    // the schema's own discriminants back out of the result.
+    T = schemaUnderlying(T);
 
     if (T->Kind == TypeKind::Array) {
         auto elemTy = T->ElemType;

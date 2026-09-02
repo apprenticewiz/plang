@@ -97,8 +97,17 @@ public:
         plang::SourceLocation Loc = {},
         std::optional<bool> loSigned = std::nullopt,
         std::optional<bool> hiSigned = std::nullopt);
+    /// ISO §6.7.2.5's `in`.  As emitSetSingleton/emitSetRange: \p declaredRange
+    /// and \p Loc let this range-check the ordinal against the set's own
+    /// declared base type under {$R+} -- issue #637: `i in s` for `s: set of
+    /// 1..100` and `i` outside 1..100 answered false silently instead of
+    /// trapping, even though `s + [i]` and `Include(s, i)` (both going
+    /// through emitSetSingleton) already trap correctly for the identical
+    /// out-of-range ordinal.
     llvm::Value* emitSetMember(llvm::Value* ordinal, llvm::Value* set, int64_t base,
-                                std::optional<bool> ordinalSigned = std::nullopt);
+        std::optional<std::pair<int64_t, int64_t>> declaredRange = std::nullopt,
+        plang::SourceLocation Loc = {},
+        std::optional<bool> ordinalSigned = std::nullopt);
     /// Lowers a set-valued or set-comparing binary operator; returns null if
     /// op is not one of them.
     llvm::Value* emitSetBinary(plang::TokenKind op, llvm::Value* a, llvm::Value* b);

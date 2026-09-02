@@ -1705,11 +1705,41 @@ void Sema::checkSetBaseRange(const Type& Base, SourceLocation Loc) {
             // codegen clamps such sets at run time instead.
             if (Lo > Hi) return;
             break;
-        case TypeKind::Integer:
-            // Unbounded: never representable.
-            error(Loc, diag::err_set_base_too_wide,
-                  {Base.Name, std::to_string(PlangMaxSetElements)});
-            return;
+        case TypeKind::Integer: {
+            // Issue #580: `set of Byte` (Width=8, unsigned, ordinal range
+            // exactly 0..255) used to hit an unconditional "unbounded,
+            // never representable" error here regardless of Width/IsSigned
+            // -- the same branch a genuinely unbounded 64-bit `integer`
+            // falls into, even though Byte's domain is exactly as wide as
+            // Char's (which is explicitly allowed two cases above).
+            //
+            // A signed sized-integer base (ShortInt, LongInt, Int64, or a
+            // bare 64-bit Integer) is never a valid set base regardless of
+            // how few values it spans -- checked against real fpc:
+            // `set of ShortInt` is "illegal type declaration of set
+            // elements" even though -128..127 is only 256 values, the same
+            // width as Byte's (which real fpc DOES accept as a set base).
+            // Only an unsigned, narrower-than-64-bit base (Byte, Word, ...)
+            // is even potentially representable; ordinalRange (Type.h)
+            // already computes its {0, 2^Width-1} range the same way it
+            // does for every other ordinal kind here, and returns nullopt
+            // for Width >= 64 (QWord) the same as it does for a bare
+            // Integer, so both fall through to the "too wide" error below.
+            if (Base.IsSigned) {
+                error(Loc, diag::err_set_base_too_wide,
+                      {Base.Name, std::to_string(PlangMaxSetElements)});
+                return;
+            }
+            auto R = ordinalRange(Base);
+            if (!R) {
+                error(Loc, diag::err_set_base_too_wide,
+                      {Base.Name, std::to_string(PlangMaxSetElements)});
+                return;
+            }
+            Lo = R->first;
+            Hi = R->second;
+            break;
+        }
         default:
             return;
     }

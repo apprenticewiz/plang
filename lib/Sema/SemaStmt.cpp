@@ -329,6 +329,20 @@ void Sema::checkAssign(const AssignStmt& S) {
                 Id->Resolution = IdentExpr::IdentResolution::ProcVarRawValue;
         }
     }
+    // Issue #590: a structured-value-constructor's own TypeName (EP §6.8.7.1,
+    // e.g. 'row[2: 99; otherwise 0]') may itself name a schema with no
+    // discriminants of its own to instantiate with -- the assignment's own
+    // destination type is the only place they can come from.  Mirrors how a
+    // typed const's initializer already gets its type from ExpectedValueType_
+    // (Sema.cpp); checkStructuredValue only consults it when TypeName
+    // resolves to a Schema symbol matching Dst's own, so this is a no-op for
+    // every other TypeName and for a bare '[...]' (which reaches Dst by its
+    // own separate route already).
+    if (!Src && llvm::isa<StructuredValueExpr>(S.Value.get())) {
+        ExpectedValueType_ = Dst;
+        Src = checkExpr(*S.Value);
+        ExpectedValueType_ = nullptr;
+    }
     if (!Src) Src = checkExpr(*S.Value);
 
     // EP §6.9.2.2: the value has to suit the type of the variable — except for
@@ -1876,16 +1890,19 @@ void Sema::checkCallStmt(const CallStmt& S) {
             auto SetTy  = checkExpr(*S.Args[0]);
             auto ElemTy = checkExpr(*S.Args[1]);
             if (!SetTy->isError()) {
-                if (SetTy->Kind != TypeKind::Set) {
+                // Issue #584: a schema-instantiated set (`s(5)`) is
+                // TypeKind::Schema/SchemaInstance, not Set, until unwrapped.
+                auto SetTyU = schemaUnderlying(SetTy);
+                if (SetTyU->Kind != TypeKind::Set) {
                     error(S.Args[0]->Loc, diag::err_set_argument, {Lo, SetTy->Name});
                 } else if (!isLValue(*S.Args[0])) {
                     error(S.Args[0]->Loc, diag::err_var_param_needs_lvalue,
                           {std::string_view("1"), std::string_view(Lo)});
-                } else if (!ElemTy->isError() && SetTy->ElemType
-                           && !SetTy->ElemType->isError()
-                           && !isAssignCompatible(*SetTy->ElemType, *ElemTy)) {
+                } else if (!ElemTy->isError() && SetTyU->ElemType
+                           && !SetTyU->ElemType->isError()
+                           && !isAssignCompatible(*SetTyU->ElemType, *ElemTy)) {
                     error(S.Args[1]->Loc, diag::err_assign_mismatch,
-                          {ElemTy->Name, SetTy->ElemType->Name});
+                          {ElemTy->Name, SetTyU->ElemType->Name});
                 }
                 // Issue #710: Include/Exclude mutate their first argument in
                 // place (SetOps::emitSetSingleton/emitSetBinary writes
@@ -2884,13 +2901,16 @@ void Sema::checkCase(const CaseStmt& S) {
 // EP §6.9.3.9.3: for v in set-expr do stmt
 void Sema::checkForIn(const ForInStmt& S) {
     auto SetTy = checkExpr(*S.SetExpr);
-    if (!SetTy->isError() && SetTy->Kind != TypeKind::Set)
+    // Issue #584: a schema-instantiated set (`s(5)`) is TypeKind::Schema/
+    // SchemaInstance, not Set, until unwrapped.
+    auto SetTyU = schemaUnderlying(SetTy);
+    if (!SetTyU->isError() && SetTyU->Kind != TypeKind::Set)
         error(S.Loc, diag::err_for_in_not_set, {SetTy->Name});
 
     // The loop variable is implicitly declared for the duration of the body.
     // It has the element type of the set (or integer if we can't determine it).
-    auto ElemTy = (SetTy->Kind == TypeKind::Set && SetTy->ElemType)
-                  ? SetTy->ElemType : TyInt;
+    auto ElemTy = (SetTyU->Kind == TypeKind::Set && SetTyU->ElemType)
+                  ? SetTyU->ElemType : TyInt;
 
     Symtab.pushScope(/*IsBlock=*/false);
     Symbol LoopSym;
