@@ -554,8 +554,13 @@ void Sema::checkFor(const ForStmt& S) {
                   {Limit->Name, S.Var, Sym->declaredType()->Name});
     }
 
-    // ISO §6.8.3.9: the body must not threaten the control variable (assign to it).
-    checkForBody(S.Body.get(), S.Var, S.Loc);
+    // ISO §6.8.3.9: the body must not threaten the control variable (assign to
+    // it).  Turbo has no such restriction (issue #650): `fpc -Mtp` accepts a
+    // body that assigns to the control variable (the assignment is visible
+    // but does not perturb the loop's own iteration count/bound), so this
+    // scan is ISO/EP-only.
+    if (!Opts.turbo())
+        checkForBody(S.Body.get(), S.Var, S.Loc);
     LoopScope LS(LoopDepth_);
     checkStmt(S.Body.get());
 }
@@ -1808,6 +1813,7 @@ void Sema::checkCallStmt(const CallStmt& S) {
             if (S.Args.size() > 1) {
                 auto MsgTy = checkExpr(*S.Args[1]);
                 if (!MsgTy->isError() && !isCharStringType(*MsgTy)
+                        && !isShortStringLike(MsgTy.get())
                         && MsgTy->Kind != TypeKind::String
                         && MsgTy->Kind != TypeKind::VarString
                         && MsgTy->Kind != TypeKind::Char)
