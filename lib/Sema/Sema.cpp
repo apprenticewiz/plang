@@ -1226,9 +1226,19 @@ size_t Sema::pushUnitUsesScopes(const std::vector<UsedUnit>& Uses) {
             // registerUsedUnitConsts and never referenced by mangled symbol
             // at all; a TypeAlias has no runtime symbol; skipping those two
             // avoids polluting the table with entries nothing ever reads).
+            // Issue #594: 'emplace' is a no-op when the bare (unqualified)
+            // name already has an entry, so the FIRST-pushed 'uses'd unit's
+            // export would win this table even though Symtab.lookup's own
+            // scope stack (just above) already resolves the bare name to
+            // the LAST-pushed unit's export -- the two "which declaration
+            // does this name mean" answers must agree, or CodeGen mangles
+            // against the wrong (first, not last) unit.  'insert_or_assign'
+            // makes a later unit's entry overwrite an earlier one's, the
+            // same last-uses-wins order the scope stack already gives the
+            // bare name.
             if ((Sym.Kind == SymbolKind::Var || Sym.Kind == SymbolKind::Proc)
                     && !Sym.Module.empty())
-                ImportOwners_[CurrentUnit_].emplace(
+                ImportOwners_[CurrentUnit_].insert_or_assign(
                     toLower(Sym.Name),
                     ImportedName{Sym.Module, Sym.Kind == SymbolKind::Proc,
                                  Sym.LinkName});

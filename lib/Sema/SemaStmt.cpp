@@ -836,6 +836,11 @@ Symbol* Sema::protectedBaseOf(const ExprNode& Target) {
         // matched neither arm) and returning null, so the const/protected
         // check below was skipped entirely rather than asked about `r`.
         if (auto* Tc = llvm::dyn_cast<TypeCastExpr>(Base)) { Base = Tc->Operand.get(); continue; }
+        // Issue #586: a substring range (`s[i..j]`) parses to its own node
+        // kind, SubstringExpr, not IndexExpr -- but `s[i..j] := ...` writes
+        // through exactly the same underlying storage a single-index
+        // `s[i] := ...` does, so it must trace back to the same base.
+        if (auto* Se = llvm::dyn_cast<SubstringExpr>(Base)) { Base = Se->Str.get(); continue; }
         break;
     }
     auto* Id = llvm::dyn_cast<IdentExpr>(Base);
