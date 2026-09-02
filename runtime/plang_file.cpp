@@ -393,8 +393,31 @@ static void trapOnWrongDirection(PascalFile *F, const char *Op, int8_t WantWrite
 /// Routed through setInOutResIfClear, not a direct assignment, for the
 /// identical "a pending, unread error is not overwritten" reason every
 /// other Turbo failure in this file goes through it.
+///
+/// Issue #663: that 105/104 pair used to be reported for EVERY ferror(),
+/// with no look at errno at all -- so a genuine OS-level write failure (most
+/// commonly ENOSPC, a full disk) was misreported as "file not open for
+/// output" instead of the real underlying error. Empirically (this item's
+/// own manual test, a glibc fwrite/fputc/fprintf against a stream opened in
+/// the wrong direction) the C-level direction violation always leaves errno
+/// at EBADF, never something plang_tp_posix_to_run_error's own table means
+/// to translate (see that function's own comment: EBADF is deliberately
+/// left out of it, precisely because Borland's own 105/104 -- not EBADF's
+/// generic mapping -- is field practice for this one specific case). Any
+/// OTHER errno is a real OS-level failure and is now routed through that
+/// table instead, exactly the way every other failure site in this file
+/// already captures errno immediately after the failing call and maps it.
+/// Err == 0 (no errno recorded at all, which should not happen once
+/// ferror() is true, but is not a case to guess a real OS error out of
+/// either) falls back to the same 105/104 pair as EBADF, the safe default.
 static void tpTrapOnStreamError(PascalFile *F, int8_t WantWrite) {
-    if (std::ferror(F->Fp)) setInOutResIfClear(WantWrite ? 105 : 104);
+    if (!std::ferror(F->Fp)) return;
+    const int Err = errno;
+    if (Err == 0 || Err == EBADF) {
+        setInOutResIfClear(WantWrite ? 105 : 104);
+        return;
+    }
+    setInOutResIfClear(plang_tp_posix_to_run_error(Err));
 }
 
 /// -std=turbo only: the non-aborting counterpart to trapOnWrongDirection,
@@ -1030,6 +1053,14 @@ void plang_tp_seek(PascalFile *F, int64_t N) {
 /// first: stdio may be holding buffered bytes not yet visible to the fd
 /// truncate operates on, and truncating out from under an unflushed buffer
 /// would let a later flush write stale data back past the new end.
+///
+/// Issue #666: also resets F->Buf to PlangFileUninit, the same lookahead
+/// invalidation plang_tp_seek/plang_tp_blockread already do on their own
+/// position-moving operations.  Truncate cuts the file off at the current
+/// position, so a one-character window primed by an earlier Eof/Eoln/Read
+/// call -- holding whatever byte used to sit right there -- would otherwise
+/// survive the truncate and answer a following Eof/Eoln with stale data
+/// from a byte that, after this call, no longer exists in the file at all.
 void plang_tp_truncate(PascalFile *F) {
     if (!tpFileReady(F, "Truncate")) return;
     std::fflush(F->Fp);
@@ -1039,6 +1070,7 @@ void plang_tp_truncate(PascalFile *F) {
         setInOutResIfClear(plang_tp_posix_to_run_error(Err));
         return;
     }
+    F->Buf = PlangFileUninit;
     unloadComponent(F);
 }
 
@@ -1092,14 +1124,41 @@ int64_t plang_tp_blockread(PascalFile *F, void *Buf, int64_t Count, int8_t HasRe
 /// BlockRead just above -- see its own comment for the shared shape,
 /// including issue #679's negative-RecSize trap.  A short write without a
 /// result argument sets InOutRes 101 ("disk write error") instead of 100.
+///
+/// Issue #665: unlike BlockRead (where a short transfer with no result
+/// argument is the ONLY error this function itself can detect -- reaching
+/// real end-of-file sets neither ferror() nor anything else BlockRead
+/// checks), a short BlockWrite is, empirically (confirmed against
+/// `fpc -Mtp`: both a genuine OS-level failure like ENOSPC and a direction
+/// violation like writing to a Reset-opened, FileMode-0 read-only file trap
+/// with their own real IOResult -- 101/105 respectively -- REGARDLESS of
+/// whether a result argument is present), always accompanied by the
+/// underlying stdio stream's own error indicator.  This now calls
+/// tpTrapOnWrongDirection/tpTrapOnStreamError unconditionally, the same
+/// pair every other Turbo write entry point in this file already calls, so
+/// a genuine error is reported whether or not HasResult is set; the
+/// `!HasResult && Actual < Count` check below is now only the DEFENSIVE
+/// fallback for a short transfer that -- contrary to every case actually
+/// observed -- left no C-level error behind, and setInOutResIfClear's own
+/// "first error wins" rule keeps it from overwriting whatever
+/// tpTrapOnStreamError already set.
+///
+/// Issue #666: also resets F->Buf to PlangFileUninit, the same lookahead
+/// invalidation plang_tp_blockread (just above) and plang_tp_seek already
+/// do -- a BlockWrite that lands at or past a stale primed window's
+/// position must not leave a following Eof/Eoln answering from a byte the
+/// write has just overwritten or left behind.
 int64_t plang_tp_blockwrite(PascalFile *F, const void *Buf, int64_t Count, int8_t HasResult) {
     if (!tpFileReady(F, "BlockWrite")) return 0;
     if (Count <= 0) return 0;
     if (F->RecSize < 0) plang_tp_runerror(217);
     if (F->RecSize == 0) return 0;
+    tpTrapOnWrongDirection(F, 1);
     const std::size_t Want = (std::size_t)Count * (std::size_t)F->RecSize;
     const std::size_t Got  = std::fwrite(Buf, 1, Want, F->Fp);
     const int64_t Actual = (int64_t)(Got / (std::size_t)F->RecSize);
+    tpTrapOnStreamError(F, 1);
+    F->Buf = PlangFileUninit;
     unloadComponent(F);
     if (!HasResult && Actual < Count) setInOutResIfClear(101);
     return Actual;
@@ -1139,13 +1198,41 @@ void plang_tp_rename(PascalFile *F, const char *NewName) {
     F->Name[N] = '\0';
 }
 
-/// TP Flush(f): flushes f's buffered output without closing it.  No InOutRes
-/// distinction of its own beyond tpFileReady's ordinary 103 -- confirmed
-/// against `fpc -Mtp`: Flush on a valid, open file always reports IOResult
-/// 0.
+/// Issue #664's own direction check for plang_tp_flush just below: Flush on
+/// a read-only-opened file traps (InOutRes 105, "file not open for output"
+/// -- confirmed against `fpc -Mtp`) even though fflush(3) itself is a
+/// harmless no-op there. POSIX only documents fflush's effect on OUTPUT
+/// streams; glibc's own read-side fflush just discards any buffered input
+/// and repositions to the underlying fd's real position, never setting
+/// ferror() -- so, unlike every write path elsewhere in this file, Flush
+/// cannot detect this through tpTrapOnStreamError's ferror() check at all
+/// and has to ask F->Readable directly instead. Unlike trapOnWrongDirection/
+/// tpTrapOnWrongDirection (whose own comments explain why a NAMED file is
+/// skipped there -- its C-level open mode already traps a wrong-direction
+/// WRITE through ferror, so checking Readable too would be redundant),
+/// this check applies to every file, named or internal alike, because
+/// there is no ferror signal for a named file to fall back on here either.
+static void tpFlushWrongDirection(PascalFile *F) {
+    if (F->Readable == 1) setInOutResIfClear(105);
+}
+
+/// TP Flush(f): flushes f's buffered output without closing it.
+///
+/// Issue #664: used to ignore fflush(3)'s own return value entirely (so a
+/// flush that genuinely failed -- e.g. ENOSPC surfacing only once the
+/// buffer is actually written out, which a small preceding Write can leave
+/// undetected until exactly this call -- silently reported IOResult 0) and
+/// never checked the stream's direction (see tpFlushWrongDirection just
+/// above). Both are now checked, the same "capture errno immediately after
+/// the failing call, map it through plang_tp_posix_to_run_error" pattern
+/// every other failure site in this file already uses.
 void plang_tp_flush(PascalFile *F) {
     if (!tpFileReady(F, "Flush")) return;
-    std::fflush(F->Fp);
+    tpFlushWrongDirection(F);
+    if (std::fflush(F->Fp) != 0) {
+        const int Err = errno;
+        setInOutResIfClear(plang_tp_posix_to_run_error(Err));
+    }
 }
 
 /// TP SetTextBuf(f, buf, size): overrides f's own internal I/O buffering
@@ -2321,23 +2408,41 @@ void plang_read_binary_turbo(PascalFile *F, void *Buf, int64_t ElemSize) {
     prime(F);
 }
 
+// Issue #666: a typed Write's own lookahead invalidation, for the identical
+// reason plang_tp_truncate/plang_tp_blockwrite (above) and plang_tp_seek/
+// plang_tp_blockread (further above) already reset F->Buf on their own
+// position-moving/mutating operations.  plang_read_binary_turbo (just
+// above) re-primes rather than merely invalidating, because a read always
+// needs the NEW window filled right away for eof's own next check; a write
+// has no such need -- clearing to PlangFileUninit and letting the next
+// ensurePrimed() (used by eof/eoln dialect-agnostically) prime lazily,
+// exactly like every other invalidation site in this file, is enough. This
+// matters most in EP's own update mode / Turbo's FileMode-2 Reset (both
+// open "r+b", genuinely bidirectional), the only shapes where a file
+// remains Readable after a Write -- eof(f) on an output-only file already
+// answers true unconditionally (plang_eof_file/plang_eof_file_turbo's own
+// "rewrite(f) leaves eof(f) true" comment) without ever consulting F->Buf,
+// so the gap this closes is unreachable there regardless.
 void plang_write_binary(PascalFile *F, const void *Buf, int64_t ElemSize) {
     abortIfClosed(F, "write");
     trapOnWrongDirection(F, "write", 1);
     std::fwrite(Buf, static_cast<std::size_t>(ElemSize), 1, F->Fp);
     trapOnStreamError(F, "write");
+    F->Buf = PlangFileUninit;
     unloadComponent(F);
 }
 
 // -std=turbo only: the fileReady twin of plang_write_binary just above --
 // see plang_read_binary_turbo's own comment for why typed binary files need
 // one at all, and for why unloadComponent() (which plang_write_binary above
-// still calls) is dropped here.
+// still calls) is dropped here.  F->Buf is reset for the identical issue
+// #666 reason plang_write_binary's own comment just above explains.
 void plang_write_binary_turbo(PascalFile *F, const void *Buf, int64_t ElemSize) {
     if (!tpFileReady(F, "write")) return;
     tpTrapOnWrongDirection(F, 1);
     std::fwrite(Buf, static_cast<std::size_t>(ElemSize), 1, F->Fp);
     tpTrapOnStreamError(F, 1);
+    F->Buf = PlangFileUninit;
 }
 
 // ---- EP §6.7.5.2: extend / update ----

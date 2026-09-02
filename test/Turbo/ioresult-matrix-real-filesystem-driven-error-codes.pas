@@ -27,10 +27,24 @@ Each case is driven by GENUINE filesystem state, not a stub:
   100 disk read error -- BlockRead with no Result argument, asked for more
                   records than the file actually holds (a genuine short
                   read against real bytes on disk, past the real EOF)
-  101 disk write error -- BlockWrite with no Result argument against a file
-                  Reset (not Rewrite) -- genuinely read-only, so every byte
-                  of the attempted write is really refused by the C
-                  library, not simulated
+  105 file not open for output -- BlockWrite with no Result argument
+                  against a file Reset (not Rewrite) -- genuinely
+                  read-only, so every byte of the attempted write is
+                  really refused by the C library, not simulated. (Issue
+                  #665 correction: this case used to be labeled/checked as
+                  101 here, on the same now-known-wrong "a short write
+                  without a Result argument always means 101" assumption
+                  blockwrite-without-result-argument-a-direction-violation-
+                  sets-inoutres-105.pas, test/CodeGen/Turbo/, corrects on
+                  its own -- see that test's own comment. A genuinely-101
+                  case, driven by a real ENOSPC rather than a direction
+                  violation, is covered separately by
+                  write-to-a-disk-full-device-reports-the-real-ioresult-
+                  not-105.pas and
+                  blockwrite-to-a-disk-full-device-reports-101-even-with-a-
+                  result-argument.pas, both test/CodeGen/Turbo/ -- not
+                  folded into this capstone, since both need the "dev-full"
+                  lit feature gate this file's other six codes do not.)
   102 file not assigned -- Erase against a file variable Assign never
                   touched at all (F->Name/F->Mode both still zero-init --
                   genuinely never opened, not merely closed)
@@ -78,7 +92,7 @@ RUN: chmod 755 %t.dir/locked
 CHECK:code2=2
 CHECK-NEXT:code5=5
 CHECK-NEXT:code100=100
-CHECK-NEXT:code101=101
+CHECK-NEXT:code105=105
 CHECK-NEXT:code102=102
 CHECK-NEXT:code103=103
 CHECK-NEXT:code218=218
@@ -121,16 +135,19 @@ begin
   writeln('code100=', IOResult);
   close(blkFile);
 
-  { code 101: real short BlockWrite, no Result argument, against a
-    genuinely read-only-reopened file. FileMode must be forced to 0
-    (read-only) here -- Tier 3's own gap fix (reset-opens-read-write.pas)
-    now has Reset honor FileMode's documented read-write default of 2, so
-    without this, the BlockWrite below would genuinely succeed instead of
-    failing the way this case means to exercise. }
+  { code 105: real short BlockWrite, no Result argument, against a
+    genuinely read-only-reopened file -- a direction violation, not a
+    disk-write error (issue #665 correction: see this file's own top
+    comment for why this is 105, not the 101 this case used to claim).
+    FileMode must be forced to 0 (read-only) here -- Tier 3's own gap fix
+    (reset-opens-read-write.pas) now has Reset honor FileMode's documented
+    read-write default of 2, so without this, the BlockWrite below would
+    genuinely succeed instead of failing the way this case means to
+    exercise. }
   FileMode := 0;
   reset(blkFile, 1);
   blockwrite(blkFile, buf, 5);
-  writeln('code101=', IOResult);
+  writeln('code105=', IOResult);
   close(blkFile);
   FileMode := 2;
 
