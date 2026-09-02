@@ -103,24 +103,39 @@ public:
         Indent.reserve(P.Column);
         unsigned Col      = 1;
         size_t   CaretPos = std::string::npos;
-        for (size_t I = 0; I < Line.size(); ++I) {
-            const unsigned char C = static_cast<unsigned char>(Line[I]);
-            if (isUtf8ContinuationByte(Line[I])) {
-                DisplayLine += Line[I];
-                continue;
-            }
+        for (size_t I = 0; I < Line.size(); ) {
+            // #614: walk whole VALIDATED UTF-8 sequences, not bytes
+            // classified on their own -- an isolated/malformed continuation
+            // byte (utf8SequenceLength returns 1 for it, same as any other
+            // byte >= 0x80 it cannot validate) is not part of any real
+            // character and must be escaped and given its own cell exactly
+            // like a control byte is, rather than silently absorbed into
+            // whatever preceded it and reaching stderr raw.
+            const unsigned Len = utf8SequenceLength(Line, I);
             if (Col == P.Column) CaretPos = DisplayLine.size();
-            if ((C < 0x20 && C != '\t') || C == 0x7F) {
-                static const char Hex[] = "0123456789abcdef";
-                DisplayLine += '\\';
-                DisplayLine += 'x';
-                DisplayLine += Hex[C >> 4];
-                DisplayLine += Hex[C & 0xF];
-                if (Col < P.Column) Indent += "    ";
+            if (Len > 1) {
+                // A validated multi-byte character: copy every byte of it
+                // raw, unescaped -- it is well-formed, printable Unicode.
+                // Like the original per-byte loop (#285), it contributes
+                // exactly one column/one indent space, matching the single
+                // terminal cell it renders as, whatever its byte length.
+                DisplayLine += Line.substr(I, Len);
+                if (Col < P.Column) Indent += ' ';
             } else {
-                DisplayLine += Line[I];
-                if (Col < P.Column) Indent += (Line[I] == '\t') ? '\t' : ' ';
+                const unsigned char C = static_cast<unsigned char>(Line[I]);
+                if ((C < 0x20 && C != '\t') || C == 0x7F || C >= 0x80) {
+                    static const char Hex[] = "0123456789abcdef";
+                    DisplayLine += '\\';
+                    DisplayLine += 'x';
+                    DisplayLine += Hex[C >> 4];
+                    DisplayLine += Hex[C & 0xF];
+                    if (Col < P.Column) Indent += "    ";
+                } else {
+                    DisplayLine += Line[I];
+                    if (Col < P.Column) Indent += (Line[I] == '\t') ? '\t' : ' ';
+                }
             }
+            I += Len;
             ++Col;
         }
         // P.Column can name a cell past the end of the line (an error at

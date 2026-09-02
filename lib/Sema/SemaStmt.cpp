@@ -853,13 +853,26 @@ Symbol* Sema::protectedBaseOf(const ExprNode& Target) {
     // again, for its own reason: see ParamGroup::IsConst's own comment
     // (AstType.h) for why it is a separate flag from IsProtected rather than
     // folded into it.
-    return (Sym && (Sym->IsProtected || Sym->IsConformantBound || Sym->IsConstParam))
+    // Issue #603: a Turbo typed constant (Symbol::IsTypedConst) is writable
+    // by default and refused only under {$J-} -- checkNotProtected below
+    // reads Switch::WritableConst (which needs Loc, not available here) to
+    // decide whether that refusal actually applies at this write site.
+    return (Sym && (Sym->IsProtected || Sym->IsConformantBound || Sym->IsConstParam
+                     || Sym->IsTypedConst))
         ? Sym : nullptr;
 }
 
 void Sema::checkNotProtected(const ExprNode& Target, SourceLocation Loc) {
     Symbol* Sym = protectedBaseOf(Target);
     if (!Sym) return;
+    if (Sym->IsTypedConst) {
+        // TP-only: {$J-} (Switch::WritableConst off) makes a typed constant
+        // truly immutable; the default {$J+} keeps TP7/FPC -Mtp's usual
+        // preinitialized-variable behavior, so no diagnostic fires then.
+        if (!Opts.switchOn(Switch::WritableConst, Loc))
+            error(Loc, diag::err_typed_const_not_writable, {Sym->Name});
+        return;
+    }
     if (Sym->IsConformantBound) {
         error(Loc, diag::err_conformant_bound_assigned, {Sym->Name});
         return;

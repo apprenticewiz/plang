@@ -230,6 +230,13 @@ BRACE_CHECK_EXEMPT = {
     # syntax in English the same way the switch-directive files above
     # already do.  Not a hazard to fix.
     "test/Driver/Turbo/comma-separated-multi-switch-directive-applies-every-switch.pas",
+    # Same reasoning again, for the issue #603 {$J-}/{$J+} typed-constant-
+    # writability fix: their header prose quotes the '{$J-}'/'{$J+}' switch
+    # directives themselves the same way the '{$I+}'/'{$I-}'/'{$R+}' entries
+    # above already do.  Not a hazard to fix.
+    "test/Sema/SemaTurboTypedConst/j-minus-makes-a-typed-constant-immutable.pas",
+    "test/Sema/SemaTurboTypedConst/j-plus-keeps-a-typed-constant-writable.pas",
+    "test/Sema/SemaTurboTypedConst/j-minus-then-j-plus-only-protects-the-const-declared-while-off.pas",
 }
 
 
@@ -434,7 +441,13 @@ def find_midline_directive_words(text: str):
 # ---------------------------------------------------------------------------
 
 def lint_file(path: str, checks: set[str]):
-    text = open(path, encoding="utf-8").read()
+    # errors="replace" rather than the default "strict": a lit test file is
+    # free to embed a byte that is not valid UTF-8 on purpose -- test/Driver/
+    # CaretDiagnostics's malformed-UTF-8 diagnostic-column regression test
+    # (issue #614) does exactly that -- and every check below is a line-
+    # oriented regex over the surrounding RUN/CHECK text, which does not care
+    # whether one unrelated byte decoded to U+FFFD instead of raising.
+    text = open(path, encoding="utf-8", errors="replace").read()
     rel = os.path.relpath(path, REPO_ROOT)
     out = []
 
