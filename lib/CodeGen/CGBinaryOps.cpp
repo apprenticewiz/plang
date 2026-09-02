@@ -576,6 +576,13 @@ llvm::Value* CGBinaryOps::emitBinary(const BinaryExpr& e) {
     auto* rv = EmitExpr(*e.Right);
     if (!lv || !rv) codegenICE("binary operator with an unlowerable operand");
 
+    // Issue #577 (reopened): Plus/Minus/Times need the ORIGINAL, un-narrowed
+    // operand values -- see the switch's Plus/Minus/Times arms below for why
+    // -- so they are captured here, before `lv`/`rv` are ever overwritten by
+    // needFP's ToDouble or the integer coercion block further down.
+    llvm::Value* const lvRaw = lv;
+    llvm::Value* const rvRaw = rv;
+
     // EP §6.8.3.2: complex arithmetic — intercept before the scalar path.
     if (lv->getType() == Complex.complexTy() || rv->getType() == Complex.complexTy()) {
         auto* lc = Complex.coerceToComplex(lv);
@@ -750,16 +757,70 @@ llvm::Value* CGBinaryOps::emitBinary(const BinaryExpr& e) {
         uns = !targetSigned;
     }
 
+    // Issue #577 (reopened) -- Plus/Minus/Times, integer case: computed at
+    // full i64 precision from the RAW operands (each widened per its OWN
+    // Sema-resolved signedness, exactly what Div/Mod's own `n`/`d` already
+    // do just below), NOT at `wide` -- the narrower, mutually-unified width
+    // the block above computed for comparisons/bitwise ops.  This is a
+    // deliberate divergence from that block, confirmed against extensive
+    // real `fpc -Mtp` sweeps (var+var, var+literal, stored, and inline/
+    // unstored, across every sized-integer width):
+    //
+    //   - fpc's own code generator never actually computes narrow-integer
+    //     arithmetic at the variables' declared width at all -- it always
+    //     widens to full register precision first, and ONLY narrows back
+    //     down when the result is STORED into a fixed-width l-value (a
+    //     variable, a value parameter, a typed constant) or otherwise
+    //     consumed by something that reads a specific width.  A bare
+    //     `Writeln(byteVar + byteVar2)` for two Byte(200) variables prints
+    //     400, not a wrapped 144 -- even though BOTH operands are ordinary
+    //     variables, no literal in sight.  `by3 := byteVar + byteVar2;
+    //     Writeln(by3)` DOES print 144, because the 8-bit STORE into by3
+    //     (not the addition itself) is what narrows it -- CGAssign's own
+    //     dstTy SExtOrTrunc/ZExtOrTrunc (CGAssign.cpp) already does exactly
+    //     that once this function hands back an i64 value wider than the
+    //     target, and StringCallMarshalling::emitCallArg's identical
+    //     CoerceToType does the same for a value-parameter actual.  Nothing
+    //     downstream needed to change for the STORED case to keep working;
+    //     the previous eager truncation done HERE was simply narrowing too
+    //     early, before any real consumer had a chance to ask for a
+    //     specific width.
+    //   - This also *automatically* resolves the reopened issue's first
+    //     confirmed bug (Byte/ShortInt still wrapping inconsistently between
+    //     var+var and var+literal): since neither operand shape reaches
+    //     `wide`'s width-unification at all anymore for Plus/Minus/Times,
+    //     there is no literal-vs-variable asymmetry left to go wrong -- both
+    //     shapes now take the identical "widen own operand to i64, add,
+    //     leave narrowing to whoever consumes the result" path.
+    //   - And it resolves the regression PR #756 introduced (a narrow
+    //     SIGNED type's overflowing INLINE-use expression, e.g. `ii := 32767;
+    //     Writeln(ii + 1)`, wrongly wrapping to -32768 where real fpc prints
+    //     32768): an unstored expression has no consumer to narrow it, so it
+    //     simply stays at i64 -- ToI64 (BuiltinIO's write-argument path,
+    //     already called on every write parameter) is then a true no-op,
+    //     matching fpc exactly.
+    //
+    // Comparisons and the Turbo bitwise and/or/xor/shl/shr operators below
+    // are UNCHANGED by this: they still read `lv`/`rv` (the `wide`-coerced
+    // values), since a comparison's correctness genuinely depends on the
+    // SAME-DECLARED-WIDTH mixed-sign unification issue #629/#630 fixed (see
+    // that block's own comment) -- widening a comparison operand further
+    // than necessary is always safe (it only ever adds unambiguous
+    // precision), but narrowing arithmetic's OWN result early, as this used
+    // to, is exactly what caused both bugs above.
     switch (e.Op) {
         case TokenKind::Plus:
             return needFP ? B.CreateFAdd(lv, rv, "fadd")
-                          : B.CreateAdd(lv, rv, "add");
+                          : B.CreateAdd(ToI64(lvRaw, operandIsSigned(*e.Left)),
+                                        ToI64(rvRaw, operandIsSigned(*e.Right)), "add");
         case TokenKind::Minus:
             return needFP ? B.CreateFSub(lv, rv, "fsub")
-                          : B.CreateSub(lv, rv, "sub");
+                          : B.CreateSub(ToI64(lvRaw, operandIsSigned(*e.Left)),
+                                        ToI64(rvRaw, operandIsSigned(*e.Right)), "sub");
         case TokenKind::Times:
             return needFP ? B.CreateFMul(lv, rv, "fmul")
-                          : B.CreateMul(lv, rv, "mul");
+                          : B.CreateMul(ToI64(lvRaw, operandIsSigned(*e.Left)),
+                                        ToI64(rvRaw, operandIsSigned(*e.Right)), "mul");
         case TokenKind::Divide:
             return B.CreateFDiv(ToDouble(lv), ToDouble(rv), "fdiv");
         case TokenKind::Div: {
