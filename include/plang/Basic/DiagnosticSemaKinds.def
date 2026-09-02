@@ -640,6 +640,15 @@ DIAG(err_inherited_no_ancestor, Error,
 // err_object_method_not_found just above.
 DIAG(err_inherited_method_not_found, Error,
      "ancestor of object type '%0' has no method '%1' for 'inherited' to reach")
+// Issue #574: 'inherited MethodName(...)' (or the bare form) resolves to a
+// STATIC call to the ancestor's own body (docs/turbo.md, "Object types") --
+// but an 'abstract' method has no body at all, only CodeGenProcs.cpp's
+// emitAbstractMethodStub, which unconditionally raises Runtime error 211.
+// Confirmed against a local fpc -Mtp build ("Abstract methods cannot be
+// called directly"): this is refused at COMPILE time, not deferred to
+// whichever run happens to execute the 'inherited' call.
+DIAG(err_inherited_abstract_method, Error,
+     "cannot call abstract method '%0.%1' via 'inherited'")
 // Issue #616: a bare 'inherited;' forwards THIS activation's own actual
 // parameter values, by position, straight into the resolved ancestor
 // method's own parameter list -- well-typed only when the two signatures
@@ -788,6 +797,29 @@ DIAG(err_new_object_needs_init, Error,
 // Pointee's own ancestor chain, but not one declared 'constructor'.
 DIAG(err_new_init_not_constructor, Error,
      "'%1' is not a constructor of object type '%0'")
+// Issue #622: 'p := New(PtrType[, Ctor[(args)]])' -- New's own FUNCTION
+// form (real Borland/FPC's "extended syntax", confirmed against a local
+// fpc -Mtp build). PtrType is a POINTER TYPE identifier, never a value and
+// never the pointee type alone ('New(TFoo)' for an unpointered object type
+// is refused too: "pointer type expected").
+DIAG(err_new_function_arg_not_pointer_type, Error,
+     "the function form of 'new' expects a pointer type as its argument, "
+     "got '%0'")
+// Issue #622: err_new_object_needs_init's function-form sibling -- the
+// same "wrong number of top-level arguments" shape, worded with the
+// function form's own call syntax rather than the statement form's.
+DIAG(err_new_function_object_needs_init, Error,
+     "the function form of 'new' for a pointer to object type '%0' needs a "
+     "constructor call, as in 'New(PtrType, Init(...))'")
+// Issue #622: an extra argument on the function form of 'new' is only ever
+// a constructor call, for a pointer to an OBJECT type -- unlike the
+// statement form, there is no confirmed real-world function-New idiom for
+// a schema (Extended Pascal, which has no function-New at all -- this
+// arm is Turbo-only) or a variant record's own case-constants, so both are
+// refused here with a clear diagnostic rather than silently mishandled.
+DIAG(err_new_function_extra_args, Error,
+     "the function form of 'new' takes an extra argument only for a "
+     "pointer to an object type (a constructor call), and '%0' is not one")
 // Turbo Tier 5, Cluster A item 6: 'dispose(p, Dtor)' mirrors
 // err_new_object_needs_init above.
 DIAG(err_dispose_object_needs_done, Error,

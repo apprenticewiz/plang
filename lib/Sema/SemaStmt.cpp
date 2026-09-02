@@ -2308,6 +2308,54 @@ void Sema::checkNewInit(const CallStmt& S, const Type& Pointee) {
     S.NewInitMethod = CtorName;
 }
 
+// Issue #622: see this method's own declaration (Sema.h) for the whole
+// design -- checkNewInit's sibling for New's FUNCTION form.
+void Sema::checkNewInitExpr(const CallExpr& E, const Type& Pointee) {
+    if (E.Args.size() != 2) {
+        error(E.Loc, diag::err_new_function_object_needs_init, {Pointee.Name});
+        for (size_t I = 1; I < E.Args.size(); ++I) (void)checkExpr(*E.Args[I]);
+        return;
+    }
+    std::string CtorName;
+    std::span<const std::unique_ptr<ExprNode>> CtorArgs;
+    if (!splitCtorDtorArg(*E.Args[1], CtorName, CtorArgs)) {
+        error(E.Args[1]->Loc, diag::err_new_function_object_needs_init, {Pointee.Name});
+        (void)checkExpr(*E.Args[1]);
+        return;
+    }
+
+    const Symbol* MethodSym = nullptr;
+    for (const Type* Cur = &Pointee; Cur; Cur = Cur->Parent.get()) {
+        Symbol* Sy = Symtab.lookup(objectMethodKey(Cur->Name, CtorName));
+        if (Sy && Sy->Kind == SymbolKind::Method) { MethodSym = Sy; break; }
+    }
+    if (!MethodSym) {
+        error(E.Args[1]->Loc, diag::err_object_method_not_found,
+              {Pointee.Name, CtorName});
+        for (const auto& A : CtorArgs) (void)checkExpr(*A);
+        return;
+    }
+    if (!MethodSym->IsMethodConstructor) {
+        error(E.Args[1]->Loc, diag::err_new_init_not_constructor,
+              {Pointee.Name, CtorName});
+        for (const auto& A : CtorArgs) (void)checkExpr(*A);
+        return;
+    }
+    if (MethodSym->IsMethodPrivate && MethodSym->Module != CurrentUnit_)
+        error(E.Args[1]->Loc, diag::err_object_private_method,
+              {MethodSym->MethodOwnerType, CtorName});
+
+    Symbol Indirect;
+    Indirect.Kind       = SymbolKind::Proc;
+    Indirect.Name       = MethodSym->MethodOwnerType + "." +
+                           (MethodSym->Decl ? MethodSym->Decl->Name : CtorName);
+    Indirect.IsFunction = MethodSym->IsFunction;
+    Indirect.Params     = MethodSym->Params;
+    Indirect.ReturnType = MethodSym->ReturnType;
+    (void)checkUserDefinedCall(Indirect, E.Args[1]->Loc, CtorArgs,
+                               /*ExpectFunction=*/false);
+}
+
 void Sema::checkDisposeDone(const CallStmt& S, const Type& Pointee) {
     if (S.Args.size() != 2) {
         error(S.Loc, diag::err_dispose_object_needs_done, {Pointee.Name});

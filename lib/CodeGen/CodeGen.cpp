@@ -284,6 +284,19 @@ bool Codegen::emitUnit(const UnitNode& Unit, std::ostream& os) {
     if (Unit.InterfaceBlock)
         for (const auto& Proc : Unit.InterfaceBlock->Procs)
             PImpl->emitFunctionDef(*Proc, /*declareOnly=*/true);
+    // Issue #618: an ABSTRACT method declared on an object type in this
+    // unit's own INTERFACE section (the ordinary place to declare one
+    // meant to be used from another translation unit) gets its real,
+    // defined trap-body stub here too -- emitAllProcedures's own identical
+    // pass, just below, only ever sees ImplementationBlock's own types, so
+    // without this call an interface-declared abstract method's stub was
+    // never emitted in this unit's own object file at all.  Before
+    // emitAllProcedures(ImplementationBlock), exactly like
+    // ensureAbstractStubsDefined's own comment (CodeGenImpl.h) explains: a
+    // method call inside THIS unit's own implementation body may already
+    // need this stub's mangled name to resolve.
+    if (Unit.InterfaceBlock)
+        PImpl->ensureAbstractStubsDefined(*Unit.InterfaceBlock);
     if (Unit.ImplementationBlock)
         PImpl->emitAllProcedures(*Unit.ImplementationBlock);
 

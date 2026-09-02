@@ -63,7 +63,9 @@ public:
                std::function<int64_t(const plang::ExprNode&)> ExprShortStrCap,
                std::function<llvm::GlobalVariable*(const plang::Type&)> GetOrCreateVmt,
                std::function<llvm::Function*(const plang::Type::Method&,
-                                             const std::string&)> DeclareForeignInheritedCallee)
+                                             const std::string&)> DeclareForeignInheritedCallee,
+               std::function<llvm::Value*(const plang::Type&,
+                                          const plang::ExprNode&)> EmitNewObjectValue)
         : Ctx(Ctx), Mod(Mod), B(B), RtFns(RtFns), Sets(Sets), Complex(Complex),
           FileVars(FileVars), Types(Types), Schema(Schema), Strings(Strings),
           StrCall(StrCall), Linkage(Linkage), SymTab(SymTab), ClosureAbi(ClosureAbi),
@@ -78,7 +80,8 @@ public:
           ExprCharStrLen(std::move(ExprCharStrLen)), ExprStrCapStatic(std::move(ExprStrCapStatic)),
           ExprIsShortStr(std::move(ExprIsShortStr)), ExprShortStrCap(std::move(ExprShortStrCap)),
           GetOrCreateVmt(std::move(GetOrCreateVmt)),
-          DeclareForeignInheritedCallee(std::move(DeclareForeignInheritedCallee)) {}
+          DeclareForeignInheritedCallee(std::move(DeclareForeignInheritedCallee)),
+          EmitNewObjectValue(std::move(EmitNewObjectValue)) {}
 
     llvm::Value* emitCallExpr(const plang::CallExpr& e);
     llvm::Value* emitUserFuncCall(const plang::CallExpr& e);
@@ -213,6 +216,18 @@ private:
     /// this class, unlike Impl itself, has no access to).
     std::function<llvm::Function*(const plang::Type::Method&,
                                   const std::string&)> DeclareForeignInheritedCallee;
+    /// Issue #622: New used as a FUNCTION with a constructor -- 'p :=
+    /// New(PtrType, Ctor[(args)])' (Args.size() > 1; the bare 'New(PtrType)'
+    /// form is handled directly in this file's own 'new' arm instead, since
+    /// -- like the statement form's own bare 'new(p)' -- it must NOT stamp a
+    /// '_vptr', issue #514's own policy).  Bridges to CGProcCall::
+    /// emitNewObjectValue (its own comment, CGProcCall.h, has the whole
+    /// design) exactly the way GetOrCreateVmt/DeclareForeignInheritedCallee
+    /// just above bridge to Impl-level logic this class has no direct
+    /// access to -- here, StampVptr/StampFieldVptrs/emitBoundMethodCall, all
+    /// private to CGProcCall.  The second argument is *Args[1].
+    std::function<llvm::Value*(const plang::Type&,
+                               const plang::ExprNode&)> EmitNewObjectValue;
 
     llvm::Constant* i64c(int64_t v) const {
         return llvm::ConstantInt::get(I64Ty, v, true);
