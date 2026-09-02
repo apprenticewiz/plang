@@ -421,6 +421,29 @@ VarGroup Parser::parseVarGroup() {
 // func-decl → 'function'  identifier param-list ':' type-expr ';' (block ';' | 'forward' ';')
 std::unique_ptr<ProcDecl> Parser::parseProcDecl(bool IsFunction,
                                                 bool HeadingOnly) {
+    // Issue #599: TypeNames_/VarNames_ (see their declarations in Parser.h)
+    // are flat, parser-wide sets that the cast-vs-call and set-constructor
+    // disambiguation in ParseExpr.cpp/ParseStmt.cpp/ParseInit.cpp consult.
+    // Every name this declaration's parameter list or local declaration part
+    // adds -- a parameter, a local type, or a local variable -- belongs only
+    // to this procedure/function's scope and must stop being visible once
+    // parsing leaves it; otherwise a local `T` permanently shadows (or
+    // wrongly unlocks) an outer cast-type name for the rest of the program.
+    // Snapshotting here and restoring via RAII on every exit path (forward
+    // declaration, heading-only interface declaration, or a full body) is
+    // the simplest way to make that hold without touching every return site.
+    struct NameScopeGuard {
+        Parser&                Parser_;
+        std::set<std::string>  SavedTypeNames;
+        std::set<std::string>  SavedVarNames;
+        explicit NameScopeGuard(Parser& P)
+            : Parser_(P), SavedTypeNames(P.TypeNames_), SavedVarNames(P.VarNames_) {}
+        ~NameScopeGuard() {
+            Parser_.TypeNames_ = std::move(SavedTypeNames);
+            Parser_.VarNames_  = std::move(SavedVarNames);
+        }
+    } NameGuard(*this);
+
     auto Node        = std::make_unique<ProcDecl>();
     Node->Loc        = Current;
     Node->IsFunction = IsFunction;

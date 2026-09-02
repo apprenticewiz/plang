@@ -146,9 +146,17 @@ PresumedLoc SourceManager::getPresumedLoc(SourceLocation Loc) const {
     // column of its own.  For an all-ASCII line (the common case) every
     // byte is a lead byte, so this counts exactly the same as the plain
     // `Off - Start` it replaces.
+    //
+    // Advances by whole VALIDATED sequences (#614), not by classifying each
+    // byte on its own: an isolated/malformed continuation byte with no valid
+    // lead byte before it is not part of any character and must occupy a
+    // display cell of its own, or every column after it comes out one too
+    // low.
     unsigned Column = 1;
-    for (unsigned I = Start; I < Off; ++I)
-        if (!isUtf8ContinuationByte(B->Text[I])) ++Column;
+    for (unsigned I = Start; I < Off; ++Column) {
+        const unsigned Len = utf8SequenceLength(B->Text, I);
+        I += Len;
+    }
 
     return PresumedLoc{ B->Name, static_cast<unsigned>(Idx) + 1, Column };
 }

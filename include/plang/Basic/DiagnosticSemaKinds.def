@@ -1279,6 +1279,17 @@ DIAG(err_val_argument, Error,
 // ParamGroup::IsConst's own comment (AstType.h) for why the two are kept
 // separate rather than merged.
 DIAG(err_const_param_assigned, Error, "assignment to const parameter '%0'")
+// TP-only, issue #603: a typed constant (`const X: T = ...`) is writable by
+// default (`{$J+}`, Switch::WritableConst's own default in
+// CompilerSwitches.def), matching TP7/FPC -Mtp's convention that a typed
+// const behaves like a preinitialized variable unless the program opts into
+// making it truly constant with `{$J-}`.  Symbol::IsTypedConst's own comment
+// explains why this is a Var, not a Const, so this diagnostic -- fired only
+// when WritableConst is off at the assignment's own location -- is the one
+// place that actually enforces the switch; wording matches FPC -Mtp's own
+// "Can't assign values to const variable".
+DIAG(err_typed_const_not_writable, Error,
+     "can't assign values to const variable '%0'")
 // TP-only: Turbo's UNTYPED parameter (procedure P(var x), no ': type' at
 // all).  Sema::checkIdent gives this whenever one is used bare -- as a
 // plain value, a field/index base, an actual for a TYPED formal, and so on
