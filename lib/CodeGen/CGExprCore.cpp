@@ -529,7 +529,18 @@ llvm::Value* CGExprCore::emitTypeCastValue(const TypeCastExpr& n) {
         // test assumes an integer operand.
         if (dstLlvmTy->isIntegerTy(1) && srcVal->getType()->isIntegerTy())
             return EnsureI1(srcVal);
-        return CoerceToType(srcVal, dstLlvmTy, exprIsSigned(*n.Operand));
+        // Issue #642: a loose ByteBool/WordBool/LongBool operand
+        // (Type::IsLooseBool) widening into a wider integer destination --
+        // e.g. `LongInt(WordBool(40000))` -- has to SIGN-extend its raw
+        // storage bits, matching real `fpc -Mtp` (confirmed empirically:
+        // `LongInt(WordBool(40000))` prints -25536, WordBool's stored 0x9C40
+        // read as a signed i16), even though SrcTy->IsSigned is deliberately
+        // false for this family (TypeContext::getLooseBoolean's own comment
+        // -- required so `<`/`>` between two loose Booleans compares their
+        // UNSIGNED magnitude, also matching fpc). exprIsSigned(*n.Operand)
+        // alone would zero-extend here, so a loose-bool source overrides it.
+        const bool srcIsLooseBool = SrcTy && SrcTy->IsLooseBool;
+        return CoerceToType(srcVal, dstLlvmTy, srcIsLooseBool || exprIsSigned(*n.Operand));
     }
     // Not both ordinal-or-real: Sema only accepts this when the two types
     // are exactly the same size, so it is a VARIABLE-style reinterpretation

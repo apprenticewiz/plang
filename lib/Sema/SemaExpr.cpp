@@ -4299,6 +4299,26 @@ bool Sema::isAssignCompatible(const Type& Dst, const Type& Src,
             // Pointer is untyped and no domain check applies to it at all.
             case TypeKind::Pointer:
                 if (!Dst.PointeeType || !Src.PointeeType) return true;
+                // Issue #702: `@buf` for a whole zero-based char array
+                // (`buf: array[0..N] of Char`) is ALSO Dst.Kind==Src.Kind==
+                // Pointer (the '@' operator's own Ctx_.getPointer(T) result,
+                // checkUnary's At case above), so it reaches this switch
+                // arm rather than the isCharPointerType(Src)-gated rule
+                // further down this function (which only ever sees a
+                // Pointer/non-Pointer pairing, never two Pointers) -- see
+                // that rule's own comment for the fpc-confirmed field
+                // practice this mirrors one level down.  Checked ahead of
+                // isIdenticalType, which would otherwise say no (Char and
+                // the array type are not the same PointeeType) and return
+                // false outright before ever reaching the other rule.
+                if (Opts.turbo() && isCharPointerType(Dst)
+                        && Src.PointeeType->Kind == TypeKind::Array
+                        && Src.PointeeType->ElemType
+                        && Src.PointeeType->ElemType->Kind == TypeKind::Char
+                        && Src.PointeeType->IndexType
+                        && Src.PointeeType->IndexType->Kind == TypeKind::Subrange
+                        && Src.PointeeType->IndexType->SubLo == 0)
+                    return true;
                 // Turbo Tier 5, Cluster A item 7: a POINTER to a descendant
                 // object type is assignment-compatible with an ancestor-
                 // typed pointer -- see objectIsOrDescendsFrom's own comment
@@ -4443,6 +4463,23 @@ bool Sema::isAssignCompatible(const Type& Dst, const Type& Src,
             && Src.IndexType && Src.IndexType->Kind == TypeKind::Subrange
             && Src.IndexType->SubLo == 0)
         return true;
+    // Issue #702: a plain string LITERAL ('HELLO', typed String/TyStr just
+    // like every other non-EP multi-char literal -- see checkExpr's
+    // StringLitExpr arm above) decays to PChar too, the single most common
+    // way a PChar-taking call (StrComp/StrCopy/... from the Strings unit) is
+    // actually written -- confirmed against real `fpc -Mtp`, which accepts
+    // `StrComp(p, 'HELLO')` outright.  Deliberately does not touch Dst's
+    // arms above keyed on Src.Kind==String (isShortStringLike/isCharStringType
+    // /Char): those all read the literal as a STRING value, this one reads
+    // it as an ADDRESS, and only makes sense for a PChar-like Dst.
+    if (Opts.turbo() && isCharPointerType(Dst) && Src.Kind == TypeKind::String)
+        return true;
+    // `@buf` for a whole zero-based char array (issue #702) is ALSO
+    // Dst.Kind==Src.Kind==Pointer, so it is handled inside the
+    // `Dst.Kind == Src.Kind` switch's own Pointer case far above, not here
+    // -- see that arm's comment.  Nothing reaches this point with
+    // Src.Kind==Pointer at all (this function already returned, one way or
+    // the other, from inside that switch).
     return false;
 }
 

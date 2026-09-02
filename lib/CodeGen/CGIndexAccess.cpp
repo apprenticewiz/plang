@@ -240,8 +240,12 @@ llvm::Value* CGIndexAccess::emitIndexGEP(const IndexExpr& e) {
             RangeGuards.emitGuard(bad, "sstrbounds", [&] {
                 B.CreateCall(
                     RtFns.getExternFnN("plang_err_str_index",
-                                 llvm::Type::getVoidTy(Ctx), {I64Ty, I64Ty}),
-                    {idx, llvm::ConstantInt::get(I64Ty, cap)});
+                                 llvm::Type::getVoidTy(Ctx), {I64Ty, I64Ty, I64Ty}),
+                    // Issue #643: Lo=0 -- a Turbo ShortString's s[0] is the
+                    // legal length-byte alias (this arm's own comment above),
+                    // so the reported range has to say 0, not EP's 1.
+                    {idx, llvm::ConstantInt::get(I64Ty, 0),
+                     llvm::ConstantInt::get(I64Ty, cap)});
             });
         }
         // Byte offset 0 is the one-byte length prefix, offset 1..cap is
@@ -272,8 +276,8 @@ llvm::Value* CGIndexAccess::emitIndexGEP(const IndexExpr& e) {
             RangeGuards.emitGuard(bad, "strbounds", [&] {
                 B.CreateCall(
                     RtFns.getExternFnN("plang_err_str_index",
-                                 llvm::Type::getVoidTy(Ctx), {I64Ty, I64Ty}),
-                    {idx, len});
+                                 llvm::Type::getVoidTy(Ctx), {I64Ty, I64Ty, I64Ty}),
+                    {idx, one, len});
             });
         }
         auto* zeroBased = B.CreateSub(idx,

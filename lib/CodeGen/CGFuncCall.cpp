@@ -398,7 +398,16 @@ llvm::Value* CGFuncCall::emitBuiltinCall(const std::string& Name,
         // just below already consult via ToI64 -- correctly zero-extending
         // Char/Boolean/Enum/Turbo's unsigned rungs (Byte/Word/Cardinal/
         // LongWord/QWord), and sign-extending only the signed ones.
-        return ToI64(EmitExpr(*Args[0]), exprIsSigned(*Args[0]));
+        //
+        // Issue #642: a loose ByteBool/WordBool/LongBool argument
+        // (Type::IsLooseBool) is the one more exception -- `Ord(ByteBool
+        // (200))` sign-extends its raw stored byte (0xC8) to -56, matching
+        // real `fpc -Mtp`, even though the family's own IsSigned is
+        // deliberately false (see CGExprCore::emitTypeCastValue's identical
+        // override, and TypeContext::getLooseBoolean's comment for why
+        // IsSigned has to stay false for `<`/`>` to compare unsigned).
+        const bool argIsLooseBool = Args[0]->ResolvedType && Args[0]->ResolvedType->IsLooseBool;
+        return ToI64(EmitExpr(*Args[0]), argIsLooseBool || exprIsSigned(*Args[0]));
     }
     if (lo == "chr") {
         // ISO §6.6.6.4: chr(x) yields the value whose ordinal number is x,
