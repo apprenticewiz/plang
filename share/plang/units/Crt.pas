@@ -201,6 +201,9 @@ begin
   end;
   CursorX := 1;
   CursorY := 1;
+  CrtSyncCursor(CursorX, CursorY); { issue #704 -- keep the tracked cursor
+    (WhereX/WhereY's own source of truth for ordinary Write output, see
+    runtime/plang_io.cpp) in sync with this explicit move. }
 end;
 
 procedure ClrEol;
@@ -226,21 +229,30 @@ begin
   if (X < 1) or (Y < 1) or (X > WindowWidth) or (Y > WindowHeight) then Exit;
   CursorX := X;
   CursorY := Y;
+  CrtSyncCursor(CursorX, CursorY); { issue #704 -- see ClrScr's own comment }
   AbsX := (WindMin and $FF) + X;
   AbsY := (WindMin shr 8) + Y;
   Write(Chr(27), '[', AbsY, ';', AbsX, 'H');
 end;
 
+// Issue #704: an ordinary Write/Writeln also moves the real cursor, which
+// GotoXY/ClrScr's own CursorX/CursorY (this unit's own private state, set
+// only by an explicit move) cannot see -- CrtTrackedX/CrtTrackedY read the
+// runtime's own tracked column/row instead (runtime/plang_io.cpp), which
+// GotoXY/ClrScr resync via CrtSyncCursor above and ordinary output advances
+// on its own.  See both builtins' own comment (Builtins.def) for why this
+// needs new, deliberately-obscure internal builtins rather than being pure
+// Pascal the way the rest of this unit is.
 function WhereX: Byte;
 begin
   EnsureInit;
-  WhereX := CursorX;
+  WhereX := CrtTrackedX();
 end;
 
 function WhereY: Byte;
 begin
   EnsureInit;
-  WhereY := CursorY;
+  WhereY := CrtTrackedY();
 end;
 
 procedure TextColor(Color: Byte);

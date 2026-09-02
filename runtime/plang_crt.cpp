@@ -20,6 +20,7 @@
 /// already uses one layer up.
 
 #include <cerrno>
+#include <csignal>
 #include <cstdint>
 #include <cstdlib>
 #include <ctime>
@@ -58,6 +59,54 @@ void restoreTerminalAtExit() {
     }
 }
 
+/// Issue #703: restoreTerminalAtExit above only runs on a NORMAL exit
+/// (returning from main, exit()/Halt, or RunError's own exit(201) --
+/// anything that reaches atexit's own handler list at all).  A fatal signal
+/// whose disposition is left at SIG_DFL (SIGINT/SIGTERM/SIGHUP -- Ctrl-C, a
+/// plain `kill`, or the controlling terminal going away) terminates the
+/// process WITHOUT running atexit handlers at all, so a program that was in
+/// the middle of ReadKey/KeyPressed's own raw mode left the user's shell
+/// with ICANON/ECHO off afterward.  This handler restores the terminal
+/// first, then re-arms the signal's own default disposition and re-raises
+/// it, rather than calling exit()/_exit() itself: that keeps this process's
+/// own exit status, core-dump behavior, and any process-group/job-control
+/// signal propagation exactly what a normal, un-caught death by this same
+/// signal would have produced (the well-established "restore state, then
+/// re-raise with SIG_DFL" pattern real terminal-mode programs -- readline,
+/// ncurses' own endwin-on-signal idiom -- use for exactly this reason,
+/// rather than translating the signal into some ad hoc exit code of this
+/// program's own invention).
+///
+/// tcsetattr is not on POSIX's own async-signal-safe function list, but
+/// this is the same accepted, long-standing real-world practice those same
+/// libraries use: the alternative -- doing nothing here -- is a strictly
+/// worse, GUARANTEED-corrupted terminal on every single one of these
+/// signals, not a theoretical risk against a real one.
+extern "C" void restoreTerminalOnFatalSignal(int Sig) {
+    if (RawModeActive) {
+        tcsetattr(STDIN_FILENO, TCSANOW, &SavedTermios);
+        RawModeActive = false;
+    }
+    std::signal(Sig, SIG_DFL);
+    std::raise(Sig);
+}
+
+/// Installs restoreTerminalOnFatalSignal for the fatal, default-terminates
+/// signals a Crt program in raw mode can realistically receive.  Called
+/// once, from ensureRawMode below, at the same "first call that actually
+/// enters raw mode" point restoreTerminalAtExit's own atexit registration
+/// already uses -- a program that never enters raw mode never left the
+/// terminal in a state that needs restoring, so it has nothing for these
+/// handlers to do either.
+void installFatalSignalHandlers() {
+    static bool Installed = false;
+    if (Installed) return;
+    Installed = true;
+    std::signal(SIGINT,  restoreTerminalOnFatalSignal);
+    std::signal(SIGTERM, restoreTerminalOnFatalSignal);
+    std::signal(SIGHUP,  restoreTerminalOnFatalSignal);
+}
+
 /// Puts stdin into the mode real ReadKey/KeyPressed need: no line buffering
 /// (ICANON off, so a byte is available as soon as it is typed, not only
 /// after Enter) and no local echo (ECHO off, so the typed character is not
@@ -82,6 +131,7 @@ void ensureRawMode() {
     if (::tcsetattr(STDIN_FILENO, TCSANOW, &Raw) == 0) {
         RawModeActive = true;
         std::atexit(restoreTerminalAtExit);
+        installFatalSignalHandlers(); // issue #703
     }
 }
 

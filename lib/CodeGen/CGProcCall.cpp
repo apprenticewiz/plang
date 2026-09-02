@@ -462,6 +462,20 @@ void CGProcCall::emitCallStmt(const CallStmt& s) {
         return;
     }
 
+    // Issue #704: see Builtins.def's own comment on CrtSyncCursor/
+    // CrtTrackedX/CrtTrackedY for why these three internal-only builtins
+    // exist.  Crt.pas's GotoXY/ClrScr call this with the window-relative
+    // X/Y they already computed, to resync the runtime's own tracked
+    // cursor -- the same widening every other small-integer builtin
+    // argument gets (see Delay's own ms just above).
+    if (lo == "crtsynccursor" && s.Args.size() == 2) {
+        auto* x = ToI64(EmitExpr(*s.Args[0]), exprIsSigned(*s.Args[0]));
+        auto* y = ToI64(EmitExpr(*s.Args[1]), exprIsSigned(*s.Args[1]));
+        B.CreateCall(RtFns.getExternFnN("plang_crt_sync_cursor",
+            llvm::Type::getVoidTy(Ctx), {I64Ty, I64Ty}), {x, y});
+        return;
+    }
+
     // ISO §6.7.5.4 transfer procedures.
     if ((lo == "pack" || lo == "unpack") && s.Args.size() == 3) {
         PackUnpack.emitPackUnpack(s, /*isPack=*/lo == "pack");

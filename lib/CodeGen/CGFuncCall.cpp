@@ -949,6 +949,18 @@ llvm::Value* CGFuncCall::emitBuiltinCall(const std::string& Name,
         return B.CreateCall(fn, {}, "readkey");
     }
 
+    // Issue #704: see Builtins.def's own comment on CrtSyncCursor/
+    // CrtTrackedX/CrtTrackedY -- these back Crt.pas's own WhereX/WhereY,
+    // reading the runtime's tracked cursor column/row back.
+    if (lo == "crttrackedx") {
+        auto* fn = RtFns.getExternFnN("plang_crt_tracked_x", I64Ty, {});
+        return B.CreateCall(fn, {}, "crttrackedx");
+    }
+    if (lo == "crttrackedy") {
+        auto* fn = RtFns.getExternFnN("plang_crt_tracked_y", I64Ty, {});
+        return B.CreateCall(fn, {}, "crttrackedy");
+    }
+
     // Every Func-kind row in Builtins.def has a named arm above; reaching
     // here means ResolvedBuiltin was set to a spelling none of them matched,
     // which should not happen.  nullptr, not codegenICE: emitCallExpr's own

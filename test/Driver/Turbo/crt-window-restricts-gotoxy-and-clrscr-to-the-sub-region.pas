@@ -11,16 +11,29 @@ here is short of column 80 -- clears only to the window's own right edge,
 also via ESC[<n>X, rather than ESC[K (which would clear to the REAL
 terminal's line end, past the window).
 
+Issue #704: WhereX/WhereY now also track ordinary Write/Writeln output (not
+just GotoXY/ClrScr), so the WindMin/WindMax Writeln just below -- 14
+characters, written from the window-relative position Window()'s own
+trailing GotoXY(1,1) set -- itself moves the tracked cursor before the
+explicit GotoXY(1, 1) right after it resyncs back to (1,1); WhereX/WhereY
+are read into locals immediately after THAT (nothing written in between),
+so this checks the resync lands on the window-relative (1,1) Window()
+itself asks for, not the absolute (10,5) the real terminal was actually
+sent -- the whole point of "every coordinate is WINDOW-relative" above.
+
 RUN: %plang -std=turbo %s -o %t
 RUN: %run %t | tr '\033' 'E' | FileCheck %s
 *)
 program WindowSubRegion;
 uses Crt;
+var
+  X, Y: Byte;
 begin
   Window(10, 5, 20, 8); { 11 columns x 4 rows, origin (10,5) }
   Writeln('win=', WindMin, ',', WindMax);
   GotoXY(1, 1);
-  Writeln('at ', WhereX, ',', WhereY);
+  X := WhereX; Y := WhereY;
+  Writeln('at ', X, ',', Y);
   ClrEol;
 end.
 (*
