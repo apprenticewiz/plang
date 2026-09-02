@@ -788,13 +788,29 @@ void plang_tp_assign(PascalFile *F, const char *Name) {
 /// plang_tp_rewrite already uses for its own write-only stream -- and 2
 /// (both directions) for FileMode 2, the same value plang_extend/
 /// plang_update already use for their own "r+b" streams.
+///
+/// Issue #667: a TEXT file's Reset ignores FileMode entirely and always
+/// opens read-only -- confirmed against `fpc -Mtp`: a `text` Reset under
+/// FileMode 1 or 2 alike still reports IOResult 105 ("file not open for
+/// output") on a following Write, exactly as FileMode 0 does, while a
+/// typed/untyped file's Reset honors FileMode as this function's own top
+/// comment documents. EffectiveFileMode substitutes a forced 0 in for
+/// plang_tp_filemode whenever F->RecSize is still 0 -- the same "has the
+/// _sized wrapper touched this file" signal plang_tp_rewrite/
+/// plang_eof_file_turbo use for the identical text-vs-typed/untyped
+/// distinction (see their own comments): F->RecSize is set by
+/// plang_tp_reset_sized BEFORE it calls this function for a typed/untyped
+/// file, and never touched at all for a `text`, whose Reset always reaches
+/// this function directly with no _sized wrapper in between.
 void plang_tp_reset(PascalFile *F) {
     closeStream(F);
+    const int16_t EffectiveFileMode =
+        (F->RecSize > 0) ? plang_tp_filemode : (int16_t)0;
     if (F->Name[0] == '\0') {
         F->Fp      = stdin;
         F->Binding = PlangBindStd;
         F->Readable = 1;
-    } else if (plang_tp_filemode == 1) {
+    } else if (EffectiveFileMode == 1) {
         // Write-only: no fopen(3) mode string opens for write without also
         // creating or truncating, so this drops to the raw POSIX open().
         const int Fd = ::open(F->Name, O_WRONLY);
@@ -822,7 +838,7 @@ void plang_tp_reset(PascalFile *F) {
         // -- and anything else out-of-range collapses to the same read-write
         // handling FileMode 2 gets, the closest honest match with no `fpc
         // -Mtp` field practice to confirm a different fallback against.
-        const bool ReadWrite = plang_tp_filemode != 0;
+        const bool ReadWrite = EffectiveFileMode != 0;
         F->Fp = std::fopen(F->Name, ReadWrite ? "r+" : "r");
         if (!F->Fp) {
             const int Err = errno; // captured before anything else can clobber it
@@ -853,21 +869,40 @@ void plang_tp_reset(PascalFile *F) {
 
 /// TP Rewrite(f): creates/truncates F->Name for writing, or -- for an empty
 /// bound name -- attaches F to stdout.
+///
+/// Issue #668: real Turbo Pascal/`fpc -Mtp` opens a typed or untyped file's
+/// Rewrite for reading as well as writing -- confirmed empirically:
+/// Write/Seek(0)/Read against a freshly Rewrite-opened typed file succeeds
+/// under `fpc -Mtp` for FileMode 0/1/2 alike (Rewrite, like Reset's own
+/// FileMode-0 arm, does not truncate the read side away -- this is not
+/// FileMode-conditioned at all, fpc's Rewrite opens O_RDWR unconditionally).
+/// A `text` file gets no such read-back capability: `fpc -Mtp` itself
+/// refuses to compile Seek/BlockRead/Read against a Text argument ("Got
+/// Text expected File"), so there is no way a real Turbo program could ever
+/// exercise it, and this keeps a text Rewrite's existing write-only "w"
+/// open exactly as before. F->RecSize > 0 is the same "has the _sized
+/// wrapper already run" text-vs-typed/untyped signal plang_tp_reset/
+/// plang_eof_file_turbo use (see their own comments): plang_tp_rewrite_sized
+/// sets it BEFORE calling this function for a typed/untyped file, and a
+/// `text` Rewrite -- which always reaches this function directly, with no
+/// _sized wrapper in between -- never touches it at all.
 void plang_tp_rewrite(PascalFile *F) {
     closeStream(F);
+    const bool ReadWrite = F->RecSize > 0;
     if (F->Name[0] == '\0') {
-        F->Fp      = stdout;
-        F->Binding = PlangBindStd;
+        F->Fp       = stdout;
+        F->Binding  = PlangBindStd;
+        F->Readable = 0;
     } else {
-        F->Fp = std::fopen(F->Name, "w");
+        F->Fp = std::fopen(F->Name, ReadWrite ? "w+" : "w");
         if (!F->Fp) {
             const int Err = errno;
             setInOutResIfClear(plang_tp_posix_to_run_error(Err));
             return;
         }
+        F->Readable = ReadWrite ? 2 : 0;
     }
     F->Buf      = PlangFileUninit;
-    F->Readable = 0;
     F->Mode     = PlangFmOutput;
     unloadComponent(F);
 }
@@ -1299,6 +1334,19 @@ int8_t plang_eof_file_turbo(PascalFile *F) {
     // §6.6.5.2: rewrite(f) leaves eof(f) true, and it stays true for as long
     // as f is being generated -- see plang_eof_file's identical comment.
     if (!F->Readable) return 1;
+    // Issue #669: a typed/untyped file's eof is RECORD-wise, FilePos >=
+    // FileSize -- confirmed against `fpc -Mtp`: a 13-byte file of 4-byte
+    // records reports eof TRUE after the 3rd record (floor(12/4) ==
+    // floor(13/4) == 3), not FALSE the way a raw BYTE position compare
+    // would answer, fooled by the trailing partial record's stray byte --
+    // rather than a single byte peeked ahead the way a text file's
+    // line-oriented lookahead window answers this below. Reuses
+    // plang_tp_filepos/plang_tp_filesize just above rather than
+    // re-deriving their identical ftell/fseek-around-SEEK_END dance here;
+    // F->RecSize > 0 is the same text-vs-typed/untyped signal
+    // plang_tp_reset/plang_tp_rewrite use (see their own comments).
+    if (F->RecSize > 0)
+        return (plang_tp_filepos(F) >= plang_tp_filesize(F)) ? 1 : 0;
     ensurePrimed(F);
     return (F->Buf == EOF) ? 1 : 0;
 }
@@ -1307,7 +1355,12 @@ int8_t plang_eoln_file_turbo(PascalFile *F) {
     if (plang_tp_inoutres != 0) return 1;
     if (!tpFileReady(F, "eoln")) return 1;
     ensurePrimed(F);
-    return (F->Buf == EOF || F->Buf == '\n') ? 1 : 0;
+    // Issue #662: real Turbo Pascal/`fpc -Mtp` treats a bare CR as a line
+    // marker too, not just LF -- confirmed empirically (Eoln reports TRUE
+    // sitting on either byte of a CRLF pair, and on a lone CR in a bare-CR
+    // file) -- unlike plang_eoln_file's ISO/EP twin just above, which is
+    // correctly LF-only for that dialect's own §6.4.3.5 line-marker model.
+    return (F->Buf == EOF || F->Buf == '\n' || F->Buf == '\r') ? 1 : 0;
 }
 
 // -std=turbo only: SeekEof(f) / SeekEoln(f) -- Cluster C item 6.  Real
@@ -1348,7 +1401,9 @@ int8_t plang_tp_seekeoln(PascalFile *F) {
     if (!tpFileReady(F, "SeekEoln")) return 1;
     if (!F->Readable) return 1;
     skipTurboWhitespace(F, /*CrossLines=*/false);
-    return (F->Buf == EOF || F->Buf == '\n') ? 1 : 0;
+    // Issue #662: CR is a line marker too -- see plang_eoln_file_turbo's
+    // identical note just above.
+    return (F->Buf == EOF || F->Buf == '\n' || F->Buf == '\r') ? 1 : 0;
 }
 
 // ---- advance / flush ----
@@ -1459,11 +1514,26 @@ void plang_readln_file(PascalFile *F) {
 // -std=turbo only: the fileReady twin of plang_readln_file just above --
 // Readln is an ALL-dialect builtin (Builtins.def), so this is genuinely
 // shared with ISO/EP and needs its own `_turbo` entry point.
+//
+// Issue #662: real Turbo Pascal/`fpc -Mtp` treats a bare CR as a line
+// marker too, and a CRLF pair as ONE marker, not two -- confirmed
+// empirically: Readln against a CRLF-terminated line consumes both bytes,
+// and against a bare-CR-terminated line consumes just the CR, either way
+// leaving the following line's first byte in place for the next read. So
+// this stops scanning at CR same as LF, then -- unlike the plain LF case,
+// which only ever needs to consume the one byte -- consumes a CR and, only
+// if one immediately follows it, the paired LF too; a lone CR (no
+// following LF) consumes just itself.
 void plang_readln_file_turbo(PascalFile *F) {
     if (!tpFileReady(F, "readln")) return;
     ensurePrimed(F);
-    while (F->Buf != EOF && F->Buf != '\n') advance(F);
-    if (F->Buf == '\n') advance(F);
+    while (F->Buf != EOF && F->Buf != '\n' && F->Buf != '\r') advance(F);
+    if (F->Buf == '\r') {
+        advance(F);
+        if (F->Buf == '\n') advance(F);
+    } else if (F->Buf == '\n') {
+        advance(F);
+    }
     unloadComponent(F);
 }
 
@@ -1478,11 +1548,22 @@ void plang_writeln_file(PascalFile *F) {
 // called by BuiltinIO.cpp both for a bare `writeln(f)` and as the trailing
 // newline after every `write(f, ...)`/`writeln(f, ...)` value, so this is
 // one of the most heavily exercised `_turbo` siblings in this file.
+//
+// Issue #667 fallout: this used to call the ISO/EP-only, UNCONDITIONALLY
+// ABORTING trapOnWrongDirection/trapOnStreamError instead of this file's
+// own non-aborting tpTrapOnWrongDirection/tpTrapOnStreamError -- every
+// other `_turbo` writer in this file already gets the checked pair (see
+// e.g. plang_write_file_char_turbo just below), so this was the one
+// outlier. Latent before #667 (a text Reset under FileMode 1 used to open
+// write-only, so a following Writeln never hit the wrong-direction case at
+// all), it became live once #667 made a text Reset always open read-only
+// regardless of FileMode: a `{$I-} Writeln(t, ...)` against such a file
+// must set InOutRes 105, matching `fpc -Mtp`, not abort the whole process.
 void plang_writeln_file_turbo(PascalFile *F) {
     if (!tpFileReady(F, "writeln")) return;
-    trapOnWrongDirection(F, "writeln", 1);
+    tpTrapOnWrongDirection(F, 1);
     std::fputc('\n', F->Fp);
-    trapOnStreamError(F, "writeln");
+    tpTrapOnStreamError(F, 1);
 }
 
 void plang_page_file(PascalFile *F) {
@@ -1732,6 +1813,14 @@ void plang_read_file_char(PascalFile *F, int8_t *P) {
 // the numeric _i64/_f64/_u64 suffix swap skips char), so this exists purely
 // for the fileReady/InOutRes choke point this item adds, not for a second
 // parsing rule.
+//
+// Issue #662: unlike plang_read_file_char just above, this does NOT apply
+// ISO §6.4.3.5's line-marker-as-space substitution -- confirmed against
+// `fpc -Mtp`: reading a byte positioned on a line marker returns the RAW
+// byte (10 for LF, 13 for CR), not a space. Real Turbo Pascal's Text has no
+// abstract "line marker" of its own the way ISO's f^ does; every byte the
+// underlying file holds, including CR and LF, is a character read can
+// return.
 void plang_read_file_char_turbo(PascalFile *F, int8_t *P) {
     if (!tpFileReady(F, "read")) { *P = 0; return; }
     tpTrapOnWrongDirection(F, 0);
@@ -1739,7 +1828,7 @@ void plang_read_file_char_turbo(PascalFile *F, int8_t *P) {
     if (F->Buf == EOF) { *P = 0; return; }
     const int C = advance(F);
     tpTrapOnStreamError(F, 0);
-    *P = static_cast<int8_t>(C == '\n' ? ' ' : C);
+    *P = static_cast<int8_t>(C);
     unloadComponent(F);
 }
 
@@ -1896,7 +1985,13 @@ void plang_str_read_fixed_file_turbo(PascalFile *F, void *Buf, int64_t N) {
     int64_t Len = 0;
     tpTrapOnWrongDirection(F, 0);
     ensurePrimed(F);
-    while (F->Buf != EOF && F->Buf != '\n') {
+    // Issue #662: stop at a bare CR too, not just LF -- see
+    // plang_readln_file_turbo's own comment on Turbo's CR-as-line-marker
+    // field practice. The terminator (CR, LF, or an unpaired CR) is left in
+    // the lookahead either way, exactly as the plain-LF case already did --
+    // this function's own top comment's "matching readln consumes exactly
+    // one line" convention.
+    while (F->Buf != EOF && F->Buf != '\n' && F->Buf != '\r') {
         const int C = advance(F);
         tpTrapOnStreamError(F, 0);
         if (Len < N) Data[Len] = static_cast<char>(C);
@@ -2066,7 +2161,11 @@ void plang_sstr_read_file(PascalFile *F, void *S, int64_t Cap) {
     const int64_t ECap = Cap < 255 ? Cap : 255;
     tpTrapOnWrongDirection(F, 0);
     ensurePrimed(F);
-    while (F->Buf != EOF && F->Buf != '\n') {
+    // Issue #662: stop at a bare CR too, not just LF -- see
+    // plang_readln_file_turbo's own comment on Turbo's CR-as-line-marker
+    // field practice; the terminator stays in the lookahead either way,
+    // exactly as this function's own top comment describes.
+    while (F->Buf != EOF && F->Buf != '\n' && F->Buf != '\r') {
         const int C = advance(F);
         tpTrapOnStreamError(F, 0);
         if (Len < ECap) Data[Len++] = static_cast<char>(C);
@@ -2387,10 +2486,11 @@ void plang_read_binary(PascalFile *F, void *Buf, int64_t ElemSize) {
 //
 // Tier 3 Cluster C item 5 audit: prime()/unloadComponent() here are NOT both
 // the same thing.  prime() is NOT ISO's f^ buffer-variable bookkeeping in
-// disguise -- it also drives plang_eof_file_turbo (this file, "eof reads the
-// window" comment on plang_read_binary above applies here too: eof(f) under
-// -std=turbo peeks one byte/char ahead via F->Buf exactly the way ISO/EP's
-// does), so it stays.  unloadComponent(), on the other hand, only resets
+// disguise -- it keeps F->Buf's window valid the way every other file-I/O
+// entry point here does (issue #669's fix moved plang_eof_file_turbo's own
+// typed-file answer off F->Buf and onto a record-wise FilePos/FileSize
+// comparison instead, but F->Buf is still read by other, non-eof call
+// sites), so it stays.  unloadComponent(), on the other hand, only resets
 // F->CompLoaded, which nothing under Turbo ever reads again: F->Comp/
 // CompLoaded exist solely to back f^ (plang_file_buffer, FileVarHelpers.cpp
 // fileBufferPtr), and `f^` is already rejected under Turbo at Sema (#477,
@@ -2399,12 +2499,29 @@ void plang_read_binary(PascalFile *F, void *Buf, int64_t ElemSize) {
 // wasted -- so it is dropped from the two _turbo functions; plang_read_binary/
 // plang_write_binary (the ISO/EP twins, just above/below) keep it, since EP's
 // own f^ is very much reachable there.
+//
+// Issue #661: a short/at-EOF fread (nmemb=1) sets the C stream's feof
+// indicator, not ferror -- tpTrapOnStreamError (like trapOnStreamError,
+// its ISO/EP twin) deliberately checks only ferror, which is correct for
+// its own OWN job (catching a wrong-direction stream), so it takes no
+// action here and previously left this case setting no InOutRes at all.
+// Real Turbo Pascal/`fpc -Mtp` traps a typed Read at or past EOF with
+// InOutRes 100 ("disk read error") even under default {$I+} -- confirmed
+// empirically -- so a `Got < 1` short/zero read (whether the position was
+// already at EOF, or only a partial trailing record was available) sets
+// that here explicitly, through the same setInOutResIfClear/{$I+} contract
+// as every other Turbo I/O failure in this file. Routed through
+// setInOutResIfClear rather than an unconditional assignment so an
+// already-pending, more specific error (e.g. tpTrapOnStreamError's own 104
+// from a wrong-direction stream, just above) is not overwritten.
 void plang_read_binary_turbo(PascalFile *F, void *Buf, int64_t ElemSize) {
     if (ElemSize > 0) std::memset(Buf, 0, static_cast<std::size_t>(ElemSize));
     if (!tpFileReady(F, "read")) return;
     tpTrapOnWrongDirection(F, 0);
-    std::fread(Buf, static_cast<std::size_t>(ElemSize), 1, F->Fp);
+    const std::size_t Got =
+        std::fread(Buf, static_cast<std::size_t>(ElemSize), 1, F->Fp);
     tpTrapOnStreamError(F, 0);
+    if (Got < 1) setInOutResIfClear(100);
     prime(F);
 }
 
