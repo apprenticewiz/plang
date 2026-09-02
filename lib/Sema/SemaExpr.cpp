@@ -3007,9 +3007,9 @@ std::shared_ptr<Type> Sema::checkInheritedCall(
     // error 211 trap.  Refuse this at compile time (matching fpc -Mtp)
     // rather than let it compile clean and only fail whenever this
     // particular 'inherited' call actually executes.
-    if (MethodSym->IsMethodAbstract) {
+    if (MEntry->IsAbstract) {
         error(Loc, diag::err_inherited_abstract_method,
-              {MethodSym->MethodOwnerType, MethodName});
+              {Owner->Name, MethodName});
         for (const auto& A : Args) (void)checkExpr(*A);
         return TyErr;
     }
