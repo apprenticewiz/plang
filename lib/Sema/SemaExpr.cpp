@@ -1098,6 +1098,16 @@ std::shared_ptr<Type> Sema::checkBinary(const BinaryExpr& E) {
             // ISO §6.7.2.5: pointers compare with = and <> only, and nil is
             // comparable with any pointer.  Without this a traversal cannot
             // even ask whether it has reached the end of a list.
+            //
+            // Turbo relaxes this: real Turbo Pascal/`fpc -Mtp` allow the
+            // full set of relational operators (<, <=, >, >=) on pointers
+            // too, ordering by address -- confirmed empirically (issue
+            // #640) for both two typed-pointer operands and a pointer
+            // compared against nil.  So the ordering-only-for-non-Turbo
+            // restriction just below is gated on !Opts.turbo(); the
+            // domain-mismatch check that follows it still applies under
+            // every dialect, ordering included, the same as = and <> already
+            // require matching pointer domains.
             if (Lt->Kind == TypeKind::Pointer || Rt->Kind == TypeKind::Pointer
                 || Lt->Kind == TypeKind::Nil  || Rt->Kind == TypeKind::Nil) {
                 const bool BothPtrLike =
@@ -1105,7 +1115,8 @@ std::shared_ptr<Type> Sema::checkBinary(const BinaryExpr& E) {
                  && (Rt->Kind == TypeKind::Pointer || Rt->Kind == TypeKind::Nil);
                 if (!BothPtrLike)
                     error(E.Loc, diag::err_cannot_compare, {Lt->Name, Rt->Name});
-                else if (E.Op != TokenKind::Equal && E.Op != TokenKind::NotEqual)
+                else if (!Opts.turbo() && E.Op != TokenKind::Equal
+                         && E.Op != TokenKind::NotEqual)
                     error(E.Loc, diag::err_op_pointer_ordering, {opSpelling(E.Op)});
                 else if (Lt->Kind == TypeKind::Pointer
                          && Rt->Kind == TypeKind::Pointer && Lt != Rt
@@ -2085,10 +2096,21 @@ std::shared_ptr<Type> Sema::checkCallExpr(const CallExpr& E) {
         // identical note on the codegen side.  All three need a real
         // integer at least 16 bits wide -- Byte/ShortInt (8 bits) has no
         // separate high and low half to name.
+        //
+        // A subrange is ordinally an integer (ISO §6.4.2.4: it takes its
+        // values from its host type) and getSubrange narrows a numeric
+        // subrange's Width to its host's under Turbo the same way a plain
+        // sized integer's is, so `ordinalBase` -- unwrapping to the host
+        // type -- decides both the kind and width checks below rather than
+        // testing ArgTy's own Kind/Width directly, which rejected every
+        // subrange-typed argument (e.g. `var w: 0..65535`) regardless of
+        // width (issue #635); an Enum argument is still rejected, since
+        // ordinalBase leaves a non-subrange type unchanged.
         if ((Lo == "hi" || Lo == "lo" || Lo == "swap") && !E.Args.empty()) {
             auto ArgTy = checkExpr(*E.Args[0]);
             if (ArgTy->isError()) return TyErr;
-            if (ArgTy->Kind != TypeKind::Integer || ArgTy->Width < 16) {
+            const Type& Base = ordinalBase(*ArgTy);
+            if (Base.Kind != TypeKind::Integer || Base.Width < 16) {
                 error(E.Args[0]->Loc, diag::err_hi_lo_swap_argument, {Lo, ArgTy->Name});
                 return TyErr;
             }
@@ -2097,7 +2119,7 @@ std::shared_ptr<Type> Sema::checkCallExpr(const CallExpr& E) {
             // own width -- FPC's actual declared return types (verified
             // against fpc -Mtp's System unit: Hi/Lo(Word) -> Byte,
             // Hi/Lo(LongInt) -> Word, Hi/Lo(Int64) -> LongWord).
-            return Ctx_.getInt(ArgTy->Width / 2, /*Signed=*/false);
+            return Ctx_.getInt(Base.Width / 2, /*Signed=*/false);
         }
         // TP-only: Random is polymorphic on ARITY, not on its argument's
         // type the way Abs/Sqr (above) are: Random() -- no argument, this
@@ -4442,6 +4464,24 @@ bool Sema::isAssignCompatible(const Type& Dst, const Type& Src,
             && Src.ElemType->Kind == TypeKind::Char
             && Src.IndexType && Src.IndexType->Kind == TypeKind::Subrange
             && Src.IndexType->SubLo == 0)
+        return true;
+
+    // Turbo: a string LITERAL is assignment-compatible with a zero-based
+    // array of Char too -- `buf := 'hello'` for `buf: array[0..9] of Char`
+    // -- the mirror image of the array-to-PChar decay just above (issue
+    // #641). Confirmed against real `fpc -Mtp`: the array decays the same
+    // way it does for a PChar destination, and CodeGen's own store for this
+    // pairing (CGAssign.cpp) truncates a too-long literal to fit and
+    // zero-fills whatever a too-short one leaves over, matching field
+    // practice exactly.  Deliberately Src.Kind == TypeKind::String only,
+    // not isVarStringLike/isShortStringLike/isCharStringType: those already
+    // have their own, differently-shaped (exact-length, no zero-fill) store
+    // paths, and this is scoped to the literal case the issue is about.
+    if (Opts.turbo() && Dst.Kind == TypeKind::Array && Dst.ElemType
+            && Dst.ElemType->Kind == TypeKind::Char
+            && Dst.IndexType && Dst.IndexType->Kind == TypeKind::Subrange
+            && Dst.IndexType->SubLo == 0
+            && Src.Kind == TypeKind::String)
         return true;
     return false;
 }

@@ -43,9 +43,16 @@ SWITCH(ExtendedSyntax, 'x', "extendedsyntax", true,  true)
 
 // Recorded so that {$IFOPT} answers correctly, and nothing more.
 //
-// Overflow checking is the interesting one: every ordinal lowers to an i64
-// here, so the 16- and 32-bit wraparound a Turbo program provokes is not
-// observable to check for.  FPC's own -Mtp on x86-64 has the same blind spot.
+// Overflow checking is the interesting one: unlike when this comment was
+// first written, a sized Turbo ordinal (Byte/ShortInt/Word/Integer/LongInt/
+// ...) now genuinely lowers at its own declared width, not unconditionally
+// at i64 -- so the 16- and 32-bit wraparound a Turbo program provokes IS
+// observable to check for (issue #638's own finding). This stays
+// Honored=false anyway: confirmed against a local `fpc -Mtp` 3.2.2 build,
+// `{$Q+}` does not actually make FPC trap on `+`/`-`/`*` wraparound or on
+// `div`'s one overflowing pair (`minint div -1`) either -- FPC's own field
+// practice is to never observably enforce this switch, `{$Q+}` or
+// `{$Q-}` alike, so plang matches that rather than the manual's claim.
 SWITCH(OverflowChecks, 'q', "overflowchecks", false, false)
 SWITCH(VarStringChecks,'v', "varstringchecks",true,  false)
 SWITCH(TypedAddress,   't', "typedaddress",   false, false)

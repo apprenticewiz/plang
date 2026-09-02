@@ -859,12 +859,60 @@ llvm::Value* CGBinaryOps::emitBinary(const BinaryExpr& e) {
                 Ctx, e.ResolvedType ? e.ResolvedType->Width : 64);
             const unsigned divWidth = divBitsTy->getIntegerBitWidth();
             const bool nSigned = operandIsSigned(*e.Left), dSigned = operandIsSigned(*e.Right);
-            RangeGuards.emitDivZeroCheck(CoerceToType(d, divBitsTy, dSigned), "div", divWidth);
+            auto* nAtWidth = CoerceToType(n, divBitsTy, nSigned);
+            auto* dAtWidth = CoerceToType(d, divBitsTy, dSigned);
+            RangeGuards.emitDivZeroCheck(dAtWidth, "div", divWidth);
             // minint div -1: the one nonzero-divisor case that still
-            // overflows, since minint's magnitude has no positive int64_t
-            // representation (same UB shape as abs(minint)).
-            RangeGuards.emitDivOverflowCheck(CoerceToType(n, divBitsTy, nSigned),
-                                              CoerceToType(d, divBitsTy, dSigned), divWidth);
+            // overflows AT THE OPERATION'S OWN WIDTH, since minint's
+            // magnitude has no positive same-width representation (same UB
+            // shape as abs(minint)).
+            //
+            // Turbo does NOT trap on this (issue #638): confirmed against
+            // `fpc -Mtp` at every width up to Int64, `MinInt div -1`
+            // computes silently -- even under `{$Q+}`, so this is not
+            // something OverflowChecks gates either; fpc's own div overflow
+            // is simply never checked, at any width. Unlike Plus/Minus/
+            // Times's own silent wraparound (this switch's own comment,
+            // above), the RIGHT answer here is not "wrap immediately": `n`
+            // and `d` are already sign-extended to i64 (ToI64, above), so
+            // for any divWidth < 64 the division computed at that full i64
+            // precision is safe hardware-wise (a narrower minint's
+            // sign-extended magnitude always fits i64, e.g. minint16's
+            // 32768 quotient) AND gives the exact answer fpc itself prints
+            // when the quotient is never narrower-stored (`writeln(i div
+            // (-1))` alone prints 32768, not -32768) -- narrowing back to
+            // -32768 only happens later, on assignment into a 16-bit
+            // variable, through the ordinary truncate-on-store every other
+            // overflow already goes through. So below divWidth 64 this is a
+            // plain, unguarded SDiv, exactly like every in-range case.
+            //
+            // At divWidth == 64 (Int64/QWord, or ISO 7185/EP's own Integer,
+            // whose one width always is 64) there is no such escape: `n`/`d`
+            // ARE the actual i64 division operands, 2^63 has no i64
+            // representation at ANY precision to compute first and narrow
+            // later, and an unguarded SDiv here is real x86 idiv overflow
+            // UB. Turbo still must not trap on it (same field-practice
+            // requirement above, confirmed directly against fpc's own
+            // Int64 case, which prints MinInt64 back unchanged) -- so the
+            // divisor is forced to 1 in exactly this one bad case, making
+            // `n div safeD` compute `n div 1 == n`, i.e. MinInt64 right
+            // back, the same answer fpc gives, without ever executing the
+            // trapping division. ISO 7185 and Extended Pascal keep the
+            // unconditional runtime-error trap instead (unaffected by this
+            // issue, and not what fpc -Mtp is a reference for).
+            if (RangeGuards.isTurbo()) {
+                if (divWidth < 64) return B.CreateSDiv(n, d, "sdiv");
+                auto* isMinInt = B.CreateICmpEQ(nAtWidth,
+                    llvm::ConstantInt::get(divBitsTy, llvm::APInt::getSignedMinValue(divWidth)),
+                    "div.ismin");
+                auto* isNegOne = B.CreateICmpEQ(dAtWidth,
+                    llvm::ConstantInt::getSigned(divBitsTy, -1), "div.isnegone");
+                auto* bad = B.CreateAnd(isMinInt, isNegOne, "div.overflow");
+                auto* safeD = B.CreateSelect(bad,
+                    llvm::ConstantInt::get(d->getType(), 1), d, "div.safed");
+                return B.CreateSDiv(n, safeD, "sdiv");
+            }
+            RangeGuards.emitDivOverflowCheck(nAtWidth, dAtWidth, divWidth);
             return B.CreateSDiv(n, d, "sdiv");
         }
         case TokenKind::Mod: {
