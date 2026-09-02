@@ -2630,16 +2630,19 @@ void Sema::checkProcSignature(const ProcDecl& Proc) {
                               // Turbo: a function may return its own
                               // string[N] -- ordinary, idiomatic Turbo
                               // Pascal (`function F: string;`), the same
-                              // shape real Turbo/FPC accept.  A narrow,
-                              // ShortString-only addition rather than
-                              // following EP's own blanket "any
-                              // assignable, file-free type" carve-out just
-                              // below: Turbo has no schema/record/array-
-                              // result convention (or Extended Pascal's own
-                              // rationale) for this to generalize from, and
-                              // widening "Simple" to admit those too would
-                              // be well outside this item's scope.
-                              || (Opts.turbo() && Ret->Kind == TypeKind::ShortString);
+                              // shape real Turbo/FPC accept.
+                              || (Opts.turbo() && Ret->Kind == TypeKind::ShortString)
+                              // Turbo also allows a function to return a
+                              // record type or a fixed-size array type --
+                              // ordinary, idiomatic TP7 (confirmed against
+                              // `fpc -Mtp`, issue #585).  What real Turbo
+                              // Pascal actually disallows is an *open
+                              // array* result (Type::IsOpenArray), not
+                              // record/fixed-array results in general.
+                              || (Opts.turbo()
+                                  && (Ret->Kind == TypeKind::Record
+                                      || (Ret->Kind == TypeKind::Array
+                                          && !Ret->IsOpenArray)));
             if (AnyFile || (!Simple && !Opts.extendedPascal()))
                 error(Proc.Loc, diag::err_function_result_type, {Ret->Name});
         }

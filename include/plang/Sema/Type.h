@@ -19,6 +19,8 @@ struct RecordTypeNode;
 struct ObjectTypeNode;
 struct ProcDecl;
 struct TypeNode;
+struct ArrayTypeNode;
+struct EnumTypeNode;
 
 /// Number of distinct ordinals a set can hold.  A set is lowered to one bit
 /// per ordinal, so this is both the width of the set representation and the
@@ -198,6 +200,17 @@ struct Type {
     // --- Enum ---
     /// Declared value names for an enumerated type.
     std::vector<std::string> EnumValues;
+    /// The declaration this enum type was resolved from.  ISO §6.4.2.3 makes
+    /// each enumerated-type definition its own distinct type, so two of them
+    /// with the same spelling and the same value list are still not one
+    /// another when they come from different declarations -- issue #598, the
+    /// same "declaration is the identity, name+shape is not" rule
+    /// Type::RecordDecl already exists for.  A fresh Type object is minted
+    /// for every EnumTypeNode resolution (see the EnumTypeNode arm,
+    /// SemaType.cpp), so this is set unconditionally, never shared with a
+    /// different declaration's Type the way an anonymous array's interned
+    /// Type can be.
+    const EnumTypeNode* EnumDecl{nullptr};
 
     // --- VarString ---
     /// Capacity (N) of an EP string(N) type; 0 for unbounded String.
@@ -242,6 +255,17 @@ struct Type {
     std::shared_ptr<Type> ElemType;
     /// True if the type was declared with the 'packed' qualifier.
     bool Packed{false};
+    /// The declaration this array type was resolved from, set only for a
+    /// NAMED array type-denoter (the direct body of `type X = array...`,
+    /// TypeContext::makeArrayUncached's one-object-per-declaration path --
+    /// issue #178) -- null for an anonymous array, which shares an interned
+    /// Type object across every structurally-identical inline spelling and
+    /// so has no single declaration to point at.  Mirrors Type::RecordDecl:
+    /// ISO §6.4.2.3/§6.4.3.2 make each `type` declaration its own distinct
+    /// type, so two NAMED arrays with the same spelling and shape but a
+    /// different declaration (e.g. same name in two different nested
+    /// scopes) are still not one another -- issue #598.
+    const ArrayTypeNode* ArrayDecl{nullptr};
 
     // --- ConformantArray (EP §6.7.3.7) ---
     /// One dimension's bound variable names and ordinal type.
