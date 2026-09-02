@@ -34,8 +34,8 @@ RUN: test ! -e %t.dir/d.bin
 
 (*
 MISSING: error: 'IFDEF' directive expects a single symbol name
-NOMATCH: error: 'ELSE' with no matching '{$IFDEF}'/'{$IFNDEF}'
-DUPELSE: error: 'ELSE' after '{$ELSE}' for the same '{$IFDEF}'/'{$IFNDEF}'
+NOMATCH: error: 'ELSE' with no matching '{$IFDEF}'/'{$IFNDEF}'/'{$IFOPT}'
+DUPELSE: error: 'ELSE' after '{$ELSE}' for the same '{$IFDEF}'/'{$IFNDEF}'/'{$IFOPT}'
 UNTERM: error: no matching '{$ENDIF}' for this 'IFDEF' directive
 *)
 

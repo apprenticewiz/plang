@@ -149,20 +149,27 @@ Every predefined symbol is an ordinary member of the same set a program's own
 `-u<symbol>` or `{$UNDEF}` can override; `-uUNIX` really does turn `{$IFDEF UNIX}`
 false on a Linux build, the same as undefining any other symbol would.
 
-### `{$IFOPT}` is not implemented
+### `{$IFOPT}`
 
 Real Turbo/FPC also has `{$IFOPT R+}`/`{$IFOPT R-}`, a conditional that
 branches on a *switch's* current state rather than a `{$DEFINE}`d symbol's.
-plang's switches are recorded into a position-keyed table
-(`SwitchTable`, below) specifically so that a future `{$IFOPT}` can answer
-correctly wherever it is written in a file — but `{$IFOPT}` itself is not
-one of the five directive categories `dispatchDirective` recognizes today.
-Writing it compiles as an unrecognized directive
-(`warning: unknown compiler directive 'IFOPT'`), and the `{$ELSE}`/`{$ENDIF}`
-that would normally close it fail with "no matching `{$IFDEF}`/`{$IFNDEF}`",
-since nothing pushed a conditional frame for it to close. This is a real,
-currently-open gap, not a documentation slip — verified by compiling
-`{$IFOPT R+} ... {$ENDIF}` against this build.
+plang's switches are recorded into a position-keyed table (`SwitchTable`,
+below) specifically so that `{$IFOPT}` can answer correctly wherever it is
+written in a file, and this is exactly what it does: `{$IFOPT R+}` takes its
+branch when RangeChecks is currently on at that point in the source (whether
+because a `{$R+}` before it turned it on, or because no switch directive has
+touched it yet and it is still at its `-std=turbo` default), the same
+`{$ELSE}`/`{$ELSEIF}`/`{$ENDIF}` machinery `{$IFDEF}`/`{$IFNDEF}` already use,
+including correct nesting with each other.
+
+Like real Turbo/FPC, `{$IFOPT}` only ever takes the *letter* spelling —
+`{$IFOPT RANGECHECKS+}`, though perfectly valid as an ordinary switch
+directive, is rejected as an illegal switch reference for `{$IFOPT}`. The two
+switches with no letter spelling at all (`ObjectChecks`/`Goto` — see
+`CompilerSwitches.def`) can therefore never be tested this way either, again
+matching `fpc -Mtp`. Anything that is not a real single-letter switch
+immediately followed by `+` or `-` is a real, reported error
+(`illegal compiler switch '...'`) rather than silently taking either branch.
 
 ## Source inclusion: `{$I file}` / `{$INCLUDE file}`
 

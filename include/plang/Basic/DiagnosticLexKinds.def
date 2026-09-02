@@ -35,22 +35,26 @@ DIAG(err_directive_error, Error, "%0")
 DIAG(err_directive_fatal, Error, "%0")
 DIAG(warn_directive_unknown, Warning, "unknown compiler directive '%0'")
 
-// Conditional compilation -- {$DEFINE}/{$UNDEF}/{$IFDEF}/{$IFNDEF}/{$ELSE}/
-// {$ELSEIF}/{$ENDIF} (lib/Lex/Directives.cpp's dispatchConditionalDirective
-// and skipToNextConditionalMarker).  Deliberately few diagnostics: a
-// directive or a plain syntax error found while skipping a dead branch is
-// never reported at all (see skipToNextConditionalMarker's own comment) --
-// only the directive-nesting structure itself (a missing symbol name, an
-// {$ELSE}/{$ELSEIF}/{$ENDIF} with nothing open to match, a second {$ELSE},
-// or a conditional never closed by end of file) is a real error here.
+// Conditional compilation -- {$DEFINE}/{$UNDEF}/{$IFDEF}/{$IFNDEF}/{$IFOPT}/
+// {$ELSE}/{$ELSEIF}/{$ENDIF} (lib/Lex/Directives.cpp's
+// dispatchConditionalDirective and skipToNextConditionalMarker).
+// Deliberately few diagnostics: a directive or a plain syntax error found
+// while skipping a dead branch is never reported at all (see
+// skipToNextConditionalMarker's own comment) -- only the directive-nesting
+// structure itself (a missing symbol name, an {$ELSE}/{$ELSEIF}/{$ENDIF}
+// with nothing open to match, a second {$ELSE}, a conditional never closed
+// by end of file, or an {$IFOPT} argument that is not a real single-letter
+// switch) is a real error here.
 DIAG(err_directive_expects_symbol, Error,
      "'%0' directive expects a single symbol name")
 DIAG(err_directive_no_matching_ifdef, Error,
-     "'%0' with no matching '{$IFDEF}'/'{$IFNDEF}'")
+     "'%0' with no matching '{$IFDEF}'/'{$IFNDEF}'/'{$IFOPT}'")
 DIAG(err_directive_else_already_seen, Error,
-     "'%0' after '{$ELSE}' for the same '{$IFDEF}'/'{$IFNDEF}'")
+     "'%0' after '{$ELSE}' for the same '{$IFDEF}'/'{$IFNDEF}'/'{$IFOPT}'")
 DIAG(err_directive_unterminated_conditional, Error,
      "no matching '{$ENDIF}' for this '%0' directive")
+DIAG(err_directive_ifopt_bad_switch, Error,
+     "illegal compiler switch '%0'")
 
 // `{$I file}`/`{$INCLUDE file}` (lib/Lex/Directives.cpp's
 // dispatchIncludeDirective/resolveIncludePath/openInclude).  `{$I+}`/`{$I-}`
