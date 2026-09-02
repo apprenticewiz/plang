@@ -394,18 +394,27 @@ void Sema::checkAssign(const AssignStmt& S) {
 // commits no error, and rejecting the program would refuse one the standard
 // admits.
 void Sema::warnIfConstantOutOfRange(const Type& Dst, const ExprNode& Src) {
-    if (Dst.Kind != TypeKind::Subrange) return;
     // EP §6.4.7: bounds a discriminant fixes are not known here.  The recorded
     // ones are the probe's, so this warned that every value but 1 was outside
     // 1..1 -- certain of a trap that does not happen, on a program that is
     // correct.  Codegen checks it against the value the object carries.
     if (Dst.ExtentVaries) return;
+    // Issue #776: an explicit subrange (`1..10`) is not the only ordinal type
+    // with a fixed compile-time range -- a named built-in ranged integer type
+    // (Byte/Word/ShortInt/... -- TypeKind::Integer with Width < 64) is
+    // exactly as bounded, per ordinalRange's own doc comment.  Consulting it
+    // here instead of hand-checking TypeKind::Subrange covers both the same
+    // way warnIfSetLitOutOfRange (SemaExpr.cpp) already does for a set's
+    // element type -- and the same way #580's fix unified Byte's set-base
+    // width against ordinalRange rather than a Subrange-only check.
+    auto Range = ordinalRange(Dst);
+    if (!Range) return;
     auto V = constBound(Src);
     if (!V) return;
-    if (*V >= Dst.SubLo && *V <= Dst.SubHi) return;
+    if (*V >= Range->first && *V <= Range->second) return;
     warning(Src.Loc, diag::warn_const_out_of_range,
-            {spellOrdinal(Dst, *V), spellOrdinal(Dst, Dst.SubLo),
-             spellOrdinal(Dst, Dst.SubHi)});
+            {spellOrdinal(Dst, *V), spellOrdinal(Dst, Range->first),
+             spellOrdinal(Dst, Range->second)});
 }
 
 void Sema::checkStringCapacity(const Type& Dst, const ExprNode& Src) {
@@ -560,9 +569,13 @@ void Sema::checkFor(const ForStmt& S) {
         // run 1..15 through a `1..10` variable. warnIfConstantOutOfRange is
         // the same check assignment and Exit/function-result already use for
         // exactly this "right type, wrong constant value" gap; it is a no-op
-        // whenever the declared type is not itself a Subrange or the bound
-        // is not a compile-time constant, so this adds no diagnostic for the
-        // (far more common) non-subrange or non-constant-bound loop.
+        // whenever the declared type has no fixed ordinalRange (Type.h) --
+        // e.g. a bare Integer -- or the bound is not a compile-time constant,
+        // so this adds no diagnostic for the (far more common) unbounded- or
+        // non-constant-bound loop.  Issue #776 widened warnIfConstantOutOfRange
+        // itself to consult ordinalRange rather than hand-checking
+        // TypeKind::Subrange, so this also now catches e.g. `var b: Byte; for
+        // b := 1 to 300 do`.
         warnIfConstantOutOfRange(*Sym->declaredType(), *S.From);
         warnIfConstantOutOfRange(*Sym->declaredType(), *S.Limit);
     }
