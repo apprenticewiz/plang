@@ -1083,6 +1083,23 @@ private:
     /// real TP7 idiom, and CodeGen dispatches it exactly like an ordinary
     /// virtual method call (through Pointee's own '_vptr') when it is.
     void checkDisposeDone(const CallStmt& S, const Type& Pointee);
+    /// Issue #622: checkNewInit's own sibling for New's FUNCTION form --
+    /// 'p := New(PtrType, Ctor[(args)])', reached from checkCallExpr's own
+    /// dedicated 'new' arm once it has resolved PtrType to a pointer-to-
+    /// OBJECT type and confirmed E.Args.size() > 1.  Same validation
+    /// (ancestor-chain lookup of Ctor, IsMethodConstructor, private-
+    /// visibility gate, argument type-checking) as checkNewInit, adapted
+    /// for a CallExpr rather than a CallStmt and worded with the function
+    /// form's own call syntax -- duplicated rather than shared because the
+    /// two AST node kinds have no common base to write one implementation
+    /// against (see this project's other CallStmt/CallExpr pairs, e.g.
+    /// checkMethodCall's own comment, for the same shape of split).  Unlike
+    /// checkNewInit, nothing is recorded back onto \p E: CodeGen re-derives
+    /// the constructor name/arguments directly from E.Args[1] the same way
+    /// it already does for the statement form (CGProcCall::
+    /// emitNewObjectValue), so there is no CallExpr::NewInitMethod field to
+    /// set in the first place.
+    void checkNewInitExpr(const CallExpr& E, const Type& Pointee);
     void checkWith      (const WithStmt&     S);
     void checkGoto      (const GotoStmt&     S);
     void checkLabeled   (const LabeledStmt&  S);

@@ -433,6 +433,39 @@ llvm::Value* CGFuncCall::emitBuiltinCall(const std::string& Name,
         return B.CreateICmpNE(v, llvm::ConstantPointerNull::get(PtrTy), "assigned");
     }
 
+    // Turbo Tier 5, issue #622: New used as a FUNCTION -- 'p := New(PtrType
+    // [, Ctor[(args)]])'.  Args[0]->ResolvedType is PtrType itself (Sema's
+    // own resolveTypeArgOrValue, the same SizeOf/High/Low/TypeOf dual-shape
+    // argument just below already reads its type-name argument's answer
+    // from), so -- exactly like those -- Args[0] itself is never emitted:
+    // there is no runtime VALUE to name a pointer TYPE with. A pointee with
+    // no second argument (Args.size() == 1) is a plain allocation, no
+    // '_vptr' stamp even for an object pointee -- confirmed against a local
+    // fpc -Mtp build: 'p := New(PFoo)' with no constructor traps Runtime
+    // error 216 on a later virtual call through it, exactly like the
+    // statement form's own bare 'new(p)' (issue #514's own policy, matched
+    // here rather than "fixed" per this project's field-practice
+    // precedent). EmitNewObjectValue (bridged to CGProcCall::
+    // emitNewObjectValue) is reached only once Args.size() > 1 -- Sema's own
+    // "new" arm (checkCallExpr) already refused an extra argument for any
+    // pointee that is not an object type, so Pointee->Kind == Object is
+    // guaranteed whenever this branch is taken.
+    if (lo == "new") {
+        const auto& ptrTy = Args[0]->ResolvedType;
+        const plang::Type* pointee = (ptrTy && ptrTy->Kind == TypeKind::Pointer)
+                                          ? ptrTy->PointeeType.get() : nullptr;
+        if (!pointee)
+            codegenICE("New() reached codegen with no resolvable pointee "
+                       "type for '" + (ptrTy ? ptrTy->Name : std::string("?"))
+                       + "' -- Sema::checkCallExpr's own 'new' arm should "
+                         "have refused this already");
+        if (Args.size() > 1) return EmitNewObjectValue(*pointee, *Args[1]);
+        int64_t bytes = (int64_t)Mod.getDataLayout().getTypeAllocSize(
+            Types.llvmTypeOfSemaType(*pointee));
+        return B.CreateCall(RtFns.getRuntimeNewFn(),
+                            {llvm::ConstantInt::get(I64Ty, bytes)});
+    }
+
     // TP-only: SizeOf(T)/High(T)/Low(T).  Args[0]->ResolvedType is the type
     // this call answers about -- Sema::resolveTypeArgOrValue set it either
     // directly (Args[0] named a type) or via the ordinary checkExpr path

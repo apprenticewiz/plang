@@ -530,15 +530,25 @@ void Codegen::Impl::emitAllProcedures(const BlockNode& block) {
     for (const auto& proc : block.Procs)
         if (!proc->OwnerType.empty()) emitFunctionDef(*proc, /*declareOnly=*/true);
 
-    // Turbo Tier 5, Cluster A item 7: every ABSTRACT method declared by an
-    // object type in this block gets a real, defined trap-body function
-    // here -- see emitAbstractMethodStub's own comment for why an abstract
-    // heading needs this dedicated pass rather than falling out of the
-    // ordinary block.Procs loop just above (it is never IN block.Procs:
-    // there is no out-of-line body, ever, for one).  Must run before any
-    // body below is emitted, exactly like the method pre-pass just above,
-    // since a method call or a VMT build reached from inside one of those
-    // bodies may need this name to already resolve.
+    // Turbo Tier 5, Cluster A item 7 (issue #618's own follow-up: see
+    // ensureAbstractStubsDefined's own comment for why this is now a
+    // dedicated method rather than an inline loop here): every ABSTRACT
+    // method declared by an object type in this block gets a real, defined
+    // trap-body function here.  Must run before any body below is emitted,
+    // exactly like the method pre-pass just above, since a method call or a
+    // VMT build reached from inside one of those bodies may need this name
+    // to already resolve.
+    ensureAbstractStubsDefined(block);
+
+    for (const auto& proc : block.Procs) {
+        if (proc->IsForward) continue;
+        emitFunctionDef(*proc);
+    }
+}
+
+// Turbo Tier 5, Cluster A item 7 / issue #618: see this method's own
+// declaration (CodeGenImpl.h) for the whole design.
+void Codegen::Impl::ensureAbstractStubsDefined(const BlockNode& block) {
     for (const auto& td : block.Types) {
         if (!td.Type || !td.Type->ResolvedType
                 || td.Type->ResolvedType->Kind != TypeKind::Object)
@@ -547,15 +557,28 @@ void Codegen::Impl::emitAllProcedures(const BlockNode& block) {
             if (M.IsAbstract)
                 emitAbstractMethodStub(M, td.Type->ResolvedType->Name);
     }
-
-    for (const auto& proc : block.Procs) {
-        if (proc->IsForward) continue;
-        emitFunctionDef(*proc);
-    }
 }
 
 // Turbo Tier 5, Cluster A item 7: see this method's own declaration
 // (CodeGenImpl.h) for the whole design.
+//
+// Issue #618: this is the ONE translation unit that DEFINES M's own
+// mangled symbol -- emitAllProcedures's own pre-pass (this function's only
+// caller) runs once per block, over every object type THAT BLOCK declares,
+// so reaching here at all already means this compile is the one compiling
+// OwnerTypeName's own declaring module.  A concrete DESCENDANT type that
+// leaves M unoverridden may still be declared in a DIFFERENT translation
+// unit (a unit's own abstract method, inherited-and-not-overridden by a
+// program or another unit that merely `uses` it) -- getOrCreateVmt's own
+// VMT-slot-filling loop (CodeGenProcs.cpp) looks up this SAME mangled name
+// with mod->getFunction, exactly like any other cross-unit method
+// reference, and previously found nothing: InternalLinkage kept this
+// symbol out of the defining unit's own object file entirely, so ld failed
+// with an undefined symbol rather than linking a real (if trapping) stub.
+// ExternalLinkage matches getOrCreateVmt's own VMT-array global just above
+// (also always defined by exactly one TU and referenced by every other),
+// and costs nothing extra for the common same-TU case this always was
+// before cross-unit objects existed.
 void Codegen::Impl::emitAbstractMethodStub(const Type::Method& M,
                                             const std::string& OwnerTypeName) {
     std::string mangledName = mangledMethod(OwnerTypeName, M.Name);
@@ -566,25 +589,37 @@ void Codegen::Impl::emitAbstractMethodStub(const Type::Method& M,
     // (not sharing, since there is no ProcDecl here to hand the ordinary
     // signature-building path -- an abstract heading is never in
     // block.Procs, see this function's own header comment) the same shape
-    // every other method's own signature already has. The exact ABI details
-    // ordinary parameter marshaling worries about (struct-by-value
-    // thresholds, sret, schema/conformant-array widening, ...) do not
-    // matter here: this function is never linked against a real
-    // implementation and never successfully returns a value to anything --
-    // every caller that looks up this SAME mangled name reads ITS
-    // FunctionType back off THIS declaration to marshal arguments, so all
-    // that is required is internal self-consistency, not byte-for-byte
-    // agreement with some other translation unit's own convention.
+    // every other method's own signature already has.
+    //
+    // Issue #618's own latent follow-on: a 'const' parameter is by-reference
+    // (ptrTy) ONLY when it is STRUCTURED-for-const-by-ref
+    // (isStructuredForConstByRef -- a record/array/set wide enough that a
+    // full by-value copy would be wasteful); a scalar 'const' parameter is
+    // passed BY VALUE, exactly like declareImportedMethod's own identical
+    // rule (this file, just below) already computes for a genuine
+    // cross-unit call.  Before this fix, EVERY 'const' parameter here was
+    // typed ptrTy regardless of scalar-ness -- self-consistent as long as
+    // this symbol was only ever DEFINED and DECLARED by the same
+    // (InternalLinkage) translation unit, but once a DIFFERENT TU declares
+    // the SAME mangled name through declareImportedMethod (this stub's own
+    // ExternalLinkage above now makes that reachable), the two
+    // declarations' FunctionTypes disagreed for any scalar 'const'
+    // parameter -- undefined behavior at the LLVM IR level even though
+    // neither module's verifier alone could see it.
     std::vector<llvm::Type*> paramTys;
     paramTys.push_back(ptrTy);  // Self
-    for (const auto& P : M.Params)
-        paramTys.push_back(P.IsVar || P.IsConst ? ptrTy
+    for (const auto& P : M.Params) {
+        const bool constByRef = P.IsConst && P.Ty && !P.Ty->isError()
+            && isStructuredForConstByRef(*P.Ty);
+        const bool passByRef = P.IsVar || constByRef;
+        paramTys.push_back(passByRef ? ptrTy
                             : (P.Ty ? llvmTypeOfSemaType(*P.Ty) : ptrTy));
+    }
     llvm::Type* retTy = (M.IsFunction && M.RetType)
                              ? llvmTypeOfSemaType(*M.RetType)
                              : llvm::Type::getVoidTy(ctx);
     auto* fnTy = llvm::FunctionType::get(retTy, paramTys, /*isVarArg=*/false);
-    auto* fn = llvm::Function::Create(fnTy, llvm::GlobalValue::InternalLinkage,
+    auto* fn = llvm::Function::Create(fnTy, llvm::GlobalValue::ExternalLinkage,
                                        mangledName, *mod);
     auto* entry = llvm::BasicBlock::Create(ctx, "entry", fn);
     llvm::IRBuilder<> stubB(entry);

@@ -124,6 +124,34 @@ public:
     /// is identical; see InheritedCallStmt's own comment (AstStmt.h).
     void emitInheritedCallStmt(const plang::InheritedCallStmt& s);
 
+    /// Turbo Tier 5, issue #622: allocates a fresh \p Pointee, stamps its own
+    /// (and any nested member's) '_vptr', and runs the constructor \p
+    /// CtorArg names -- the exact "allocate, StampVptr/StampFieldVptrs,
+    /// emitBoundMethodCall, Fail-unwinds back to nil" sequence emitCallStmt's
+    /// own 'new(p, Ctor[(args)])' arm always has, factored out here PUBLIC so
+    /// both that arm (which now just stores this call's own return value
+    /// into its own \p addr) and CGFuncCall's own 'p := New(PtrType,
+    /// Ctor(args))' dispatch (issue #622: New used as a FUNCTION, which has
+    /// no lvalue of its own to store into and instead wants this call's
+    /// return value directly) share one implementation rather than two
+    /// copies of the branch-and-PHI Fail-unwind logic.  Both real callers
+    /// only ever reach this with a genuine constructor named -- New's own
+    /// BARE form ('new(p)' / the function form's 'New(PtrType)' alone, no
+    /// second argument) is gated out before either one calls this at all
+    /// (emitCallStmt's own 's.NewInitMethod.empty()' check; CGFuncCall's own
+    /// 'Args.size() > 1' check), matching issue #514's own policy that a
+    /// bare New never stamps a '_vptr' either -- so \p CtorArg is never
+    /// null and this never has a "no constructor" case of its own to skip.
+    /// \p CtorArg is *Args[1] (a CallExpr for 'Ctor(a, b)' or an IdentExpr
+    /// for the bare 'Ctor') for either caller alike -- re-derived from the
+    /// AST the same way emitBoundMethodCall's other caller (dispose(p,
+    /// Dtor)) already does, rather than threading the name and argument
+    /// list through as two more parameters.  Returns the allocated pointer
+    /// on success, or a null pointer constant of the same LLVM type on a
+    /// constructor 'Fail'.
+    llvm::Value* emitNewObjectValue(const plang::Type& Pointee,
+                                    const plang::ExprNode& CtorArg);
+
 private:
     /// Turbo Tier 5, Cluster A item 6: a bound method call where the
     /// receiver's own address (\p selfPtr) is already in hand -- built for

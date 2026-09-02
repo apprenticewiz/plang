@@ -1480,6 +1480,66 @@ std::shared_ptr<Type> Sema::checkCallExpr(const CallExpr& E) {
         E.ResolvedBuiltin = Sym->BuiltinKind;
         std::string Lo = toLower(E.Name);
 
+        // Issue #622: 'p := New(PtrType[, Ctor[(args)]])' -- New used as a
+        // FUNCTION, real Borland/FPC's own "extended syntax" (fpc -Mtp's own
+        // "use extended syntax of NEW and DISPOSE for instances of objects"
+        // warning is exactly this form, and it accepts and runs it).
+        // Builtins.def keeps New itself Proc-only (BUILTIN(New, "new",
+        // Proc, ...): the ordinary statement form just below, checkCallStmt,
+        // is still New's most common use and needs none of this) -- so this
+        // is a dedicated exception, reached BEFORE the generic
+        // '!Sym->IsFunction' gate just below fires for it, and only under
+        // -std=turbo: ISO 7185 and Extended Pascal have no such extension
+        // (EP's own schemas -- new's OTHER extra-argument shape,
+        // checkCallStmt's ToSchema arm -- have no function-New counterpart
+        // either), so a non-Turbo dialect falls through unchanged to that
+        // generic gate's own err_proc_cannot_return_value.
+        //
+        // PtrType is a POINTER TYPE identifier, never a value and never the
+        // pointee type alone (confirmed against fpc -Mtp: 'New(TFoo)' for an
+        // unpointered object type is refused, "pointer type expected"),
+        // read the same dual-shape way SizeOf/High/Low/TypeOf's own
+        // type-or-value argument is (resolveTypeArgOrValue, just below).
+        //
+        // A bare 'New(PtrType)' (no second argument) is a PLAIN allocation
+        // for every pointee kind alike, even an object type with a declared
+        // constructor -- confirmed against fpc -Mtp: it does NOT run one
+        // (matching the statement form's own bare 'new(p)') and does NOT
+        // stamp a '_vptr' either (issue #514's own policy: a later virtual
+        // call through the result traps Runtime error 216 in both plang and
+        // fpc -Mtp alike, rather than dispatching to a real override).  Only
+        // an object pointee with a genuine second argument runs
+        // checkNewInitExpr's own constructor validation; every other
+        // pointee kind with a second argument (schema, variant record, or a
+        // plain type with a spurious extra argument) is refused outright --
+        // unlike the statement form, there is no confirmed real-world
+        // function-New idiom for either of the first two to match field
+        // practice against.
+        if (Lo == "new" && Opts.turbo() && !E.Args.empty()) {
+            auto PtrTy = resolveTypeArgOrValue(*E.Args[0]);
+            if (PtrTy->isError()) {
+                for (size_t I = 1; I < E.Args.size(); ++I) (void)checkExpr(*E.Args[I]);
+                return TyErr;
+            }
+            if (PtrTy->Kind != TypeKind::Pointer || !PtrTy->PointeeType) {
+                error(E.Args[0]->Loc, diag::err_new_function_arg_not_pointer_type,
+                      {PtrTy->Name});
+                for (size_t I = 1; I < E.Args.size(); ++I) (void)checkExpr(*E.Args[I]);
+                return TyErr;
+            }
+            const Type& Pointee = *PtrTy->PointeeType;
+            if (E.Args.size() > 1) {
+                if (Pointee.Kind != TypeKind::Object) {
+                    error(E.Args[1]->Loc, diag::err_new_function_extra_args,
+                          {Pointee.Name});
+                    for (size_t I = 1; I < E.Args.size(); ++I) (void)checkExpr(*E.Args[I]);
+                    return TyErr;
+                }
+                checkNewInitExpr(E, Pointee);
+            }
+            return PtrTy;
+        }
+
         // Mirror of checkCallStmt's err_func_as_statement check, in the
         // other direction: a builtin PROCEDURE has no result, so calling one
         // where an expression is expected is exactly what
@@ -2887,6 +2947,19 @@ std::shared_ptr<Type> Sema::checkInheritedCall(
     }
     if (!MethodSym) {
         error(Loc, diag::err_inherited_method_not_found, {OwnerTy.Name, MethodName});
+        for (const auto& A : Args) (void)checkExpr(*A);
+        return TyErr;
+    }
+
+    // Issue #574: 'inherited' always resolves to a STATIC call to the
+    // ancestor's own body -- an 'abstract' method has no body to call
+    // statically, only emitAbstractMethodStub's unconditional Runtime
+    // error 211 trap.  Refuse this at compile time (matching fpc -Mtp)
+    // rather than let it compile clean and only fail whenever this
+    // particular 'inherited' call actually executes.
+    if (MethodSym->IsMethodAbstract) {
+        error(Loc, diag::err_inherited_abstract_method,
+              {MethodSym->MethodOwnerType, MethodName});
         for (const auto& A : Args) (void)checkExpr(*A);
         return TyErr;
     }

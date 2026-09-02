@@ -783,48 +783,13 @@ void CGProcCall::emitCallStmt(const CallStmt& s) {
         const auto& pt = s.Args[0]->ResolvedType;
         const plang::Type& Pointee = *pt->PointeeType;
         auto* addr = EmitLValue(*s.Args[0]);
-        int64_t Bytes = (int64_t)Mod.getDataLayout().getTypeAllocSize(
-            Types.llvmTypeOfSemaType(Pointee));
-        auto* ptr = B.CreateCall(RtFns.getRuntimeNewFn(),
-                                       {llvm::ConstantInt::get(I64Ty, Bytes)});
-        StampVptr(ptr, Pointee);
-        // Issue #511: Pointee's own OBJECT-typed fields (a value-composed
-        // member, not an ancestor -- an ancestor's vptr is the SAME slot
-        // StampVptr just above already found) need their own '_vptr' too,
-        // exactly like a directly declared instance of Pointee would get from
-        // emitVarValueInit -- see StampFieldVptrs's own comment (CGProcCall.h).
-        StampFieldVptrs(ptr, Pointee);
-
-        std::string ctorName;
-        std::span<const std::unique_ptr<ExprNode>> ctorArgs;
-        if (auto* CE = llvm::dyn_cast<CallExpr>(s.Args[1].get())) {
-            ctorName = CE->Name;
-            ctorArgs = CE->Args;
-        } else if (auto* Id = llvm::dyn_cast<IdentExpr>(s.Args[1].get())) {
-            ctorName = Id->Name;
-        } else {
-            codegenICE("new(p, Ctor) reached CodeGen with an unrecognized "
-                       "second-argument shape -- Sema::checkNewInit should "
-                       "have refused this already");
-        }
-        auto* ok = emitBoundMethodCall(ptr, Pointee, ctorName, ctorArgs);
-
-        auto* curFn = B.GetInsertBlock()->getParent();
-        auto* okBB   = llvm::BasicBlock::Create(Ctx, "new.ctor.ok", curFn);
-        auto* failBB = llvm::BasicBlock::Create(Ctx, "new.ctor.fail", curFn);
-        auto* contBB = llvm::BasicBlock::Create(Ctx, "new.ctor.cont", curFn);
-        B.CreateCondBr(ok, okBB, failBB);
-
-        B.SetInsertPoint(okBB);
-        B.CreateStore(ptr, addr);
-        B.CreateBr(contBB);
-
-        B.SetInsertPoint(failBB);
-        B.CreateCall(RtFns.getRuntimeDisposeFn(), {ptr});
-        B.CreateStore(llvm::ConstantPointerNull::get(PtrTy), addr);
-        B.CreateBr(contBB);
-
-        B.SetInsertPoint(contBB);
+        // issue #622's own refactor: the allocate/StampVptr/StampFieldVptrs/
+        // emitBoundMethodCall/Fail-unwind sequence that used to live inline
+        // here is now emitNewObjectValue (CGProcCall.h's own comment), so
+        // that CGFuncCall's 'p := New(PtrType, Ctor[(args)])' -- New used as
+        // a FUNCTION, with no lvalue of its own to store into -- shares it
+        // rather than duplicating the branch-and-PHI Fail-unwind logic.
+        B.CreateStore(emitNewObjectValue(Pointee, *s.Args[1]), addr);
         return;
     }
 
@@ -1308,6 +1273,56 @@ llvm::Value* CGProcCall::emitBoundMethodCall(
         return B.CreateCall(callee->getFunctionType(), fnPtr, args);
     }
     return B.CreateCall(callee, args);
+}
+
+// Turbo Tier 5, issue #622: see this method's own declaration (CGProcCall.h)
+// for the whole design.
+llvm::Value* CGProcCall::emitNewObjectValue(const Type& Pointee,
+                                            const ExprNode& CtorArg) {
+    int64_t Bytes = (int64_t)Mod.getDataLayout().getTypeAllocSize(
+        Types.llvmTypeOfSemaType(Pointee));
+    auto* ptr = B.CreateCall(RtFns.getRuntimeNewFn(),
+                                   {llvm::ConstantInt::get(I64Ty, Bytes)});
+    StampVptr(ptr, Pointee);
+    // Issue #511: Pointee's own OBJECT-typed fields (a value-composed
+    // member, not an ancestor -- an ancestor's vptr is the SAME slot
+    // StampVptr just above already found) need their own '_vptr' too,
+    // exactly like a directly declared instance of Pointee would get from
+    // emitVarValueInit -- see StampFieldVptrs's own comment (CGProcCall.h).
+    StampFieldVptrs(ptr, Pointee);
+
+    std::string ctorName;
+    std::span<const std::unique_ptr<ExprNode>> ctorArgs;
+    if (auto* CE = llvm::dyn_cast<CallExpr>(&CtorArg)) {
+        ctorName = CE->Name;
+        ctorArgs = CE->Args;
+    } else if (auto* Id = llvm::dyn_cast<IdentExpr>(&CtorArg)) {
+        ctorName = Id->Name;
+    } else {
+        codegenICE("New(..., Ctor) reached CodeGen with an unrecognized "
+                   "constructor-argument shape -- Sema::checkNewInit/"
+                   "checkNewInitExpr should have refused this already");
+    }
+    auto* ok = emitBoundMethodCall(ptr, Pointee, ctorName, ctorArgs);
+
+    auto* curFn = B.GetInsertBlock()->getParent();
+    auto* okBB   = llvm::BasicBlock::Create(Ctx, "new.ctor.ok", curFn);
+    auto* failBB = llvm::BasicBlock::Create(Ctx, "new.ctor.fail", curFn);
+    auto* contBB = llvm::BasicBlock::Create(Ctx, "new.ctor.cont", curFn);
+    B.CreateCondBr(ok, okBB, failBB);
+
+    B.SetInsertPoint(okBB);
+    B.CreateBr(contBB);
+
+    B.SetInsertPoint(failBB);
+    B.CreateCall(RtFns.getRuntimeDisposeFn(), {ptr});
+    B.CreateBr(contBB);
+
+    B.SetInsertPoint(contBB);
+    auto* result = B.CreatePHI(PtrTy, 2, "new.result");
+    result->addIncoming(ptr, okBB);
+    result->addIncoming(llvm::ConstantPointerNull::get(PtrTy), failBB);
+    return result;
 }
 
 // Turbo Tier 5, Cluster A item 5: see this method's own declaration

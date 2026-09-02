@@ -1790,6 +1790,28 @@ struct Codegen::Impl {
     /// own distinct mangled name).
     void emitAbstractMethodStub(const Type::Method& M,
                                  const std::string& OwnerTypeName);
+    /// Issue #618: emitAllProcedures's own abstract-stub pre-pass (calls
+    /// emitAbstractMethodStub, just above, once per abstract method heading
+    /// on every object type \p block declares), factored out to a dedicated
+    /// method for the SAME reason ensureOwnedVmtsDefined (issue #619) is
+    /// one rather than an inline loop: emitAllProcedures itself is called
+    /// only on a UNIT's ImplementationBlock (Codegen::emitUnit) or a
+    /// PROGRAM's single Block (Codegen::emit), never on a unit's own
+    /// InterfaceBlock -- so an abstract method declared in a unit's
+    /// INTERFACE section (the ordinary place to declare an exported object
+    /// type, and the shape issue #618's own repro uses) never reached
+    /// emitAbstractMethodStub at all, and this symbol was simply never
+    /// EMITTED in the declaring unit's own object file, whatever its
+    /// linkage.  Codegen::emitUnit now calls this directly for
+    /// Unit.InterfaceBlock too, exactly like ensureOwnedVmtsDefined's own
+    /// existing two call sites (CodeGen.cpp) -- before
+    /// emitAllProcedures(ImplementationBlock), so a method call inside the
+    /// implementation's own body that needs this stub's mangled name (a
+    /// concrete, unit-local descendant type that leaves an INTERFACE
+    /// ancestor's abstract method unoverridden) finds it already defined,
+    /// not merely declared through declareImportedMethod's cross-unit
+    /// fallback.
+    void ensureAbstractStubsDefined(const BlockNode& block);
     /// Stamps T's own VMT global's address into \p ptr's `_vptr` slot (found
     /// through vptrOffsetOf, which already accounts for an inherited vptr
     /// living inside the embedded ancestor sub-object at a stable offset --

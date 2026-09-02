@@ -537,7 +537,16 @@ void Codegen::Impl::init(const std::string& progName) {
         // not yet declared in this translation unit" fallback -- see
         // Impl::declareForeignInheritedCallee's own comment (CodeGenImpl.h).
         [this](const plang::Type::Method& m, const std::string& n){
-            return declareForeignInheritedCallee(m, n); });
+            return declareForeignInheritedCallee(m, n); },
+        // Issue #622: New used as a FUNCTION -- bridges to procCall_'s own
+        // emitNewObjectValue (built above, so -- unlike EmitBuiltinFuncCall's
+        // own forward reference to funcCall_ in the OTHER direction, in
+        // procCall_'s own constructor call just above this one -- this is
+        // already a live pointer even at construction time, not merely by
+        // the time it is first invoked).  See CGFuncCall.h's own
+        // EmitNewObjectValue field comment for the whole design.
+        [this](const plang::Type& pointee, const plang::ExprNode& ctorArg){
+            return procCall_->emitNewObjectValue(pointee, ctorArg); });
     // ISO §6.7.1 expression emission -- the central recursive-descent
     // dispatcher every other extracted unit already reaches via its own
     // EmitExpr/EmitLValue closure (unaffected by this move, since those
