@@ -1222,6 +1222,19 @@ private:
     /// which the run-time check is certain to catch wherever it is reached.
     void warnIfConstantOutOfRange(const Type& Dst, const ExprNode& Src);
 
+    /// Issue #795: Src is an IntLitExpr whose text denoted a value in
+    /// (Int64::max, UInt64::max] (IntLitExpr::ExceedsInt64) -- valid only
+    /// where Dst can itself hold the full unsigned 64-bit range (QWord).
+    /// Returns true (having already reported the diagnostic if Dst does
+    /// not qualify) when Src is such a literal, so the caller knows this
+    /// pair has already been fully judged and any further ordinary
+    /// range/compatibility check on the same pair would be redundant or
+    /// wrong; returns false, doing nothing, for every other Src. Shared by
+    /// warnIfConstantOutOfRange (assignment, initializers, for-bounds,
+    /// function-result return) and checkCallArgs (value-parameter passing),
+    /// the two places a literal's actual destination type is known.
+    bool rejectOverflowLiteralUnlessQWordDest(const Type& Dst, const ExprNode& Src);
+
     /// warnIfConstantOutOfRange's sibling for a set's members: a set-literal
     /// element (or range endpoint) that is a compile-time constant, and lies
     /// outside ElemBase's own ordinal range, is certain to trap once codegen's

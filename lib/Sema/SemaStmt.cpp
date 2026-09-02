@@ -386,6 +386,31 @@ void Sema::checkAssign(const AssignStmt& S) {
     adoptSetType(*S.Value, Dst);
 }
 
+// Issue #795: a literal whose text denoted a value in (Int64::max,
+// UInt64::max] parses successfully (Parser::parseFactor's uint64 fallback,
+// ParseExpr.cpp) with its two's-complement bit pattern stored in the
+// ordinary int64_t IntLitExpr::Value -- unlike every other out-of-range
+// case Sema otherwise only warns about, reinterpreting that pattern at a
+// narrower or signed destination's own width would not clamp or trap at
+// run time, it would silently substitute a wholly different, unrelated
+// number (UInt64::max's bit pattern reads back as -1, which is very much
+// inside an Int64's own range). This is a hard error, matching the
+// parser's own former unconditional rejection, because there is no
+// runtime trap that would ever catch a silently wrong value substituted
+// at compile time.
+bool Sema::rejectOverflowLiteralUnlessQWordDest(const Type& Dst, const ExprNode& Src) {
+    const auto* Lit = llvm::dyn_cast<IntLitExpr>(&Src);
+    if (!Lit || !Lit->ExceedsInt64) return false;
+    const Type* T = &Dst;
+    while (T->Kind == TypeKind::Subrange && T->SubBase) T = T->SubBase.get();
+    const bool DstIsQWord = T->Kind == TypeKind::Integer && T->Width == 64 && !T->IsSigned;
+    if (!DstIsQWord) {
+        auto ValStr = std::to_string(static_cast<uint64_t>(Lit->Value));
+        error(Src.Loc, diag::err_int_literal_out_of_range, {std::string_view(ValStr)});
+    }
+    return true;
+}
+
 // §6.4.6, §6.8.2.2: the value assigned to a variable of a subrange type shall
 // be within that subrange.  The check is made when the program runs, because
 // in general the value is not known before then — but when it is a constant it
@@ -399,6 +424,16 @@ void Sema::warnIfConstantOutOfRange(const Type& Dst, const ExprNode& Src) {
     // 1..1 -- certain of a trap that does not happen, on a program that is
     // correct.  Codegen checks it against the value the object carries.
     if (Dst.ExtentVaries) return;
+
+    // Issue #795: a literal whose text denoted a value in (Int64::max,
+    // UInt64::max] needs its own hard-error handling, not the ordinary
+    // warning this function otherwise gives -- see
+    // rejectOverflowLiteralUnlessQWordDest's own comment for why.
+    // ordinalRange itself answers std::nullopt for any Width>=64
+    // destination (its own doc comment), so the general range check just
+    // below never even looks at this case; it has to be handled first.
+    if (rejectOverflowLiteralUnlessQWordDest(Dst, Src)) return;
+
     // Issue #776: an explicit subrange (`1..10`) is not the only ordinal type
     // with a fixed compile-time range -- a named built-in ranged integer type
     // (Byte/Word/ShortInt/... -- TypeKind::Integer with Width < 64) is

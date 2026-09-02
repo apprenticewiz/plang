@@ -1374,23 +1374,58 @@ alignment. A real Turbo program that depends on a specific `{$PACKRECORDS}`
 setting for its record layout will not get that same layout from plang —
 only the plain `packed`/unpacked distinction is honored.
 
-### Permanent: no `QWord` literal syntax — build one with a typecast
+### Fixed: `QWord` literals above `Int64::max` (issue #795)
 
-Neither Turbo Pascal nor plang has an *unsigned* integer-literal syntax, and
-plang's own integer literals are `int64_t` end to end, from the scanner
-through constant folding — so a literal past `Int64`'s own maximum
-(`9223372036854775807`) is rejected by the lexer's range check regardless of
-the destination type, before Sema ever sees which type it's headed for. A
-`QWord` value in that upper half of its range (`9223372036854775808` through
-`18446744073709551615`) therefore cannot be written as a literal at all —
-build it with a typecast or arithmetic a `QWord` variable can hold instead,
-exactly the two idioms real `fpc -Mtp` source uses for the identical reason:
-`QWord(-1)` for the all-ones maximum, or `QWord(9223372036854775807) + 1`
-for the value one past `Int64`'s own maximum. This is permanent — not a gap
-in `QWord`'s own write/read support (which is complete and covers the full
-unsigned range end to end), but a limitation of literal syntax that predates
-`QWord` and affects only how its uppermost values get *into* a program's
-source text.
+Neither Turbo Pascal nor plang has an *unsigned* integer-literal syntax as
+its own token spelling, and plang's own integer literals are `int64_t` end
+to end, from the scanner through constant folding. A literal past `Int64`'s
+own maximum (`9223372036854775807`) still cannot be represented by that
+`int64_t` storage, so the parser used to reject it outright — before Sema
+ever saw which type it was headed for, regardless of destination.
+
+As of issue #795's fix, the parser instead retries such a literal's text as
+a `uint64_t` before giving up, and records (on the `IntLitExpr` node) that
+its true value is only representable unsigned. Sema then accepts the
+literal directly wherever the destination can itself hold the full unsigned
+64-bit range — assigned to a `QWord` variable, or passed bare to `writeln`
+— exactly matching real `fpc -Mtp`, no typecast required:
+
+```pascal
+var q: QWord;
+begin
+  writeln(18446744073709551615);   { prints directly, no typecast }
+  q := 18446744073709551615;       { assigns directly, no typecast }
+end.
+```
+
+A destination that cannot hold the full unsigned 64-bit range — a signed
+`Int64`, or anything narrower — still reports the same "integer literal ...
+is out of range" diagnostic as before; there is no bit pattern in a signed
+64-bit variable that would represent `18446744073709551615` rather than
+silently substituting `-1`. `QWord(-1)` and `QWord(9223372036854775807) + 1`
+remain valid ways to build the same values, just no longer the *only* ways.
+
+The residual gap this fix does not close: the literal's own AST
+representation (`IntLitExpr::Value`) is still `int64_t`, and the flag
+marking "this text meant something only representable unsigned" is
+consulted only where a literal reaches a known destination *directly* —
+assignment, `writeln`, a value-parameter actual, var/const initializers,
+`for` bounds, a function's `result`. An untyped constant built from one
+(`const Big = 18446744073709551615 - 1;`) is unaffected — the expression's
+own type already comes out correctly unsigned-64-bit through the ordinary
+type-inference path, with no destination-context special case needed at
+all. The gap is narrower than that: a literal *combined with an operator*
+(`18446744073709551615 + 0`, not the bare literal) and then passed to a
+destination that is itself 64 bits wide but signed (`Int64`, not `QWord`)
+is not caught — unlike a same-shape expression reaching a *narrower*
+destination (`Byte`, `Word`, ...), which the pre-existing general
+out-of-range check still catches correctly (by folding the arithmetic and
+comparing the fold against that destination's own computable range), a
+64-bit-wide destination's range is not computable at all by that same
+general check, and only a *bare* literal is specially recognized past it.
+Widening `IntLitExpr` itself (tracked separately, not scheduled) is what
+would close that residual gap uniformly instead of by direct-literal
+special case.
 
 ### Permanent: a set is always 256 bits wide, in every dialect — narrowing does not reach it
 
