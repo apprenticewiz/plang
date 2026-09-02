@@ -940,6 +940,16 @@ void CGProcCall::emitCallStmt(const CallStmt& s) {
         // emitBoundMethodCall) already check for exactly that NULL and trap
         // there, right before the indirect call that would otherwise
         // segfault reading a function pointer from near address zero.
+        // Issue #780: this trap is only reached when NOTHING between this
+        // plain new(p) and the later virtual call ever supplies a VMT -- an
+        // ORDINARY, explicitly-qualified constructor call on the result
+        // ('p^.Init(...)', the real Borland/FPC idiom this warning is
+        // steering a caller toward using the extended syntax instead of, not
+        // forbidding) now stamps it at that call's own site instead (see
+        // emitMethodCallStmt/emitBoundMethodCall's own #780 comments) -- so
+        // this function staying silent is still correct: it is simply no
+        // longer the ONLY place upstream of a virtual call that could have
+        // stamped it.
         return;
     }
     // Turbo Tier 5, Cluster A item 6: dispose(p, Dtor[(args)]) -- New/Init's
@@ -1232,6 +1242,29 @@ void CGProcCall::emitMethodCallStmt(const MethodCallStmt& s) {
     // INDIRECTLY, through the receiver's own `_vptr` and Owner's own
     // VmtSlot index, never Owner's mangled symbol directly.
     const Type::Method* MEntry = methodEntryOf(*Owner, s.Method);
+    // Issue #780: an ORDINARY, explicitly-qualified constructor call --
+    // 'p^.Init(...)' reached here as a plain MethodCallStmt, not the
+    // extended 'New(p, Init(...))' sugar (which is emitNewObjectValue's own,
+    // separate path just below in this file) -- is exactly the call SITE
+    // real Borland/FPC's own ABI has supply/stamp the VMT: a plain New(p)
+    // leaves '_vptr' NULL (plang_new's own calloc), and nothing else ever
+    // touches it unless this call is itself the constructor.  A constructor
+    // can never be virtual (err_object_virtual_constructor), so this always
+    // runs before the IsVirtual check below, which for a constructor call is
+    // therefore always the (unreachable-for-ctors) 'else' branch -- matching
+    // real TP7's own "a constructor is called statically" rule.  Stamped
+    // using the RECEIVER's own resolved static type (s.Receiver->
+    // ResolvedType), not Owner (which may be an ancestor that merely
+    // DECLARES Init) -- exactly what 'PDescendant(p)^.Init' means when p is
+    // only ancestor-typed: the receiver's own (possibly cast-narrowed)
+    // static type is what the instance IS, exactly like emitNewObjectValue's
+    // own Pointee argument means for the extended-syntax path.  Reuses the
+    // SAME StampVptr/StampFieldVptrs mechanism that path already uses,
+    // rather than duplicating it.
+    if (MEntry && MEntry->IsConstructor) {
+        StampVptr(selfPtr, *s.Receiver->ResolvedType);
+        StampFieldVptrs(selfPtr, *s.Receiver->ResolvedType);
+    }
     if (MEntry && MEntry->IsVirtual) {
         auto vptrOff = Types.vptrOffsetOf(*s.Receiver->ResolvedType);
         if (!vptrOff)
@@ -1321,6 +1354,28 @@ llvm::Value* CGProcCall::emitBoundMethodCall(
     // unreachable for it -- one code path serves both, exactly like
     // emitMethodCallStmt's own identical branch just above.
     const Type::Method* MEntry = methodEntryOf(*Owner, Method);
+    // Issue #780: this is the SHARED constructor-call core -- reached both
+    // by emitNewObjectValue's own extended 'New(p, Ctor(...))' path (which
+    // used to StampVptr/StampFieldVptrs itself, inline, before calling this)
+    // and by an ordinary qualified constructor call made through an
+    // expression context ('if p^.Init then ...', or a bare no-parens
+    // 'p^.Init' field-style call -- emitMethodCallExpr/
+    // emitImplicitMethodFieldCall in CGFuncCall.cpp, both of which reach
+    // here). Stamping HERE, gated on MEntry->IsConstructor, covers all of
+    // them with one call site instead of duplicating the stamp at each
+    // caller -- and since a constructor can never be virtual
+    // (err_object_virtual_constructor), this always runs before the
+    // IsVirtual check below, which is therefore unreachable for a
+    // constructor either way (see that check's own comment). Stamped using
+    // RecvTy, the receiver's own resolved static type as each caller passes
+    // it -- exactly what emitNewObjectValue's own former inline stamp used
+    // (its Pointee argument), so moving the stamp here changes no behavior
+    // for that path, only adds it for the ordinary-call ones that were
+    // missing it entirely.
+    if (MEntry && MEntry->IsConstructor) {
+        StampVptr(selfPtr, RecvTy);
+        StampFieldVptrs(selfPtr, RecvTy);
+    }
     if (MEntry && MEntry->IsVirtual) {
         auto vptrOff = Types.vptrOffsetOf(RecvTy);
         if (!vptrOff)
@@ -1354,13 +1409,17 @@ llvm::Value* CGProcCall::emitNewObjectValue(const Type& Pointee,
         Types.llvmTypeOfSemaType(Pointee));
     auto* ptr = B.CreateCall(RtFns.getRuntimeNewFn(),
                                    {llvm::ConstantInt::get(I64Ty, Bytes)});
-    StampVptr(ptr, Pointee);
-    // Issue #511: Pointee's own OBJECT-typed fields (a value-composed
-    // member, not an ancestor -- an ancestor's vptr is the SAME slot
-    // StampVptr just above already found) need their own '_vptr' too,
-    // exactly like a directly declared instance of Pointee would get from
-    // emitVarValueInit -- see StampFieldVptrs's own comment (CGProcCall.h).
-    StampFieldVptrs(ptr, Pointee);
+    // Issue #780: StampVptr/StampFieldVptrs used to run inline here,
+    // unconditionally, before the constructor call just below -- moved into
+    // emitBoundMethodCall itself (gated on MEntry->IsConstructor, using the
+    // very same Pointee/RecvTy value this call passes it), so that the
+    // ordinary-qualified-constructor-call paths that reach emitBoundMethodCall
+    // with no such stamp of their own (CGProcCall::emitMethodCallStmt has its
+    // own separate copy right above; CGFuncCall::emitMethodCallExpr/
+    // emitImplicitMethodFieldCall reach here) get it too, without duplicating
+    // the mechanism at every caller.  See emitBoundMethodCall's own comment
+    // for the full design; behavior for THIS call site is unchanged (same
+    // stamp, same Pointee, now just performed one call frame down).
 
     std::string ctorName;
     std::span<const std::unique_ptr<ExprNode>> ctorArgs;
