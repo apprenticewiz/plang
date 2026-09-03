@@ -8,6 +8,8 @@ version numbers follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-09-02
+
 ### Added
 
 - **`-static`/`-dynamic` driver flags**, dynamic linking now the default.
