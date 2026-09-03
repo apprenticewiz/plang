@@ -2,6 +2,15 @@ add_library(PlangDriver STATIC Driver.cpp)
 target_link_libraries(PlangDriver PRIVATE plang_warnings)
 target_compile_definitions(PlangDriver PRIVATE
     PLANG_RUNTIME_DIR="${CMAKE_BINARY_DIR}/runtime"
+    # findRuntimeLib (Driver.cpp) needs to know where an INSTALLED layout
+    # really put libplang.a/libplang.so, relative to PREFIX -- that is
+    # CMAKE_INSTALL_LIBDIR, which GNUInstallDirs resolves to "lib64" (not
+    # plain "lib") on Fedora, openSUSE, and other 64-bit multi-lib distros
+    # (issue #805). Baking the value in mirrors PLANG_RUNTIME_DIR just
+    # above: both are "where CMake's own build put/installed the runtime"
+    # facts that only CMake actually knows, fed to the driver at compile
+    # time rather than hardcoded or re-derived at run time.
+    PLANG_INSTALL_LIBDIR="${CMAKE_INSTALL_LIBDIR}"
 )
 if(PLANG_ENABLE_RUNTIME_SANITIZER_TESTS)
     # -sanitize-runtime (issue #190 part B option 2): linkSanitized

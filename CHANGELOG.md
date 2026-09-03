@@ -10,6 +10,22 @@ version numbers follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 
 ### Added
 
+- **`-static`/`-dynamic` driver flags**, dynamic linking now the default.
+  Previously the driver only ever knew how to link the plang runtime
+  statically, by embedding `libplang.a`'s own path directly in the link
+  command; there was no dynamic auto-link path at all, so a user who wanted
+  one had to pass `-lplang` by hand, which only worked because the *build*
+  host's linker default search path happened to include `libplang.so`.
+  `-dynamic` (the new default) instead passes `-L<libdir> -lplang` plus a
+  matching `-rpath <libdir>` (the absolute install libdir, not `$ORIGIN`-
+  relative -- the produced binary is the user's own program, built wherever
+  they choose, not something installed alongside the compiler), so the
+  resulting binary can find `libplang.so`/`.dylib` again at run time
+  without `LD_LIBRARY_PATH`/`DYLD_LIBRARY_PATH`. `-static` opts back into
+  the old self-contained-binary behavior. Verified with real compile-link-
+  run tests for both modes, plus an `-rpath` check via `readelf -d` (issue
+  #805).
+
 - **`-std=turbo`: unit `implementation ... begin ... end` initialization
   sections now run automatically**, in real dependency order, before a
   program's own body -- previously they never ran at all except when a
@@ -160,6 +176,28 @@ version numbers follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html
   "before" IR and diffing again).
 
 ### Fixed
+
+- **[P0] A fresh install on a `lib64`-multilib distro (Fedora, openSUSE,
+  Arch-family systems) could not link any program at all.** `findRuntimeLib`
+  (the driver's runtime-archive lookup) hardcoded the literal `"lib"` when
+  building the installed-layout candidate path, but the install rules put
+  the runtime at `CMAKE_INSTALL_LIBDIR`, which GNUInstallDirs resolves to
+  `"lib64"` (not `"lib"`) on exactly those distros. The driver silently
+  found no runtime, silently linked without it, and the link only failed
+  several layers down with a raw, driver-diagnostic-free `ld.lld: undefined
+  symbol: plang_set_args` et al. -- exactly what issue #805's reporter hit.
+  Fixed by baking the real configured `CMAKE_INSTALL_LIBDIR` value in as
+  `PLANG_INSTALL_LIBDIR` (mirroring the existing `PLANG_RUNTIME_DIR`
+  build-tree fallback) and looking there instead of a hardcoded `"lib"`.
+  Reproduced and verified against a real `cmake --install` done with
+  `-DCMAKE_INSTALL_LIBDIR=lib64` directly matching the report.
+  Additionally, a genuinely missing/broken runtime (as opposed to merely
+  hard to find) now gets a clear `err_runtime_not_found` diagnostic instead
+  of the same confusing raw linker failure -- mirroring the existing
+  `-sanitize-runtime` diagnostic for its own missing-build case -- except
+  in linker-only mode (issue #611: a `plang a.o b.o -o out` invocation with
+  no `.pas` source at all), where nothing could need the plang runtime in
+  the first place and the check is skipped entirely (issue #805).
 
 A ninth adversarial review round, the largest yet: this project's own 6-way
 parallel sweep across every completed Turbo tier and the EP/ISO 10206 core,

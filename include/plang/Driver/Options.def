@@ -136,6 +136,11 @@ OPTION("-sanitize-runtime", "-sanitize-runtime", Flag, Driver,
        "                     normal one (test infrastructure only; requires a build\n"
        "                     configured with -DPLANG_ENABLE_RUNTIME_SANITIZER_TESTS=ON;\n"
        "                     see issue #190)")
+OPTION("-static",  "-static",  Flag, Driver,
+       "Link the plang runtime statically, producing a self-contained\n"
+       "                     binary with no runtime library dependency")
+OPTION("-dynamic", "-dynamic", Flag, Driver,
+       "Link the plang runtime dynamically (the default)")
 OPTION("--target=", "--target=<triple>", Joined,  Both, "Generate code for the given target")
 OPTION("-v",        "-v",               Flag,     Driver, "Show commands to run and use verbose output")
 

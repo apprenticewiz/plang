@@ -161,6 +161,21 @@ jobs:
           printf 'program hello(output);\nbegin writeln(%s) end.\n' "'ok'" > hello.pas
           plang hello.pas -o hello
           test "$(./hello)" = "ok"
+          # Issue #805: -dynamic (the default since this fix) and -static both
+          # compile, link AND RUN a real program against this real installed
+          # prefix -- not just "the driver invocation reported success", which
+          # would have missed #805 entirely (that bug's whole nature was a
+          # link that reported success and only failed at execution). -v's
+          # own output shape is pinned too, so a future regression that
+          # silently drops -rpath (leaving a binary that only runs by
+          # accident) fails loudly here.
+          plang -v hello.pas -o hello_dynamic > dynamic.log 2>&1
+          grep -q -- '-lplang' dynamic.log
+          grep -q -- '-rpath' dynamic.log
+          test "$(./hello_dynamic)" = "ok"
+          plang -static -v hello.pas -o hello_static > static.log 2>&1
+          grep -q 'libplang\.a' static.log
+          test "$(./hello_static)" = "ok"
           # The message catalogs.  Falling back to English is deliberate and
           # total, so a catalog installed where plang cannot find it leaves a
           # compiler that works perfectly and is silently never translated --
@@ -313,6 +328,52 @@ jobs:
           cmake --build "$consumer_dir/build"
           "$consumer_dir/build/consumer_smoke" | grep -q '^plang version '
 
+      - name: Reproduce and verify the lib64 install-layout fix (issue #805)
+        # The install-rules check above uses this runner's own default
+        # CMAKE_INSTALL_LIBDIR ("lib" on Ubuntu), which never reproduces
+        # issue #805 -- the bug only bites when CMAKE_INSTALL_LIBDIR is
+        # "lib64" (Fedora, openSUSE, Arch-family systems, and what the
+        # issue's own reporter's build actually used), which findRuntimeLib's
+        # old hardcoded "lib" literal silently missed. A second, separately
+        # configured build with -DCMAKE_INSTALL_LIBDIR=lib64, installed to
+        # its own fresh prefix, reproduces the reporter's exact layout
+        # directly rather than trusting the fix on a platform whose own
+        # default never exercises it.
+        run: |
+          cmake -S . -B build-lib64 -G Ninja \
+            -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
+            -DCMAKE_INSTALL_LIBDIR=lib64 \
+            -DLLVM_DIR="/usr/lib/llvm-$LLVM_VERSION/lib/cmake/llvm"
+          cmake --build build-lib64 -j"$(nproc)"
+          prefix="$(mktemp -d)"
+          cmake --install build-lib64 --prefix "$prefix"
+          test -f "$prefix/lib64/libplang.a"
+          test -f "$prefix/lib64/libplang.so"
+          printf 'program hello(output);\nbegin writeln(%s) end.\n' "'hello world'" > hello_lib64.pas
+          # $prefix/lib64 for the driver binary's OWN libplang-frontend.so.*
+          # dependency (also installed there); nothing to do with the fix
+          # under test, which is about the *compiled Pascal program's*
+          # runtime, not the plang binary's own shared-library dependency.
+          export LD_LIBRARY_PATH="$prefix/lib64"
+          # Default (dynamic): must compile, link, AND RUN with no
+          # LD_LIBRARY_PATH override for the *produced binary* -- the whole
+          # point of the -rpath this mode adds. A plain compile+link success
+          # would NOT have caught #805: that bug's own link reported success
+          # too, and only failed several layers down at actual execution.
+          "$prefix/bin/plang" -v hello_lib64.pas -o hello_lib64_dynamic > dynamic.log 2>&1
+          cat dynamic.log
+          grep -q -- '-lplang' dynamic.log
+          grep -q -- '-rpath' dynamic.log
+          env -u LD_LIBRARY_PATH ./hello_lib64_dynamic
+          test "$(env -u LD_LIBRARY_PATH ./hello_lib64_dynamic)" = "hello world"
+          # -static: a self-contained binary with no libplang.so dependency
+          # at all, against the same lib64 install.
+          "$prefix/bin/plang" -static -v hello_lib64.pas -o hello_lib64_static > static.log 2>&1
+          cat static.log
+          grep -q 'lib64/libplang\.a' static.log
+          test "$(env -u LD_LIBRARY_PATH ./hello_lib64_static)" = "hello world"
+          ! ldd ./hello_lib64_static | grep -q libplang.so
+
   macos:
     name: macOS / ${{ matrix.build_type }}
     # The arm64 runner, which is what macos-latest is, so this is also the
@@ -442,6 +503,21 @@ jobs:
           printf 'program hello(output);\nbegin writeln(%s) end.\n' "'ok'" > hello.pas
           plang hello.pas -o hello
           test "$(./hello)" = "ok"
+          # Issue #805: -dynamic (the default since this fix) and -static both
+          # compile, link AND RUN a real program against this real installed
+          # prefix -- not just "the driver invocation reported success", which
+          # would have missed #805 entirely (that bug's whole nature was a
+          # link that reported success and only failed at execution). -v's
+          # own output shape is pinned too, so a future regression that
+          # silently drops -rpath (leaving a binary that only runs by
+          # accident) fails loudly here.
+          plang -v hello.pas -o hello_dynamic > dynamic.log 2>&1
+          grep -q -- '-lplang' dynamic.log
+          grep -q -- '-rpath' dynamic.log
+          test "$(./hello_dynamic)" = "ok"
+          plang -static -v hello.pas -o hello_static > static.log 2>&1
+          grep -q 'libplang\.a' static.log
+          test "$(./hello_static)" = "ok"
           # The message catalogs.  Falling back to English is deliberate and
           # total, so a catalog installed where plang cannot find it leaves a
           # compiler that works perfectly and is silently never translated --
