@@ -92,6 +92,22 @@ DIAG(err_sanitized_runtime_not_built, Error,
      "-sanitize-runtime requires the sanitized runtime, which this build of "
      "plang was not configured with; reconfigure with "
      "-DPLANG_ENABLE_RUNTIME_SANITIZER_TESTS=ON (Clang only) and rebuild")
+// issue #805: a real .pas-sourced link needs libplang.a (-static, the
+// default before these flags existed) or libplang.so/.dylib (-dynamic, now
+// the default) and found neither next to this plang binary's own install
+// prefix nor in the build tree -- a genuinely broken or incomplete install
+// (e.g. one where CMAKE_INSTALL_LIBDIR put the runtime somewhere this
+// binary's own lookup does not check). Reported explicitly, before ever
+// reaching the link step, so this reads as a clear plang-level diagnostic
+// instead of a confusing raw "undefined symbol: plang_set_args" et al. from
+// the linker several layers further down -- exactly what the reporter of
+// #805 hit on a lib64 install a hardcoded "lib" lookup silently missed.
+// Never fires in linker-only mode (issue #611 -- no .pas source, so nothing
+// could need plang_runtime in the first place); see resolveRuntimeLib's own
+// comment.
+DIAG(err_runtime_not_found, Error,
+     "could not find the plang runtime library (libplang.a / libplang.so); "
+     "this looks like a broken or incomplete install")
 DIAG(err_program_exec_failed, Error, "failed to execute '%0': %1")
 // A subprocess that died on a signal rather than exiting.  Without this the
 // driver returned llvm's -2 as its own status -- exit 254 and not one word of

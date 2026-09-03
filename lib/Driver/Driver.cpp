@@ -417,37 +417,92 @@ std::string Driver::findInstallDir() const {
     return std::string(Dir);
 }
 
-/// Returns the path to libplang.a (the ordinary runtime) or, when \p
-/// Sanitized is true (-sanitize-runtime, issue #190 part B option 2),
-/// libplang_sanitized.a -- the ASan/UBSan-instrumented plang_runtime_sanitized
-/// variant runtime/CMakeLists.txt only builds when
-/// -DPLANG_ENABLE_RUNTIME_SANITIZER_TESTS=ON was given at CMake configure
-/// time. Checks PREFIX/lib at runtime first (installed layout -- never where
-/// the sanitized variant lives, since it is test infrastructure and never
-/// installed, but harmless to also check there), then falls back to the
-/// baked-in build-directory path. Returns "" if the file was not found
-/// either place; the sanitized caller turns that into
-/// err_sanitized_runtime_not_built rather than pressing on into a confusing
-/// linker failure (the ordinary caller already tolerates "" on its own —
-/// see the linker-only-mode call site's own comment).
-static std::string findRuntimeLib(const std::string &ExePath, bool Sanitized = false) {
-    const char *LibFile = Sanitized ? "libplang_sanitized.a" : "libplang.a";
+// The shared runtime's own on-disk name: runtime/CMakeLists.txt gives
+// plang_runtime_shared OUTPUT_NAME "plang" with no VERSION/SOVERSION, so it
+// builds as an unversioned libplang.so on ELF hosts. CMake's own default
+// MACOSX_RPATH behavior (CMP0042 NEW, the default since CMake 3.14, well
+// under this project's cmake_minimum_required(3.16)) gives a Darwin shared
+// library an "@rpath/<name>"-relative LC_ID_DYLIB automatically, so
+// linkDarwin's own -dynamic path (below) only has to hand ld a matching
+// -rpath, the same shape as the ELF path.
+#if defined(__APPLE__)
+static constexpr const char *SharedRuntimeLibFile = "libplang.dylib";
+#else
+static constexpr const char *SharedRuntimeLibFile = "libplang.so";
+#endif
+
+/// What findRuntimeLib found, in the shape each of its two callers needs:
+///  - A static (or sanitized) link embeds the archive's own path directly as
+///    an argv entry (StaticPath).
+///  - A dynamic link instead needs -L<dir> -lplang plus a matching -rpath
+///    <dir> so the resulting binary runs without LD_LIBRARY_PATH/
+///    DYLD_LIBRARY_PATH (DynamicLibDir) -- see resolveRuntimeLib's own
+///    comment for why a bare path does not work here the way it does for a
+///    static archive.
+struct RuntimeLibResult {
+    std::string StaticPath;
+    std::string DynamicLibDir;
+
+    bool found() const { return !StaticPath.empty() || !DynamicLibDir.empty(); }
+};
+
+/// Locates the ordinary plang runtime (\p Dynamic selects libplang.so/
+/// .dylib over libplang.a) or, when \p Sanitized is true (-sanitize-runtime,
+/// issue #190 part B option 2), libplang_sanitized.a -- the ASan/UBSan-
+/// instrumented plang_runtime_sanitized variant runtime/CMakeLists.txt only
+/// builds when -DPLANG_ENABLE_RUNTIME_SANITIZER_TESTS=ON was given at CMake
+/// configure time (\p Dynamic is ignored when \p Sanitized is set: that
+/// variant is test infrastructure only and always static).
+///
+/// Checks PREFIX/<CMAKE_INSTALL_LIBDIR> at run time first (the installed
+/// layout -- PLANG_INSTALL_LIBDIR, baked in at configure time from the exact
+/// same CMAKE_INSTALL_LIBDIR value lib/CMakeLists.txt's own install() rules
+/// use, rather than a hardcoded "lib": GNUInstallDirs resolves that to
+/// "lib64" on Fedora, openSUSE, and other 64-bit multi-lib distros, and a
+/// hardcoded "lib" here silently missed the runtime on exactly those
+/// systems -- issue #805), then falls back to the baked-in build-directory
+/// path. Returns a not-found() result if the file was not found either
+/// place; the sanitized caller turns that into
+/// err_sanitized_runtime_not_built, and the ordinary caller into
+/// err_runtime_not_found (both in resolveRuntimeLib), rather than pressing
+/// on into a confusing linker failure.
+static RuntimeLibResult findRuntimeLib(const std::string &ExePath,
+                                        bool Sanitized, bool Dynamic) {
+    RuntimeLibResult Result;
+    const char *LibFile = Sanitized ? "libplang_sanitized.a"
+                          : Dynamic ? SharedRuntimeLibFile
+                                    : "libplang.a";
+
+    // Tries LibFile inside Dir; records it into Result in whichever shape
+    // the caller wants and returns whether it was found.
+    auto tryDir = [&](const llvm::Twine &Dir) -> bool {
+        llvm::SmallString<256> Candidate(Dir.str());
+        llvm::sys::path::append(Candidate, LibFile);
+        if (!isRegFile(Candidate)) return false;
+        if (Dynamic && !Sanitized)
+            Result.DynamicLibDir = std::string(Dir.str());
+        else
+            Result.StaticPath = std::string(Candidate);
+        return true;
+    };
+
     if (!ExePath.empty()) {
         llvm::SmallString<256> BinDir(ExePath);
         llvm::sys::path::remove_filename(BinDir);
         llvm::SmallString<256> Prefix(BinDir);
         llvm::sys::path::remove_filename(Prefix);
-        llvm::SmallString<256> Candidate(Prefix);
-        llvm::sys::path::append(Candidate, "lib", LibFile);
-        if (isRegFile(Candidate)) return std::string(Candidate);
+        llvm::SmallString<256> LibDir(Prefix);
+#ifdef PLANG_INSTALL_LIBDIR
+        llvm::sys::path::append(LibDir, PLANG_INSTALL_LIBDIR);
+#else
+        llvm::sys::path::append(LibDir, "lib");
+#endif
+        if (tryDir(LibDir)) return Result;
     }
 #ifdef PLANG_RUNTIME_DIR
-    {
-        std::string Fallback = std::string(PLANG_RUNTIME_DIR) + "/" + LibFile;
-        if (isRegFile(Fallback)) return Fallback;
-    }
+    if (tryDir(PLANG_RUNTIME_DIR)) return Result;
 #endif
-    return "";
+    return Result;
 }
 
 // ---------------------------------------------------------------------------
@@ -862,6 +917,10 @@ Driver::ParseResult Driver::parseArgs(int Argc, char *Argv[]) {
             Opts.saveTemps = true;
         } else if (Arg == "-sanitize-runtime") {
             Opts.sanitizeRuntime = true;
+        } else if (Arg == "-static") {
+            Opts.linkRuntimeStatic = true;
+        } else if (Arg == "-dynamic") {
+            Opts.linkRuntimeStatic = false;
 
         } else if (Arg == "-S") {
             Opts.mode = OutputMode::Assembly;
@@ -1091,13 +1150,37 @@ static std::vector<std::string> makeFEArgs(const Options &Opts,
     return Args;
 }
 
+/// Appends whichever of RuntimeLib's StaticPath/DynamicLibDir was resolved to
+/// \p Args, in the shape the target linker wants: a static (or sanitized)
+/// link is just the archive's own path as a single argv entry, exactly where
+/// any other link input would go; a dynamic link instead needs the triple
+/// -L<dir> -lplang -rpath <dir> -- -L and -lplang so the linker itself can
+/// resolve libplang.so/.dylib, and -rpath so the resulting binary can find it
+/// again at run time without LD_LIBRARY_PATH/DYLD_LIBRARY_PATH (issue #805's
+/// own request: a user who had to pass -lplang by hand before these flags
+/// existed got a working link but only because the *build* host happened to
+/// have libplang.so on the linker's default search path -- nothing made the
+/// resulting binary itself able to find it again at run time without that
+/// same host's default runtime linker search path also including it).
+static void appendRuntimeLinkArgs(const RuntimeLibResult &RuntimeLib,
+                                  std::vector<std::string> &Args) {
+    if (!RuntimeLib.StaticPath.empty()) {
+        Args.push_back(RuntimeLib.StaticPath);
+    } else if (!RuntimeLib.DynamicLibDir.empty()) {
+        Args.push_back("-L" + RuntimeLib.DynamicLibDir);
+        Args.push_back("-lplang");
+        Args.push_back("-rpath");
+        Args.push_back(RuntimeLib.DynamicLibDir);
+    }
+}
+
 /// Link ObjFile into OutFile using ld.lld with detected GCC CRT paths.
 ///
 /// Takes the Driver so that it can report through the same engine everything
 /// else does, and run ld.lld through the same runTool.
 static int linkELF(Driver &D, const Options &Opts, const std::string &ObjFile,
                    const std::string &OutFile,
-                   const std::string &RuntimeLib,
+                   const RuntimeLibResult &RuntimeLib,
                    bool Verbose, bool DryRun) {
     GCCInstall GCC = detectGCC();
 
@@ -1140,7 +1223,7 @@ static int linkELF(Driver &D, const Options &Opts, const std::string &ObjFile,
     // forwarded straight to the linker via Opts.linkerArgs below); an empty
     // argument would otherwise be handed to ld.lld as a bogus input file.
     if (!ObjFile.empty()) Args.push_back(ObjFile);
-    if (!RuntimeLib.empty()) Args.push_back(RuntimeLib);
+    appendRuntimeLinkArgs(RuntimeLib, Args);
     Args.push_back("-lm");
     Args.push_back("-lgcc"); Args.push_back("--as-needed");
     Args.push_back("-lgcc_s"); Args.push_back("--no-as-needed");
@@ -1165,7 +1248,7 @@ static int linkELF(Driver &D, const Options &Opts, const std::string &ObjFile,
 /// for, and which on Linux arrive with -lgcc.
 static int linkDarwin(Driver &D, const Options &Opts, const std::string &ObjFile,
                       const std::string &OutFile,
-                      const std::string &RuntimeLib,
+                      const RuntimeLibResult &RuntimeLib,
                       bool Verbose, bool DryRun) {
     const llvm::Triple T  = targetTriple(Opts);
     const DarwinToolchain TC = detectDarwinToolchain();
@@ -1194,7 +1277,7 @@ static int linkDarwin(Driver &D, const Options &Opts, const std::string &ObjFile
     Args.push_back("-o"); Args.push_back(OutFile);
     // See the matching comment in linkELF: empty in linker-only mode.
     if (!ObjFile.empty()) Args.push_back(ObjFile);
-    if (!RuntimeLib.empty()) Args.push_back(RuntimeLib);
+    appendRuntimeLinkArgs(RuntimeLib, Args);
     for (const auto &A : Opts.linkerArgs) Args.push_back(A);
     Args.push_back("-lSystem");
     // Left out rather than reported when it is missing: it is only wanted by
@@ -1251,7 +1334,7 @@ static int linkDarwin(Driver &D, const Options &Opts, const std::string &ObjFile
 /// linker untouched the way -Xlinker guarantees.
 static int linkSanitized(Driver &D, const Options &Opts,
                          const std::string &ObjFile, const std::string &OutFile,
-                         const std::string &RuntimeLib, bool Verbose, bool DryRun) {
+                         const RuntimeLibResult &RuntimeLib, bool Verbose, bool DryRun) {
     // Baked in at configure time from CMAKE_C_COMPILER (lib/Driver/
     // CMakeLists.txt), which PLANG_ENABLE_RUNTIME_SANITIZER_TESTS's own
     // configure-time check (top-level CMakeLists.txt) requires to be Clang
@@ -1297,14 +1380,19 @@ static int linkSanitized(Driver &D, const Options &Opts,
     // left that reference undefined -- clang has no fixed default linker of
     // its own to rely on here the way ld.lld's own direct invocation does,
     // so this has to be right for whichever one clang picks.
-    if (!RuntimeLib.empty()) Args.push_back(RuntimeLib);
+    //
+    // Always RuntimeLib.StaticPath, never DynamicLibDir: the sanitized
+    // runtime (findRuntimeLib's Sanitized case) is test infrastructure only
+    // and always statically linked regardless of -static/-dynamic -- see
+    // findRuntimeLib's own comment.
+    if (!RuntimeLib.StaticPath.empty()) Args.push_back(RuntimeLib.StaticPath);
 
     return D.runTool(ClangProg, Args, Verbose, DryRun);
 }
 
 /// Link ObjFile into OutFile with whichever linker the target calls for.
 static int link(Driver &D, const Options &Opts, const std::string &ObjFile,
-                const std::string &OutFile, const std::string &RuntimeLib,
+                const std::string &OutFile, const RuntimeLibResult &RuntimeLib,
                 bool Verbose, bool DryRun) {
     if (Opts.sanitizeRuntime)
         return linkSanitized(D, Opts, ObjFile, OutFile, RuntimeLib, Verbose, DryRun);
@@ -1315,21 +1403,38 @@ static int link(Driver &D, const Options &Opts, const std::string &ObjFile,
 
 /// Resolves the runtime library to link against -- plang_runtime_sanitized
 /// when Opts.sanitizeRuntime (-sanitize-runtime) is set, the ordinary
-/// plang_runtime otherwise -- into \p RuntimeLib, and reports
-/// err_sanitized_runtime_not_built up front (returning false) when the
-/// former was asked for but this build was not configured with
-/// -DPLANG_ENABLE_RUNTIME_SANITIZER_TESTS=ON (see findRuntimeLib's own
-/// comment for why that leaves \p RuntimeLib empty). A missing *ordinary*
-/// runtime is not diagnosed here -- unchanged from before this flag
-/// existed; link() and its ELF/Darwin backends already tolerate an empty
-/// RuntimeLib on their own (see linkELF's "empty in linker-only mode"
-/// comment, the one existing case that leaves it empty today).
+/// plang_runtime/plang_runtime_shared otherwise, static or dynamic per
+/// Opts.linkRuntimeStatic -- into \p RuntimeLib, and reports a diagnostic up
+/// front (returning false) rather than pressing on into a confusing linker
+/// failure when the needed variant was not found:
+///
+///  - err_sanitized_runtime_not_built when -sanitize-runtime was given but
+///    this build was not configured with
+///    -DPLANG_ENABLE_RUNTIME_SANITIZER_TESTS=ON (see findRuntimeLib's own
+///    comment for why that leaves \p RuntimeLib not-found()).
+///  - err_runtime_not_found (issue #805) when a real, ordinary Pascal-
+///    sourced link needs the runtime and it is missing -- a genuinely
+///    broken/incomplete install, or (for -dynamic) one that shipped only the
+///    static archive. Gated on \p RequireRuntime, which every caller except
+///    the linker-only-mode call site in Driver::compile() passes true:
+///    linker-only mode (issue #611 -- a "plang a.o b.o -o out" invocation
+///    with no .pas source at all) has no Pascal-sourced symbols that could
+///    possibly need plang_runtime in the first place, so a missing runtime
+///    there is not an error -- link() and its ELF/Darwin backends already
+///    tolerate a not-found() RuntimeLib on their own for exactly that case
+///    (see linkELF's "empty in linker-only mode" comment).
 static bool resolveRuntimeLib(Driver &D, const Options &Opts,
                               const std::string &ExePath,
-                              std::string &RuntimeLib) {
-    RuntimeLib = findRuntimeLib(ExePath, Opts.sanitizeRuntime);
-    if (Opts.sanitizeRuntime && RuntimeLib.empty()) {
+                              bool RequireRuntime,
+                              RuntimeLibResult &RuntimeLib) {
+    RuntimeLib = findRuntimeLib(ExePath, Opts.sanitizeRuntime,
+                                 !Opts.linkRuntimeStatic);
+    if (Opts.sanitizeRuntime && !RuntimeLib.found()) {
         D.diag(diag::err_sanitized_runtime_not_built);
+        return false;
+    }
+    if (!Opts.sanitizeRuntime && RequireRuntime && !RuntimeLib.found()) {
+        D.diag(diag::err_runtime_not_found);
         return false;
     }
     return true;
@@ -1356,8 +1461,13 @@ int Driver::compile(const Options &Opts, bool IsExtraFile) {
     // produced -- matching gcc's own "plang -c foo.o" response.
     if (Opts.inputFile.empty()) {
         if (Opts.mode != OutputMode::Executable) return 0;
-        std::string RuntimeLib;
-        if (!resolveRuntimeLib(*this, Opts, ExePath_, RuntimeLib)) return 1;
+        RuntimeLibResult RuntimeLib;
+        // RequireRuntime=false: linker-only mode (issue #611), no .pas
+        // source at all, so there is nothing here that could need
+        // plang_runtime -- see resolveRuntimeLib's own comment.
+        if (!resolveRuntimeLib(*this, Opts, ExePath_, /*RequireRuntime=*/false,
+                               RuntimeLib))
+            return 1;
         return link(*this, Opts, /*ObjFile=*/"", OutFile,
                     RuntimeLib, Opts.verbose, Opts.dryRun);
     }
@@ -1662,8 +1772,12 @@ int Driver::compile(const Options &Opts, bool IsExtraFile) {
     // shipped units' own objects auto-linked just above).
     Options LinkOpts = Opts;
     for (const auto &EO : ExtraObjs) LinkOpts.linkerArgs.push_back(EO);
-    std::string RuntimeLib;
-    if (!resolveRuntimeLib(*this, LinkOpts, ExePath_, RuntimeLib)) {
+    RuntimeLibResult RuntimeLib;
+    // RequireRuntime=true: this is a real .pas-sourced compile reaching its
+    // own link step, which always needs the plang runtime -- unlike the
+    // linker-only-mode call site above.
+    if (!resolveRuntimeLib(*this, LinkOpts, ExePath_, /*RequireRuntime=*/true,
+                           RuntimeLib)) {
         if (OwnObj) removeOwnTemp(ObjFile);
         return 1;
     }

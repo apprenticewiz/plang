@@ -52,6 +52,18 @@ struct Options {
     /// sanitizer instrumentation regardless of this flag (see
     /// runtime/CMakeLists.txt's own "-fno-sanitize=all" comment).
     bool         sanitizeRuntime{false};
+    /// -static/-dynamic (issue #805): whether the plang runtime is linked
+    /// into the final binary as a static archive (libplang.a's own path
+    /// embedded directly in the link command, producing a self-contained
+    /// binary) or dynamically (-L<libdir> -lplang plus a matching -rpath,
+    /// so the binary needs libplang.so/.dylib at run time but not
+    /// LD_LIBRARY_PATH/DYLD_LIBRARY_PATH to find it). Dynamic is the
+    /// default, matching what a plain `-lplang` workaround already resolved
+    /// to before these flags existed; whichever of -static/-dynamic appears
+    /// last on the command line wins, the same "last flag wins" rule
+    /// -frange-checks/-fno-range-checks and -fnil-checks/-fno-nil-checks
+    /// already use.
+    bool         linkRuntimeStatic{false};
     bool         debug{false};             ///< -g: generate debug information
     std::string  target;                   ///< --target=<triple>
     std::string  std;                      ///< -std=<dialect>

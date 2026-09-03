@@ -332,6 +332,30 @@ Pass the comma-separated list \fIargs\fR directly to the linker.
 .BI \-Xlinker " arg"
 Pass \fIarg\fR as a single argument to the linker.
 .TP
+.B \-dynamic
+Link the plang runtime dynamically (the default): passes
+.BI \-L libdir
+.B \-lplang
+plus a matching
+.BI \-rpath libdir
+so the resulting binary can find
+.IR libplang.so / .dylib
+again at run time with no
+.B LD_LIBRARY_PATH
+/
+.B DYLD_LIBRARY_PATH
+needed.
+.TP
+.B \-static
+Link the plang runtime statically: embeds
+.IR libplang.a 's
+own path directly in the link command, producing a self-contained binary
+with no runtime library dependency.  Whichever of
+.B \-static
+and
+.B \-dynamic
+appears last on the command line takes effect.
+.TP
 .B \-sanitize\-runtime
 Link the compiled program against an AddressSanitizer/UndefinedBehaviorSanitizer
 \-instrumented build of the runtime instead of the normal one, and bring in
