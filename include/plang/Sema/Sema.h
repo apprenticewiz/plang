@@ -369,6 +369,17 @@ private:
     /// which is item 2/3's job.
     std::map<std::string, const UnitNode*> LoadedUnitNodes_;
 
+    /// Issue #790: lowercased unit name -> whether loadUnitInterfaceExports
+    /// resolved it through a genuine published .tui (true) or only through
+    /// its .pas re-parse fallback (false) -- set exactly once, alongside
+    /// LoadedUnitNodes_, the first time each name is loaded.  A fallback
+    /// resolution has no guaranteed matching .o anywhere in this link (see
+    /// loadUnitInterfaceExports' own comment on why the fallback exists at
+    /// all), so unitInitCallNames uses this to decide which used units are
+    /// safe for CodeGen to call `__plang_init_<name>` on without risking a
+    /// fresh undefined-reference failure at link time.
+    std::map<std::string, bool> UnitFromTUI_;
+
     /// Owns the ProgramNode (and, inside it, the UnitNode) that
     /// loadUnitInterfaceExports parsed each used unit's own source file
     /// into.  A Type resolved from one of these keeps a pointer back into
@@ -462,6 +473,25 @@ public:
         auto It = LoadedUnitNodes_.find(LowerUnitName);
         return It == LoadedUnitNodes_.end() ? nullptr : It->second;
     }
+
+    /// Issue #790: \p Uses (a program's own top-level 'uses', or one unit's
+    /// own InterfaceUses+ImplementationUses concatenated), filtered down to
+    /// the lowercased names CodeGen should call `__plang_init_<name>` for
+    /// directly -- see Codegen::setUnitInitOrder's own comment for what the
+    /// caller does with this and why no further ordering computation is
+    /// needed here.  Drops (in this order of checks): 'System' (never a
+    /// real unit -- see pushUnitUsesScopes' own comment), a name repeated
+    /// within \p Uses itself, and any name this Sema resolved only through
+    /// loadUnitInterfaceExports' .pas fallback rather than a real .tui (see
+    /// UnitFromTUI_'s own comment) -- in each case because there is nothing
+    /// safe or useful for CodeGen to call.  \p Uses's own written order is
+    /// preserved for what remains; deeper (transitive/implementation-only)
+    /// dependencies are NOT expanded here at all -- each returned unit's own
+    /// `__plang_init_<name>`, wherever IT was compiled, is responsible for
+    /// its own further dependencies the exact same way, so nothing further
+    /// needs finding from here.
+    [[nodiscard]] std::vector<std::string>
+    unitInitCallNames(const std::vector<UsedUnit>& Uses) const;
 
 private:
     // --- EP §6.11: separate compilation (.pmi file loading) ---

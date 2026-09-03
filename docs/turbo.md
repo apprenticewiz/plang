@@ -40,10 +40,10 @@ being one — every point where plang's Turbo mode is known to diverge from
 what a real `fpc -Mtp` (this project's stand-in for Turbo Pascal 7 itself,
 and empirically checked against throughout) actually does. Tiers 1-3's
 divergences are collected in one place, "Documented deviations," near the
-end; Tier 4's own one open gap (unit initialization sections) is
-documented in its own section instead, since — unlike the others — it is
-not a divergence checked against real `fpc -Mtp` field practice so much as
-a still-unscoped piece of this tier's own work.
+end; Tier 4's own unit-initialization-section mechanism (issue #790) is
+documented in its own section instead, since it is less a single checked
+divergence and more a small design of its own (see "Unit initialization
+sections" below for the dependency-ordering rule it settled on).
 
 ---
 
@@ -1586,10 +1586,10 @@ no bodies), an `implementation` section (its own optional, independent
 `uses` clause, then the bodies for everything the interface declared,
 plus any private `const`/`type`/`var`/procedure/function of its own that
 the interface never mentions), and a final `end.` — no `begin` is
-required before it (see "Unit initialization sections do not run
-automatically" below for what an optional `begin...end` there does and
-does not do). A **program** file's own `uses` clause, if any, comes
-immediately after the `program` heading, before any declaration.
+required before it (see "Unit initialization sections" below for what an
+optional `begin...end` there does). A **program** file's own `uses`
+clause, if any, comes immediately after the `program` heading, before any
+declaration.
 
 `uses UnitA, UnitB, UnitC;` — a comma-separated list, order significant
 (see "Scoping" below). The interface's own `uses` and the implementation's
@@ -1755,13 +1755,19 @@ confirmed against real `fpc -Mtp`.
 **`Printer`** — a single exported variable, `Lst: Text`, auto-bound to a
 real, writable text file the first time the program touches it — no
 `Assign`/`Rewrite` of its own required, matching real TP field practice
-where `Lst` just works. Because a used unit's own initialization section
-does not run (see below), this binding happens through a C++ global
+where `Lst` just works. This binding happens through a C++ global
 constructor in `runtime/plang_printer.cpp` that calls straight into the
-runtime, bypassing the Pascal-level init path this tier could not rely on
-— the one shipped unit that needed a workaround different from `Crt`'s own
-lazy-`EnsureInit`-per-call pattern, since `Lst` is a bare variable a
-program can read/assign with no intervening call to hook.
+runtime, rather than through the Pascal-level unit-initialization path
+"Unit initialization sections" below describes — `Lst` is a bare variable
+a program can read/assign with no intervening call to hook, so a real
+Pascal `begin...end` init section (which only ever runs when something
+actually `uses`s the unit, see below) would still leave a **standalone**
+read of `Lst` unbound; the C++ constructor runs unconditionally, before
+`main` even starts, so it has no such gap. `Crt`'s own lazy
+`EnsureInit`-per-call pattern predates this issue's fix too and is kept
+as-is (issue #790 is deliberately scoped to the core init mechanism, not a
+migration of the shipped RTL's own already-working patterns onto it — see
+that issue's own resolution for why).
 
 **`Strings`** — the classic null-terminated `PChar` toolbox, every routine
 backed by real `runtime/plang_strings.cpp` C string primitives (`strlen`/
@@ -1798,53 +1804,120 @@ jobs): a real `sudo cmake --install`, then a program identical in spirit
 to the lit test above, compiled and run with `plang -std=turbo
 usesrtl.pas -o usesrtl` alone, no `-I`, no `PLANG_UNIT_DIR`.
 
-## Unit initialization sections do not run automatically
+## Unit initialization sections
 
-**This is the one deliberate, still-open scope cut this whole tier
-carries.** A unit's `implementation` section may end with its own
-`begin...end` (instead of a bare `end.`) — real Turbo Pascal runs every
-`uses`d unit's own initialization section, in `uses`-clause dependency
-order, before the program's own `begin` — but plang does not yet run it
-automatically at all: only a **program's** own top-level `begin...end`
-ever executes on its own. A unit compiled and run **standalone** (nothing
-`uses`s it) is unaffected, since nothing about this gap touches how a
-program's own body runs — but a unit's own runtime-computed globals and
-any side effect its `begin...end` section would have produced simply do
-not happen when another program or unit `uses`s it.
+A unit's `implementation` section may end with its own `begin...end`
+(instead of a bare `end.`). Real Turbo Pascal runs every `uses`d unit's
+own initialization section, in dependency order, before the program's own
+`begin` — and, as of issue #790, so does plang: a unit's `begin...end`
+section, and any of its own runtime-computed global initializers, now run
+automatically whenever the unit is `uses`d, with no call of any kind into
+the unit required first. A unit compiled and run **standalone** (nothing
+`uses`s it) never had this section run at all, and still doesn't — the
+section only ever runs as part of a program (or another unit) actually
+`uses`ing it, exactly matching real Turbo/`fpc -Mtp` behavior.
 
-Confirmed directly, for this report: a unit
-(`InitUnit`, exporting `var InitRan: Integer` and a `begin...end` section
-that sets `InitRan := 99` and `Writeln`s a marker) compiled with `plang
--std=turbo -c` and linked into a program that immediately reads
-`InitRan` — with **no** call of any kind into the unit first — prints
-`InitRan=0`, not `99`, and the marker line never appears: the global
-keeps LLVM's own zero-initializer, and the `begin...end` section's
-`Writeln` never runs.
+Confirmed directly, this issue's own repro: a unit (`InitUnit`, exporting
+`var InitRan: Integer` and a `begin...end` section that sets `InitRan :=
+99` and `Writeln`s a marker) compiled with `plang -std=turbo -c` and
+linked into a program that immediately reads `InitRan` — with no call of
+any kind into the unit first — now prints the marker line followed by
+`InitRan=99`, in both a same-invocation-style build and, more strongly,
+with the unit's own `.pas` **deleted** between the two compiles (genuine
+separate compilation, proving the call reaches into the unit's own `.o`
+rather than depending on any AST still being around) — see
+`a-used-units-own-begin-end-initialization-section-runs-automatically-
+issue-790.pas` (`test/Turbo/Units/`).
 
-Every shipped unit that needed real initialization state worked around
-this individually rather than waiting on it: `Crt` uses a lazy
-`EnsureInit`, called from the START of every single exported
-procedure/function, so state is set up the first time ANYTHING in the
-unit is actually called (real TP code overwhelmingly calls something —
-`ClrScr` is close to universal — before ever reading `TextAttr`/`WindMin`/
-`WindMax` directly, so a bare, call-free FIRST read of one of those three
-is the one narrow, separately-documented gap `EnsureInit`'s own pattern
-cannot close). `Printer` bypasses the Pascal-level init path entirely with
-a C++ global constructor that calls straight into the runtime. `Dos` and
-`Strings` are mostly stateless (every call is a self-contained real
-syscall or C string operation), so the gap does not matter to either.
+### How CodeGen finds and calls each unit's own init function
 
-This project's own test corpus deliberately does not — and should not —
-assert that a used unit's initialization section runs: doing so would be
-asserting behavior plang does not have. Every multi-unit integration test
-in `test/Turbo/Units/` that needs a unit-level starting value (e.g.
-`three-units-separate-compilation-real-string-pipeline.pas`'s own
-`Counter`) sets it explicitly from the program, the same workaround
-`a-unit-compiled-standalone-can-be-used-by-a-program-that-never-sees-its-
-source.pas` already established. Closing this gap for real — running
-every `uses`d unit's own initialization section, in dependency order,
-automatically — remains open, unscoped future work, not part of this
-tier.
+Every unit CodeGen compiles (`Codegen::emitUnit`, whether or not it
+declares a `begin...end` section at all) already emits a real function,
+`__plang_init_<unitname>`, holding that unit's own runtime-computed
+global initializers plus its optional `begin...end` body, guarded by a
+private `__plang_initdone_<unitname>` flag so a second call is a safe
+no-op (`Codegen::Impl::emitUnitInitFn`, `lib/CodeGen/CodeGenProcs.cpp`) —
+this part predates #790 and did not change. What #790 added is CALLING
+it: `Sema::unitInitCallNames` (`lib/Sema/Sema.cpp`) filters a `uses`
+list down to the units CodeGen should call directly, dropping `System`,
+duplicates, and — critically — any unit Sema could only resolve through
+its `.pas` re-parse fallback rather than a real published `.tui` (see
+"Real separate compilation" above): a fallback-resolved unit has no
+guaranteed matching `.o` anywhere in the link, so calling its init
+function unconditionally would turn a previously-working
+uses-only-constants-or-types build into a fresh, surprising
+undefined-reference failure at link time
+(`an-uncompiled-uses-only-fallback-unit-still-links-init-call-is-skipped-
+issue-790.pas`).
+
+A **program's** own `emitMain` calls `__plang_init_<name>` for each name
+in its own top-level `uses` clause that `unitInitCallNames` kept (folded
+into the same call loop `emitMain` already ran for an Extended Pascal
+program's own module imports — `Codegen::emit`, `CodeGen.cpp`). A
+**unit's own** `__plang_init_<name>` does the identical thing for its own
+combined `InterfaceUses`+`ImplementationUses` list, calling its own
+direct dependencies' init functions before its own globals/`begin...end`
+body run (`emitUnitInitFn`'s own loop, mirroring the pre-existing EP
+module-initializer design in `emitModuleInitFn`, same file). This has to
+be a unit's own responsibility, not something the ultimate program works
+out top-down: a downstream consumer that only ever sees a unit's
+published `.tui` can see that unit's own `InterfaceUses` (republished
+verbatim into the `.tui`) but never its `ImplementationUses`, which stays
+genuinely private the same way an Extended Pascal module's own
+implementation section does — so a dependency reached only through a
+unit's own implementation `uses` is invisible to anyone but that unit's
+own compile.
+
+### Ordering rule, including mutual `uses` through implementation
+
+The full transitive order is never computed by any one topological sort —
+it falls out of plain recursion plus the per-unit idempotent guard,
+exactly the same design already proven for EP module initializers: each
+unit's own init function calls its own direct dependencies' init
+functions first (depth-first, in the `uses` clause's own written order,
+interface list before implementation list), and the guard makes calling
+one twice — from more than one place in the call graph — a harmless
+no-op. The result matches real Turbo Pascal's own linker behavior: a
+dependency chain (program `uses A`, `A`'s own interface `uses B`) brings
+`B`'s section up before `A`'s, and `A`'s before the program's own `begin`,
+regardless of what order the program's own `uses` clause lists `A`/`B`
+in — see `a-dependency-chain-of-units-runs-init-sections-in-dependency-
+order-issue-790.pas` (`test/Turbo/Units/`).
+
+**Mutual `uses` through `implementation`** (`UnitA`'s implementation
+`uses UnitB`, `UnitB`'s implementation `uses UnitA` right back — see
+"Mutual `uses`" above for why this is allowed at all) needs a real
+tie-break, since neither unit can wait on a fully-initialized other. The
+rule this project settled on: it falls out of **compile order**, via the
+same `.tui`-vs-`.pas`-fallback gating `unitInitCallNames` already needs
+for the separate-compilation-safety reason above. Whichever of the two
+units is compiled FIRST can only resolve the other through the `.pas`
+fallback (the other's `.tui` does not exist yet), so `unitInitCallNames`
+drops that dependency and that unit's own init function does NOT call the
+other's. Whichever is compiled SECOND resolves the first through its now
+genuinely published `.tui`, so IT does call the first's. Net effect: the
+second-compiled unit's own init always runs the first-compiled unit's
+init first, each exactly once, no infinite recursion, no double
+execution — deterministic given a fixed build order, the same way a real
+linker's own behavior in this exact scenario is order-dependent too. See
+`mutual-implementation-uses-init-sections-run-once-each-no-cycle-
+issue-790.pas` (`test/Turbo/Units/`) for the full proof, including the
+build-order commentary in its own header.
+
+A unit `uses`d but with no `begin...end` section at all is unaffected
+beyond the (harmless, no-op) extra call: `__plang_init_<name>` still
+exists and still gets called, it simply has nothing to do
+(`a-used-unit-with-no-initialization-section-is-unaffected-issue-790.pas`).
+
+Every shipped unit that needed real initialization state before this
+issue kept its own workaround rather than being migrated onto the new
+mechanism (deliberately out of scope for #790 — see that issue's own
+resolution): `Crt` still uses its lazy `EnsureInit`, called from the
+START of every single exported procedure/function; `Printer` still
+bypasses the Pascal-level init path with a C++ global constructor (see
+"The shipped units" above for why that one still needs to, even now);
+`Dos` and `Strings` are still mostly stateless and were never affected
+either way.
 
 ---
 

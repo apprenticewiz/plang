@@ -73,6 +73,28 @@ public:
     /// They must outlive emit.
     void setUsedUnits(std::vector<const UnitNode*> Units);
 
+    /// Issue #790: the lowercased names, in the order this program's (or
+    /// this unit's own) 'uses' named them, of exactly the DIRECTLY-'uses'd
+    /// units whose own `__plang_init_<name>` should be called from here --
+    /// as computed by Sema::unitInitCallNames, which already drops
+    /// 'System', self-uses, duplicates, and (critically) any unit Sema
+    /// could only resolve through its .pas re-parse fallback rather than a
+    /// real published .tui (see that function's own comment for why: a
+    /// fallback-resolved unit has no guarantee a matching .o exists
+    /// anywhere in this link, and calling its init function unconditionally
+    /// would turn an until-now working compile-without-linking-everything
+    /// into a fresh undefined-reference failure).
+    ///
+    /// Each named unit's own `__plang_init_<name>` recursively calls the
+    /// init functions of ITS OWN direct 'uses' first (emitUnitInitFn does
+    /// this the same way emitModuleInitFn already does for an EP module's
+    /// imports), and every init function guards itself against running
+    /// twice -- so this list only ever needs to name what THIS program or
+    /// unit directly 'uses'; the full transitive/topological order falls
+    /// out of the recursion + guard, not from any ordering computed here.
+    /// Called before emit()/emitUnit(); must outlive it.
+    void setUnitInitOrder(std::vector<std::string> Order);
+
     /// -g: the SourceManager that resolves every node's SourceLocation to a
     /// filename/line/column, and the FileID of the main input file, from
     /// which DIFile/DICompileUnit take their name and directory.  Only

@@ -1281,6 +1281,29 @@ void Sema::popUnitUsesScopes(size_t Count) {
     for (size_t I = 0; I < Count; ++I) Symtab.popScope();
 }
 
+// Issue #790: see this method's own declaration (Sema.h) for the full
+// contract.  Kept intentionally simple -- a filtered pass over \p Uses,
+// nothing recursive -- because the recursion that gives the FULL transitive
+// order its correctness lives in CodeGen instead (emitUnitInitFn calling
+// this same method for its own 'uses', emitModuleInitFn-style; see
+// Codegen::setUnitInitOrder's own comment for why no topological sort is
+// needed anywhere in this design).
+std::vector<std::string>
+Sema::unitInitCallNames(const std::vector<UsedUnit>& Uses) const {
+    std::vector<std::string> Names;
+    std::set<std::string> Seen;
+    for (const auto& U : Uses) {
+        if (eqCI(U.Name, "System")) continue;
+        const std::string Key = toLower(U.Name);
+        if (!Seen.insert(Key).second) continue;
+        if (LoadedUnitNodes_.find(Key) == LoadedUnitNodes_.end()) continue;
+        auto It = UnitFromTUI_.find(Key);
+        if (It == UnitFromTUI_.end() || !It->second) continue;
+        Names.push_back(Key);
+    }
+    return Names;
+}
+
 const std::vector<Symbol>&
 Sema::loadUnitInterfaceExports(const std::string& UnitName, SourceLocation Loc) {
     const std::string Key = toLower(UnitName);
@@ -1468,6 +1491,10 @@ Sema::loadUnitInterfaceExports(const std::string& UnitName, SourceLocation Loc) 
 
     const UnitNode* UN = UnitProg->BareUnit.get();
     LoadedUnitNodes_[Key] = UN;
+    // Issue #790: see UnitFromTUI_'s own comment.  Set exactly once, right
+    // alongside LoadedUnitNodes_ above, from the same IsTUI this function
+    // already computed while searching SearchDirs.
+    UnitFromTUI_[Key] = IsTUI;
     // Turbo Tier 5, Cluster B item 8: CurrentUnit_ has to name THIS foreign
     // unit (Key), not whatever unit/program is doing the 'uses', while its
     // interface is checked -- resolveObjectType and checkField both stamp

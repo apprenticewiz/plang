@@ -60,6 +60,10 @@ void Codegen::setUsedUnits(std::vector<const UnitNode*> Units) {
     PImpl->usedUnits_ = std::move(Units);
 }
 
+void Codegen::setUnitInitOrder(std::vector<std::string> Order) {
+    PImpl->unitInitOrder_ = std::move(Order);
+}
+
 void Codegen::setSourceManager(const SourceManager& SM, FileID MainFile) {
     PImpl->srcMgr_     = &SM;
     PImpl->mainFileID_ = MainFile;
@@ -171,6 +175,20 @@ bool Codegen::emit(const ProgramNode& prog, std::ostream& os) {
             [&](const std::string& N) { return eqCI(N, Clause.ModuleName); });
         if (!Local) InitModules.push_back(Clause.ModuleName);
     }
+
+    // Issue #790: fold this program's own top-level 'uses' (already
+    // filtered and ordered by Sema::unitInitCallNames -- see
+    // Codegen::setUnitInitOrder's own comment) into the very same
+    // InitModules list/call loop emitMain already runs for an EP program's
+    // module imports.  moduleInitFn(name) below either finds the real
+    // definition emitUnitInitFn already gave "name" (a Turbo unit compiled
+    // in THIS SAME invocation never happens -- see emitUnit's own header
+    // comment -- so in practice this always declares an external symbol,
+    // exactly like an EP program calling into a separately compiled
+    // module's own initialiser) or declares it extern; either way the call
+    // this loop already emits is correct without any further change here.
+    for (const auto& UnitName : PImpl->unitInitOrder_)
+        InitModules.push_back(UnitName);
 
     // Turbo Tier 4, Cluster A item 1: register the narrow subset of a used
     // unit's interface this item supports (see Codegen::setUsedUnits's own

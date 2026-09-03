@@ -306,6 +306,11 @@ struct Codegen::Impl {
     /// itself 'uses' another unit gets the same const/var/proc registration
     /// a program does.
     std::vector<const UnitNode*> usedUnits_;
+    /// Issue #790: see Codegen::setUnitInitOrder's own comment.  Consumed by
+    /// Codegen::emit (folded into its own InitModules call loop) and by
+    /// emitUnitInitFn (its own recursive-imports-style loop, mirroring
+    /// emitModuleInitFn's).
+    std::vector<std::string> unitInitOrder_;
     /// Turbo Tier 4: registers what a 'uses'd unit's INTERFACE declares, so
     /// that code being emitted here can read its constants, read/write its
     /// variables, and call its procedures/functions.  Item 1's own
