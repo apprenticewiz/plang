@@ -58,6 +58,26 @@ std::string describeBound(const Type& T, int64_t V) {
         return Base->EnumValues[static_cast<size_t>(V)];
     return std::to_string(V);
 }
+/// The IntLitExpr immediately named by E -- allowing one leading +/- unary
+/// wrapper, the same shape constBoundImpl itself unwraps on the way to
+/// folding a literal -- if it is one whose ExceedsInt64 bit is set, else
+/// nullptr.
+///
+/// Issue #800: constBoundImpl declines to fold such a literal at all (see
+/// its own comment) -- silently, the same way it declines any other
+/// unfoldable expression -- so a caller whose "could not fold" diagnostic
+/// assumes the only possible reason is "not a constant" would tell the user
+/// something false about a literal that plainly is one. foldBounds uses this
+/// to name the literal instead, for its own, accurate diagnostic.
+const IntLitExpr* asExceedsInt64Literal(const ExprNode& E) {
+    const ExprNode* Cur = &E;
+    if (auto* U = llvm::dyn_cast<UnaryExpr>(Cur))
+        if (U->Op == TokenKind::Plus || U->Op == TokenKind::Minus)
+            Cur = U->Operand.get();
+    if (auto* N = llvm::dyn_cast<IntLitExpr>(Cur))
+        if (N->ExceedsInt64) return N;
+    return nullptr;
+}
 } // namespace
 
 /// Both bounds of an index type or subrange, or nothing once one has been
@@ -81,8 +101,30 @@ Sema::foldBounds(const ExprNode& Low, const ExprNode& High,
     const bool UsedDisc = SchemaBindingUsed_;
     SchemaBindingUsed_  = SavedUsed || SchemaBindingUsed_;
 
-    if (!Lo) error(Low.Loc,  LowID);
-    if (!Hi) error(High.Loc, HighID);
+    // Issue #800: name the specific reason ahead of the generic "not a
+    // constant expression" LowID/HighID whenever it is actually
+    // asExceedsInt64Literal's -- see its own comment. Only int64_t bounds
+    // are representable here (Type::SubLo/SubHi), so this literal, whose
+    // own text needs the full unsigned 64 bits just to be written down, can
+    // never itself be an array or subrange bound, whatever the context.
+    if (!Lo) {
+        if (const auto* N = asExceedsInt64Literal(Low)) {
+            auto ValStr = std::to_string(static_cast<uint64_t>(N->Value));
+            error(Low.Loc, diag::err_int_literal_out_of_range,
+                  {std::string_view(ValStr)});
+        } else {
+            error(Low.Loc, LowID);
+        }
+    }
+    if (!Hi) {
+        if (const auto* N = asExceedsInt64Literal(High)) {
+            auto ValStr = std::to_string(static_cast<uint64_t>(N->Value));
+            error(High.Loc, diag::err_int_literal_out_of_range,
+                  {std::string_view(ValStr)});
+        } else {
+            error(High.Loc, HighID);
+        }
+    }
     if (!Lo || !Hi) return std::nullopt;
     if (*Lo > *Hi) {
         // A schema body is resolved once with its discriminants bound to 1, to
@@ -2019,7 +2061,28 @@ std::optional<int64_t> Sema::constBoundImpl(const ExprNode& E) const {
         if (!Narrow && Width < 64 && Wide) NarrowFoldOverflow_ = true;
         return Narrow;
     };
-    if (auto* N = llvm::dyn_cast<IntLitExpr>(&E))  return N->Value;
+    if (auto* N = llvm::dyn_cast<IntLitExpr>(&E)) {
+        // Issue #800: a literal past Int64::max (ExceedsInt64, set only
+        // when the parser's uint64 fallback succeeded -- ParseExpr.cpp)
+        // has no representable int64_t value at all -- every constant-
+        // ordinal context this fold feeds (subrange/array bounds, case
+        // labels, `const` values, ...) stores its result as a plain signed
+        // int64_t (e.g. Type::SubLo/SubHi), unlike an assignment or
+        // argument destination, which SemaExpr.cpp/SemaStmt.cpp's
+        // rejectOverflowLiteralUnlessQWordDest can accept outright when the
+        // destination itself is a 64-bit unsigned QWord. Returning the raw
+        // two's-complement bit pattern here (as this used to) silently
+        // substituted the wrong value -- UInt64::max's pattern reads back
+        // as -1 -- which downstream, bound-inversion-checking code such as
+        // foldBounds (just above) then reported as a confusing "lower
+        // bound exceeds upper bound" instead of the true "literal is out
+        // of range" story. Declining the fold here, silently, the same way
+        // any other unfoldable expression already does, is what lets
+        // foldBounds (via asExceedsInt64Literal) give that accurate
+        // diagnostic instead.
+        if (N->ExceedsInt64) return std::nullopt;
+        return N->Value;
+    }
     if (auto* N = llvm::dyn_cast<BoolLitExpr>(&E)) return N->Value ? 1 : 0;
     // ISO §6.1.7: a one-character string is a char-type constant, so it is an
     // ordinal and may appear as an array or subrange bound.
