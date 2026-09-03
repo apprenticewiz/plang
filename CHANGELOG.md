@@ -10,6 +10,24 @@ version numbers follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 
 ### Added
 
+- **`-std=turbo`: unit `implementation ... begin ... end` initialization
+  sections now run automatically**, in real dependency order, before a
+  program's own body -- previously they never ran at all except when a
+  unit was compiled and executed as its own standalone translation unit.
+  Each unit's own init function now calls its direct dependencies' init
+  functions first (depth-first, `uses`-clause order); the existing
+  per-unit idempotent guard (already shipped for Extended Pascal module
+  initializers) makes any repeat call anywhere in the dependency graph a
+  no-op, so the correct transitive order falls out of ordinary recursion
+  with no separate graph/topological-sort pass needed. Mutual `uses`
+  through `implementation` (already supported for interface resolution)
+  is handled deterministically by compile order: whichever of the two
+  units compiles second is the one whose init calls the other's, since
+  only it resolves the other through a real `.tui`. Proven across a real
+  separate-compilation boundary (a unit compiled standalone via `-c`,
+  its source deleted, then linked into a program that never sees the
+  source) as well as a "diamond" dependency (two units sharing a common
+  third dependency, confirmed to initialize exactly once) (issue #790).
 - **`-std=turbo`: `{$IFOPT switch+}`/`{$IFOPT switch-}`.** Tests the CURRENT
   state of a compiler switch at the point it appears -- `{$R+} ... {$IFOPT
   R+}` takes its branch, a later `{$R-}` flips it -- reusing the existing
@@ -142,6 +160,279 @@ version numbers follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html
   "before" IR and diffing again).
 
 ### Fixed
+
+A ninth adversarial review round, the largest yet: this project's own 6-way
+parallel sweep across every completed Turbo tier and the EP/ISO 10206 core,
+plus three external models run independently against the same codebase
+state, together filed 143 confirmed bugs. Triaged by severity (29 P0, 67
+P1, 51 P2/P3) and fixed in waves of up to 5 concurrent worktree-isolated
+agents -- a root-cause fix, a regression test, and a full Debug+Release
+rebuild-plus-test-suite pass per cluster, then one more independent
+verification pass per wave (re-running every original repro from scratch
+and hunting for interaction bugs between the wave's own fixes) before
+moving on. That last discipline is what pushed the total past 143: fixing
+bugs kept surfacing more of them. A squash-merge of two sibling PRs once
+left `main` briefly non-compiling (two fixes had each refactored the same
+function's local variables on different, non-conflicting lines -- caught
+and fixed within minutes, not through any single PR's own CI); an
+independent verification pass caught a fix for one bug (#616) leaving a
+gap that produced a fresh crash on a case its own author never tested
+(#723); fixing a bare-method-call resolution gap (#773) introduced a
+silent-wrong-answer regression on a name-clash case a different,
+already-merged fix (#730) existed specifically to prevent, caught by
+re-running that fix's own regression tests against the new one (#781); and a full
+26-bug pass thought complete after four separate rounds of triage was
+still missing 9 real P0s that had simply never been graded, caught only
+by a stray tally while wrapping up an unrelated P1 campaign. Every one of
+these is fixed as part of the entries below rather than left for a future
+release.
+
+- **Compiler crashes and ICEs**, now clean diagnostics or correct codegen
+  instead: a record with a scalar field ahead of a Turbo `string[N]` field
+  (wrong hardcoded alignment in the runtime layout walk, #591); `for x in
+  setExpr do` when `x` already denotes an outer Set-typed variable (#588);
+  `Assign`/`Rename` with a packed-array-of-char filename (#671); a typed-
+  file `write` under `-std=turbo` (#683); a `ShortString` function result
+  relayed through a procedural parameter/variable (#684); a record
+  structured value constructor as a value argument, and selectors on one
+  (#685); `FindFirst` with an integer-literal attribute mask (#696); a
+  bare `inherited;` after a static hide with a mismatched signature
+  (#616, plus a gap in that very fix caught by independent re-verification
+  and closed same-round, #723); `FillChar`/`Move` with a negative `Count`
+  (#628); reading an untyped `var` parameter through a typecast (#645);
+  calling a nil procedural variable (#646, now a clean Runtime error 216
+  trap); `Dispose(P, Done)` on a nil `P` segfaulting the same way instead
+  of trapping (#579); schema-backed string initial state and value-argument passing
+  (#606, #607); a procedure-local object type (#617, now a clean
+  diagnostic); a qualified, no-parens call to a parameterless method
+  returning `string` (#786); and a procedural variable's indirect call
+  mismarshaling a `const` record parameter -- a crash when the record had
+  a `set` field, a silent wrong answer when it didn't (#772).
+- **Silent miscompilation and data corruption** -- the most severe class,
+  fixed with no observable diagnostic previously at all: Turbo
+  `Integer`/`Byte` arithmetic silently skipping 16-bit wraparound whenever
+  either operand was a literal (also flipping comparison results, #577,
+  with a Byte-width gap and an inline-use regression in the first fix
+  caught and closed by the same round's own re-verification); mixed
+  signed/unsigned comparisons and arithmetic wrong at every width below 64
+  bits (#629, #630); `Abs`/`Sqr` exposing their internal runtime-helper's
+  own result width instead of the operand's real declared type (#609); `Assign`/`Reset(f,0)`/`Rewrite(f,0)` leaving a
+  previous stream live so writes landed in the wrong or deleted file
+  (#573, #587); an unqualified reference resolving to the *first* `uses`d
+  unit instead of the last, violating Turbo's own documented shadowing
+  rule (#594); set union/symmetric-difference silently dropping members
+  across mismatched base windows (#681); cross-unit `inherited` calls
+  mismarshaling `var`/set parameters (#682); Turbo's mutating builtins and
+  variable-typecast assignment silently bypassing `const`/protected
+  parameter checks (#710, #711, plus the same gap in a parser-level
+  `const var` combined prefix and in `readstr`/`writestr`, #712, #714);
+  and a bare/qualified parenthesis-free call to a method sharing a name
+  with an inherited field silently reading the stale field instead of
+  calling the method (#781, a regression introduced by this round's own
+  #773 fix and caught the same round).
+- **Turbo object model (methods, VMT, `inherited`)**: an unqualified call
+  to a sibling method from inside another method's own body, or from a
+  `with obj do` block, failed to resolve (#571, #623); method-call
+  resolution was keyed by a bare name instead of the receiver's own
+  resolved type identity, giving wrong results under type-name shadowing
+  (#621); `inherited` to an abstract-only ancestor method compiled clean
+  and only trapped at runtime instead of at compile time (#574); a cross-
+  unit unoverridden abstract method failed to link (#618); `New` used as
+  a function expression, the canonical polymorphic-allocation idiom, was
+  rejected (#622); a bare `inherited;` in a root object with no ancestor
+  was rejected (#624); a function-method's implicit result assignment was
+  shadowed by an inherited field of the same name (#626); a statement-
+  position method call on a function-result pointer didn't parse (#627);
+  `inherited` inside a nested procedure within a method was rejected
+  (#625); VMT identity broke across unit boundaries, so `TypeOf` on the
+  same declared type answered differently depending which unit asked
+  (#619); re-virtualizing a statically-hidden method took over the old
+  VMT slot instead of a fresh one, dispatching to the wrong implementation
+  (#620); a bare, argument-free method call used as a value (not just in
+  statement position) failed to resolve in expression context (#773); and
+  virtual dispatch trapped after a plain `New(p)` followed by an ordinary,
+  non-extended-syntax constructor call, since only the extended `New(p,
+  Ctor(...))` form stamped the VMT (#780).
+- **Turbo file I/O and `IOResult`/`InOutRes` semantics** -- a large
+  cluster, all cross-checked against real `fpc -Mtp` field practice:
+  `Close` never checking whether the file was actually open (#575);
+  `Append` on a nonexistent file silently creating it (#576); a negative
+  radix-prefixed integer failing to parse from a text file (#592);
+  `ExitProc` chaining -- a handler reassigning `ExitProc` from inside
+  itself -- not honored (#595); a typed-file `Read` at or past EOF
+  recording no error even under `{$I+}` (#661); the Turbo text model
+  treating only LF as a line marker and substituting a space for CR
+  (#662); genuine write failures (`ENOSPC`, ...) misreported as a fixed
+  "file not open" code instead of the real underlying error (#663);
+  `Flush` only ever able to report one fixed result regardless of what
+  actually happened (#664, plus its file-kind restriction being
+  documented backwards, #739); `BlockWrite` suppressing genuine write
+  errors and misreporting direction violations (#665); a stale one-
+  character lookahead surviving `Truncate`, `BlockWrite`, and typed
+  `Write` (#666); a text-file `Reset` honoring `FileMode` when real
+  Turbo/`fpc` never let `FileMode` touch `Text` files at all (#667,
+  independently rediscovered and closed as a duplicate, #735); typed/
+  untyped `Rewrite` being effectively write-only, with `Eof` always
+  `TRUE` immediately after (#668); `Eof` on typed files computed byte-
+  wise instead of record-wise (#669); a negative literal token wrapping
+  silently into `Word`/`Cardinal`/`LongWord` (#672); a negative `RecSize`
+  being a silent no-op instead of trapping (#679); `Seek(f, n)` reporting
+  stale or garbage `IOResult` -- including false success -- when `n *
+  RecSize` overflowed a 64-bit integer (#583); `Reset(f)` with an out-of-
+  range `FileMode` opening read-write instead of falling back to read-
+  only (#589); `Truncate(f)` on a read-only-opened file reporting the
+  wrong `IOResult` code (#593); `Append` accepted on typed/untyped files
+  when it should be Text-only (#670); and, the deepest gap
+  in this cluster: `{$I-}`'s documented "a pending, unread `InOutRes`
+  suppresses every further I/O call, on any file, until `IOResult` is
+  read" contract was only ever implemented for `Eof`/`Eoln` -- every
+  other I/O entry point kept working normally while an error sat pending,
+  a gap only reachable once this round's own fixes made errors reliably
+  *detectable* in the first place (#738).
+- **Turbo unit system (linking, search order, naming)**: a case-variant
+  spelling of a unit export failing to link because Sema and CodeGen
+  mangled the symbol name differently (#694); enum constants of a unit-
+  exported enum type left undefined in any importer (#695); no compile-
+  time conformance check between a unit's interface heading and its
+  implementation body (#698); `uses System` rejected (#699); a local
+  `.pas` losing to a same-named shipped `.tui` (#700); transitive unit
+  objects not auto-linked (#705, plus the fix itself initially missing
+  any normally-capitalized unit name, only ever trying an all-lowercase
+  object filename, caught and closed the same round, #746); a failed
+  unit compile leaving its freshly-published `.tui` behind (#706); a
+  corrupt `.tui` in an earlier search directory hard-erroring instead of
+  falling through to a later one (#707); the driver's `.o` resolution
+  disagreeing with Sema's own `.tui` resolution about which directory a
+  unit actually came from (#708); duplicate and self `uses` silently
+  accepted (#709); a type cast through a unit-imported type name not parsing as a cast
+  (#701); and Dos exporting Delphi/SysUtils-style prefixed
+  attribute constants instead of real TP7's unprefixed names, never
+  returning `.`/`..` from `FindFirst`/`FindNext`, plus nested
+  `FindFirst`/`FindNext` loops corrupting each other's directory-
+  scan state (#581, #582, #697).
+- **Sized-integer, cast, and pointer semantics**: `Hi`/`Lo`/`Swap`
+  mis-folding integer literals at 64 bits instead of their real operand
+  width (#631); `Ord` zero-extending a signed narrow type instead of
+  sign-extending (#632); `Boolean(x)` as a value cast keeping only the
+  low bit instead of treating any nonzero value as true (#633); `PChar`/
+  `PAnsiChar` typecast expressions not parsing as casts at all (#634);
+  `Hi`/`Lo`/`Swap` rejecting a subrange-typed argument (#635); literal-
+  literal string comparison using EP's space-padding rule under
+  `-std=turbo` (#636); a global `absolute` aliasing a component (not a
+  bare variable) crashing instead of a diagnostic (#639); pointer
+  relational comparison rejected under `-std=turbo` (#640); a string
+  literal assigned to a 0-based char array rejected (#641); loose-`Bool`-
+  to-integer conversion zero-extending where real `fpc` sign-extends
+  (#642); a misleading `{$R+}` string-index range-check message that
+  excluded a legal index-0 (#643); `x in s` never range-checking under
+  `{$R+}` (#637); `-std=turbo` incorrectly accepting negative-based sets
+  (#692); `set of Byte` incorrectly rejected as exceeding the 256-element
+  set limit (#580); `minint div -1` trapping unconditionally under
+  `-std=turbo` when real `fpc -Mtp` itself never traps it (#638); string
+  literals and `@wholearray` rejected as `PChar` arguments (#702); and
+  `PChar` pointer subtraction truncated to a 16-bit result and wrapping
+  (#713).
+- **EP/ISO 10206 correctness**: schema-instantiated set types rejected by
+  every set operator despite being independently assignable (#584);
+  structured value constructors rejecting every schema type with a
+  misleading "type not found" (#590); `empty(f)` implementing "positioned
+  at EOF" instead of the standard-mandated "has no components" (#686); a
+  conformant packed-char-array parameter rejecting string literals
+  (#687); `dispose` of a schema/variant instance accepting standard-
+  mandated errors and silently dropping discriminant expressions (#688);
+  the `for...in` control variable being implicitly shadow-declared
+  instead of naming an ordinary, already-declared variable, contra
+  §6.9.3.9.1 (#689); the two-word `and then`/`or else` spellings rejected
+  in favor of only this project's own non-standard underscored ones
+  (#690); dynamic (runtime-computed) schema discriminants rejected for
+  local variables while the heap-allocation form already accepted them
+  (#691); and a substring-range assignment/read on a `protected`
+  parameter bypassing the protection check (#586).
+- **Parser, lexer, and directive robustness**: two more stack-headroom-vs-
+  term-count recursion-guard siblings to the ones fixed in earlier rounds
+  -- `Sema::resolveType` had no guard at all (#596), and `Sema::checkBlock`
+  /`checkProcBody` crashed at a strikingly ordinary ~2.5 MiB of stack
+  (#597) -- plus a third, `parseFactor`'s own parenthesized-expression
+  ceiling, which had a term-count check but no stack-headroom one (#572);
+  a Turbo cast-parsing scope leak letting a local variable's name affect
+  cast recognition outside its own procedure (#599); Turbo `^letter`
+  character constants failing to parse after `=` and `of` (#600); a
+  dead-branch conditional skipper fooled by `{$...}`-looking text inside
+  string literals or comments (#644); a dead conditional branch unable to
+  straddle an `{$I}` include boundary (#651); whitespace changing a one-
+  letter Turbo directive's meaning (#604); a directive placed mid-
+  statement not applying to the rest of that statement's own checks
+  (#655); comments/directives unable to span an include boundary (#656);
+  nested includes lacking `fpc`'s own current-working-directory fallback
+  (#657); the comma-separated `{$R+,I-}` multi-switch form applying
+  neither switch and warning misleadingly (#658); and `{$J-}` not
+  actually making a Turbo typed constant immutable (#603).
+- **Procedural variables**: a procedural variable couldn't itself be
+  passed as the actual argument to a procedural-typed parameter (#647); a
+  call through a procedural-typed array element didn't parse (#648); and
+  a bare reference to a function-typed procedural variable in value
+  context was rejected, treated like the auto-calling rule for a plain
+  function name instead of a value read (#649).
+- **Driver, diagnostics, and runtime misc**: `-c` linking object-only
+  input into an executable instead of stopping after producing the
+  object (#611); multi-input `-c` silently discarding every object after
+  the first (#612); `dump-parse-tree` exiting successfully despite a
+  promoted error (#613); malformed UTF-8 shifting later diagnostic
+  columns and emitting raw bytes into diagnostic text (#614); `Assert`
+  rejecting a short-string variable as its message (#601); `RunError`,
+  `Delay`, and `Halt` all accepting a real-valued argument (#602, #653);
+  `RunError`/`Halt`'s `ExitCode`, printed message, and actual process
+  exit status disagreeing for codes outside 0-255, three different
+  truncation widths that were never reconciled (#775); `ExitProc`
+  observing a stale `ExitCode` after `RunError` (#652); no compile-time
+  diagnostic for an out-of-range constant for-loop limit or assignment,
+  and that diagnostic not covering built-in ranged types like `Byte`
+  once it did exist (#654, #776); Turbo for-loops rejecting an assignment to the control variable within
+  the loop body, though real TP7 allows it (#650); `warn_for_var_after_loop`
+  firing under
+  `-std=turbo` though Turbo leaves the control variable well-defined
+  after a normal loop exit (#659); an unchecked out-of-bounds write (under
+  `{$R-}`, already-UB territory) able to corrupt the RTL's own exit-state
+  globals, hardened by consistently truncating and reusing one canonical
+  value for both the printed message and the real exit code rather than
+  two independently-truncated ones (#660); `SizeOf`/`High`/`Low` falsely warning
+  "read before given a value" despite never evaluating their argument
+  (#578); a spurious warning on `BlockRead`/`BlockWrite`'s `amt` out-
+  parameter and `GetMem`'s `p` (#673); `Read(f)` with no value arguments
+  on a typed file silently accepted as a no-op (#674); a field width past
+  `INT32_MAX` aborting unconditionally even under `{$I-}` (#675);
+  `Random(Range)` with a negative `Range` always returning 0 instead of a
+  negative value (#676); fixed-decimal formatting of large reals printing
+  the exact binary expansion instead of a reasonable rounding (#677);
+  `docs/turbo.md` incorrectly claiming `InOutRes` isn't a nameable
+  identifier (#678); a char read at EOF returning 0 instead of Ctrl-Z
+  (#680); Crt leaving the terminal in raw mode on a fatal signal, and
+  `WhereX`/`WhereY` not tracking actual `Write`/`Writeln` output (#703,
+  #704); `get`/`put`/`close`/`page` silently ignoring extra or missing
+  arguments instead of a compile-time arity error (#605, #693); PMI
+  serialization dropping `bindable` type metadata (#608); nested same-
+  name nominal types incorrectly treated as assignment-compatible
+  (#598); and `-std=turbo` wrongly rejecting a function returning a
+  record, array, or set type, all of which real `fpc -Mtp` allows (#585,
+  #787).
+- **Closing four more documented gaps between `-std=turbo` and real
+  `fpc -Mtp`**, found and fixed in the same pass that produced the
+  `{$IFOPT}` and unit-initialization work above: a record/object type
+  can now name itself as a by-value or `var` method parameter before its
+  own declaration finishes (#791); a `method ... hides the inherited
+  method of the same name` warning no longer false-positives on a non-
+  virtual redeclaration -- it now only fires when the ancestor
+  declaration being hidden was itself `virtual`, matching real `fpc`
+  exactly (#792); an anonymous inline enum used as a `set`'s (or `file`
+  of...'s) base type no longer fails to link, since enum-constant
+  registration now recurses into `Set`/`File`/`Pointer`/`Packed` type
+  nodes the same way it already did for `Array`/`Record` (#774); and an
+  integer literal between `Int64`'s maximum and
+  `QWord`'s own maximum is now accepted wherever the destination context
+  is unsigned-compatible, instead of being rejected outright regardless
+  of destination (#795, plus a subrange/array-index-bound context the
+  first fix missed, giving a misleading error instead of an accurate one,
+  closed the same round, #800).
 
 - `Sema::checkIdent`'s generic `SymbolKind::Builtin` case never checked
   whether the current dialect actually has the name in question -- only
