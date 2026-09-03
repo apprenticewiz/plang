@@ -224,7 +224,7 @@ jobs:
           begin
             TextColor(Green);
             Count := 0;
-            FindFirst('rtlprobe/*.txt', faAnyFile, F);
+            FindFirst('rtlprobe/*.txt', AnyFile, F);
             while DosError = 0 do
             begin
               Count := Count + 1;
@@ -505,7 +505,7 @@ jobs:
           begin
             TextColor(Green);
             Count := 0;
-            FindFirst('rtlprobe/*.txt', faAnyFile, F);
+            FindFirst('rtlprobe/*.txt', AnyFile, F);
             while DosError = 0 do
             begin
               Count := Count + 1;
