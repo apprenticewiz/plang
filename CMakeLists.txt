@@ -152,7 +152,7 @@ endif()
 # The date in the man page header, which by convention is when the page last
 # changed rather than when it was built — a build date would make two builds of
 # the same source differ.
-set(PLANG_MANPAGE_DATE "2026-08-26")
+set(PLANG_MANPAGE_DATE "2026-09-01")
 
 message(STATUS "plang version ${PLANG_VERSION_STRING}")
 
