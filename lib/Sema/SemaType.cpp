@@ -1201,6 +1201,17 @@ std::shared_ptr<Type> Sema::resolveObjectType(const ObjectTypeNode& Node,
     }
 
     auto T = std::make_shared<Type>();
+    // Issue #791's follow-up (a leak CI's ASan+LSan job caught): register T
+    // with Ctx_ right away so ~TypeContext's cycle-breaking walk has a root
+    // to reach it from even if nothing interned ever refers to it -- see
+    // TypeContext::trackObjectType's own comment for why an Object type
+    // needs this and Enum/Record never have.  Registered unconditionally,
+    // not only once a self-typed parameter/return type is actually seen
+    // below: a failed/partial resolution still leaves whatever members were
+    // already appended reachable only through T, and tracking every Object
+    // type uniformly is one line instead of a second, easy-to-miss call
+    // site guarded by "did this one turn out self-referential".
+    Ctx_.trackObjectType(T);
     // Issue #791: from here until this function returns, T is the eventual
     // real type for DeclName, mutated in place as the loop below walks
     // members -- but the symbol table still only has Phase 3a's unresolved

@@ -136,6 +136,29 @@ public:
     /// each keep the other's shared_ptr alive, and neither is ever freed.  The
     /// context outlives every type it hands out, so it is the one place that
     /// can cut the links once nothing will read them again.
+    ///
+    /// Issue #791's follow-up: an Object type is never interned (same as
+    /// Enum/Record -- see this class's own header comment) and so is never a
+    /// root the loop below would otherwise reach ON ITS OWN.  Ordinarily that
+    /// is fine, the same way it is fine for Enum/Record: the walk still finds
+    /// a nominal type as long as SOME interned/cached type's link leads to
+    /// it (a `^TFoo` field does exactly that for a record, and did for
+    /// Object too, until now). But issue #791 gave a method parameter
+    /// naming its own enclosing Object type a DIRECT shared_ptr cycle
+    /// (T -> ObjectMethods[i].Params[j].Ty == T, or the same for a self-typed
+    /// return type) that need not pass through anything interned at all --
+    /// `TFoo = object procedure Copy(Other: TFoo); end` alone, no pointer or
+    /// array anywhere, leaves T reachable only from itself.  ObjectRoots_
+    /// (populated by Sema::resolveObjectType, right where each Object type
+    /// is minted) gives the walk below a way to reach it regardless, and the
+    /// ObjectMethods loop right after this one's structural fields breaks
+    /// the actual cyclic edge -- Params/RetType are the only shared_ptr<Type>
+    /// fields ObjectMethods holds (see Type::Method's own comment); the rest
+    /// of Type::Method (Name, VmtSlot, Heading, ...) holds nothing that could
+    /// keep a Type alive.  A confirmed-acyclic field (Parent: ISO/EP/Turbo
+    /// all refuse a type inheriting from itself, so Sema always rejects that
+    /// declaration before a real cycle could form there) is left alone, same
+    /// as before.
     ~TypeContext() {
         // Collected as shared_ptr, and held that way until every link is cut.
         // Raw pointers were enough only while everything reachable was also
@@ -152,6 +175,10 @@ public:
             for (auto& [K, T] : *Cache) collect(T, Seen, Alive);
         for (auto& [Cap, T] : VarStringCache_) collect(T, Seen, Alive);
         for (auto& [Cap, T] : ShortStringCache_) collect(T, Seen, Alive);
+        // See this destructor's own comment (issue #791's follow-up) for why
+        // Object types need their own root list rather than riding along
+        // with something interned.
+        for (const auto& T : ObjectRoots_) collect(T, Seen, Alive);
         for (const auto& Sp : Alive) {
             Type* T = Sp.get();
             T->SubBase.reset();
@@ -162,6 +189,16 @@ public:
             T->SchemaBody.reset();
             T->RecordFields.clear();
             T->Params.clear();
+            // Issue #791's follow-up: Params/RetType are the only
+            // shared_ptr<Type> fields a Method holds (see this destructor's
+            // own top comment) -- clearing them here is what actually
+            // breaks a self-typed parameter's T -> ObjectMethods[i].
+            // Params[j].Ty == T edge, the same way T->RecordFields.clear()
+            // just above already broke a self-typed FIELD's edge.
+            for (auto& M : T->ObjectMethods) {
+                M.RetType.reset();
+                for (auto& P : M.Params) P.Ty.reset();
+            }
         }
     }
 
@@ -503,6 +540,15 @@ public:
         PointerCache_["ptr:" + addrKey(pointee)] = ptr;
     }
 
+    /// Issue #791's follow-up: called once by Sema::resolveObjectType
+    /// (SemaType.cpp), right where each Object type is minted, so
+    /// ~TypeContext's cycle-breaking walk always has a root to reach it
+    /// from -- see that destructor's own top comment and ObjectRoots_'s own
+    /// comment for why an Object type specifically needs this.
+    void trackObjectType(std::shared_ptr<Type> T) {
+        ObjectRoots_.push_back(std::move(T));
+    }
+
     /// Canonical file type.  ISO §6.4.3.5 gives `text` its own predefined
     /// identity; see getText.
     std::shared_ptr<Type> getFile(std::shared_ptr<Type> elem,
@@ -614,6 +660,13 @@ private:
         collect(T->SchemaBody,  Seen, Alive);
         for (const auto& F : T->RecordFields) collect(F.Ty, Seen, Alive);
         for (const auto& P : T->Params)       collect(P.Ty, Seen, Alive);
+        // Issue #791's follow-up: an Object method's own Params/RetType --
+        // see the destructor's own top comment for why these, uniquely
+        // among Type::Method's fields, need walking here at all.
+        for (const auto& M : T->ObjectMethods) {
+            collect(M.RetType, Seen, Alive);
+            for (const auto& P : M.Params) collect(P.Ty, Seen, Alive);
+        }
     }
 
     /// Cache-key fragment identifying a component type.  Null is a distinct
@@ -679,6 +732,17 @@ private:
     /// Turbo string[N]; see getShortString's own comment for why this is a
     /// separate cache and not a slot shared with VarStringCache_ above.
     std::map<int64_t,     std::shared_ptr<Type>> ShortStringCache_;
+
+    /// Issue #791's follow-up: every Object type Sema::resolveObjectType has
+    /// minted (SemaType.cpp), via trackObjectType below -- gives
+    /// ~TypeContext's cycle-breaking walk a root to reach one from even when
+    /// nothing interned (no pointer, no array, ...) ever refers to it.  Not
+    /// a cache: Object types are deliberately never interned (this class's
+    /// own header comment), so this is a plain append-only list, one entry
+    /// per declaration, exactly mirroring why Enum/Record need none of this
+    /// (nothing about them can hold a shared_ptr back to themselves -- only
+    /// Object, by way of a method's own parameter or return type, can).
+    std::vector<std::shared_ptr<Type>> ObjectRoots_;
 };
 
 } // namespace plang
