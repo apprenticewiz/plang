@@ -1365,6 +1365,15 @@ static CompilationResult compileRequest(const CompilationRequest& Request,
             if (const UnitNode* UN = UnitSem.loadedUnit(toLower(U.Name)))
                 UsedUnits.push_back(UN);
         if (!UsedUnits.empty()) Cg.setUsedUnits(std::move(UsedUnits));
+        // Issue #790: this unit's own direct dependencies -- interface AND
+        // implementation 'uses' alike, since a downstream consumer of THIS
+        // unit's .tui can only ever see the interface half (see
+        // emitUnitInitFn's own header comment) -- whose __plang_init_<name>
+        // this unit's own init function should call.
+        std::vector<UsedUnit> AllUses = Unit.InterfaceUses;
+        AllUses.insert(AllUses.end(), Unit.ImplementationUses.begin(),
+                       Unit.ImplementationUses.end());
+        Cg.setUnitInitOrder(UnitSem.unitInitCallNames(AllUses));
         if (Opts.Debug) Cg.setSourceManager(SrcMgr, MainFileID);
 
         std::ostringstream OSS;
@@ -1410,6 +1419,10 @@ static CompilationResult compileRequest(const CompilationRequest& Request,
             if (const UnitNode* UN = Sem.loadedUnit(toLower(U.Name)))
                 UsedUnits.push_back(UN);
         Cg.setUsedUnits(std::move(UsedUnits));
+        // Issue #790: this program's own top-level 'uses', filtered/ordered
+        // by Sema -- see Codegen::setUnitInitOrder's own comment for what
+        // CodeGen does with it.
+        Cg.setUnitInitOrder(Sem.unitInitCallNames(Program->Uses));
     }
     if (Opts.Debug) Cg.setSourceManager(SrcMgr, MainFileID);
 

@@ -3032,25 +3032,41 @@ std::string Codegen::Impl::emitModuleInitFn(const ModuleNode& modNode) {
     return fnName;
 }
 
-// Turbo Tier 4, Cluster A item 2: see this method's own declaration
-// (CodeGenImpl.h) for the whole design.  Deliberately does NOT call any
-// OTHER unit's own __plang_init_<name> the way emitModuleInitFn calls
-// moduleInitFn(clause.ModuleName) for each of an EP module's imports: a
-// Turbo unit 'uses'd only through Sema::loadUnitInterfaceExports' .pas
-// fallback (no .tui was published, so Sema read its INTERFACE straight from
-// source for type-checking only -- see that function's own comment on why
-// the fallback exists) has no real object file anywhere in this compile,
-// and calling its __plang_init_<name> here would leave an undefined
-// reference for the linker to fail on even though the compile itself looked
-// clean.  So this only ever brings up the unit's OWN runtime-computed
-// constants/variables and its own InitBody -- automatically running a
-// USED unit's own initializer is left for a later item once every 'uses' in
-// a build is known to have a real published .tui/.o rather than possibly
-// being the fallback path (see this item's own report for exactly what this
-// means in practice: a used unit's foldable interface constants, extern
-// variable storage, and extern procedure/function calls all work today; a
-// used unit's runtime-computed constant/variable value and its
-// `begin...end` initialization section do not yet run automatically).
+// Issue #790: see this method's own declaration (CodeGenImpl.h) for the
+// whole design.  UPDATE (was: "Deliberately does NOT call any OTHER unit's
+// own __plang_init_<name>"): it now does, exactly the way emitModuleInitFn
+// already calls moduleInitFn(clause.ModuleName) for each of an EP module's
+// imports -- see the loop just inside the 'run' block below.  The list it
+// loops over (unitInitOrder_, set by Codegen::setUnitInitOrder before this
+// runs) is Sema::unitInitCallNames' own output for THIS unit's combined
+// InterfaceUses+ImplementationUses, which already excludes exactly the case
+// the old comment above used to worry about: a unit 'uses'd only through
+// Sema::loadUnitInterfaceExports' .pas fallback (no .tui was published, so
+// Sema read its INTERFACE straight from source for type-checking only) has
+// no real object file anywhere in this compile, and unitInitCallNames drops
+// it rather than have this function call an __plang_init_<name> the linker
+// can never resolve.
+//
+// Why THIS function has to be the one making these calls, rather than
+// leaving it to whatever program eventually 'uses' this unit: a downstream
+// consumer that only ever sees this unit's own published .tui (real
+// separate compilation, no source in sight) can only see THIS unit's own
+// InterfaceUses -- buildTUIContent (Frontend.cpp) republishes that list
+// verbatim so a further-downstream unit's own interface resolution keeps
+// working, but never ImplementationUses, which is genuinely private the
+// same way EP's own module implementation section is.  So a dependency this
+// unit reaches only through its OWN ImplementationUses is invisible to
+// anyone reading just the .tui, and the only place that still knows about
+// it is this unit's own compile, right here -- exactly mirroring why
+// emitModuleInitFn's own recursion-plus-self-guard design (its own comment,
+// just above) already works "the same whether the modules were compiled
+// together or apart": each unit's init function is responsible for its own
+// direct dependencies, the guard makes calling one twhow8ce (from here AND
+// from a caller further up the chain) harmless, and the correct full
+// transitive order simply falls out of the recursion -- no topological sort
+// needed anywhere in this design.  (Calling one init function twice, from
+// here and from a caller further up the chain, is harmless -- the guard
+// just below makes every call after the first a no-op.)
 std::string Codegen::Impl::emitUnitInitFn(const UnitNode& unit) {
     const std::string unitLower = toLower(unit.Name);
     const std::string fnName    = "__plang_init_" + unitLower;
@@ -3085,6 +3101,13 @@ std::string Codegen::Impl::emitUnitInitFn(const UnitNode& unit) {
 
     builder.SetInsertPoint(run);
     builder.CreateStore(llvm::ConstantInt::get(i8Ty, 1), done);
+
+    // Issue #790: this unit's own direct dependencies come up before
+    // anything of its own -- see this function's own header comment above
+    // for why this has to happen HERE rather than only at whatever program
+    // eventually 'uses' this unit.
+    for (const auto& Dep : unitInitOrder_)
+        builder.CreateCall(moduleInitFn(Dep), {});
 
     if (unit.ImplementationBlock)
         emitModuleGlobalInits(*unit.ImplementationBlock, unit.InterfaceBlock.get());
